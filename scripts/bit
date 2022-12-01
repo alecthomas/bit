@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+dir="$(dirname "$0")/.."
+(cd "${dir}/cmd/bit" ; go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o "${TMPDIR}/bit" .) && exec "${TMPDIR}/bit" "$@"
