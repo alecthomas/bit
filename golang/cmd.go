@@ -15,8 +15,8 @@ func GoCmd() *GoCmdAnalyser {
 	return &GoCmdAnalyser{}
 }
 
-func (GoCmdAnalyser) Patterns() []string {
-	return []string{`.*\bmain\.go$`}
+func (GoCmdAnalyser) Patterns() (match, exclude []string) {
+	return []string{`.*\bmain\.go$`}, goExcludes
 }
 
 func (GoCmdAnalyser) Setup() []ninja.Node {

@@ -14,8 +14,9 @@ import (
 )
 
 var (
-	fset  = token.NewFileSet()
-	cache sync.Map
+	fset       = token.NewFileSet()
+	cache      sync.Map
+	goExcludes = []string{`\bvendor/`, `\btestdata/`}
 )
 
 func getModulePath(file string) (string, error) {

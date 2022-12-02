@@ -42,45 +42,45 @@ func Generate(w io.Writer, analysers []Analyser, options ...Option) error {
 		return fmt.Errorf("failed to walk directory %s: %w", opts.dir, err)
 	}
 	type match struct {
-		analysers []Analyser
-		re        *regexp.Regexp
+		analyser Analyser
+		include  *regexp.Regexp
+		exclude  *regexp.Regexp
 	}
 	file := ninja.File{ninja.Vars{
 		{"dest", opts.dest},
 	}}
-	patterns := map[string]*match{}
+	matches := []match{}
 	using := map[Analyser]bool{}
 	for _, a := range analysers {
 		using[a] = true
-		for _, p := range a.Patterns() {
-			m, ok := patterns[p]
-			if !ok {
-				re, err := regexp.Compile(p)
-				if err != nil {
-					return fmt.Errorf("failed to compile pattern %s: %w", p, err)
-				}
-				m = &match{re: re}
-				patterns[p] = m
-			}
-			m.analysers = append(m.analysers, a)
+		include, exclude := a.Patterns()
+		includePattern := "(?:" + strings.Join(include, ")|(?:") + ")"
+		includeRe, err := regexp.Compile(includePattern)
+		if err != nil {
+			return fmt.Errorf("failed to compile include pattern %s: %w", includePattern, err)
 		}
+		excludePattern := "(?:" + strings.Join(exclude, ")|(?:") + ")"
+		excludeRe, err := regexp.Compile(excludePattern)
+		if err != nil {
+			return fmt.Errorf("failed to compile exclude pattern %s: %w", excludePattern, err)
+		}
+		matches = append(matches, match{analyser: a, include: includeRe, exclude: excludeRe})
 	}
 
 	for a := range using {
 		file = append(file, a.Setup()...)
 	}
 
-	for _, m := range patterns {
+	for _, m := range matches {
 		for _, f := range files {
-			if m.re.MatchString(f) {
-				for _, a := range m.analysers {
-					nodes, err := a.Analyse(f)
-					if err != nil {
-						return fmt.Errorf("failed to analyse %s: %w", f, err)
-					}
-					file = append(file, nodes...)
-				}
+			if m.exclude.MatchString(f) || !m.include.MatchString(f) {
+				continue
 			}
+			nodes, err := m.analyser.Analyse(f)
+			if err != nil {
+				return fmt.Errorf("failed to analyse %s: %w", f, err)
+			}
+			file = append(file, nodes...)
 		}
 	}
 

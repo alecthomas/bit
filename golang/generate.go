@@ -35,7 +35,9 @@ func GoGenerate(matchers map[string]GoGenerateMatcher) *GoGenerateAnalyser {
 }
 
 func (GoGenerateAnalyser) Setup() []ninja.Node { return nil }
-func (GoGenerateAnalyser) Patterns() []string  { return []string{`.*\.go$`} }
+func (GoGenerateAnalyser) Patterns() (match, exclude []string) {
+	return []string{`.*\.go$`}, goExcludes
+}
 func (g GoGenerateAnalyser) Analyse(file string) ([]ninja.Node, error) {
 	dir := filepath.Dir(file)
 	pkgs, err := parseDir(dir)
