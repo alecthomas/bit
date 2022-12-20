@@ -1,0 +1,10 @@
+dest = build
+rule gocmd
+  command = go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o $out ./$dir
+build $dest/testdata: gocmd enum_enumer.go main.go
+  dir = .
+rule go-generate-enumer-fc4800f200bc3802
+  command = cd $dir && enumer -type=$type -json -text
+build enum_enumer.go: go-generate-enumer-fc4800f200bc3802 main.go
+  dir = .
+  type = Enum,Kinds

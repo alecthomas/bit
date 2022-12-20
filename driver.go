@@ -2,17 +2,19 @@ package bit
 
 import (
 	"fmt"
-	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"regexp"
+	"sort"
 	"strings"
 
-	"github.com/Duncaen/go-ninja"
+	"github.com/alecthomas/repr"
+	"github.com/gobwas/glob"
+	"github.com/kballard/go-shellquote"
 )
 
 type genOpts struct {
-	dir  string
+	root string
 	dest string
 }
 
@@ -24,69 +26,135 @@ func WithDest(dir string) Option {
 	}
 }
 
-// Generate Ninja build file using provided analysers.
-func Generate(w io.Writer, analysers []Analyser, options ...Option) error {
-	opts := genOpts{dir: ".", dest: "build"}
+// Build targets using Analysers.
+func Build(analysers []Analyser, options ...Option) error {
+	opts := genOpts{root: ".", dest: "build"}
 	for _, opt := range options {
 		opt(&opts)
 	}
+	var err error
+	opts.root, err = filepath.Abs(opts.root)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for %s: %w", opts.root, err)
+	}
+	opts.dest, err = filepath.Abs(opts.dest)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for %s: %w", opts.dest, err)
+	}
 	files := []string{}
-	err := filepath.WalkDir(opts.dir, func(path string, d os.DirEntry, err error) error {
-		if d.IsDir() && (path != opts.dir && (strings.HasPrefix(path, ".") || strings.Contains(path, "/."))) {
+	err = filepath.WalkDir(opts.root, func(path string, d os.DirEntry, err error) error {
+		if d.IsDir() && (path != opts.root && (strings.HasPrefix(path, ".") || strings.Contains(path, "/."))) {
 			return filepath.SkipDir
 		}
 		files = append(files, path)
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to walk directory %s: %w", opts.dir, err)
+		return fmt.Errorf("failed to walk directory %s: %w", opts.root, err)
 	}
 	type match struct {
 		analyser Analyser
-		include  *regexp.Regexp
-		exclude  *regexp.Regexp
+		includes string
+		include  []glob.Glob
+		excludes string
+		exclude  []glob.Glob
 	}
-	file := ninja.File{ninja.Vars{
-		{"dest", opts.dest},
-	}}
 	matches := []match{}
 	using := map[Analyser]bool{}
 	for _, a := range analysers {
 		using[a] = true
 		include, exclude := a.Patterns()
-		includePattern := "(?:" + strings.Join(include, ")|(?:") + ")"
-		includeRe, err := regexp.Compile(includePattern)
-		if err != nil {
-			return fmt.Errorf("failed to compile include pattern %s: %w", includePattern, err)
+		includes := []glob.Glob{}
+		for _, inc := range include {
+			pattern, err := glob.Compile(inc, '/')
+			if err != nil {
+				return fmt.Errorf("failed to compile include pattern %s: %w", inc, err)
+			}
+			includes = append(includes, pattern)
 		}
-		excludePattern := "(?:" + strings.Join(exclude, ")|(?:") + ")"
-		excludeRe, err := regexp.Compile(excludePattern)
-		if err != nil {
-			return fmt.Errorf("failed to compile exclude pattern %s: %w", excludePattern, err)
+		excludes := []glob.Glob{}
+		for _, ex := range exclude {
+			pattern, err := glob.Compile(ex, '/')
+			if err != nil {
+				return fmt.Errorf("failed to compile exclude pattern %s: %w", ex, err)
+			}
+			excludes = append(excludes, pattern)
 		}
-		matches = append(matches, match{analyser: a, include: includeRe, exclude: excludeRe})
+		matches = append(matches, match{
+			analyser: a,
+			includes: strings.Join(include, "|"),
+			include:  includes,
+			excludes: strings.Join(exclude, "|"),
+			exclude:  excludes,
+		})
 	}
 
-	for a := range using {
-		file = append(file, a.Setup()...)
-	}
-
+	rules := []Rule{}
+	ctx := Context{Root: opts.root, Dest: opts.dest}
 	for _, m := range matches {
 		for _, f := range files {
-			if m.exclude.MatchString(f) || !m.include.MatchString(f) {
+			matched := false
+			for _, inc := range m.include {
+				if inc.Match(f) {
+					matched = true
+				}
+			}
+			if !matched {
 				continue
 			}
-			nodes, err := m.analyser.Analyse(f)
+			for _, exc := range m.exclude {
+				if exc.Match(f) {
+					matched = false
+				}
+			}
+			if !matched {
+				continue
+			}
+			rule, err := m.analyser.Analyse(ctx, f)
 			if err != nil {
 				return fmt.Errorf("failed to analyse %s: %w", f, err)
 			}
-			file = append(file, nodes...)
+			if !rule.Valid() {
+				continue
+			}
+			rules = append(rules, rule)
 		}
 	}
 
-	_, err = file.WriteTo(w)
+	fmt.Printf("mkdir -p %s\n", shellquote.Join(opts.dest))
+	err = os.MkdirAll(opts.dest, 0700)
 	if err != nil {
-		return fmt.Errorf("failed to write Ninja file: %w", err)
+		return fmt.Errorf("failed to create output directory %s: %w", opts.dest, err)
+	}
+	sort.Slice(rules, func(i, j int) bool {
+		for _, l := range rules[i].Outputs {
+			for _, r := range rules[j].Inputs {
+				if strings.HasPrefix(l, r.URI.Path) {
+					fmt.Println(l, r.URI.Path)
+					return true
+				}
+			}
+		}
+		return false
+	})
+	for _, rule := range rules {
+		repr.Println(rule)
+		command, err := ctx.Expand(rule, rule.Command)
+		if err != nil {
+			return fmt.Errorf("failed to expand command (%w): %s", err, rule.Command)
+		}
+		args, err := shellquote.Split(command)
+		if err != nil {
+			return fmt.Errorf("failed to parse command %q: %w", command, err)
+		}
+		fmt.Println(command)
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err = cmd.Run()
+		if err != nil {
+			return fmt.Errorf("%s -- %w", command, err)
+		}
 	}
 	return nil
 }

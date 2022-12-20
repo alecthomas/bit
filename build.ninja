@@ -1,9 +1,8 @@
 dest = build
 rule gocmd
   command = go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o $out ./$dir
-build $dest/bit: gocmd cmd/bit/main.go golang/cmd.go golang/common.go golang/generate.go
-  dir = cmd/bit
-rule gg-enumer-426fc95dec889c44
-  command = cd $dir && enumer -type=Enum -json -text
-build golang/enum_enumer.go: gg-enumer-426fc95dec889c44 golang/generate.go
-  dir = golang
+build go-package-cmd-bit: phony cmd/bit/main.go 
+build go-package-golang: phony golang/common.go 
+build go-package-golang-cmd: phony golang/cmd/cmd.go 
+build go-package-golang-generate: phony golang/generate/generate.go golang/generate/util.go golang/generate/mockgen.go
+build $dest/bit: gocmd go-package-cmd-bit go-package-golang-cmd go-package-golang go-package-golang-generate
