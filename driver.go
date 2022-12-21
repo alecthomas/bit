@@ -8,14 +8,14 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/alecthomas/repr"
 	"github.com/gobwas/glob"
 	"github.com/kballard/go-shellquote"
 )
 
 type genOpts struct {
-	root string
-	dest string
+	root   string
+	dest   string
+	dryRun bool
 }
 
 type Option func(o *genOpts)
@@ -23,6 +23,12 @@ type Option func(o *genOpts)
 func WithDest(dir string) Option {
 	return func(o *genOpts) {
 		o.dest = dir
+	}
+}
+
+func DryRun(dryRun bool) Option {
+	return func(o *genOpts) {
+		o.dryRun = dryRun
 	}
 }
 
@@ -127,10 +133,17 @@ func Build(analysers []Analyser, options ...Option) error {
 		return fmt.Errorf("failed to create output directory %s: %w", opts.dest, err)
 	}
 	sort.Slice(rules, func(i, j int) bool {
-		for _, l := range rules[i].Outputs {
+		for _, l := range rules[i].Watch {
 			for _, r := range rules[j].Inputs {
-				if strings.HasPrefix(l, r.URI.Path) {
-					fmt.Println(l, r.URI.Path)
+				if strings.HasPrefix(r.URI.Path, l) {
+					return true
+				}
+			}
+		}
+		for _, l := range rules[j].Outputs {
+			l = filepath.Dir(l)
+			for _, r := range rules[i].Inputs {
+				if strings.HasPrefix(r.URI.Path, l) {
 					return true
 				}
 			}
@@ -138,7 +151,7 @@ func Build(analysers []Analyser, options ...Option) error {
 		return false
 	})
 	for _, rule := range rules {
-		repr.Println(rule)
+		// repr.Println(rule)
 		command, err := ctx.Expand(rule, rule.Command)
 		if err != nil {
 			return fmt.Errorf("failed to expand command (%w): %s", err, rule.Command)
@@ -148,6 +161,10 @@ func Build(analysers []Analyser, options ...Option) error {
 			return fmt.Errorf("failed to parse command %q: %w", command, err)
 		}
 		fmt.Println(command)
+		if opts.dryRun {
+			continue
+		}
+
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
