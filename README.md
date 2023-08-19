@@ -26,65 +26,8 @@ While I love the simplicity of `make`, it has some pretty big limitations:
 - It can't (natively) capture non-filesystem dependencies. For example, if a
   target depends on a Docker image, it can't be expressed without intermediate
   files being manually created to track this.
-- It has very limited introspection capabilities. For example, it can't tell
-  you what targets are out-of-date, or what the dependencies of a target are.
-  This makes integrating it with other tooling difficult.
 
-## Example
-
-This example builds a Go binary, a Docker image from it, and runs it in a container.
-If any of the dependencies change, the binary, image, and container will be rebuilt.
-
-```
-dest = ./build
-version = %(git describe --tags --always)
-
-# Build the controller binary
-%{dest}/ftl-controller:
-  < go-cmd(pkg="./cmd/ftl")
-
-# The Docker image depends on the binary.
-virtual ftl-controller-docker-image: %{dest}/ftl-controller
-  < docker-image(dockerfile="Dockerfile.controller", tag="ghcr.io/tbd54566975/ftl-controller:latest")
-  
-# The Docker container depends on the image, and will be restarted if it changes.
-virtual ftl-controller-docker-container: ftl-controller-docker-image
-  < docker-container(tag="ghcr.io/tbd54566975/ftl-controller:latest")
-
-go-cmd(pkg): %(go list -f '{{ join .Deps "\n" }}' %{pkg} | grep github.com/TBD54566975/ftl | cut -d/ -f4-)
-  build: go build -tags release -ldflags "-X main.version=%{version}" -o %{output} %{pkg}
-  
-virtual docker-image(dockerfile, tag, context="."): %{dockerfile} %{context}
-  hash: docker image inspect %{tag}
-  build: docker build -f %{dockerfile} -t %{tag} %{context}
-  delete: docker rmi %{tag}
-
-virtual docker-container(tag):
-  hash: docker inspect %{tag}
-  build: docker run --restart=always -d %{tag}
-  delete: docker rm %{tag}
-```
-
-## Bitfile
-
-Bit is driven by a configuration file called a `Bitfile` by default located in 
-the current directory.
-
-The Bitfile has the following syntax:
-
-```
-var = value
-...
-
-target1 target2: dependency1 dependency2 ...
-  < other-target                            # Inherit from a target
-  var = value                               # Set variable
-  ...
-  directive: parameters
-  ...
-```
-
-### Variables
+## Variables
 
 Variables are in the form:
 
@@ -98,7 +41,7 @@ occurs after inheritance and before any other evaluation.
 
 Directive names are reserved words and cannot be used as variable names.
 
-### Command substitution
+## Command substitution
 
 Command substitution is in the form:
 
@@ -106,14 +49,14 @@ Command substitution is in the form:
 %(command)
 ```
 
-### Targets
+## Targets
 
 Targets are in the form:
 
 ```
-target1 target2 ...: dependency1 dependency2 ...
+target(): <input1> <input2> ...
   < other-target                            # Inherit from a target
-  < arg1=value, arg2=value, ...)   # Inherit from a
+  < template(arg1=value, arg2=value, ...)   # Inherit from a template
   var = value                               # Set variable
   -var                                      # Delete variable
   var += value                              # Append to variable
@@ -125,10 +68,12 @@ target1 target2 ...: dependency1 dependency2 ...
 ```
 
 
-### Virtual targets
+## Virtual targets
 
 Virtual targets do not exist in the filesystem, but instead refer to some virtual resource.
 Examples might include Docker images, Kubernetes resources, an object in S3, etc.
+
+They must be hashable and include the `create` directive.
 
 Virtual targets have the syntax:
 
@@ -144,30 +89,28 @@ Dockerfile or any of the files in the current directory change:
 ```
 virtual docker-container: docker-image
   hash: docker inspect docker-container
-  build: docker run --restart=always -d docker-image
+  create: docker run --restart=always -d docker-image
   delete: docker rm -f docker-container
   
 virtual docker-image: Dockerfile ./**
   hash: docker image inspect docker-image
-  build: docker build -f Dockerfile -t docker-image .
+  create: docker build -f Dockerfile -t docker-image .
   delete: docker rmi docker-image
 ```
 
-### Templates
+## Templates
 
-Templates are targets that can be inherited from. They are largely identical to
-normal targets except that they accept parameters that are interpolated into the
-template. They are in the form:
+Templates are targets that can be inherited from. They are in the form:
 
 ```
-[virtual] name(arg1, arg2, ...): [dependency1 dependency2 ...]
+[virtual] template name(arg1, arg2, ...) [input1 input2 ...]: [dependency1 dependency2 ...]
   ...
 ```
 
-Arguments are interpolated into directives using the syntax `%{arg1}`, in order
+Arguments are interpolated into the directives using the syntax `%{arg1}`, in order
 to differentiate them from shell variable interpolation.
 
-When calling a template arguments are always named. Templates can be invoked
+When calling a template, arguments are always named. Templates can be invoked
 directly from the command line by providing arguments in the form
 `name:arg1=value,arg2=value,...`.
 
@@ -178,16 +121,14 @@ target: template(arg1=value, arg2=value, ...)
   ...
 ```
 
-### Dependencies
+## Dependencies
 
 Dependencies are targets that must be built before the current target. They may be either
 virtual targets or files on the local filesystem. For files, globs may be used.
 
-### Inheritance
+## Inheritance
 
-Targets can inherit from other targets or templates with the `<` operator. An inherited
-target's directives and variables are merged with the current target's directives and
-variables. A directive or variable can be replaced, deleted, appended to or prepended to.
+Targets can inherit from other targets or templates with the `<` operator:
 
 ```
 target: dependency
@@ -214,7 +155,7 @@ var += value                              # Append to variable
 var ^= value                              # Prepend to variable
 ```
 
-### Implicit default target
+## Implicit default target
 
 An implicit default target exists for files and directories on the
 local filesystem. For files, the content of the file is used as the hash.
@@ -240,14 +181,14 @@ eg. given
 
 ```
 file.o: file.c file.h
-  build: gcc -c file.c -o file.o
+  create: gcc -c file.c -o file.o
 ```
 
 The expansion is:
 
 ```
 file.o: file.c file.h
-  build: gcc -c file.c -o file.o
+  create: gcc -c file.c -o file.o
   
 file.c:
   hash: cat file.c
@@ -256,7 +197,7 @@ file.h:
   hash: cat file.h
 ```
 
-### Directives
+## Directives
 
 Directives are in the form:
 
@@ -275,7 +216,7 @@ directive:
 
 Available directives are:
 
-#### `hash` directive (optional)
+### `hash` directive (optional)
 
 The `hash` directive runs a command, hashes its output along with any dependencies, 
 and stores it in the Bit database as the current state of the target. If the command
@@ -289,28 +230,18 @@ If omitted, the output is hashed.
 hash: command
 ```
 
-#### `inputs` directive (optional)
+### `create` directive (optional)
 
-The `inputs` directive is an alternative method of specifying dependencies. It
-is mostly useful for clarity, as dependencies defined in the first line can
-become quite cluttered.
+The `create` directive runs a command if the target is not up-to-date.
 
-```
-inputs: dependency1 dependency2 ...
-```
-
-#### `build` directive (optional)
-
-The `build` directive runs a command if the target is not up-to-date.
-
-If the `build` directive is omitted and the target is not up-to-date, the build
+If the `create` directive is omitted and the target is not up-to-date, the build
 will fail.
 
 ```
-build: command
+create: command
 ```
 
-#### `delete` directive (optional)
+### `delete` directive (optional)
 
 The `delete` directive runs a command to delete the target.
 
@@ -320,7 +251,7 @@ delete: command
 
 It is optional and if omitted, the target is not deleted when cleaning.
 
-### `dir` directive (optional)
+## `dir` directive (optional)
 
 The `dir` directive sets the working directory for the target. If omitted it
 defaults to the current working directory.
@@ -332,19 +263,7 @@ globs are evaluated.
 dir: path
 ```
 
-### Evaluation order
-
-1. Inherited targets are merged.
-2. Variables are evaluated.
-3. `dir` directive is evaluated.
-4. File globs are evaluated.
-5. Dependencies are evaluated.
-6. Directives are evaluated.
-
-## Full Example
-
-This is a full example modelled after an existing Makefile, but extending it to support
-Docker and Kubernetes resources directly.
+## Example
 
 ```
 dest = ./build
@@ -357,7 +276,7 @@ virtual k8s-postgres:
 virtual k8s-ftl-controller: k8s-postgres
   < k8s-apply(manifest="ftl-controller.yml", resource="deployment/ftl-controller")
   dir: ./ftl-controller
-  
+
 virtual release: %{dest}/ftl %{dest}/ftl-controller %{dest}/ftl-runner \
     docker-ftl-runner docker-ftl-controller
 
@@ -366,23 +285,23 @@ virtual release: %{dest}/ftl %{dest}/ftl-controller %{dest}/ftl-runner \
 
 %{dest}/ftl-controller:
   < go-cmd(pkg="./cmd/ftl-controller")
-  
+
 %{dest}/ftl-runner:
   < go-cmd(pkg="./cmd/ftl-runner")
   +build: echo "Runner built"
-  
+
 dist/*: src/** *.json *.ts *.js plop/**
   dir: console/client
   build: npm install && npm run build
 
 protos/**/*.go console/client/src/protos/**/*.ts
     backend/common/3rdparty/protos/**/*.go: protos/**.proto buf.work.yaml **/buf.yaml **/buf.gen.yaml
-  build: 
+  build:
     buf format -w
     buf lint
     (cd protos && buf generate)
     (cd backend/common/3rdparty/protos && buf generate)
-    
+
 db.go models.go queries.sql.go \
     %(shell grep -q copyfrom queries.sql && echo copyfrom.go):
   dir: backend/controller/internal/sql
@@ -391,21 +310,21 @@ db.go models.go queries.sql.go \
     schema/*.sql
     queries.sql
   build:
-    sqlc generate -f ../../../../sqlc.yaml --experimental 
+    sqlc generate -f ../../../../sqlc.yaml --experimental
     # sqlc 1.18.0 generates a file with a missing import
-    gosimports -w querier.go 
-  
+    gosimports -w querier.go
+
 virtual docker-ftl-runner:
   < docker(dockerfile="Dockerfile.runner", tag="ghcr.io/tbd54566975/ftl-runner:latest")
-  
+
 virtual docker-ftl-controller:
   < docker(dockerfile="Dockerfile.controller", tag="ghcr.io/tbd54566975/ftl-controller:latest")
-  
+
 build/libs/ftl-runtime.jar: src/** build.gradle.kts gradle.properties settings.gradle.kts
   dir: kotlin-runtime/ftl-runtime
   build: gradle jar
 
-go-cmd(pkg): 
+go-cmd(pkg):
   inputs: %(go list -f '{{ join .Deps "\n" }}' %{pkg} | grep github.com/TBD54566975/ftl | cut -d/ -f4-)
   build: go build -tags release -ldflags "-X main.version=%{version}" -o %{output} %{pkg}
 
@@ -413,7 +332,7 @@ virtual k8s-apply(manifest, resource): %{manifest}
   hash: kubectl get -o yaml %{resource}
   build: kubectl apply -f %{manifest}
   delete: kubectl delete %{resource}
-  
+
 virtual docker(dockerfile, tag, context="."): %{dockerfile} %{context}
   hash: docker image inspect %{tag}
   build: docker build -f %{dockerfile} -t %{tag} %{context}
