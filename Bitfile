@@ -1,0 +1,102 @@
+[vars]
+dest = './build'
+version = '%(git describe --tags --always)'
+
+[target.k8s-postgres]
+inherit = 'k8s-apply(manifest="db.yml", resource="pod/ftl-pg-cluster-1-0")'
+dir = './db'
+
+[target.k8s-ftl-controller]
+inherit = 'k8s-apply(manifest="ftl-controller.yml", resource="deployment/ftl-controller")'
+inputs = 'k8s-postgres'
+dir = './ftl-controller'
+
+[target.release]
+inputs = [
+  '%{dest}/ftl %{dest}/ftl-controller %{dest}/ftl-runner',
+  'docker-ftl-runner docker-ftl-controller',
+]
+
+[target.ftl]
+outputs = '%{dest}/ftl'
+inherits = 'go-cmd(pkg="./cmd/ftl")'
+
+[target.ftl-controller]
+inherits = 'go-cmd(pkg="./cmd/ftl-controller")'
+inputs = 'client'
+outputs = '%{dest}/ftl-controller'
+
+[target.ftl-runner]
+inherits = 'go-cmd(pkg="./cmd/ftl-runner")'
+outputs = '%{dest}/ftl-runner'
+append.build = 'echo "Runner built"'
+
+[target.client]
+outputs = 'dist/*'
+inputs = 'src/** *.json *.ts *.js plop/**'
+dir = 'console/client'
+build = 'npm install && npm run build'
+
+[target.protos]
+outputs = [
+  'protos/**/*.go',
+  'console/client/src/protos/**/*.ts',
+  'backend/common/3rdparty/protos/**/*.go',
+]
+inputs = [
+  'protos/**.proto',
+  'buf.work.yaml',
+  '**/buf.yaml',
+  '**/buf.gen.yaml',
+]
+build = '''
+  buf format -w
+  buf lint
+  (cd protos && buf generate)
+  (cd backend/common/3rdparty/protos && buf generate)
+'''
+
+[target.sqlc]
+dir = 'backend/controller/internal/sql'
+outputs = [
+  'db.go', 'models.go', 'queries.sql.go',
+  '%(shell grep -q copyfrom queries.sql && echo copyfrom.go)',
+]
+inputs = [
+  'sqlc.yaml',
+  'schema/*.sql',
+  'queries.sql',
+]
+build = '''
+  sqlc generate -f ../../../../sqlc.yaml --experimental
+  # sqlc 1.18.0 generates a file with a missing import
+  gosimports -w querier.go
+'''
+
+[target.docker-ftl-runner]
+inherits = 'docker(dockerfile="Dockerfile.runner", tag="ghcr.io/tbd54566975/ftl-runner:latest")'
+
+[target.docker-ftl-controller]
+inherits = 'docker(dockerfile="Dockerfile.controller", tag="ghcr.io/tbd54566975/ftl-controller:latest")'
+
+[target.kotlin-runtime]
+outputs = ['build/libs/ftl-runtime.jar']
+inputs = ['src/**', 'build.gradle.kts', 'gradle.properties', 'settings.gradle.kts']
+dir = 'kotlin-runtime/ftl-runtime'
+build = 'gradle jar'
+
+[template.'go-cmd(pkg)']
+inputs = ['''%(go list -f '{{ join .Deps "\n" }}' %{pkg} | grep github.com/TBD54566975/ftl | cut -d/ -f4-)''']
+build = 'go build -tags release -ldflags "-X main.version=%{version}" -o %{output} %{pkg}'
+
+[template.'k8s-apply(manifest, resource)']
+inputs = '%{manifest}'
+hash = 'kubectl get -o yaml %{resource}'
+build = 'kubectl apply -f %{manifest}'
+delete = 'kubectl delete %{resource}'
+
+[template.'docker(dockerfile, tag, context=".")']
+inputs = '%{dockerfile} %{context}'
+hash = 'docker image inspect %{tag}'
+build = 'docker build -f %{dockerfile} -t %{tag} %{context}'
+delete = 'docker rmi %{tag}'
