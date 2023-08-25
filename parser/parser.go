@@ -9,13 +9,18 @@ import (
 
 var parser = participle.MustBuild[Bitfile](
 	participle.Lexer(lex),
-	participle.Unquote("String", "StringLiteral"),
+	participle.Unquote("String"),
+	participle.Map(unquoteStringLiteral, "StringLiteral"),
+	participle.Map(unquoteMultilineString, "MultilineString"),
 	participle.Elide("Comment", "WS"),
 	participle.UseLookahead(3),
-	participle.Union[Entry](&Assignment{}, &Template{}, &Target{}),
+	participle.Union[Entry](&Template{}, &VirtualTarget{}, &Assignment{}, &Target{}),
 	participle.Union[Directive](&Inherit{}, &Dir{}, &Assignment{}, &RefCommand{}, &Command{}),
 	participle.Union[Atom](Var{}, Cmd{}, String{}, Path{}),
 )
+
+//sumtype:decl
+type Node interface{ children() []Node }
 
 func EBNF() string {
 	return parser.String()
@@ -76,42 +81,63 @@ type Bitfile struct {
 }
 
 //sumtype:decl
-type Entry interface{ entry() }
+type Entry interface {
+	Node
+	entry()
+}
+
+// A Buildable entry is something that can be built.
+type Buildable interface {
+	Entry
+	buildable()
+}
 
 type Assignment struct {
-	Name     string   `@Ident WS? `
+	Name     string   `@Ident`
 	Override Override `@@?`
-	Value    *Block   `"=" WS? @@`
+	Value    *Block   `"=" @@`
 }
 
 func (a *Assignment) entry()     {}
 func (a *Assignment) directive() {}
 
 type Target struct {
-	Virtual    bool        `(@"virtual" WS)?`
-	Inputs     []Atom      `(@@ WS?)+  WS? ":"`
-	Outputs    []Atom      `(WS? @@)* WS? NL*`
-	Directives []Directive `Indent NL* (@@ NL*)* WS? Dedent`
+	Outputs    []Atom      `(@@ WS?)* ":"`
+	Inputs     []Atom      `(WS? @@)* NL*`
+	Directives []Directive `Indent NL* (@@ NL*)* Dedent`
 }
 
-func (t *Target) entry() {}
+func (*Target) entry()     {}
+func (*Target) buildable() {}
+
+type VirtualTarget struct {
+	Name       string      `"virtual" @Ident ":"`
+	Inputs     []Atom      `(WS? @@)* NL*`
+	Directives []Directive `Indent NL* (@@ NL*)* Dedent`
+}
+
+func (*VirtualTarget) entry()     {}
+func (*VirtualTarget) buildable() {}
 
 type Template struct {
-	Name       string      `"template" WS @Ident`
-	Parameters []Parameter `"(" @@ (WS? "," WS? @@)* WS? ")" WS?`
-	Inputs     []Atom      `(@@ WS?)*  WS? ":"`
-	Outputs    []Atom      `(WS? @@)* WS? NL*`
-	Directives []Directive `Indent NL* (@@ NL*)* WS? Dedent`
+	Name       string      `"template" @Ident`
+	Parameters []Parameter `"(" @@ ("," @@)* ")"`
+	Outputs    []Atom      `@@* ":"`
+	Inputs     []Atom      `@@* NL*`
+	Directives []Directive `Indent NL* (@@ NL*)* Dedent`
 }
 
-func (t *Template) entry() {}
+func (*Template) entry() {}
 
 //sumtype:decl
-type Directive interface{ directive() }
+type Directive interface {
+	Node
+	directive()
+}
 
 type Inherit struct {
-	Target     string      `"<" WS? @Ident`
-	Parameters []*Argument `("(" @@ (WS? "," WS? @@)* WS? ")")?`
+	Target     string      `"<" @Ident`
+	Parameters []*Argument `("(" @@ ("," @@)* ")")?`
 }
 
 func (i *Inherit) directive() {}
@@ -121,32 +147,32 @@ func (i *Inherit) directive() {}
 // Currently, this includes "inputs" and "outputs".
 type RefCommand struct {
 	Override Override `@@?`
-	Command  string   `@("inputs"|"outputs") WS?`
-	Value    []Atom   `( ":" WS? ((Indent (NL* WS* @@)+ Dedent) | (@@ WS?)+) )?`
+	Command  string   `@("inputs"|"outputs")`
+	Value    []Atom   `( ":" WS? ((Indent (NL* @@)+ Dedent) | @@+) )?`
 }
 
-func (i RefCommand) directive() {}
+func (r *RefCommand) directive() {}
 
 type Command struct {
-	Override Override `@@? WS?`
-	Command  string   `@Ident WS?`
+	Override Override `@@?`
+	Command  string   `@Ident`
 	Value    *Block   `(":" @@)?`
 }
 
-func (i Command) directive() {}
+func (c *Command) directive() {}
 
 type Argument struct {
-	Name  string `@Ident WS? "=" WS?`
-	Value string `(@String | @StringLiteral)`
+	Name  string `@Ident "="`
+	Value String `@@`
 }
 
 type Parameter struct {
-	Name  string `@Ident WS? ("=" WS?`
-	Value string `(@String | @StringLiteral))?`
+	Name  string `@Ident ("="`
+	Value string `        (@String | @StringLiteral))?`
 }
 
 type Dir struct {
-	Target *Block `"dir" WS? ":" @@`
+	Target *Block `"dir" ":" @@`
 }
 
 func (d *Dir) directive() {}
@@ -167,7 +193,10 @@ type Block struct {
 }
 
 //sumtype:decl
-type Atom interface{ atom() }
+type Atom interface {
+	Node
+	atom()
+}
 
 type Var struct {
 	Name string `@Var`
@@ -182,24 +211,15 @@ type Cmd struct {
 func (c Cmd) atom() {}
 
 type String struct {
-	Value string `@(String | StringLiteral)`
+	Value string `@(String | StringLiteral | MultilineString)`
 }
 
 func (s String) atom() {}
 
 type Path struct {
-	Parts string `@((?!WS) ("/" | "." | "*" | Var | Number | Ident))+`
+	// This is a bit hairy because we need to explicitly match WS
+	// to "un"-elide it, but we don't want to capture it.
+	Parts string `@((?!WS) ("/" | "." | "*" | Var | Number | Ident | Cmd))+`
 }
-
-// var _ participle.Parseable = (*Path)(nil)
-//
-// func (p *Path) Parse(lex *lexer.PeekingLexer) error {
-// 	for {
-// 		t := lex.Peek()
-// 		switch t.Value {
-// 		case "/", ".", "*":
-// 		}
-// 	}
-// }
 
 func (p Path) atom() {}

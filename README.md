@@ -27,7 +27,12 @@ While I love the simplicity of `make`, it has some pretty big limitations:
   target depends on a Docker image, it can't be expressed without intermediate
   files being manually created to track this.
 
-## Variables
+## Bitfile
+
+The Bitfile is a declarative file that describes how to build targets. It consists
+of targets, templates, and variables, that can be substituted into targets.
+
+### Variables
 
 Variables are in the form:
 
@@ -41,7 +46,7 @@ occurs after inheritance and before any other evaluation.
 
 Directive names are reserved words and cannot be used as variable names.
 
-## Command substitution
+### Command substitution
 
 Command substitution is in the form:
 
@@ -49,12 +54,12 @@ Command substitution is in the form:
 %(command)
 ```
 
-## Targets
+### Targets
 
 Targets are in the form:
 
 ```
-target(): <input1> <input2> ...
+output1 output2 ...: input1 input2 ...
   < other-target                            # Inherit from a target
   < template(arg1=value, arg2=value, ...)   # Inherit from a template
   var = value                               # Set variable
@@ -68,17 +73,19 @@ target(): <input1> <input2> ...
 ```
 
 
-## Virtual targets
+### Virtual targets
 
 Virtual targets do not exist in the filesystem, but instead refer to some virtual resource.
 Examples might include Docker images, Kubernetes resources, an object in S3, etc.
 
-They must be hashable and include the `create` directive.
+They must be `hash`able and include the `create` directive.
 
 Virtual targets have the syntax:
 
 ```
 virtual name: [dependency1 dependency2 ...]
+  hash: ...
+  create: ...
   ...
 ```
 
@@ -98,7 +105,7 @@ virtual docker-image: Dockerfile ./**
   delete: docker rmi docker-image
 ```
 
-## Templates
+### Templates
 
 Templates are targets that can be inherited from. They are in the form:
 
@@ -121,12 +128,12 @@ target: template(arg1=value, arg2=value, ...)
   ...
 ```
 
-## Dependencies
+### Dependencies
 
 Dependencies are targets that must be built before the current target. They may be either
 virtual targets or files on the local filesystem. For files, globs may be used.
 
-## Inheritance
+### Inheritance
 
 Targets can inherit from other targets or templates with the `<` operator:
 
@@ -155,7 +162,7 @@ var += value                              # Append to variable
 var ^= value                              # Prepend to variable
 ```
 
-## Implicit default target
+### Implicit default target
 
 An implicit default target exists for files and directories on the
 local filesystem. For files, the content of the file is used as the hash.
@@ -197,7 +204,7 @@ file.h:
   hash: cat file.h
 ```
 
-## Directives
+### Directives
 
 Directives are in the form:
 
@@ -216,7 +223,7 @@ directive:
 
 Available directives are:
 
-### `hash` directive (optional)
+#### `hash` directive (optional)
 
 The `hash` directive runs a command, hashes its output along with any dependencies, 
 and stores it in the Bit database as the current state of the target. If the command
@@ -230,7 +237,7 @@ If omitted, the output is hashed.
 hash: command
 ```
 
-### `create` directive (optional)
+#### `create` directive (optional)
 
 The `create` directive runs a command if the target is not up-to-date.
 
@@ -241,7 +248,7 @@ will fail.
 create: command
 ```
 
-### `delete` directive (optional)
+#### `delete` directive (optional)
 
 The `delete` directive runs a command to delete the target.
 
@@ -251,7 +258,7 @@ delete: command
 
 It is optional and if omitted, the target is not deleted when cleaning.
 
-## `dir` directive (optional)
+### `dir` directive (optional)
 
 The `dir` directive sets the working directory for the target. If omitted it
 defaults to the current working directory.
@@ -263,7 +270,7 @@ globs are evaluated.
 dir: path
 ```
 
-## Example
+### Example
 
 ```
 dest = ./build

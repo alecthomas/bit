@@ -48,16 +48,15 @@ func TestParser(t *testing.T) {
 				`,
 			expected: &Bitfile{
 				Entries: []Entry{
-					&Target{
-						Virtual: true,
-						Inputs:  []Atom{Path{"k8s-postgres"}},
-						Outputs: []Atom{Path{"some/"}, Path{"path"}},
+					&VirtualTarget{
+						Name:   "k8s-postgres",
+						Inputs: []Atom{Path{"some/"}, Path{"path"}},
 						Directives: []Directive{
 							&Inherit{
 								Target: "k8s-apply",
 								Parameters: []*Argument{
-									{Name: "manifest", Value: "db.yml"},
-									{Name: "resource", Value: "pod/ftl-pg-cluster-1-0"},
+									{Name: "manifest", Value: String{"db.yml"}},
+									{Name: "resource", Value: String{"pod/ftl-pg-cluster-1-0"}},
 								},
 							},
 							&Dir{
@@ -66,7 +65,7 @@ func TestParser(t *testing.T) {
 						},
 					},
 					&Target{
-						Inputs: []Atom{Path{"target"}},
+						Outputs: []Atom{Path{"target"}},
 						Directives: []Directive{
 							&Inherit{Target: "k8s-postgres"},
 						},
@@ -75,7 +74,7 @@ func TestParser(t *testing.T) {
 			}},
 		{name: "Overrides",
 			input: `
-				docker-postgres:
+				virtual docker-postgres:
 					< docker
 					+inputs: src
 					-outputs
@@ -83,8 +82,8 @@ func TestParser(t *testing.T) {
 				`,
 			expected: &Bitfile{
 				Entries: []Entry{
-					&Target{
-						Inputs: []Atom{Path{"docker-postgres"}},
+					&VirtualTarget{
+						Name: "docker-postgres",
 						Directives: []Directive{
 							&Inherit{Target: "docker"},
 							&RefCommand{
@@ -114,16 +113,15 @@ func TestParser(t *testing.T) {
 			`,
 			expected: &Bitfile{
 				Entries: []Entry{
-					&Target{
-						Virtual: true,
-						Inputs:  []Atom{Path{"k8s-ftl-controller"}},
-						Outputs: []Atom{Path{"k8s-postgres"}},
+					&VirtualTarget{
+						Name:   "k8s-ftl-controller",
+						Inputs: []Atom{Path{"k8s-postgres"}},
 						Directives: []Directive{
 							&Inherit{
 								Target: "k8s-apply",
 								Parameters: []*Argument{
-									{Name: "manifest", Value: "ftl-controller.yml"},
-									{Name: "resource", Value: "deployment/ftl-controller"},
+									{Name: "manifest", Value: String{"ftl-controller.yml"}},
+									{Name: "resource", Value: String{"deployment/ftl-controller"}},
 								},
 							},
 							&Dir{
@@ -143,10 +141,8 @@ func TestParser(t *testing.T) {
 			expected: &Bitfile{
 				Entries: []Entry{
 					&Template{
-						Name: "go-cmd",
-						Parameters: []Parameter{
-							{Name: "pkg"},
-						},
+						Name:       "go-cmd",
+						Parameters: []Parameter{{Name: "pkg"}},
 						Directives: []Directive{
 							&RefCommand{
 								Command: "inputs",

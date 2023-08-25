@@ -27,3 +27,13 @@ var lex = continuation.New(indenter.New(lexer.MustStateful(lexer.Rules{
 		{"MultilineStringContent", `'|([^']*)`, nil},
 	},
 })))
+
+func unquoteMultilineString(t lexer.Token) (lexer.Token, error) {
+	t.Value = t.Value[3 : len(t.Value)-3]
+	return t, nil
+}
+
+func unquoteStringLiteral(t lexer.Token) (lexer.Token, error) {
+	t.Value = t.Value[1 : len(t.Value)-1]
+	return t, nil
+}
