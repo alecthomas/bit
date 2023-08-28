@@ -4,9 +4,9 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/alecthomas/participle/v2"
@@ -24,8 +24,9 @@ type Target struct {
 	outputs *parser.RefList
 	build   *parser.Command
 	hashPos lexer.Position
-	hash    func(list *parser.RefList) (uint64, error)
 	vars    Vars
+	// If present, the target has been built and this is its hash.
+	hash hash
 }
 
 type RefKey string
@@ -40,7 +41,7 @@ type Engine struct {
 	inputs  map[RefKey]*Target
 }
 
-// Compile a Bitfile into an Engine.
+// Compile a Bitfile into an Engine ready to build targets.
 func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 	cachedir, err := os.UserCacheDir()
 	if err != nil {
@@ -72,13 +73,15 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 		switch entry := entry.(type) {
 		case *parser.Target:
 			target := &Target{
-				pos: entry.Pos,
+				pos:     entry.Pos,
+				inputs:  entry.Inputs,
+				outputs: entry.Outputs,
 			}
-			if entry.Inputs != nil {
-				target.inputs = entry.Inputs
+			if entry.Inputs == nil {
+				target.inputs = &parser.RefList{Pos: entry.Pos}
 			}
-			if entry.Outputs != nil {
-				target.outputs = entry.Outputs
+			if entry.Outputs == nil {
+				target.outputs = &parser.RefList{Pos: entry.Pos}
 			}
 			for _, directive := range entry.Directives {
 				switch directive := directive.(type) {
@@ -120,23 +123,45 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 }
 
 func (e *Engine) Close() error {
+	for _, target := range e.targets {
+		for _, output := range target.outputs.Refs {
+			h, err := e.realRefHasher(target, output)
+			if err != nil {
+				continue
+			}
+			e.db.Set(output.Text, h)
+		}
+	}
 	return e.db.Close()
 }
 
 func (e *Engine) Build(name string) error {
 	name = e.normalisePath(name)
 	log := e.log.Scope(name)
-	target, ok := e.outputs[RefKey(name)]
-	if !ok {
-		return fmt.Errorf("unknown target %q", name)
+
+	target, err := e.getTarget(name)
+	if err != nil {
+		return err
 	}
-	// Check if we need to build.
-	if h, err := e.hashRef(target, name); err == nil {
-		if stored, ok := e.db.Get(name); ok && stored == h {
-			log.Noticef("Nothing to do.")
+
+	if target.hash != 0 {
+		h, err := e.recomputeHash(target, e.realRefHasher)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if h == target.hash {
+			log.Tracef("Skipping %s, up to date.", name)
 			return nil
 		}
 	}
+
+	// Build dependencies.
+	for _, input := range target.inputs.Refs {
+		if err := e.Build(input.Text); err != nil {
+			return participle.Wrapf(input.Pos, err, "build failed")
+		}
+	}
+
 	block := target.build.Value
 	command, err := e.evaluateString(block.Pos, block.Body, target, map[string]bool{})
 	if err != nil {
@@ -150,33 +175,58 @@ func (e *Engine) Build(name string) error {
 	if err != nil {
 		return participle.Wrapf(block.Pos, err, "failed to run command %q", command)
 	}
-	err = e.writeHahes(log, target)
+	h, err := e.recomputeHash(target, e.realRefHasher)
 	if err != nil {
 		return err
 	}
+	target.hash = h
 	return nil
 }
 
-func (e *Engine) writeHahes(log *Logger, target *Target) error {
-	for _, ref := range target.outputs.Refs {
-		h, err := e.hashRef(target, ref.Text)
+type refHasher func(target *Target, ref *parser.Ref) (hash, error)
+
+// Recompute hash of target.
+func (e *Engine) recomputeHash(target *Target, refHasher refHasher) (hash, error) {
+	h := newHasher()
+	for _, input := range target.inputs.Refs {
+		target, err := e.getTarget(input.Text)
 		if err != nil {
-			return participle.Errorf(target.pos, "%s", err)
+			return 0, err
 		}
-		log.Tracef("hash = %d", h)
-		e.db.Set(e.normalisePath(ref.Text), h)
+		h = h.int(uint64(target.hash))
 	}
-	return nil
+	for _, output := range target.outputs.Refs {
+		rh, err := refHasher(target, output)
+		if err != nil {
+			return 0, err
+		}
+		h = h.update(rh)
+	}
+	return h, nil
 }
 
-func (e *Engine) hashRef(target *Target, ref string) (uint64, error) {
-	info, err := os.Stat(ref)
-	if err != nil {
-		return 0, participle.Errorf(target.pos, "did not generate output %q", ref)
+func (e *Engine) dbRefHasher(target *Target, ref *parser.Ref) (hash, error) {
+	h, ok := e.db.Get(ref.Text)
+	if !ok {
+		return 0, nil
 	}
-	h := fnv.New64a()
-	h.Write([]byte(fmt.Sprintf("%d", info.ModTime().UnixNano())))
-	return h.Sum64(), nil
+	return h, nil
+}
+
+// Hash real files.
+func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (hash, error) {
+	h := newHasher()
+	info, err := os.Stat(ref.Text)
+	if err != nil {
+		return 0, participle.Wrapf(target.pos, err, "%q", ref)
+	}
+	h = h.string(ref.Text)
+	h = h.int(uint64(info.Mode()))
+	if !info.IsDir() {
+		h = h.int(uint64(info.Size()))
+		h = h.int(uint64(info.ModTime().UnixNano()))
+	}
+	return h, nil
 }
 
 func (e *Engine) evaluate() error {
@@ -185,11 +235,32 @@ func (e *Engine) evaluate() error {
 			if evaluated, err := e.evaluateString(ref.Pos, ref.Text, target, map[string]bool{}); err != nil {
 				return err
 			} else {
-				ref.Text = evaluated
 				evaluated = e.normalisePath(evaluated)
-				e.outputs[RefKey(evaluated)] = target
+				ref.Text = evaluated
+				key := RefKey(evaluated)
+				if existing, ok := e.outputs[key]; ok {
+					return participle.Errorf(ref.Pos, "duplicate output %q at %s", ref.Text, existing.pos)
+				}
+				e.outputs[key] = target
 			}
 		}
+		slices.SortFunc(target.outputs.Refs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
+
+		for _, ref := range target.inputs.Refs {
+			if evaluated, err := e.evaluateString(ref.Pos, ref.Text, target, map[string]bool{}); err != nil {
+				return err
+			} else {
+				evaluated = e.normalisePath(evaluated)
+				ref.Text = evaluated
+				e.inputs[RefKey(evaluated)] = target
+			}
+		}
+		slices.SortFunc(target.inputs.Refs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
+		h, err := e.recomputeHash(target, e.dbRefHasher)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		target.hash = h
 	}
 	return nil
 }
@@ -246,6 +317,47 @@ func (e *Engine) normalisePath(path string) string {
 	return strings.TrimPrefix(path, e.cwd+"/")
 }
 
+func (e *Engine) getTarget(name string) (*Target, error) {
+	name = e.normalisePath(name)
+	target, ok := e.outputs[RefKey(name)]
+	if ok {
+		return target, nil
+	}
+	// Synthetic target.
+	target = &Target{
+		pos:     lexer.Position{},
+		inputs:  &parser.RefList{},
+		outputs: &parser.RefList{Refs: []*parser.Ref{{Text: name}}},
+		build: &parser.Command{
+			Command: "build",
+			Value: &parser.Block{
+				Body: "true",
+			},
+		},
+		vars: Vars{},
+	}
+	h, err := e.recomputeHash(target, e.realRefHasher)
+	if err != nil {
+		return nil, err
+	}
+	target.hash = h
+	e.targets = append(e.targets, target)
+	e.outputs[RefKey(name)] = target
+	return target, nil
+}
+
+func (e *Engine) hashFile(name string) (hash, error) {
+	name = e.normalisePath(name)
+	info, err := os.Stat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, fmt.Errorf("no such file or target %q", name)
+	} else if err != nil {
+		return 0, err
+	}
+	h := newHasher().int(uint64(info.ModTime().UnixNano()))
+	return h, nil
+}
+
 // Translate fragment position into Bitfile position.
 func translateVarPos(pos lexer.Position, fragment *parser.VarFragment) lexer.Position {
 	if fragment.Pos.Line != 1 {
@@ -256,4 +368,40 @@ func translateVarPos(pos lexer.Position, fragment *parser.VarFragment) lexer.Pos
 	}
 	pos.Offset += fragment.Pos.Offset
 	return pos
+}
+
+// fnv64a hash function.
+const offset64 = 14695981039346656037
+const prime64 = 1099511628211
+
+type hash uint64
+
+func newHasher() hash { return offset64 }
+
+func (f hash) int(data uint64) hash {
+	f ^= hash(data)
+	f *= prime64
+	return f
+}
+
+func (f hash) update(h hash) hash {
+	f ^= h
+	f *= prime64
+	return f
+}
+
+func (f hash) string(data string) hash {
+	for _, c := range data {
+		f ^= hash(c)
+		f *= prime64
+	}
+	return f
+}
+
+func (f hash) bytes(data []byte) hash {
+	for _, c := range data {
+		f ^= hash(c)
+		f *= prime64
+	}
+	return f
 }

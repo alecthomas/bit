@@ -29,8 +29,9 @@ func main() {
 	logger := engine.NewLogger(cli.LogConfig)
 	eng, err := engine.Compile(logger, bitfile)
 	reportError(kctx, err)
-	defer eng.Close()
 	err = eng.Build(cli.Target)
+	reportError(kctx, err)
+	err = eng.Close()
 	reportError(kctx, err)
 }
 

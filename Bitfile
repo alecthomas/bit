@@ -3,5 +3,5 @@ dest = ./build
 %{dest}:
   build: mkdir -p %{dest}
 
-%{dest}/bit: %{dest} engine/engine.go
+%{dest}/bit: %{dest} engine/engine.go cmd/bit/main.go
   build: go build -v -o %{dest}/bit ./cmd/bit

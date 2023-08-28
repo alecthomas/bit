@@ -13,7 +13,7 @@ import (
 )
 
 type LogConfig struct {
-	Level LogLevel `help:"Log level." enum:"trace,debug,info,notice,warn,error" default:"info"`
+	Level LogLevel `help:"Log level (${enum})." enum:"trace,debug,info,notice,warn,error" default:"info"`
 	Debug bool     `help:"Enable debug mode." xor:"trace"`
 	Trace bool     `help:"Enable trace mode." xor:"trace"`
 }
@@ -84,7 +84,13 @@ func NewLogger(config LogConfig) *Logger {
 }
 
 // Scope returns a new logger with the given scope.
-func (l *Logger) Scope(scope string) *Logger { return &Logger{scope: scope, level: l.level} }
+func (l *Logger) Scope(scope string) *Logger {
+	if len(scope) > 16 {
+		scope = scope[:16] + "…"
+	}
+	scope = fmt.Sprintf("%-16s", scope)
+	return &Logger{scope: scope, level: l.level}
+}
 
 func (l *Logger) logf(level LogLevel, format string, args ...interface{}) {
 	if l.level > level {

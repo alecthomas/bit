@@ -41,7 +41,7 @@ var (
 			if (r > g*2 && r > b*2) || (r+g+b < 200) || (r == g && g == b) {
 				continue
 			}
-			colours = append(colours, fmt.Sprintf("\033[38;5;%dm", i))
+			colours = append(colours, fmt.Sprintf("\033[1m\033[38;5;%dm", i))
 		}
 		return colours
 	}()

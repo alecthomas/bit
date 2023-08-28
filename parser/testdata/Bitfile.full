@@ -9,6 +9,7 @@ virtual k8s-ftl-controller: k8s-postgres
   < k8s-apply(manifest="ftl-controller.yml", resource="deployment/ftl-controller")
   dir: ./ftl-controller
 
+# Build FTL binary
 virtual release: %{dest}/ftl %{dest}/ftl-controller %{dest}/ftl-runner docker-ftl-runner docker-ftl-controller
   inputs: none
 

@@ -105,6 +105,8 @@ func (a *Assignment) directive()               {}
 type Target struct {
 	Pos lexer.Position
 
+	Docs []string `@Comment*`
+
 	Outputs    *RefList    `@@* ":"`
 	Inputs     *RefList    `@@* NL*`
 	Directives []Directive `Indent NL* (@@ NL*)* Dedent`
@@ -116,6 +118,8 @@ func (*Target) entry()                     {}
 type VirtualTarget struct {
 	Pos lexer.Position
 
+	Docs []string `@Comment*`
+
 	Name       string      `"virtual" @Ident ":"`
 	Inputs     *RefList    `@@* NL*`
 	Directives []Directive `Indent NL* (@@ NL*)* Dedent`
@@ -126,6 +130,8 @@ func (*VirtualTarget) entry()                     {}
 
 type Template struct {
 	Pos lexer.Position
+
+	Docs []string `@Comment*`
 
 	Name       string       `"template" @Ident`
 	Parameters []*Parameter `"(" @@ ("," @@)* ")"`
@@ -198,8 +204,6 @@ func (p *Parameter) Position() lexer.Position { return p.Pos }
 
 type Dir struct {
 	Pos lexer.Position
-
-	Doc string `@Comment?`
 
 	Target *Block `"dir" ":" @@`
 }
