@@ -7,31 +7,31 @@ import (
 	"github.com/alecthomas/participle/v2/lexer"
 )
 
+var parserOptions = []participle.Option{}
 var parser = participle.MustBuild[Bitfile](
 	participle.Lexer(lex),
-	participle.Unquote("String"),
-	participle.Map(unquoteStringLiteral, "StringLiteral"),
-	participle.Map(unquoteMultilineString, "MultilineString"),
 	participle.Elide("Comment", "WS"),
 	participle.UseLookahead(3),
 	participle.Union[Entry](&Template{}, &VirtualTarget{}, &Assignment{}, &Target{}),
 	participle.Union[Directive](&Inherit{}, &Dir{}, &Assignment{}, &RefCommand{}, &Command{}),
-	participle.Union[Atom](Var{}, Cmd{}, String{}, Path{}),
 )
 
 //sumtype:decl
-type Node interface{ children() []Node }
+type Node interface {
+	Position() lexer.Position
+	children() []Node
+}
 
 func EBNF() string {
 	return parser.String()
 }
 
-func Parse(filename string, r io.Reader, options ...participle.ParseOption) (*Bitfile, error) {
-	return parser.Parse(filename, r, options...)
+func Parse(filename string, r io.Reader) (*Bitfile, error) {
+	return parser.Parse(filename, r)
 }
 
-func ParseString(filename, input string, options ...participle.ParseOption) (*Bitfile, error) {
-	return parser.ParseString(filename, input, options...)
+func ParseString(filename, input string) (*Bitfile, error) {
+	return parser.ParseString(filename, input)
 }
 
 type Override int
@@ -77,8 +77,12 @@ func (o *Override) Parse(lex *lexer.PeekingLexer) error {
 }
 
 type Bitfile struct {
+	Pos lexer.Position
+
 	Entries []Entry `NL* (@@ NL*)* EOF`
 }
+
+func (b *Bitfile) Position() lexer.Position { return b.Pos }
 
 //sumtype:decl
 type Entry interface {
@@ -86,48 +90,52 @@ type Entry interface {
 	entry()
 }
 
-// A Buildable entry is something that can be built.
-type Buildable interface {
-	Entry
-	buildable()
-}
-
 type Assignment struct {
+	Pos lexer.Position
+
 	Name     string   `@Ident`
 	Override Override `@@?`
 	Value    *Block   `"=" @@`
 }
 
-func (a *Assignment) entry()     {}
-func (a *Assignment) directive() {}
+func (a *Assignment) Position() lexer.Position { return a.Pos }
+func (a *Assignment) entry()                   {}
+func (a *Assignment) directive()               {}
 
 type Target struct {
-	Outputs    []Atom      `(@@ WS?)* ":"`
-	Inputs     []Atom      `(WS? @@)* NL*`
+	Pos lexer.Position
+
+	Outputs    *RefList    `@@* ":"`
+	Inputs     *RefList    `@@* NL*`
 	Directives []Directive `Indent NL* (@@ NL*)* Dedent`
 }
 
-func (*Target) entry()     {}
-func (*Target) buildable() {}
+func (t *Target) Position() lexer.Position { return t.Pos }
+func (*Target) entry()                     {}
 
 type VirtualTarget struct {
+	Pos lexer.Position
+
 	Name       string      `"virtual" @Ident ":"`
-	Inputs     []Atom      `(WS? @@)* NL*`
+	Inputs     *RefList    `@@* NL*`
 	Directives []Directive `Indent NL* (@@ NL*)* Dedent`
 }
 
-func (*VirtualTarget) entry()     {}
-func (*VirtualTarget) buildable() {}
+func (t *VirtualTarget) Position() lexer.Position { return t.Pos }
+func (*VirtualTarget) entry()                     {}
 
 type Template struct {
-	Name       string      `"template" @Ident`
-	Parameters []Parameter `"(" @@ ("," @@)* ")"`
-	Outputs    []Atom      `@@* ":"`
-	Inputs     []Atom      `@@* NL*`
-	Directives []Directive `Indent NL* (@@ NL*)* Dedent`
+	Pos lexer.Position
+
+	Name       string       `"template" @Ident`
+	Parameters []*Parameter `"(" @@ ("," @@)* ")"`
+	Outputs    *RefList     `@@* ":"`
+	Inputs     *RefList     `@@* NL*`
+	Directives []Directive  `Indent NL* (@@ NL*)* Dedent`
 }
 
-func (*Template) entry() {}
+func (t *Template) Position() lexer.Position { return t.Pos }
+func (*Template) entry()                     {}
 
 //sumtype:decl
 type Directive interface {
@@ -136,46 +144,68 @@ type Directive interface {
 }
 
 type Inherit struct {
+	Pos lexer.Position
+
 	Target     string      `"<" @Ident`
 	Parameters []*Argument `("(" @@ ("," @@)* ")")?`
 }
 
-func (i *Inherit) directive() {}
+func (i *Inherit) Position() lexer.Position { return i.Pos }
+func (i *Inherit) directive()               {}
 
 // RefCommand is a command that takes a list of references as its value.
 //
 // Currently, this includes "inputs" and "outputs".
 type RefCommand struct {
+	Pos lexer.Position
+
 	Override Override `@@?`
 	Command  string   `@("inputs"|"outputs")`
-	Value    []Atom   `( ":" WS? ((Indent (NL* @@)+ Dedent) | @@+) )?`
+	Value    *RefList `( ":" ((Indent (NL* @@)+ Dedent) | @@+) )?`
 }
 
-func (r *RefCommand) directive() {}
+func (r *RefCommand) Position() lexer.Position { return r.Pos }
+func (r *RefCommand) directive()               {}
 
 type Command struct {
+	Pos lexer.Position
+
 	Override Override `@@?`
 	Command  string   `@Ident`
 	Value    *Block   `(":" @@)?`
 }
 
-func (c *Command) directive() {}
+func (c *Command) Position() lexer.Position { return c.Pos }
+func (c *Command) directive()               {}
 
 type Argument struct {
-	Name  string `@Ident "="`
-	Value String `@@`
+	Pos lexer.Position
+
+	Name  string  `@Ident "="`
+	Value *String `@@`
 }
+
+func (a *Argument) Position() lexer.Position { return a.Pos }
 
 type Parameter struct {
-	Name  string `@Ident ("="`
-	Value string `        (@String | @StringLiteral))?`
+	Pos lexer.Position
+
+	Name  string  `@Ident ("="`
+	Value *String `        @@)?`
 }
 
+func (p *Parameter) Position() lexer.Position { return p.Pos }
+
 type Dir struct {
+	Pos lexer.Position
+
+	Doc string `@Comment?`
+
 	Target *Block `"dir" ":" @@`
 }
 
-func (d *Dir) directive() {}
+func (d *Dir) Position() lexer.Position { return d.Pos }
+func (d *Dir) directive()               {}
 
 // A Block is either a single line, or an indented block.
 //
@@ -189,37 +219,50 @@ func (d *Dir) directive() {}
 //	  a
 //	  b
 type Block struct {
-	Body string `WS? ((Indent NL+ @(WS | ~Dedent)+ Dedent) | @(WS | ~(NL|Dedent))*)`
+	Pos lexer.Position
+
+	Body string `WS? ((Indent NL+ @(WS | ~Dedent)+ Dedent) 
+						| @(WS | ~(NL|Dedent))*)`
 }
 
-//sumtype:decl
-type Atom interface {
-	Node
-	atom()
+func (b *Block) Position() lexer.Position { return b.Pos }
+
+// RefList is a list of references to file or virtual targets.
+type RefList struct {
+	Pos lexer.Position
+
+	Refs []*Ref `@@+`
 }
 
-type Var struct {
-	Name string `@Var`
+func (r *RefList) Position() lexer.Position { return r.Pos }
+func (r *RefList) Strings() []string {
+	if r == nil {
+		return nil
+	}
+	strs := make([]string, len(r.Refs))
+	for i, ref := range r.Refs {
+		strs[i] = ref.Text
+	}
+	return strs
 }
 
-func (v Var) atom() {}
+// Ref is a reference to a file or virtual target.
+type Ref struct {
+	Pos lexer.Position
 
-type Cmd struct {
-	Command string `@Cmd`
+	// This is a bit hairy because we need to explicitly match WS
+	// to "un"-elide it, but we don't want to capture it.
+	Text string `WS? ((?!WS) @(Var | Cmd | Ident | Number | "/" | "." | "*"))+ | @(String | StringLiteral | MultilineString)`
 }
 
-func (c Cmd) atom() {}
+func (r *Ref) Position() lexer.Position { return r.Pos }
+func (r *Ref) String() string           { return r.Text }
 
 type String struct {
+	Pos lexer.Position
+
 	Value string `@(String | StringLiteral | MultilineString)`
 }
 
-func (s String) atom() {}
-
-type Path struct {
-	// This is a bit hairy because we need to explicitly match WS
-	// to "un"-elide it, but we don't want to capture it.
-	Parts string `@((?!WS) ("/" | "." | "*" | Var | Number | Ident | Cmd))+`
-}
-
-func (p Path) atom() {}
+func (s *String) Position() lexer.Position { return s.Pos }
+func (s *String) String() string           { return s.Value }

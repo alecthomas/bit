@@ -1,9 +1,16 @@
 package parser
 
+import (
+	"reflect"
+)
+
 type Visitor func(node Node, next func() error) error
 
 // Visit all nodes in the AST.
 func Visit(node Node, visitor Visitor) error {
+	if node == nil || reflect.ValueOf(node).IsZero() {
+		return nil
+	}
 	return visitor(node, func() error {
 		for _, child := range node.children() {
 			err := Visit(child, visitor)
@@ -26,13 +33,9 @@ func (b *Bitfile) children() []Node {
 }
 
 func (t *Target) children() []Node {
-	out := make([]Node, 0, len(t.Inputs)+len(t.Outputs)+len(t.Directives))
-	for _, i := range t.Inputs {
-		out = append(out, i)
-	}
-	for _, o := range t.Outputs {
-		out = append(out, o)
-	}
+	var out []Node
+	out = append(out, t.Inputs)
+	out = append(out, t.Outputs)
 	for _, d := range t.Directives {
 		out = append(out, d)
 	}
@@ -40,10 +43,8 @@ func (t *Target) children() []Node {
 }
 
 func (t *VirtualTarget) children() []Node {
-	out := make([]Node, 0, len(t.Inputs)+len(t.Directives))
-	for _, i := range t.Inputs {
-		out = append(out, i)
-	}
+	var out []Node
+	out = append(out, t.Inputs)
 	for _, d := range t.Directives {
 		out = append(out, d)
 	}
@@ -51,16 +52,12 @@ func (t *VirtualTarget) children() []Node {
 }
 
 func (t *Template) children() []Node {
-	out := make([]Node, 0, len(t.Parameters)+len(t.Inputs)+len(t.Outputs)+len(t.Directives))
+	var out []Node
 	for _, p := range t.Parameters {
 		out = append(out, p)
 	}
-	for _, i := range t.Inputs {
-		out = append(out, i)
-	}
-	for _, o := range t.Outputs {
-		out = append(out, o)
-	}
+	out = append(out, t.Inputs)
+	out = append(out, t.Outputs)
 	for _, d := range t.Directives {
 		out = append(out, d)
 	}
@@ -75,28 +72,29 @@ func (i *Inherit) children() []Node {
 	return out
 }
 
-func (c *Command) children() []Node { return []Node{c.Value} }
-
-func (Argument) children() []Node { return nil }
-
-func (Parameter) children() []Node { return nil }
-
-func (d *Dir) children() []Node { return []Node{d.Target} }
-
-func (Block) children() []Node { return nil }
-
-func (r *RefCommand) children() []Node {
-	out := make([]Node, 0, len(r.Value))
-	for _, v := range r.Value {
-		out = append(out, v)
+func (r *RefList) children() []Node {
+	if r == nil {
+		return nil
+	}
+	out := make([]Node, len(r.Refs))
+	for i, n := range r.Refs {
+		out[i] = n
 	}
 	return out
 }
 
-func (Var) children() []Node { return nil }
+func (c *Command) children() []Node { return []Node{c.Value} }
 
-func (Cmd) children() []Node { return nil }
+func (a *Argument) children() []Node { return []Node{a.Value} }
 
-func (String) children() []Node { return nil }
+func (p *Parameter) children() []Node { return []Node{p.Value} }
 
-func (Path) children() []Node { return nil }
+func (d *Dir) children() []Node { return []Node{d.Target} }
+
+func (*Block) children() []Node { return nil }
+
+func (r *RefCommand) children() []Node { return []Node{r.Value} }
+
+func (*String) children() []Node { return nil }
+
+func (*Ref) children() []Node { return nil }

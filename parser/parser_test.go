@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"io/fs"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -50,13 +51,13 @@ func TestParser(t *testing.T) {
 				Entries: []Entry{
 					&VirtualTarget{
 						Name:   "k8s-postgres",
-						Inputs: []Atom{Path{"some/"}, Path{"path"}},
+						Inputs: &RefList{Refs: []*Ref{{Text: "some/"}, {Text: "path"}}},
 						Directives: []Directive{
 							&Inherit{
 								Target: "k8s-apply",
 								Parameters: []*Argument{
-									{Name: "manifest", Value: String{"db.yml"}},
-									{Name: "resource", Value: String{"pod/ftl-pg-cluster-1-0"}},
+									{Name: "manifest", Value: &String{Value: `"db.yml"`}},
+									{Name: "resource", Value: &String{Value: `"pod/ftl-pg-cluster-1-0"`}},
 								},
 							},
 							&Dir{
@@ -65,7 +66,7 @@ func TestParser(t *testing.T) {
 						},
 					},
 					&Target{
-						Outputs: []Atom{Path{"target"}},
+						Outputs: &RefList{Refs: []*Ref{{Text: "target"}}},
 						Directives: []Directive{
 							&Inherit{Target: "k8s-postgres"},
 						},
@@ -89,7 +90,7 @@ func TestParser(t *testing.T) {
 							&RefCommand{
 								Override: OverrideAppend,
 								Command:  "inputs",
-								Value:    []Atom{Path{"src"}},
+								Value:    &RefList{Refs: []*Ref{{Text: "src"}}},
 							},
 							&RefCommand{
 								Override: OverrideDelete,
@@ -98,7 +99,7 @@ func TestParser(t *testing.T) {
 							&RefCommand{
 								Override: OverridePrepend,
 								Command:  "inputs",
-								Value:    []Atom{Path{"another"}},
+								Value:    &RefList{Refs: []*Ref{{Text: "another"}}},
 							},
 						},
 					},
@@ -115,13 +116,13 @@ func TestParser(t *testing.T) {
 				Entries: []Entry{
 					&VirtualTarget{
 						Name:   "k8s-ftl-controller",
-						Inputs: []Atom{Path{"k8s-postgres"}},
+						Inputs: &RefList{Refs: []*Ref{{Text: "k8s-postgres"}}},
 						Directives: []Directive{
 							&Inherit{
 								Target: "k8s-apply",
 								Parameters: []*Argument{
-									{Name: "manifest", Value: String{"ftl-controller.yml"}},
-									{Name: "resource", Value: String{"deployment/ftl-controller"}},
+									{Name: "manifest", Value: &String{Value: `"ftl-controller.yml"`}},
+									{Name: "resource", Value: &String{Value: `"deployment/ftl-controller"`}},
 								},
 							},
 							&Dir{
@@ -142,18 +143,18 @@ func TestParser(t *testing.T) {
 				Entries: []Entry{
 					&Template{
 						Name:       "go-cmd",
-						Parameters: []Parameter{{Name: "pkg"}},
+						Parameters: []*Parameter{{Name: "pkg"}},
 						Directives: []Directive{
 							&RefCommand{
 								Command: "inputs",
-								Value: []Atom{
-									Cmd{"%(go list -f '{{ join .Deps \"\\n\" }}' %{pkg} | grep github.com/TBD54566975/ftl | cut -d/ -f4-)%"},
-								},
+								Value: &RefList{Refs: []*Ref{
+									{Text: "%(go list -f '{{ join .Deps \"\\n\" }}' %{pkg} | grep github.com/TBD54566975/ftl | cut -d/ -f4-)%"},
+								}},
 							},
 							&Command{
 								Command: "build",
 								Value: &Block{
-									Body: "go build -tags release -ldflags -X main.version=%{version} -o %{output} %{pkg}",
+									Body: "go build -tags release -ldflags \"-X main.version=%{version}\" -o %{output} %{pkg}",
 								},
 							},
 						},
@@ -170,11 +171,25 @@ func TestParser(t *testing.T) {
 			if test.trace {
 				options = append(options, participle.Trace(os.Stderr))
 			}
-			bitfile, err := ParseString("", input, options...)
+			bitfile, err := parser.ParseString("", input, options...)
 			assert.NoError(t, err, "%s\n%s", repr.String(tokens, repr.Indent("  ")), repr.String(bitfile, repr.Indent("  ")))
+			_ = Visit(bitfile, func(node Node, next func() error) error {
+				normaliseNode(node)
+				return next()
+			})
 			assert.Equal(t, test.expected, bitfile)
 		})
 	}
+}
+
+func normaliseNode[T any](node T) T {
+	v := reflect.Indirect(reflect.ValueOf(node))
+	f := v.FieldByName("Pos")
+	if !f.CanAddr() {
+		panic(node)
+	}
+	f.Set(reflect.Zero(f.Type()))
+	return node
 }
 
 func tokenise(t *testing.T, input string) []lexer.Token {

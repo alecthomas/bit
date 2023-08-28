@@ -7,7 +7,7 @@ import (
 	"github.com/alecthomas/bit/parser/lexer/indenter"
 )
 
-var lex = continuation.New(indenter.New(lexer.MustStateful(lexer.Rules{
+var baseLexer = lexer.MustStateful(lexer.Rules{
 	"Root": {
 		{"Continuation", `[ \t]*\\\n[ \t]*`, nil},
 		{"NL", `[\n][ \t]*`, nil},
@@ -26,7 +26,8 @@ var lex = continuation.New(indenter.New(lexer.MustStateful(lexer.Rules{
 		{"MultilineStringEnd", `'''`, lexer.Pop()},
 		{"MultilineStringContent", `'|([^']*)`, nil},
 	},
-})))
+})
+var lex = continuation.New(indenter.New(baseLexer))
 
 func unquoteMultilineString(t lexer.Token) (lexer.Token, error) {
 	t.Value = t.Value[3 : len(t.Value)-3]
@@ -35,5 +36,15 @@ func unquoteMultilineString(t lexer.Token) (lexer.Token, error) {
 
 func unquoteStringLiteral(t lexer.Token) (lexer.Token, error) {
 	t.Value = t.Value[1 : len(t.Value)-1]
+	return t, nil
+}
+
+func unwrapCmd(t lexer.Token) (lexer.Token, error) {
+	t.Value = t.Value[2 : len(t.Value)-2]
+	return t, nil
+}
+
+func unwrapVar(t lexer.Token) (lexer.Token, error) {
+	t.Value = t.Value[2 : len(t.Value)-1]
 	return t, nil
 }
