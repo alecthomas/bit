@@ -25,8 +25,12 @@ type Target struct {
 	build   *parser.Command
 	hashPos lexer.Position
 	vars    Vars
-	// If present, the target has been built and this is its hash.
-	hash hash
+	// Hash function for virtual targets.
+	virtualHash func() (hasher, error)
+	// Hash stored in the DB.
+	storedHash hasher
+	// Hash computed from the filesystem.
+	realHash hasher
 }
 
 type RefKey string
@@ -145,15 +149,9 @@ func (e *Engine) Build(name string) error {
 		return err
 	}
 
-	if target.hash != 0 {
-		h, err := e.recomputeHash(target, e.realRefHasher)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if h == target.hash {
-			log.Tracef("Skipping %s, up to date.", name)
-			return nil
-		}
+	if target.storedHash == target.realHash {
+		log.Tracef("Skipping %s, up to date.", name)
+		return nil
 	}
 
 	// Build dependencies.
@@ -176,37 +174,61 @@ func (e *Engine) Build(name string) error {
 	if err != nil {
 		return participle.Wrapf(block.Pos, err, "failed to run command %q", command)
 	}
-	h, err := e.recomputeHash(target, e.realRefHasher)
+	h, err := e.computeHash(target, e.realRefHasher)
 	if err != nil {
 		return err
 	}
-	target.hash = h
+	target.storedHash = h
 	return nil
 }
 
-type refHasher func(ref *parser.Ref) (hash, error)
+type refHasher func(ref *parser.Ref) (hasher, error)
 
-// Recompute hash of target.
-func (e *Engine) recomputeHash(target *Target, refHasher refHasher) (hash, error) {
+func (e *Engine) recursivelyComputeHash(target *Target, refHasher refHasher, forEach func(*Target, hasher)) (hasher, error) {
 	h := newHasher()
 	for _, input := range target.inputs.Refs {
 		inputTarget, err := e.getTarget(input.Text)
 		if err != nil {
 			return 0, err
 		}
-		h = h.int(uint64(inputTarget.hash))
+		subh, err := e.recursivelyComputeHash(inputTarget, refHasher, forEach)
+		if err != nil {
+			return 0, err
+		}
+		h.update(subh)
+	}
+	for _, output := range target.outputs.Refs {
+		subh, err := refHasher(output)
+		if err != nil {
+			return 0, participle.Wrapf(output.Pos, err, "hash failed")
+		}
+		h.update(subh)
+	}
+	forEach(target, h)
+	return h, nil
+}
+
+// Compute hash of target - inputs and outputs.
+func (e *Engine) computeHash(target *Target, refHasher refHasher) (hasher, error) {
+	h := newHasher()
+	for _, input := range target.inputs.Refs {
+		inputTarget, err := e.getTarget(input.Text)
+		if err != nil {
+			return 0, err
+		}
+		h.int(uint64(inputTarget.storedHash))
 	}
 	for _, output := range target.outputs.Refs {
 		rh, err := refHasher(output)
 		if err != nil {
 			return 0, participle.Wrapf(output.Pos, err, "hash failed")
 		}
-		h = h.update(rh)
+		h.update(rh)
 	}
 	return h, nil
 }
 
-func (e *Engine) dbRefHasher(ref *parser.Ref) (hash, error) {
+func (e *Engine) dbRefHasher(ref *parser.Ref) (hasher, error) {
 	h, ok := e.db.Get(ref.Text)
 	if !ok {
 		return 0, nil
@@ -215,23 +237,24 @@ func (e *Engine) dbRefHasher(ref *parser.Ref) (hash, error) {
 }
 
 // Hash real files.
-func (e *Engine) realRefHasher(ref *parser.Ref) (hash, error) {
+func (e *Engine) realRefHasher(ref *parser.Ref) (hasher, error) {
 	h := newHasher()
 	info, err := os.Stat(ref.Text)
 	if err != nil {
 		return 0, err
 	}
 
-	h = h.string(ref.Text)
-	h = h.int(uint64(info.Mode()))
+	h.string(ref.Text)
+	h.int(uint64(info.Mode()))
 	if !info.IsDir() {
-		h = h.int(uint64(info.Size()))
-		h = h.int(uint64(info.ModTime().UnixNano()))
+		h.int(uint64(info.Size()))
+		h.int(uint64(info.ModTime().UnixNano()))
 	}
 	return h, nil
 }
 
 func (e *Engine) evaluate() error {
+	// First pass - expand variables and normalise path references.
 	for _, target := range e.targets {
 		for _, ref := range target.outputs.Refs {
 			if evaluated, err := e.evaluateString(ref.Pos, ref.Text, target, map[string]bool{}); err != nil {
@@ -260,12 +283,20 @@ func (e *Engine) evaluate() error {
 		slices.SortFunc(target.inputs.Refs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
 	}
 
+	// Second pass - restore hashes from the DB.
 	for _, target := range e.targets {
-		h, err := e.recomputeHash(target, e.dbRefHasher)
+		_, err := e.recursivelyComputeHash(target, e.dbRefHasher, func(target *Target, h hasher) {
+			target.storedHash = h
+		})
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		target.hash = h
+		_, err = e.recursivelyComputeHash(target, e.realRefHasher, func(target *Target, h hasher) {
+			target.realHash = h
+		})
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	return nil
 }
@@ -345,17 +376,17 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 		},
 		vars: Vars{},
 	}
-	h, err := e.recomputeHash(target, e.dbRefHasher)
+	h, err := e.computeHash(target, e.dbRefHasher)
 	if err != nil {
 		return nil, err
 	}
-	target.hash = h
+	target.storedHash = h
 	e.targets = append(e.targets, target)
 	e.outputs[RefKey(name)] = target
 	return target, nil
 }
 
-func (e *Engine) hashFile(name string) (hash, error) {
+func (e *Engine) hashFile(name string) (hasher, error) {
 	name = e.normalisePath(name)
 	info, err := os.Stat(name)
 	if errors.Is(err, os.ErrNotExist) {
@@ -363,7 +394,8 @@ func (e *Engine) hashFile(name string) (hash, error) {
 	} else if err != nil {
 		return 0, err
 	}
-	h := newHasher().int(uint64(info.ModTime().UnixNano()))
+	h := newHasher()
+	h.int(uint64(info.ModTime().UnixNano()))
 	return h, nil
 }
 
@@ -377,40 +409,4 @@ func translateVarPos(pos lexer.Position, fragment *parser.VarFragment) lexer.Pos
 	}
 	pos.Offset += fragment.Pos.Offset
 	return pos
-}
-
-// fnv64a hash function.
-const offset64 = 14695981039346656037
-const prime64 = 1099511628211
-
-type hash uint64
-
-func newHasher() hash { return offset64 }
-
-func (f hash) int(data uint64) hash {
-	f ^= hash(data)
-	f *= prime64
-	return f
-}
-
-func (f hash) update(h hash) hash {
-	f ^= h
-	f *= prime64
-	return f
-}
-
-func (f hash) string(data string) hash {
-	for _, c := range data {
-		f ^= hash(c)
-		f *= prime64
-	}
-	return f
-}
-
-func (f hash) bytes(data []byte) hash {
-	for _, c := range data {
-		f ^= hash(c)
-		f *= prime64
-	}
-	return f
 }
