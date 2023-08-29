@@ -5,8 +5,14 @@ import (
 	"github.com/alecthomas/participle/v2/lexer"
 )
 
+var textLexer = lexer.MustSimple([]lexer.SimpleRule{
+	{"Cmd", `%\((.|\n)*?\)%`},
+	{"Var", `%{[a-zA-Z_][-a-zA-Z0-9_]*}`},
+	{"WS", `[ \t\n\r]+`},
+	{"Other", `.`},
+})
 var textParser = participle.MustBuild[Text](
-	participle.Lexer(baseLexer),
+	participle.Lexer(textLexer),
 	participle.UseLookahead(3),
 	participle.Map(unwrapVar, "Var"),
 	participle.Map(unwrapCmd, "Cmd"),

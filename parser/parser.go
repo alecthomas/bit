@@ -2,6 +2,7 @@ package parser
 
 import (
 	"io"
+	"strings"
 
 	"github.com/alecthomas/participle/v2"
 	"github.com/alecthomas/participle/v2/lexer"
@@ -13,7 +14,13 @@ var parser = participle.MustBuild[Bitfile](
 	participle.Elide("Comment", "WS"),
 	participle.UseLookahead(3),
 	participle.Union[Entry](&Template{}, &VirtualTarget{}, &Assignment{}, &Target{}),
-	participle.Union[Directive](&Inherit{}, &Dir{}, &Assignment{}, &RefCommand{}, &Command{}),
+	participle.Union[Directive](&Inherit{}, &Assignment{}, &Command{}),
+)
+
+var refListParser = participle.MustBuild[RefList](
+	participle.Lexer(lex),
+	participle.Elide("NL"),
+	participle.UseLookahead(3),
 )
 
 // Node is a node in the AST.
@@ -34,6 +41,10 @@ func Parse(filename string, r io.Reader) (*Bitfile, error) {
 
 func ParseString(filename, input string) (*Bitfile, error) {
 	return parser.ParseString(filename, input)
+}
+
+func ParseRefList(text string) (*RefList, error) {
+	return refListParser.ParseString("", strings.ReplaceAll(text, "\n", " "))
 }
 
 type Override int
@@ -165,20 +176,6 @@ type Inherit struct {
 func (i *Inherit) Position() lexer.Position { return i.Pos }
 func (i *Inherit) directive()               {}
 
-// RefCommand is a command that takes a list of references as its value.
-//
-// Currently, this includes "inputs" and "outputs".
-type RefCommand struct {
-	Pos lexer.Position
-
-	Override Override `@@?`
-	Command  string   `@("inputs"|"outputs")`
-	Value    *RefList `( ":" ((Indent (NL* @@)+ Dedent) | @@+) )?`
-}
-
-func (r *RefCommand) Position() lexer.Position { return r.Pos }
-func (r *RefCommand) directive()               {}
-
 type Command struct {
 	Pos lexer.Position
 
@@ -207,15 +204,6 @@ type Parameter struct {
 }
 
 func (p *Parameter) Position() lexer.Position { return p.Pos }
-
-type Dir struct {
-	Pos lexer.Position
-
-	Target *Block `"dir" ":" @@`
-}
-
-func (d *Dir) Position() lexer.Position { return d.Pos }
-func (d *Dir) directive()               {}
 
 // A Block is either a single line, or an indented block.
 //

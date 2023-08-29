@@ -89,11 +89,7 @@ func (a *Argument) children() []Node { return []Node{a.Value} }
 
 func (p *Parameter) children() []Node { return []Node{p.Value} }
 
-func (d *Dir) children() []Node { return []Node{d.Target} }
-
 func (*Block) children() []Node { return nil }
-
-func (r *RefCommand) children() []Node { return []Node{r.Value} }
 
 func (*String) children() []Node { return nil }
 

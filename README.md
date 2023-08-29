@@ -336,16 +336,16 @@ build/libs/ftl-runtime.jar: src/** build.gradle.kts gradle.properties settings.g
   dir: kotlin-runtime/ftl-runtime
   build: gradle jar
 
-go-cmd(pkg):
+template go-cmd(pkg):
   inputs: %(go list -f '{{ join .Deps "\n" }}' %{pkg} | grep github.com/TBD54566975/ftl | cut -d/ -f4-)
   build: go build -tags release -ldflags "-X main.version=%{version}" -o %{output} %{pkg}
 
-virtual k8s-apply(manifest, resource): %{manifest}
+template k8s-apply(manifest, resource): %{manifest}
   hash: kubectl get -o yaml %{resource}
   build: kubectl apply -f %{manifest}
   delete: kubectl delete %{resource}
 
-virtual docker(dockerfile, tag, context="."): %{dockerfile} %{context}
+template docker(dockerfile, tag, context="."): %{dockerfile} %{context}
   hash: docker image inspect %{tag}
   build: docker build -f %{dockerfile} -t %{tag} %{context}
   delete: docker rmi %{tag}

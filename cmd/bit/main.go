@@ -17,9 +17,10 @@ import (
 
 var cli struct {
 	engine.LogConfig
-	File   *os.File `help:"Bitfile to load." required:"" default:"Bitfile"`
-	List   bool     `help:"List available targets."`
-	Target string   `arg:"" help:"Target to run."`
+	File   *os.File           `short:"f" help:"Bitfile to load." required:"" default:"Bitfile"`
+	Chdir  kong.ChangeDirFlag `short:"C" help:"Change to directory before running."`
+	List   bool               `help:"List available targets."`
+	Target string             `arg:"" help:"Target to run."`
 }
 
 func main() {

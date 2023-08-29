@@ -24,7 +24,6 @@ virtual release: %{dest}/ftl %{dest}/ftl-controller %{dest}/ftl-runner docker-ft
   +build: echo "Runner built"
 
 dist/*: src/** *.json *.ts *.js plop/**
-  dir: console/client
   build: npm install && npm run build
 
 protos/**/*.go console/client/src/protos/**/*.ts \
@@ -37,7 +36,6 @@ protos/**/*.go console/client/src/protos/**/*.ts \
 
 db.go models.go queries.sql.go \
     %(grep -q copyfrom queries.sql && echo copyfrom.go)%:
-  dir: backend/controller/internal/sql
   inputs:
     sqlc.yaml
     schema/*.sql
@@ -54,7 +52,6 @@ docker-ftl-controller:
   < docker(dockerfile="Dockerfile.controller", tag="ghcr.io/tbd54566975/ftl-controller:latest")
 
 build/libs/ftl-runtime.jar: src/** build.gradle.kts gradle.properties settings.gradle.kts
-  dir: kotlin-runtime/ftl-runtime
   build: gradle jar
 
 # Templates

@@ -1,7 +1,13 @@
-dest = ./build
+DEST = ./build
 
-%{dest}:
-  build: mkdir -p %{dest}
+%{DEST}:
+  build: mkdir -p %{DEST}
 
-%{dest}/bit: %{dest} **/*.go
-  build: go build -v -o %{dest}/bit ./cmd/bit
+%{DEST}/bit:
+  inputs:
+    %(
+      go list -e -json -compiled=false -test=false -export=false -find=false -- ./... |
+        jq -r 'select(.Dir | startswith("%{CWD}")) | . as $parent | .GoFiles | map($parent.Dir + "/" + .) | .[]'
+    )%
+    %{DEST}
+  build: go build -v -o %{DEST}/bit ./cmd/bit

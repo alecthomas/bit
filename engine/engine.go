@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -73,7 +74,12 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 		db:      db,
 		inputs:  map[RefKey]*Target{},
 		outputs: map[RefKey]*Target{},
-		vars:    map[string]*parser.Block{},
+		vars: map[string]*parser.Block{
+			"CWD": &parser.Block{
+				Pos:  bitfile.Pos,
+				Body: cwd,
+			},
+		},
 	}
 	root := &Target{
 		pos:       bitfile.Pos,
@@ -104,6 +110,17 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 					switch directive.Command {
 					case "build":
 						target.build = directive
+
+					case "inputs", "outputs":
+						refs, err := parser.ParseRefList(directive.Value.Body)
+						if err != nil {
+							return nil, participle.Wrapf(directive.Pos, err, "failed to parse %s", directive.Command)
+						}
+						if directive.Command == "inputs" {
+							target.inputs.Refs = append(target.inputs.Refs, refs.Refs...)
+						} else {
+							target.outputs.Refs = append(target.outputs.Refs, refs.Refs...)
+						}
 
 					default:
 						panic(fmt.Sprintf("unsupported command %q", directive.Command))
@@ -300,27 +317,33 @@ func (e *Engine) evaluate() error {
 		slices.SortFunc(target.outputs.Refs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
 
 		// Expand globs.
-		inputs := []*parser.Ref{}
+		var inputs []*parser.Ref
 		for _, ref := range target.inputs.Refs {
 			evaluated, err := e.evaluateString(ref.Pos, ref.Text, target, map[string]bool{})
 			if err != nil {
 				return err
 			}
-			matches, err := doublestar.FilepathGlob(evaluated)
+			innerRefs, err := parser.ParseRefList(evaluated)
 			if err != nil {
-				return participle.Wrapf(ref.Pos, err, "failed to expand glob")
+				return participle.Errorf(ref.Pos, "failed to parse input %q: %s", evaluated, err)
 			}
-			if len(matches) == 0 {
-				matches = []string{evaluated}
-			}
+			for _, innerRef := range innerRefs.Refs {
+				matches, err := doublestar.FilepathGlob(innerRef.Text)
+				if err != nil {
+					return participle.Wrapf(ref.Pos, err, "failed to expand glob")
+				}
+				if len(matches) == 0 {
+					matches = []string{innerRef.Text}
+				}
 
-			for _, match := range matches {
-				inputs = append(inputs,
-					&parser.Ref{
-						Pos:  ref.Pos,
-						Text: match,
-					})
-				e.inputs[RefKey(match)] = target
+				for _, match := range matches {
+					inputs = append(inputs,
+						&parser.Ref{
+							Pos:  ref.Pos,
+							Text: match,
+						})
+					e.inputs[RefKey(match)] = target
+				}
 			}
 		}
 		slices.SortFunc(inputs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
@@ -368,10 +391,34 @@ func (e *Engine) evaluateString(pos lexer.Position, v string, target *Target, se
 
 		case *parser.TextFragment:
 			out.WriteString(fragment.Text)
+
+		case *parser.CmdFragment:
+			cmd, err := e.evaluateString(fragment.Pos, fragment.Cmd, target, seen)
+			if err != nil {
+				return "", err
+			}
+			output, err := e.capture(e.log.Scope(strings.Join(target.outputs.Strings(), ":")), cmd)
+			if err != nil {
+				return "", participle.Wrapf(fragment.Pos, err, "failed to run command %q", cmd)
+			}
+			out.WriteString(output)
 		}
 	}
 
 	return out.String(), nil
+}
+
+func (e *Engine) capture(log *Logger, command string) (string, error) {
+	log.Tracef("$ %s", command)
+	cmd := exec.Command("sh", "-c", command)
+	stdout := &strings.Builder{}
+	cmd.Stdout = stdout
+	cmd.Stderr = e.log.WriterAt(LogLevelError)
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 func (e *Engine) evaluateVar(v *parser.VarFragment, target *Target, seen map[string]bool) (string, error) {

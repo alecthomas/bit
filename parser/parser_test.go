@@ -40,8 +40,6 @@ func TestParser(t *testing.T) {
 			input: `
 				virtual k8s-postgres: some/ path
 					< k8s-apply(manifest="db.yml", resource="pod/ftl-pg-cluster-1-0")
-					dir:
-						./db
 
 				target:
 					< k8s-postgres
@@ -58,9 +56,6 @@ func TestParser(t *testing.T) {
 									{Name: "manifest", Value: &String{Value: `"db.yml"`}},
 									{Name: "resource", Value: &String{Value: `"pod/ftl-pg-cluster-1-0"`}},
 								},
-							},
-							&Dir{
-								Target: &Block{Body: "./db"},
 							},
 						},
 					},
@@ -86,19 +81,19 @@ func TestParser(t *testing.T) {
 						Name: "docker-postgres",
 						Directives: []Directive{
 							&Inherit{Target: "docker"},
-							&RefCommand{
+							&Command{
 								Override: OverrideAppend,
 								Command:  "inputs",
-								Value:    &RefList{Refs: []*Ref{{Text: "src"}}},
+								Value:    &Block{Body: "src"},
 							},
-							&RefCommand{
+							&Command{
 								Override: OverrideDelete,
 								Command:  "outputs",
 							},
-							&RefCommand{
+							&Command{
 								Override: OverridePrepend,
 								Command:  "inputs",
-								Value:    &RefList{Refs: []*Ref{{Text: "another"}}},
+								Value:    &Block{Body: "another"},
 							},
 						},
 					},
@@ -109,7 +104,6 @@ func TestParser(t *testing.T) {
 			input: `
 				virtual k8s-ftl-controller: k8s-postgres
 				  < k8s-apply(manifest="ftl-controller.yml", resource="deployment/ftl-controller")
-				  dir: ./ftl-controller
 			`,
 			expected: &Bitfile{
 				Entries: []Entry{
@@ -123,9 +117,6 @@ func TestParser(t *testing.T) {
 									{Name: "manifest", Value: &String{Value: `"ftl-controller.yml"`}},
 									{Name: "resource", Value: &String{Value: `"deployment/ftl-controller"`}},
 								},
-							},
-							&Dir{
-								Target: &Block{Body: "./ftl-controller"},
 							},
 						},
 					},
@@ -144,16 +135,43 @@ func TestParser(t *testing.T) {
 						Name:       "go-cmd",
 						Parameters: []*Parameter{{Name: "pkg"}},
 						Directives: []Directive{
-							&RefCommand{
+							&Command{
 								Command: "inputs",
-								Value: &RefList{Refs: []*Ref{
-									{Text: "%(go list -f '{{ join .Deps \"\\n\" }}' %{pkg} | grep github.com/TBD54566975/ftl | cut -d/ -f4-)%"},
-								}},
+								Value:   &Block{Body: "%(go list -f '{{ join .Deps \"\\n\" }}' %{pkg} | grep github.com/TBD54566975/ftl | cut -d/ -f4-)%"},
 							},
 							&Command{
 								Command: "build",
 								Value: &Block{
 									Body: "go build -tags release -ldflags \"-X main.version=%{version}\" -o %{output} %{pkg}",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{name: "SmallBitfile",
+			input: `
+				%{DEST}/bit:
+				  inputs:
+				    %{DEST}
+				    **/*.go
+			`,
+			expected: &Bitfile{
+				Entries: []Entry{
+					&Target{
+						Outputs: &RefList{
+							Refs: []*Ref{
+								{
+									Text: "%{DEST}/bit",
+								},
+							},
+						},
+						Directives: []Directive{
+							&Command{
+								Command: "inputs",
+								Value: &Block{
+									Body: "%{DEST}\n**/*.go",
 								},
 							},
 						},
@@ -172,13 +190,18 @@ func TestParser(t *testing.T) {
 			}
 			bitfile, err := parser.ParseString("", input, options...)
 			assert.NoError(t, err, "%s\n%s", repr.String(tokens, repr.Indent("  ")), repr.String(bitfile, repr.Indent("  ")))
-			_ = Visit(bitfile, func(node Node, next func() error) error {
-				normaliseNode(node)
-				return next()
-			})
+			normaliseAllNodes(bitfile)
 			assert.Equal(t, test.expected, bitfile)
 		})
 	}
+}
+
+func normaliseAllNodes[T Node](node T) T {
+	_ = Visit(node, func(node Node, next func() error) error {
+		normaliseNode(node)
+		return next()
+	})
+	return node
 }
 
 func normaliseNode[T any](node T) T {
@@ -214,4 +237,11 @@ func TestParseSamples(t *testing.T) {
 			assert.NoError(t, err, "%s\n%s", repr.String(bitfile, repr.Indent("  ")) /*, repr.String(tokens, repr.Indent("  "))*/)
 		})
 	}
+}
+
+func TestParseRefList(t *testing.T) {
+	refs, err := ParseRefList(`a b c`)
+	assert.NoError(t, err)
+	normaliseAllNodes(refs)
+	assert.Equal(t, &RefList{Refs: []*Ref{{Text: "a"}, {Text: "b"}, {Text: "c"}}}, refs)
 }
