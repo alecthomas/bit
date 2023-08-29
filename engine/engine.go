@@ -11,6 +11,7 @@ import (
 
 	"github.com/alecthomas/participle/v2"
 	"github.com/alecthomas/participle/v2/lexer"
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/kballard/go-shellquote"
 
 	"github.com/alecthomas/bit/parser"
@@ -19,14 +20,15 @@ import (
 type Vars map[string]*parser.Block
 
 type Target struct {
-	pos     lexer.Position
-	inputs  *parser.RefList
-	outputs *parser.RefList
-	build   *parser.Command
-	hashPos lexer.Position
-	vars    Vars
+	pos       lexer.Position
+	inputs    *parser.RefList
+	outputs   *parser.RefList
+	build     *parser.Command
+	hashPos   lexer.Position
+	vars      Vars
+	buildFunc func(logger *Logger, target *Target) error
 	// Hash function for virtual targets.
-	virtualHash func() (hasher, error)
+	hashFunc func() (hasher, error)
 	// Hash stored in the DB.
 	storedHash hasher
 	// Hash computed from the filesystem.
@@ -73,13 +75,22 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 		outputs: map[RefKey]*Target{},
 		vars:    map[string]*parser.Block{},
 	}
+	root := &Target{
+		pos:       bitfile.Pos,
+		vars:      map[string]*parser.Block{},
+		inputs:    &parser.RefList{Pos: bitfile.Pos},
+		outputs:   &parser.RefList{Pos: bitfile.Pos},
+		buildFunc: func(logger *Logger, target *Target) error { return nil },
+		hashFunc:  func() (hasher, error) { return 0, nil },
+	}
 	for _, entry := range bitfile.Entries {
 		switch entry := entry.(type) {
 		case *parser.Target:
 			target := &Target{
-				pos:     entry.Pos,
-				inputs:  entry.Inputs,
-				outputs: entry.Outputs,
+				pos:       entry.Pos,
+				inputs:    entry.Inputs,
+				outputs:   entry.Outputs,
+				buildFunc: engine.defaultBuildFunc,
 			}
 			if entry.Inputs == nil {
 				target.inputs = &parser.RefList{Pos: entry.Pos}
@@ -108,6 +119,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			if target.outputs == nil {
 				return nil, participle.Errorf(entry.Pos, "target has no outputs")
 			}
+			root.inputs.Refs = append(root.inputs.Refs, target.outputs.Refs...)
 			engine.targets = append(engine.targets, target)
 
 		case *parser.Assignment:
@@ -119,6 +131,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			panic(fmt.Sprintf("unsupported entry type %T", entry))
 		}
 	}
+	engine.targets = append(engine.targets, root)
 
 	if err := engine.evaluate(); err != nil {
 		return nil, err
@@ -150,9 +163,10 @@ func (e *Engine) Build(name string) error {
 	}
 
 	if target.storedHash == target.realHash {
-		log.Tracef("Skipping %s, up to date.", name)
+		log.Tracef("Up to date.")
 		return nil
 	}
+	log.Tracef("Building.")
 
 	// Build dependencies.
 	for _, input := range target.inputs.Refs {
@@ -161,6 +175,21 @@ func (e *Engine) Build(name string) error {
 		}
 	}
 
+	// Build target.
+	err = target.buildFunc(log, target)
+	if err != nil {
+		return participle.Wrapf(target.build.Pos, err, "build failed")
+	}
+
+	h, err := e.computeHash(target, e.realRefHasher)
+	if err != nil {
+		return err
+	}
+	target.storedHash = h
+	return nil
+}
+
+func (e *Engine) defaultBuildFunc(log *Logger, target *Target) error {
 	block := target.build.Value
 	command, err := e.evaluateString(block.Pos, block.Body, target, map[string]bool{})
 	if err != nil {
@@ -174,30 +203,29 @@ func (e *Engine) Build(name string) error {
 	if err != nil {
 		return participle.Wrapf(block.Pos, err, "failed to run command %q", command)
 	}
-	h, err := e.computeHash(target, e.realRefHasher)
-	if err != nil {
-		return err
-	}
-	target.storedHash = h
 	return nil
 }
 
 type refHasher func(ref *parser.Ref) (hasher, error)
 
-func (e *Engine) recursivelyComputeHash(target *Target, refHasher refHasher, forEach func(*Target, hasher)) (hasher, error) {
+func (e *Engine) recursivelyComputeHash(target *Target, refHasher refHasher, seen map[string]*parser.Ref, forEach func(*Target, hasher)) (hasher, error) {
 	h := newHasher()
 	for _, input := range target.inputs.Refs {
+		// if orig, ok := seen[input.Text]; ok {
+		// 	return 0, participle.Errorf(input.Pos, "circular dependency %s", orig.Pos)
+		// }
 		inputTarget, err := e.getTarget(input.Text)
 		if err != nil {
 			return 0, err
 		}
-		subh, err := e.recursivelyComputeHash(inputTarget, refHasher, forEach)
+		subh, err := e.recursivelyComputeHash(inputTarget, refHasher, seen, forEach)
 		if err != nil {
 			return 0, err
 		}
 		h.update(subh)
 	}
 	for _, output := range target.outputs.Refs {
+		seen[output.Text] = output
 		subh, err := refHasher(output)
 		if err != nil {
 			return 0, participle.Wrapf(output.Pos, err, "hash failed")
@@ -271,27 +299,43 @@ func (e *Engine) evaluate() error {
 		}
 		slices.SortFunc(target.outputs.Refs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
 
+		// Expand globs.
+		inputs := []*parser.Ref{}
 		for _, ref := range target.inputs.Refs {
-			if evaluated, err := e.evaluateString(ref.Pos, ref.Text, target, map[string]bool{}); err != nil {
+			evaluated, err := e.evaluateString(ref.Pos, ref.Text, target, map[string]bool{})
+			if err != nil {
 				return err
-			} else {
-				evaluated = e.normalisePath(evaluated)
-				ref.Text = evaluated
-				e.inputs[RefKey(evaluated)] = target
+			}
+			matches, err := doublestar.FilepathGlob(evaluated)
+			if err != nil {
+				return participle.Wrapf(ref.Pos, err, "failed to expand glob")
+			}
+			if len(matches) == 0 {
+				matches = []string{evaluated}
+			}
+
+			for _, match := range matches {
+				inputs = append(inputs,
+					&parser.Ref{
+						Pos:  ref.Pos,
+						Text: match,
+					})
+				e.inputs[RefKey(match)] = target
 			}
 		}
-		slices.SortFunc(target.inputs.Refs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
+		slices.SortFunc(inputs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
+		target.inputs.Refs = inputs
 	}
 
 	// Second pass - restore hashes from the DB.
 	for _, target := range e.targets {
-		_, err := e.recursivelyComputeHash(target, e.dbRefHasher, func(target *Target, h hasher) {
+		_, err := e.recursivelyComputeHash(target, e.dbRefHasher, map[string]*parser.Ref{}, func(target *Target, h hasher) {
 			target.storedHash = h
 		})
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		_, err = e.recursivelyComputeHash(target, e.realRefHasher, func(target *Target, h hasher) {
+		_, err = e.recursivelyComputeHash(target, e.realRefHasher, map[string]*parser.Ref{}, func(target *Target, h hasher) {
 			target.realHash = h
 		})
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -374,13 +418,10 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 				Body: "true",
 			},
 		},
-		vars: Vars{},
+		vars:      Vars{},
+		buildFunc: func(logger *Logger, target *Target) error { return nil },
+		hashFunc:  func() (hasher, error) { return e.hashFile(name) },
 	}
-	h, err := e.computeHash(target, e.dbRefHasher)
-	if err != nil {
-		return nil, err
-	}
-	target.storedHash = h
 	e.targets = append(e.targets, target)
 	e.outputs[RefKey(name)] = target
 	return target, nil

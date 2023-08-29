@@ -14,6 +14,7 @@ require (
 )
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.6.0 // indirect
 	github.com/hexops/gotextdiff v1.0.3 // indirect
 	golang.org/x/sys v0.6.0 // indirect
 )

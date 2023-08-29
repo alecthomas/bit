@@ -1,4 +1,6 @@
-# Bit - A simple yet powerful build system? [![CI](https://github.com/alecthomas/bit/actions/workflows/ci.yml/badge.svg)](https://github.com/alecthomas/bit/actions/workflows/ci.yml)
+# Bit - A simple yet powerful build tool [![CI](https://github.com/alecthomas/bit/actions/workflows/ci.yml/badge.svg)](https://github.com/alecthomas/bit/actions/workflows/ci.yml)
+
+![Build IT](bit.png)
 
 Bit's goal is to be a simple yet powerful local build system. It is inspired
 by [Make](https://www.gnu.org/software/make/manual/make.html), with the
@@ -7,7 +9,9 @@ following goals:
 - Simple declarative file format.
 - Leverage existing Unix knowledge.
 - Deterministic, incremental, parallel builds.
+- As "type safe" as possible while maintaining usability.
 - Ability to build virtual targets (e.g. Docker images, Kubernetes resources, etc.).
+- Great error messages.
 
 Non-goals:
 
@@ -20,10 +24,11 @@ Bit is driven by a configuration file called a `Bitfile`. It is described below.
 
 While I love the simplicity of `make`, it has some pretty big limitations:
 
-- It's not strict. If a target fails to build an output, it will still
-  succeed, and the target will silently continue to be out-of-date, rebuilding
-  ad infinitum.
-- It can't (natively) capture non-filesystem dependencies. For example, if a
+- If a target fails to build an output, it will still succeed, and the 
+  target will silently continue to be out-of-date.
+- Similarly, with variable interpolation, if a variable is undefined it will
+  silently be interpolated as an empty string.
+- Make can't (natively) capture non-filesystem dependencies. For example, if a
   target depends on a Docker image, it can't be expressed without intermediate
   files being manually created to track this.
 

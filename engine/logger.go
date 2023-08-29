@@ -88,7 +88,7 @@ func NewLogger(config LogConfig) *Logger {
 // Scope returns a new logger with the given scope.
 func (l *Logger) Scope(scope string) *Logger {
 	if len(scope) > 16 {
-		scope = scope[:16] + "…"
+		scope = "…" + scope[len(scope)-15:]
 	}
 	scope = fmt.Sprintf("%-16s", scope)
 	return &Logger{scope: scope, level: l.level}
