@@ -1,4 +1,4 @@
-# Bit - A simple yet powerful build system?
+# Bit - A simple yet powerful build system? [![CI](https://github.com/alecthomas/bit/actions/workflows/ci.yml/badge.svg)](https://github.com/alecthomas/bit/actions/workflows/ci.yml)
 
 Bit's goal is to be a simple yet powerful local build system. It is inspired
 by [Make](https://www.gnu.org/software/make/manual/make.html), with the

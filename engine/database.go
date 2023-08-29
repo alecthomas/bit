@@ -49,10 +49,14 @@ func (db *HashDB) Close() error {
 }
 
 func (db *HashDB) Get(path string) (hash, bool) {
-	hash, ok := db.hashes[path]
-	return hash, ok
+	h, ok := db.hashes[path]
+	return h, ok
 }
 
 func (db *HashDB) Set(path string, hash hash) {
 	db.hashes[path] = hash
+}
+
+func (db *HashDB) Delete(text string) {
+	delete(db.hashes, text)
 }

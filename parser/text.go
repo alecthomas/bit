@@ -24,6 +24,8 @@ type Text struct {
 	Fragments []Fragment `@@+`
 }
 
+// Fragment is a fragment of Text.
+//
 //sumtype:decl
 type Fragment interface{ fragment() }
 

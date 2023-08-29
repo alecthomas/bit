@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"syscall"
 
 	"github.com/creack/pty"
 	"github.com/kballard/go-shellquote"
+	"github.com/mattn/go-isatty"
 )
 
 type LogConfig struct {
@@ -92,25 +94,25 @@ func (l *Logger) Scope(scope string) *Logger {
 	return &Logger{scope: scope, level: l.level}
 }
 
+var ansiTable = func() map[LogLevel]string {
+	if !isatty.IsTerminal(os.Stdout.Fd()) {
+		return map[LogLevel]string{}
+	}
+	return map[LogLevel]string{
+		LogLevelTrace:  "\033[90m",
+		LogLevelDebug:  "\033[34m",
+		LogLevelInfo:   "",
+		LogLevelNotice: "\033[32m",
+		LogLevelWarn:   "\033[33m",
+		LogLevelError:  "\033[31m",
+	}
+}()
+
 func (l *Logger) logf(level LogLevel, format string, args ...interface{}) {
 	if l.level > level {
 		return
 	}
-	prefix := ""
-	switch level {
-	case LogLevelError:
-		prefix = "\033[31m"
-	case LogLevelWarn:
-		prefix = "\033[33m"
-	case LogLevelNotice:
-		prefix = "\033[32m"
-	case LogLevelInfo:
-		prefix = "" // Normal text.
-	case LogLevelDebug:
-		prefix = "\033[34m"
-	case LogLevelTrace:
-		prefix = "\033[90m"
-	}
+	prefix := ansiTable[level]
 	if l.scope != "" {
 		prefix = targetColour(l.scope) + l.scope + "\033[0m" + "| " + prefix
 	}
@@ -162,7 +164,7 @@ func (l *Logger) Exec(command ...string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	go io.Copy(w, p)
+	go io.Copy(w, p) //nolint:errcheck
 	return cmd.Wait()
 }
 

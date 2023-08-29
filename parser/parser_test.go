@@ -2,7 +2,6 @@ package parser
 
 import (
 	"embed"
-	_ "embed"
 	"io/fs"
 	"os"
 	"reflect"

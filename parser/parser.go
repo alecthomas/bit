@@ -16,6 +16,8 @@ var parser = participle.MustBuild[Bitfile](
 	participle.Union[Directive](&Inherit{}, &Dir{}, &Assignment{}, &RefCommand{}, &Command{}),
 )
 
+// Node is a node in the AST.
+//
 //sumtype:decl
 type Node interface {
 	Position() lexer.Position
@@ -84,6 +86,8 @@ type Bitfile struct {
 
 func (b *Bitfile) Position() lexer.Position { return b.Pos }
 
+// Entry is a top-level entry in a Bitfile.
+//
 //sumtype:decl
 type Entry interface {
 	Node
@@ -143,6 +147,8 @@ type Template struct {
 func (t *Template) Position() lexer.Position { return t.Pos }
 func (*Template) entry()                     {}
 
+// Directive is a directive in a target.
+//
 //sumtype:decl
 type Directive interface {
 	Node

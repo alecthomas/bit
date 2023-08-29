@@ -29,12 +29,12 @@ var baseLexer = lexer.MustStateful(lexer.Rules{
 })
 var lex = continuation.New(indenter.New(baseLexer))
 
-func unquoteMultilineString(t lexer.Token) (lexer.Token, error) {
+func unquoteMultilineString(t lexer.Token) (lexer.Token, error) { //nolint:unparam
 	t.Value = t.Value[3 : len(t.Value)-3]
 	return t, nil
 }
 
-func unquoteStringLiteral(t lexer.Token) (lexer.Token, error) {
+func unquoteStringLiteral(t lexer.Token) (lexer.Token, error) { //nolint:unparam
 	t.Value = t.Value[1 : len(t.Value)-1]
 	return t, nil
 }

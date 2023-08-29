@@ -125,10 +125,11 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 func (e *Engine) Close() error {
 	for _, target := range e.targets {
 		for _, output := range target.outputs.Refs {
-			h, err := e.realRefHasher(target, output)
+			h, err := e.realRefHasher(output)
 			if err != nil {
 				continue
 			}
+			e.db.Delete(output.Text)
 			e.db.Set(output.Text, h)
 		}
 	}
@@ -183,29 +184,29 @@ func (e *Engine) Build(name string) error {
 	return nil
 }
 
-type refHasher func(target *Target, ref *parser.Ref) (hash, error)
+type refHasher func(ref *parser.Ref) (hash, error)
 
 // Recompute hash of target.
 func (e *Engine) recomputeHash(target *Target, refHasher refHasher) (hash, error) {
 	h := newHasher()
 	for _, input := range target.inputs.Refs {
-		target, err := e.getTarget(input.Text)
+		inputTarget, err := e.getTarget(input.Text)
 		if err != nil {
 			return 0, err
 		}
-		h = h.int(uint64(target.hash))
+		h = h.int(uint64(inputTarget.hash))
 	}
 	for _, output := range target.outputs.Refs {
-		rh, err := refHasher(target, output)
+		rh, err := refHasher(output)
 		if err != nil {
-			return 0, err
+			return 0, participle.Wrapf(output.Pos, err, "hash failed")
 		}
 		h = h.update(rh)
 	}
 	return h, nil
 }
 
-func (e *Engine) dbRefHasher(target *Target, ref *parser.Ref) (hash, error) {
+func (e *Engine) dbRefHasher(ref *parser.Ref) (hash, error) {
 	h, ok := e.db.Get(ref.Text)
 	if !ok {
 		return 0, nil
@@ -214,12 +215,13 @@ func (e *Engine) dbRefHasher(target *Target, ref *parser.Ref) (hash, error) {
 }
 
 // Hash real files.
-func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (hash, error) {
+func (e *Engine) realRefHasher(ref *parser.Ref) (hash, error) {
 	h := newHasher()
 	info, err := os.Stat(ref.Text)
 	if err != nil {
-		return 0, participle.Wrapf(target.pos, err, "%q", ref)
+		return 0, err
 	}
+
 	h = h.string(ref.Text)
 	h = h.int(uint64(info.Mode()))
 	if !info.IsDir() {
@@ -256,6 +258,9 @@ func (e *Engine) evaluate() error {
 			}
 		}
 		slices.SortFunc(target.inputs.Refs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
+	}
+
+	for _, target := range e.targets {
 		h, err := e.recomputeHash(target, e.dbRefHasher)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -323,6 +328,10 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 	if ok {
 		return target, nil
 	}
+	_, err := os.Stat(name)
+	if err != nil {
+		return nil, fmt.Errorf("no such file or target %q", name)
+	}
 	// Synthetic target.
 	target = &Target{
 		pos:     lexer.Position{},
@@ -336,7 +345,7 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 		},
 		vars: Vars{},
 	}
-	h, err := e.recomputeHash(target, e.realRefHasher)
+	h, err := e.recomputeHash(target, e.dbRefHasher)
 	if err != nil {
 		return nil, err
 	}
