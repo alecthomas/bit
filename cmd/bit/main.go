@@ -18,9 +18,9 @@ import (
 var cli struct {
 	engine.LogConfig
 	File   *os.File           `short:"f" help:"Bitfile to load." required:"" default:"Bitfile"`
-	Chdir  kong.ChangeDirFlag `short:"C" help:"Change to directory before running."`
-	List   bool               `help:"List available targets."`
-	Target string             `arg:"" help:"Target to run."`
+	Chdir  kong.ChangeDirFlag `short:"C" help:"Change to directory before running." placeholder:"DIR"`
+	List   bool               `short:"l" help:"List available targets."`
+	Target []string           `arg:"" optional:"" help:"Target to run."`
 }
 
 func main() {
@@ -31,8 +31,18 @@ func main() {
 	reportError(logger, err)
 	eng, err := engine.Compile(logger, bitfile)
 	reportError(logger, err)
-	err = eng.Build(cli.Target)
-	reportError(logger, err)
+
+	if cli.List {
+		for _, target := range eng.Targets() {
+			fmt.Println(target)
+		}
+		return
+	}
+
+	for _, target := range cli.Target {
+		err = eng.Build(target)
+		reportError(logger, err)
+	}
 	err = eng.Close()
 	reportError(logger, err)
 }

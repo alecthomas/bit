@@ -5,9 +5,6 @@ DEST = ./build
 
 %{DEST}/bit:
   inputs:
-    %(
-      go list -e -json -compiled=false -test=false -export=false -find=false -- ./... |
-        jq -r 'select(.Dir | startswith("%{CWD}")) | . as $parent | .GoFiles | map($parent.Dir + "/" + .) | .[]'
-    )%
+    **/*.go
     %{DEST}
   build: go build -v -o %{DEST}/bit ./cmd/bit

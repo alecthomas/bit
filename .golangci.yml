@@ -125,3 +125,4 @@ issues:
     - "bad syntax for struct tag key"
     - indent-error-flow
     - unexported-return
+    - "^exported:"

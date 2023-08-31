@@ -8,13 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/alecthomas/participle/v2"
 	"github.com/alecthomas/participle/v2/lexer"
-	"github.com/bmatcuk/doublestar/v4"
-	"github.com/kballard/go-shellquote"
 
+	"github.com/alecthomas/bit/engine/glob"
 	"github.com/alecthomas/bit/parser"
 )
 
@@ -33,13 +33,15 @@ type Target struct {
 	// Hash stored in the DB.
 	storedHash hasher
 	// Hash computed from the filesystem.
-	realHash hasher
+	realHash  hasher
+	synthetic bool
 }
 
 type RefKey string
 
 type Engine struct {
 	cwd     string
+	globber *glob.Globber
 	log     *Logger
 	vars    Vars
 	db      *HashDB
@@ -63,12 +65,18 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cache directory %q: %w", dir, err)
 	}
-	hash := sha256.Sum256([]byte(dir))
-	db, err := NewHashDB(filepath.Join(dir, fmt.Sprintf("%x.json", hash)))
+	hash := sha256.Sum256([]byte(cwd))
+	dir = filepath.Join(dir, fmt.Sprintf("%x.json", hash))
+	db, err := NewHashDB(dir)
+	if err != nil {
+		return nil, err
+	}
+	globber, err := glob.NewGlobber(cwd)
 	if err != nil {
 		return nil, err
 	}
 	engine := &Engine{
+		globber: globber,
 		cwd:     cwd,
 		log:     logger,
 		db:      db,
@@ -114,7 +122,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 					case "inputs", "outputs":
 						refs, err := parser.ParseRefList(directive.Value.Body)
 						if err != nil {
-							return nil, participle.Wrapf(directive.Pos, err, "failed to parse %s", directive.Command)
+							return nil, participle.Errorf(directive.Value.Pos, "failed to parse %s: %s", directive.Command, err)
 						}
 						if directive.Command == "inputs" {
 							target.inputs.Refs = append(target.inputs.Refs, refs.Refs...)
@@ -156,14 +164,32 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 	return engine, nil
 }
 
+func (e *Engine) Targets() []string {
+	set := map[string]bool{}
+	for _, target := range e.targets {
+		if target.synthetic {
+			continue
+		}
+		for _, output := range target.outputs.Strings() {
+			set[output] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (e *Engine) Close() error {
 	for _, target := range e.targets {
 		for _, output := range target.outputs.Refs {
+			e.db.Delete(output.Text)
 			h, err := e.realRefHasher(output)
 			if err != nil {
 				continue
 			}
-			e.db.Delete(output.Text)
 			e.db.Set(output.Text, h)
 		}
 	}
@@ -180,7 +206,7 @@ func (e *Engine) Build(name string) error {
 	}
 
 	if target.storedHash == target.realHash {
-		log.Tracef("Up to date.")
+		log.Debugf("Up to date.")
 		return nil
 	}
 	log.Tracef("Building.")
@@ -203,6 +229,7 @@ func (e *Engine) Build(name string) error {
 		return err
 	}
 	target.storedHash = h
+	target.realHash = h
 	return nil
 }
 
@@ -212,11 +239,7 @@ func (e *Engine) defaultBuildFunc(log *Logger, target *Target) error {
 	if err != nil {
 		return participle.Wrapf(block.Pos, err, "invalid command %q", command)
 	}
-	args, err := shellquote.Split(command)
-	if err != nil {
-		return participle.Wrapf(block.Pos, err, "invalid command %q", command)
-	}
-	err = log.Exec(args...)
+	err = log.Exec(command)
 	if err != nil {
 		return participle.Wrapf(block.Pos, err, "failed to run command %q", command)
 	}
@@ -301,19 +324,30 @@ func (e *Engine) realRefHasher(ref *parser.Ref) (hasher, error) {
 func (e *Engine) evaluate() error {
 	// First pass - expand variables and normalise path references.
 	for _, target := range e.targets {
+		logger := e.targetLogger(target)
+		var outputs []*parser.Ref
 		for _, ref := range target.outputs.Refs {
-			if evaluated, err := e.evaluateString(ref.Pos, ref.Text, target, map[string]bool{}); err != nil {
+			evaluated, err := e.evaluateString(ref.Pos, ref.Text, target, map[string]bool{})
+			if err != nil {
 				return err
-			} else {
-				evaluated = e.normalisePath(evaluated)
-				ref.Text = evaluated
-				key := RefKey(evaluated)
+			}
+
+			subRefs, err := parser.ParseRefList(evaluated)
+			if err != nil {
+				return participle.Errorf(ref.Pos, "failed to parse output %q: %s", evaluated, err)
+			}
+			for _, subRef := range subRefs.Refs {
+				subRef.Pos = ref.Pos
+				subRef.Text = e.normalisePath(subRef.Text)
+				outputs = append(outputs, subRefs.Refs...)
+				key := RefKey(subRef.Text)
 				if existing, ok := e.outputs[key]; ok {
-					return participle.Errorf(ref.Pos, "duplicate output %q at %s", ref.Text, existing.pos)
+					return participle.Errorf(ref.Pos, "duplicate output %q at %s", subRef.Text, existing.pos)
 				}
 				e.outputs[key] = target
 			}
 		}
+		target.outputs.Refs = outputs
 		slices.SortFunc(target.outputs.Refs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
 
 		// Expand globs.
@@ -328,10 +362,8 @@ func (e *Engine) evaluate() error {
 				return participle.Errorf(ref.Pos, "failed to parse input %q: %s", evaluated, err)
 			}
 			for _, innerRef := range innerRefs.Refs {
-				matches, err := doublestar.FilepathGlob(innerRef.Text)
-				if err != nil {
-					return participle.Wrapf(ref.Pos, err, "failed to expand glob")
-				}
+				matches := e.globber.Filepath(innerRef.Text)
+				logger.Tracef("Glob %q -> %q", innerRef.Text, strings.Join(matches, " "))
 				if len(matches) == 0 {
 					matches = []string{innerRef.Text}
 				}
@@ -352,6 +384,7 @@ func (e *Engine) evaluate() error {
 
 	// Second pass - restore hashes from the DB.
 	for _, target := range e.targets {
+		logger := e.targetLogger(target)
 		_, err := e.recursivelyComputeHash(target, e.dbRefHasher, map[string]*parser.Ref{}, func(target *Target, h hasher) {
 			target.storedHash = h
 		})
@@ -364,8 +397,17 @@ func (e *Engine) evaluate() error {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+		var changed string
+		if target.storedHash != target.realHash {
+			changed = " (changed)"
+		}
+		logger.Tracef("hash: %016x > %016x%s", target.storedHash, target.realHash, changed)
 	}
 	return nil
+}
+
+func (e *Engine) targetLogger(target *Target) *Logger {
+	return e.log.Scope(strings.Join(target.outputs.Strings(), ":"))
 }
 
 func (e *Engine) evaluateString(pos lexer.Position, v string, target *Target, seen map[string]bool) (string, error) {
@@ -399,7 +441,7 @@ func (e *Engine) evaluateString(pos lexer.Position, v string, target *Target, se
 			}
 			output, err := e.capture(e.log.Scope(strings.Join(target.outputs.Strings(), ":")), cmd)
 			if err != nil {
-				return "", participle.Wrapf(fragment.Pos, err, "failed to run command %q", cmd)
+				return "", participle.Errorf(pos, "failed to run command: %s", cmd)
 			}
 			out.WriteString(output)
 		}
@@ -456,9 +498,10 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 	}
 	// Synthetic target.
 	target = &Target{
-		pos:     lexer.Position{},
-		inputs:  &parser.RefList{},
-		outputs: &parser.RefList{Refs: []*parser.Ref{{Text: name}}},
+		synthetic: true,
+		pos:       lexer.Position{},
+		inputs:    &parser.RefList{},
+		outputs:   &parser.RefList{Refs: []*parser.Ref{{Text: name}}},
 		build: &parser.Command{
 			Command: "build",
 			Value: &parser.Block{

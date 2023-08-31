@@ -7,10 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/creack/pty"
-	"github.com/kballard/go-shellquote"
 	"github.com/mattn/go-isatty"
 )
 
@@ -91,6 +91,7 @@ func (l *Logger) Scope(scope string) *Logger {
 		scope = "…" + scope[len(scope)-15:]
 	}
 	scope = fmt.Sprintf("%-16s", scope)
+	scope = strings.ReplaceAll(scope, "%", "%%")
 	return &Logger{scope: scope, level: l.level}
 }
 
@@ -144,8 +145,15 @@ func (l *Logger) Errorf(format string, args ...interface{}) {
 }
 
 // Exec a command
-func (l *Logger) Exec(command ...string) error {
-	l.Noticef("$ %s", shellquote.Join(command...))
+func (l *Logger) Exec(command string) error {
+	lines := strings.Split(command, "\n")
+	for i, line := range lines {
+		if i == 0 {
+			l.Noticef("$ %s", line)
+		} else {
+			l.Noticef("  %s", line)
+		}
+	}
 	p, t, err := pty.Open()
 	if err != nil {
 		return err
@@ -153,7 +161,7 @@ func (l *Logger) Exec(command ...string) error {
 	defer t.Close()
 	defer p.Close()
 	w := l.WriterAt(LogLevelInfo)
-	cmd := exec.Command("/bin/sh", "-c", shellquote.Join(command...))
+	cmd := exec.Command("/bin/sh", "-c", command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid:  true,
 		Setctty: true,
