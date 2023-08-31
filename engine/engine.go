@@ -71,12 +71,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	globber, err := glob.NewGlobber(cwd)
-	if err != nil {
-		return nil, err
-	}
 	engine := &Engine{
-		globber: globber,
 		cwd:     cwd,
 		log:     logger,
 		db:      db,
@@ -89,13 +84,9 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			},
 		},
 	}
-	root := &Target{
-		pos:       bitfile.Pos,
-		vars:      map[string]*parser.Block{},
-		inputs:    &parser.RefList{Pos: bitfile.Pos},
-		outputs:   &parser.RefList{Pos: bitfile.Pos},
-		buildFunc: func(logger *Logger, target *Target) error { return nil },
-		hashFunc:  func() (hasher, error) { return 0, nil },
+	engine.globber, err = glob.NewGlobber(cwd, engine.Outputs)
+	if err != nil {
+		return nil, err
 	}
 	for _, entry := range bitfile.Entries {
 		switch entry := entry.(type) {
@@ -144,7 +135,6 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			if target.outputs == nil {
 				return nil, participle.Errorf(entry.Pos, "target has no outputs")
 			}
-			root.inputs.Refs = append(root.inputs.Refs, target.outputs.Refs...)
 			engine.targets = append(engine.targets, target)
 
 		case *parser.Assignment:
@@ -156,7 +146,6 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			panic(fmt.Sprintf("unsupported entry type %T", entry))
 		}
 	}
-	engine.targets = append(engine.targets, root)
 
 	if err := engine.evaluate(); err != nil {
 		return nil, err
@@ -164,7 +153,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 	return engine, nil
 }
 
-func (e *Engine) Targets() []string {
+func (e *Engine) Outputs() []string {
 	set := map[string]bool{}
 	for _, target := range e.targets {
 		if target.synthetic {

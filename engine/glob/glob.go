@@ -10,12 +10,18 @@ import (
 
 // Globber is a file globber that respects .gitingore files.
 type Globber struct {
-	dir   string
-	files []string
-	cache map[string][]string
+	dir        string
+	files      []string
+	cache      map[string][]string
+	extraFiles func() []string
 }
 
-func NewGlobber(dir string) (*Globber, error) {
+// NewGlobber creates a new Globber for the given directory.
+//
+// The extraFiles function is called to provide additional files to be
+// considered when globbing. This is useful for files output by the
+// build process.
+func NewGlobber(dir string, extraFiles func() []string) (*Globber, error) {
 	ignore, err := GlobifyGitIgnoreFile(dir)
 	if err != nil {
 		return nil, err
@@ -43,7 +49,12 @@ func NewGlobber(dir string) (*Globber, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Globber{dir: dir, files: files, cache: map[string][]string{}}, nil
+	return &Globber{
+		dir:        dir,
+		files:      files,
+		cache:      map[string][]string{},
+		extraFiles: extraFiles,
+	}, nil
 }
 
 // Filepath returns a list of files matching the given glob.
@@ -56,6 +67,11 @@ func (g *Globber) Filepath(glob string) []string {
 	}
 	var matches []string
 	for _, file := range g.files {
+		if ok, err := doublestar.Match(glob, file); ok && err == nil {
+			matches = append(matches, file)
+		}
+	}
+	for _, file := range g.extraFiles() {
 		if ok, err := doublestar.Match(glob, file); ok && err == nil {
 			matches = append(matches, file)
 		}

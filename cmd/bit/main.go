@@ -33,7 +33,7 @@ func main() {
 	reportError(logger, err)
 
 	if cli.List {
-		for _, target := range eng.Targets() {
+		for _, target := range eng.Outputs() {
 			fmt.Println(target)
 		}
 		return
