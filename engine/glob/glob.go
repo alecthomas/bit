@@ -57,12 +57,16 @@ func NewGlobber(dir string, extraFiles func() []string) (*Globber, error) {
 	}, nil
 }
 
+func (g *Globber) IsGlob(glob string) bool {
+	return strings.ContainsAny(glob, "*?{}[]")
+}
+
 // Filepath returns a list of files matching the given glob.
 func (g *Globber) Filepath(glob string) []string {
 	if cached, ok := g.cache[glob]; ok {
 		return cached
 	}
-	if !strings.ContainsAny(glob, "*?{}[]") {
+	if !g.IsGlob(glob) {
 		return []string{glob}
 	}
 	var matches []string

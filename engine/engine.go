@@ -328,6 +328,10 @@ func (e *Engine) evaluate() error {
 			for _, subRef := range subRefs.Refs {
 				subRef.Pos = ref.Pos
 				subRef.Text = e.normalisePath(subRef.Text)
+				// TODO: Supporting brace expansion would be very useful here.
+				if e.globber.IsGlob(subRef.Text) {
+					return participle.Errorf(ref.Pos, "globs are not allowed in output")
+				}
 				outputs = append(outputs, subRefs.Refs...)
 				key := RefKey(subRef.Text)
 				if existing, ok := e.outputs[key]; ok {
