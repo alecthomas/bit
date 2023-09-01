@@ -250,7 +250,7 @@ type Ref struct {
 
 	// This is a bit hairy because we need to explicitly match WS
 	// to "un"-elide it, but we don't want to capture it.
-	Text string `WS? ((?!WS) @(Var | Cmd | Ident | Number | "/" | "." | "*"))+ | @(String | StringLiteral | MultilineString)`
+	Text string `WS? ((?!WS) @(Var | Cmd | Ident | Number | "/" | "." | "*" | "[" | "]" | "{" | "}" | "!" | ","))+ | @(String | StringLiteral | MultilineString)`
 }
 
 func (r *Ref) Position() lexer.Position { return r.Pos }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/alecthomas/participle/v2"
 	"github.com/alecthomas/participle/v2/lexer"
+	"github.com/kballard/go-shellquote"
 
 	"github.com/alecthomas/bit/engine/glob"
 	"github.com/alecthomas/bit/parser"
@@ -153,6 +154,30 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 	return engine, nil
 }
 
+func (e *Engine) Clean(dryRun bool) error {
+	seen := map[string]bool{}
+	for _, target := range e.targets {
+		if target.synthetic {
+			continue
+		}
+		for _, output := range target.outputs.Strings() {
+			if seen[output] {
+				continue
+			}
+			seen[output] = true
+			e.log.Noticef("rm -rf %s", shellquote.Join(output))
+			if dryRun {
+				continue
+			}
+			err := os.RemoveAll(output)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return participle.Wrapf(target.pos, err, "failed to remove %q", output)
+			}
+		}
+	}
+	return nil
+}
+
 func (e *Engine) Outputs() []string {
 	set := map[string]bool{}
 	for _, target := range e.targets {
@@ -185,40 +210,52 @@ func (e *Engine) Close() error {
 	return e.db.Close()
 }
 
-func (e *Engine) Build(name string) error {
-	name = e.normalisePath(name)
-	log := e.log.Scope(name)
-
-	target, err := e.getTarget(name)
-	if err != nil {
-		return err
+func (e *Engine) Build(outputs []string) error {
+	if len(outputs) == 0 {
+		outputs = e.Outputs()
 	}
+	for _, name := range outputs {
+		name = e.normalisePath(name)
+		log := e.log.Scope(name)
 
-	if target.storedHash == target.realHash {
-		log.Debugf("Up to date.")
-		return nil
-	}
-	log.Tracef("Building.")
-
-	// Build dependencies.
-	for _, input := range target.inputs.Refs {
-		if err := e.Build(input.Text); err != nil {
-			return participle.Wrapf(input.Pos, err, "build failed")
+		target, err := e.getTarget(name)
+		if err != nil {
+			return err
 		}
-	}
 
-	// Build target.
-	err = target.buildFunc(log, target)
-	if err != nil {
-		return participle.Wrapf(target.build.Pos, err, "build failed")
-	}
+		if target.storedHash == target.realHash {
+			log.Debugf("Up to date.")
+			continue
+		}
+		log.Tracef("Building.")
 
-	h, err := e.computeHash(target, e.realRefHasher)
-	if err != nil {
-		return err
+		// Build dependencies.
+		for _, input := range target.inputs.Refs {
+			if err := e.Build([]string{input.Text}); err != nil {
+				return participle.Wrapf(input.Pos, err, "build failed")
+			}
+		}
+
+		// Build target.
+		err = target.buildFunc(log, target)
+		if err != nil {
+			return participle.Wrapf(target.build.Pos, err, "build failed")
+		}
+
+		h, err := e.computeHash(target, e.realRefHasher)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				var perr participle.Error
+				if errors.As(err, &perr) {
+					return participle.Errorf(perr.Position(), "target did not produce expected output: %s", perr.Message())
+				}
+				return fmt.Errorf("target did not produce expected output: %w", err)
+			}
+			return err
+		}
+		target.storedHash = h
+		target.realHash = h
 	}
-	target.storedHash = h
-	target.realHash = h
 	return nil
 }
 
@@ -356,7 +393,7 @@ func (e *Engine) evaluate() error {
 			}
 			for _, innerRef := range innerRefs.Refs {
 				matches := e.globber.Filepath(innerRef.Text)
-				logger.Tracef("Glob %q -> %q", innerRef.Text, strings.Join(matches, " "))
+				logger.Tracef("Glob %s -> %s", innerRef.Text, strings.Join(matches, " "))
 				if len(matches) == 0 {
 					matches = []string{innerRef.Text}
 				}
@@ -394,7 +431,7 @@ func (e *Engine) evaluate() error {
 		if target.storedHash != target.realHash {
 			changed = " (changed)"
 		}
-		logger.Tracef("hash: %016x > %016x%s", target.storedHash, target.realHash, changed)
+		logger.Tracef("Hash: %016x -> %016x%s", target.storedHash, target.realHash, changed)
 	}
 	return nil
 }

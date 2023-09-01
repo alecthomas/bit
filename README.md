@@ -37,6 +37,12 @@ While I love the simplicity of `make`, it has some pretty big limitations:
 The Bitfile is a declarative file that describes how to build targets. It consists
 of targets, templates, and variables, that can be substituted into targets.
 
+### Glob expansion
+
+Glob expansion is supported in inputs, but not outputs. This is because
+globs operate on the filesystem and outputs may not be present at time of 
+expansion. Bit will report an error for globs in outputs.
+
 ### Variables
 
 Variables are in the form:
@@ -45,18 +51,24 @@ Variables are in the form:
 var = value
 ```
 
+Or:
+
+```
+var =
+  value
+  value
+```
+
 They can be set on the command line, at the top level of a `Bitfile`,
 or in a target. Variables are interpolated with the syntax `%{var}`. Interpolation 
 occurs after inheritance and before any other evaluation.
-
-Directive names are reserved words and cannot be used as variable names.
 
 ### Command substitution
 
 Command substitution is in the form:
 
 ```
-%(command)
+%(command)%
 ```
 
 ### Targets

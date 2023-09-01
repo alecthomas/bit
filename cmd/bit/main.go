@@ -20,6 +20,8 @@ var cli struct {
 	File   *os.File           `short:"f" help:"Bitfile to load." required:"" default:"Bitfile"`
 	Chdir  kong.ChangeDirFlag `short:"C" help:"Change to directory before running." placeholder:"DIR"`
 	List   bool               `short:"l" help:"List available targets."`
+	Clean  bool               `short:"c" help:"Clean targets."`
+	DryRun bool               `short:"n" help:"Dry run."`
 	Target []string           `arg:"" optional:"" help:"Target to run."`
 }
 
@@ -32,19 +34,23 @@ func main() {
 	eng, err := engine.Compile(logger, bitfile)
 	reportError(logger, err)
 
-	if cli.List {
+	switch {
+	case cli.List:
 		for _, target := range eng.Outputs() {
 			fmt.Println(target)
 		}
-		return
-	}
 
-	for _, target := range cli.Target {
-		err = eng.Build(target)
+	case cli.Clean:
+		err = eng.Clean(cli.DryRun)
+		reportError(logger, err)
+
+	default:
+		err = eng.Build(cli.Target)
+		reportError(logger, err)
+		err = eng.Close()
 		reportError(logger, err)
 	}
-	err = eng.Close()
-	reportError(logger, err)
+
 }
 
 func reportError(logger *engine.Logger, err error) {

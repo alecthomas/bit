@@ -3,8 +3,5 @@ DEST = ./build
 %{DEST}:
   build: mkdir -p %{DEST}
 
-%{DEST}/bit:
-  inputs:
-    **/*.go
-    %{DEST}
+%{DEST}/bit: **/*.go %{DEST}
   build: go build -v -o %{DEST}/bit ./cmd/bit
