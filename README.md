@@ -20,6 +20,27 @@ Non-goals:
 
 Bit is driven by a configuration file called a `Bitfile`. It is described below.
 
+## Development status
+
+What's implemented so far:
+
+- [x] [Variable expansion](#variables)
+- [x] [Command substitution](#command-substitution)
+- [x] Output verification
+- [x] [Dependencies](#dependencies)
+- [x] Hashing
+- [x] Concrete [targets](#targets)
+- [ ] [Implicit targets](#implicit-targets)
+- [ ] [Virtual targets](#virtual-targets)
+- [ ] [Templates](#templates)
+- [ ] [Inheritance](#inheritance)
+- [ ] Directives
+  - [x] [Build](#create-directive-optional)
+  - [x] [Inputs](#inputs-directive-optional)
+  - [x] [Outputs](#outputs-directive-optional)
+  - [ ] [Hash](#hash-directive-optional)
+  - [ ] [Clean](#clean-directive-optional)
+
 ## Motivation
 
 While I love the simplicity of `make`, it has some pretty big limitations:
@@ -89,6 +110,35 @@ output1 output2 ...: input1 input2 ...
   ^directive: parameters                    # Prepend to inherited directive
 ```
 
+
+### Implicit targets
+
+Implicit targets are patterns that result in concrete targets for any matching files.
+They take the form:
+
+```
+implicit <replace>: <pattern>
+```
+
+Where any text matching `*` is extracted from `<pattern>` and interpolated 
+into `<replace>`.
+
+eg.
+
+```
+implicit *.o: *.c
+  inputs: %(cc -MM %{IN} | cut -d: -f2-)%
+  build: cc -c %{IN} -o %{OUT}
+```
+
+Given the file `input.c`, the previous `implicit` will result in the
+following concrete target:
+
+```
+input.o: input.c
+  inputs: input.c header.h
+  build: cc -c input.c -o input.o
+```
 
 ### Virtual targets
 
@@ -254,38 +304,40 @@ If omitted, the output is hashed.
 hash: command
 ```
 
-#### `create` directive (optional)
+#### `build` directive (optional)
 
-The `create` directive runs a command if the target is not up-to-date.
+The `build` directive runs a command if the target is not up-to-date.
 
-If the `create` directive is omitted and the target is not up-to-date, the build
+If the `build` directive is omitted and the target is not up-to-date, the build
 will fail.
 
 ```
-create: command
+build: command
 ```
 
-#### `delete` directive (optional)
+#### `clean` directive (optional)
 
-The `delete` directive runs a command to delete the target.
+The `clean` directive runs a command to delete the target.
 
 ```
-delete: command
+clean: command
 ```
 
 It is optional and if omitted, the target is not deleted when cleaning.
 
-### `dir` directive (optional)
+#### `inputs` directive (optional)
 
-The `dir` directive sets the working directory for the target. If omitted it
-defaults to the current working directory.
+In addition to defining inputs on the target definition directly,
+inputs may be defined in an inputs directive.
 
-The working directory is set before any other directives, variables, or file
-globs are evaluated.
+This may be on a single line, or indented and on multiple lines.
 
-```
-dir: path
-```
+#### `outputs` directive (optional)
+
+In addition to defining outputs on the target definition directly,
+outputs may be defined in an outputs directive.
+
+This may be on a single line, or indented and on multiple lines.
 
 ### Example
 

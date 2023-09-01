@@ -19,7 +19,8 @@ var cli struct {
 	engine.LogConfig
 	File   *os.File           `short:"f" help:"Bitfile to load." required:"" default:"Bitfile"`
 	Chdir  kong.ChangeDirFlag `short:"C" help:"Change to directory before running." placeholder:"DIR"`
-	Deps   bool               `short:"d" xor:"command" help:"Print dependencies."`
+	Deps   bool               `xor:"command" help:"Print dependency graph in a make-compatible format."`
+	Dot    bool               `xor:"command" help:"Print dependency graph as a .dot file."`
 	List   bool               `short:"l" xor:"command" help:"List available targets."`
 	Clean  bool               `short:"c" xor:"command" help:"Clean targets."`
 	DryRun bool               `short:"n" help:"Dry run."`
@@ -48,8 +49,27 @@ func main() {
 	case cli.Deps:
 		deps := eng.Deps()
 		for in, deps := range deps {
-			fmt.Printf("%s: %s\n", in, strings.Join(deps, " "))
+			w := len(in) + 1
+			fmt.Printf("%s:", in)
+			for _, dep := range deps {
+				if w+len(dep) > 80 {
+					fmt.Printf(" \\\n\t")
+					w = 8
+				}
+				w += len(dep)
+				fmt.Printf(" %s", dep)
+			}
+			fmt.Println()
 		}
+
+	case cli.Dot:
+		fmt.Println("digraph {")
+		for in, deps := range eng.Deps() {
+			for _, dep := range deps {
+				fmt.Printf("\t%q -> %q;\n", in, dep)
+			}
+		}
+		fmt.Println("}")
 
 	default:
 		err = eng.Build(cli.Target)

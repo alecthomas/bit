@@ -3,8 +3,8 @@
 myprog: *.o
   build: cc -o %{OUT} %{IN}
 
-a.o: a.c b.h
+a.o: %(cc -MM a.c | cut -d: -f2-)%
   build: cc -c -o %{OUT} a.c
 
-b.o: b.c
+b.o: %(cc -MM b.c | cut -d: -f2-)%
   build: cc -c -o %{OUT} %{IN}
