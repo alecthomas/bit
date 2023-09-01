@@ -1,6 +1,7 @@
 package glob
 
 import (
+	"errors"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,7 @@ type Globber struct {
 // build process.
 func NewGlobber(dir string, extraFiles func() []string) (*Globber, error) {
 	ignore, err := GlobifyGitIgnoreFile(dir)
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 	for i, glob := range ignore {
@@ -61,21 +62,30 @@ func (g *Globber) IsGlob(glob string) bool {
 	return strings.ContainsAny(glob, "*?{}[]")
 }
 
-// Filepath returns a list of files matching the given glob.
-func (g *Globber) Filepath(glob string) []string {
+// MatchFilesystem returns a list of files matching the given glob.
+func (g *Globber) MatchFilesystem(glob string) []string {
 	if cached, ok := g.cache[glob]; ok {
 		return cached
 	}
 	if !g.IsGlob(glob) {
 		return []string{glob}
 	}
+	seen := map[string]struct{}{}
 	var matches []string
 	for _, file := range g.files {
+		if _, ok := seen[file]; ok {
+			continue
+		}
+		seen[file] = struct{}{}
 		if ok, err := doublestar.Match(glob, file); ok && err == nil {
 			matches = append(matches, file)
 		}
 	}
 	for _, file := range g.extraFiles() {
+		if _, ok := seen[file]; ok {
+			continue
+		}
+		seen[file] = struct{}{}
 		if ok, err := doublestar.Match(glob, file); ok && err == nil {
 			matches = append(matches, file)
 		}

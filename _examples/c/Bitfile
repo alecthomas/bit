@@ -1,0 +1,10 @@
+# Based on Redo example: https://redo.readthedocs.io/en/latest/
+
+myprog: *.o
+  build: cc -o %{OUT} %{IN}
+
+a.o: a.c b.h
+  build: cc -c -o %{OUT} a.c
+
+b.o: b.c
+  build: cc -c -o %{OUT} %{IN}

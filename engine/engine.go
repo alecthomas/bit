@@ -93,6 +93,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 		switch entry := entry.(type) {
 		case *parser.Target:
 			target := &Target{
+				vars:      Vars{},
 				pos:       entry.Pos,
 				inputs:    entry.Inputs,
 				outputs:   entry.Outputs,
@@ -348,6 +349,7 @@ func (e *Engine) realRefHasher(ref *parser.Ref) (hasher, error) {
 }
 
 func (e *Engine) evaluate() error {
+	collectedOutputs := map[string]bool{}
 	// First pass - expand variables and normalise path references.
 	for _, target := range e.targets {
 		logger := e.targetLogger(target)
@@ -375,12 +377,14 @@ func (e *Engine) evaluate() error {
 					return participle.Errorf(ref.Pos, "duplicate output %q at %s", subRef.Text, existing.pos)
 				}
 				e.outputs[key] = target
+				collectedOutputs[subRef.Text] = true
 			}
 		}
 		target.outputs.Refs = outputs
 		slices.SortFunc(target.outputs.Refs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
 
-		// Expand globs.
+		// Expand input globs.
+		collectedInputs := map[string]bool{}
 		var inputs []*parser.Ref
 		for _, ref := range target.inputs.Refs {
 			evaluated, err := e.evaluateString(ref.Pos, ref.Text, target, map[string]bool{})
@@ -392,7 +396,7 @@ func (e *Engine) evaluate() error {
 				return participle.Errorf(ref.Pos, "failed to parse input %q: %s", evaluated, err)
 			}
 			for _, innerRef := range innerRefs.Refs {
-				matches := e.globber.Filepath(innerRef.Text)
+				matches := e.globber.MatchFilesystem(innerRef.Text)
 				logger.Tracef("Glob %s -> %s", innerRef.Text, strings.Join(matches, " "))
 				if len(matches) == 0 {
 					matches = []string{innerRef.Text}
@@ -405,11 +409,21 @@ func (e *Engine) evaluate() error {
 							Text: match,
 						})
 					e.inputs[RefKey(match)] = target
+					collectedInputs[match] = true
 				}
 			}
 		}
 		slices.SortFunc(inputs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
 		target.inputs.Refs = inputs
+
+		target.vars["IN"] = &parser.Block{
+			Pos:  target.inputs.Pos,
+			Body: strings.Join(target.inputs.Strings(), " "),
+		}
+		target.vars["OUT"] = &parser.Block{
+			Pos:  target.outputs.Pos,
+			Body: strings.Join(target.outputs.Strings(), " "),
+		}
 	}
 
 	// Second pass - restore hashes from the DB.
@@ -558,6 +572,20 @@ func (e *Engine) hashFile(name string) (hasher, error) {
 	h := newHasher()
 	h.int(uint64(info.ModTime().UnixNano()))
 	return h, nil
+}
+
+func (e *Engine) Deps() map[string][]string {
+	deps := map[string][]string{}
+	for _, target := range e.targets {
+		for _, output := range target.outputs.Refs {
+			inputs := target.inputs.Strings()
+			if len(inputs) == 0 {
+				continue
+			}
+			deps[output.Text] = inputs
+		}
+	}
+	return deps
 }
 
 // Translate fragment position into Bitfile position.

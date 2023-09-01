@@ -19,8 +19,9 @@ var cli struct {
 	engine.LogConfig
 	File   *os.File           `short:"f" help:"Bitfile to load." required:"" default:"Bitfile"`
 	Chdir  kong.ChangeDirFlag `short:"C" help:"Change to directory before running." placeholder:"DIR"`
-	List   bool               `short:"l" help:"List available targets."`
-	Clean  bool               `short:"c" help:"Clean targets."`
+	Deps   bool               `short:"d" xor:"command" help:"Print dependencies."`
+	List   bool               `short:"l" xor:"command" help:"List available targets."`
+	Clean  bool               `short:"c" xor:"command" help:"Clean targets."`
 	DryRun bool               `short:"n" help:"Dry run."`
 	Target []string           `arg:"" optional:"" help:"Target to run."`
 }
@@ -43,6 +44,12 @@ func main() {
 	case cli.Clean:
 		err = eng.Clean(cli.DryRun)
 		reportError(logger, err)
+
+	case cli.Deps:
+		deps := eng.Deps()
+		for in, deps := range deps {
+			fmt.Printf("%s: %s\n", in, strings.Join(deps, " "))
+		}
 
 	default:
 		err = eng.Build(cli.Target)
