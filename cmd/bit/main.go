@@ -23,7 +23,6 @@ var cli struct {
 	Dot    bool               `xor:"command" help:"Print dependency graph as a .dot file."`
 	List   bool               `short:"l" xor:"command" help:"List available targets."`
 	Clean  bool               `short:"c" xor:"command" help:"Clean targets."`
-	DryRun bool               `short:"n" help:"Dry run."`
 	Target []string           `arg:"" optional:"" help:"Target to run."`
 }
 
@@ -43,7 +42,7 @@ func main() {
 		}
 
 	case cli.Clean:
-		err = eng.Clean(cli.DryRun)
+		err = eng.Clean()
 		reportError(logger, err)
 
 	case cli.Deps:

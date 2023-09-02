@@ -9,11 +9,13 @@ import (
 )
 
 var parserOptions = []participle.Option{}
+
 var parser = participle.MustBuild[Bitfile](
 	participle.Lexer(lex),
 	participle.Elide("Comment", "WS"),
-	participle.UseLookahead(3),
-	participle.Union[Entry](&Template{}, &VirtualTarget{}, &Assignment{}, &Target{}),
+	participle.Map(cleanComment, "Comment"),
+	participle.UseLookahead(1),
+	participle.Union[Entry](&Template{}, &VirtualTarget{}, &ImplicitTarget{}, &Assignment{}, &Target{}),
 	participle.Union[Directive](&Inherit{}, &Assignment{}, &Command{}),
 )
 
@@ -47,13 +49,14 @@ func ParseRefList(text string) (*RefList, error) {
 	return refListParser.ParseString("", strings.ReplaceAll(text, "\n", " "))
 }
 
+//go:generate stringer -type=Override -linecomment
 type Override int
 
 const (
-	OverrideReplace Override = iota
-	OverridePrepend
-	OverrideAppend
-	OverrideDelete
+	OverrideReplace Override = iota // replace
+	OverridePrepend                 // prepend
+	OverrideAppend                  // append
+	OverrideDelete                  // delete
 )
 
 var _ participle.Parseable = (*Override)(nil)
@@ -92,7 +95,7 @@ func (o *Override) Parse(lex *lexer.PeekingLexer) error {
 type Bitfile struct {
 	Pos lexer.Position
 
-	Entries []Entry `NL* (@@ NL*)* EOF`
+	Entries []Entry `(@@ NL*)* EOF`
 }
 
 func (b *Bitfile) Position() lexer.Position { return b.Pos }
@@ -107,6 +110,8 @@ type Entry interface {
 
 type Assignment struct {
 	Pos lexer.Position
+
+	Docs []string `@Comment*`
 
 	Name     string   `@Ident`
 	Override Override `@@?`
@@ -143,13 +148,28 @@ type VirtualTarget struct {
 func (t *VirtualTarget) Position() lexer.Position { return t.Pos }
 func (*VirtualTarget) entry()                     {}
 
+type ImplicitTarget struct {
+	Pos lexer.Position
+
+	Docs []string `@Comment*`
+
+	Replace *RefList `"implicit" @@`
+	Pattern *RefList `":" @@`
+
+	Directives []Directive `Indent NL* (@@ NL*)* Dedent`
+}
+
+func (i *ImplicitTarget) Position() lexer.Position { return i.Pos }
+func (i *ImplicitTarget) children() []Node         { return nil }
+func (i *ImplicitTarget) entry()                   {}
+
 type Template struct {
 	Pos lexer.Position
 
 	Docs []string `@Comment*`
 
 	Name       string       `"template" @Ident`
-	Parameters []*Parameter `"(" @@ ("," @@)* ")"`
+	Parameters []*Parameter `"(" (@@ ("," @@)*)? ")"`
 	Outputs    *RefList     `@@* ":"`
 	Inputs     *RefList     `@@* NL*`
 	Directives []Directive  `Indent NL* (@@ NL*)* Dedent`
@@ -233,6 +253,8 @@ type RefList struct {
 }
 
 func (r *RefList) Position() lexer.Position { return r.Pos }
+
+// Strings returns all the refs in the list as strings.
 func (r *RefList) Strings() []string {
 	if r == nil {
 		return nil
@@ -250,7 +272,7 @@ type Ref struct {
 
 	// This is a bit hairy because we need to explicitly match WS
 	// to "un"-elide it, but we don't want to capture it.
-	Text string `WS? ((?!WS) @(Var | Cmd | Ident | Number | "/" | "." | "*" | "[" | "]" | "{" | "}" | "!" | ","))+ | @(String | StringLiteral | MultilineString)`
+	Text string `WS? ((?!WS) @(Var | Cmd | Ident | Number | "/" | "." | "*" | "@" | "[" | "]" | "{" | "}" | "!" | ","))+ | @(String | StringLiteral | MultilineString)`
 }
 
 func (r *Ref) Position() lexer.Position { return r.Pos }

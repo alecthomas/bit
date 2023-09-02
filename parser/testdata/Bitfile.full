@@ -9,9 +9,13 @@ virtual k8s-ftl-controller: k8s-postgres
   < k8s-apply(manifest="ftl-controller.yml", resource="deployment/ftl-controller")
   dir: ./ftl-controller
 
-# Build FTL binary
-virtual release: %{dest}/ftl %{dest}/ftl-controller %{dest}/ftl-runner docker-ftl-runner docker-ftl-controller
+# Build all release artefacts
+virtual release: %{dest}/ftl %{dest}/ftl-* docker-ftl-*
   inputs: none
+
+implicit %{dest}/@: cmd/@/*.go
+  inputs: cmd/@/*.go
+  build: go build -o %{dest}/@ cmd/@
 
 '%{dest}/ftl':
   < go-cmd(pkg="./cmd/ftl")

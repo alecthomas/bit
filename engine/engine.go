@@ -15,7 +15,7 @@ import (
 	"github.com/alecthomas/participle/v2/lexer"
 	"github.com/kballard/go-shellquote"
 
-	"github.com/alecthomas/bit/engine/glob"
+	"github.com/alecthomas/bit/engine/internal"
 	"github.com/alecthomas/bit/parser"
 )
 
@@ -29,8 +29,9 @@ type Target struct {
 	hashPos   lexer.Position
 	vars      Vars
 	buildFunc func(logger *Logger, target *Target) error
+	cleanFunc func(logger *Logger, target *Target) error
 	// Hash function for virtual targets.
-	hashFunc func() (hasher, error)
+	hashFunc *internal.MemoisedFunction[hasher]
 	// Hash stored in the DB.
 	storedHash hasher
 	// Hash computed from the filesystem.
@@ -42,7 +43,7 @@ type RefKey string
 
 type Engine struct {
 	cwd     string
-	globber *glob.Globber
+	globber *internal.Globber
 	log     *Logger
 	vars    Vars
 	db      *HashDB
@@ -85,7 +86,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			},
 		},
 	}
-	engine.globber, err = glob.NewGlobber(cwd, engine.Outputs)
+	engine.globber, err = internal.NewGlobber(cwd, engine.Outputs)
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +98,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 				pos:       entry.Pos,
 				inputs:    entry.Inputs,
 				outputs:   entry.Outputs,
+				cleanFunc: engine.defaultCleanFunc,
 				buildFunc: engine.defaultBuildFunc,
 			}
 			if entry.Inputs == nil {
@@ -105,9 +107,13 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			if entry.Outputs == nil {
 				target.outputs = &parser.RefList{Pos: entry.Pos}
 			}
+			logger := engine.targetLogger(target)
 			for _, directive := range entry.Directives {
 				switch directive := directive.(type) {
 				case *parser.Command:
+					if directive.Override != parser.OverrideDelete && directive.Value == nil {
+						return nil, participle.Errorf(directive.Pos, "command is missing body")
+					}
 					switch directive.Command {
 					case "build":
 						target.build = directive
@@ -123,12 +129,53 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 							target.outputs.Refs = append(target.outputs.Refs, refs.Refs...)
 						}
 
+					case "hash":
+						cmd, err := engine.evaluateString(directive.Value.Pos, directive.Value.Body, target, map[string]bool{})
+						if err != nil {
+							return nil, participle.Errorf(directive.Value.Pos, "hash command is invalid")
+						}
+						target.hashPos = directive.Value.Pos
+						target.hashFunc = internal.Memoise(func() (hasher, error) {
+							logger.Debugf("$ %s (hashing function)", cmd)
+							cmd := exec.Command("sh", "-c", cmd)
+							output, err := cmd.CombinedOutput()
+							if err != nil {
+								return 0, participle.Errorf(directive.Value.Pos, "failed to run hash command: %s", err)
+							}
+							hfh := newHasher()
+							hfh.bytes(output)
+							return hfh, nil
+						})
+
+					case "clean":
+						switch directive.Override {
+						case parser.OverrideDelete:
+							target.cleanFunc = func(logger *Logger, target *Target) error { return nil }
+
+						case parser.OverrideReplace:
+							target.cleanFunc = func(logger *Logger, target *Target) error {
+								return logger.Exec(directive.Value.Body)
+							}
+
+						case parser.OverrideAppend:
+							cleanFunc := target.cleanFunc
+							target.cleanFunc = func(logger *Logger, target *Target) error {
+								if err := cleanFunc(logger, target); err != nil {
+									return err
+								}
+								return logger.Exec(directive.Value.Body)
+							}
+
+						default:
+							return nil, participle.Errorf(directive.Pos, "clean does not support the %s override", directive.Override)
+						}
+
 					default:
-						panic(fmt.Sprintf("unsupported command %q", directive.Command))
+						return nil, participle.Errorf(directive.Pos, "unsupported command %q", directive.Command)
 					}
 
 				default:
-					panic(fmt.Sprintf("unsupported directive %T", directive))
+					return nil, participle.Errorf(directive.Position(), "unsupported directive %T", directive)
 				}
 			}
 			if target.build == nil {
@@ -145,7 +192,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 		// case *parser.VirtualTarget:
 		// case *parser.Template:
 		default:
-			panic(fmt.Sprintf("unsupported entry type %T", entry))
+			return nil, participle.Errorf(entry.Position(), "unsupported entry type %T", entry)
 		}
 	}
 
@@ -155,25 +202,15 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 	return engine, nil
 }
 
-func (e *Engine) Clean(dryRun bool) error {
-	seen := map[string]bool{}
+func (e *Engine) Clean() error {
 	for _, target := range e.targets {
 		if target.synthetic {
 			continue
 		}
-		for _, output := range target.outputs.Strings() {
-			if seen[output] {
-				continue
-			}
-			seen[output] = true
-			e.log.Noticef("rm -rf %s", shellquote.Join(output))
-			if dryRun {
-				continue
-			}
-			err := os.RemoveAll(output)
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return participle.Wrapf(target.pos, err, "failed to remove %q", output)
-			}
+		logger := e.targetLogger(target)
+		err := target.cleanFunc(logger, target)
+		if err != nil {
+			return participle.Wrapf(target.build.Pos, err, "clean failed")
 		}
 	}
 	return nil
@@ -293,11 +330,11 @@ func (e *Engine) recursivelyComputeHash(target *Target, refHasher refHasher, see
 	}
 	for _, output := range target.outputs.Refs {
 		seen[output.Text] = output
-		subh, err := refHasher(output)
+		rh, err := refHasher(output)
 		if err != nil {
 			return 0, participle.Wrapf(output.Pos, err, "hash failed")
 		}
-		h.update(subh)
+		h.update(rh)
 	}
 	forEach(target, h)
 	return h, nil
@@ -543,7 +580,6 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 	// Synthetic target.
 	target = &Target{
 		synthetic: true,
-		pos:       lexer.Position{},
 		inputs:    &parser.RefList{},
 		outputs:   &parser.RefList{Refs: []*parser.Ref{{Text: name}}},
 		build: &parser.Command{
@@ -553,12 +589,34 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 			},
 		},
 		vars:      Vars{},
+		cleanFunc: e.defaultCleanFunc,
 		buildFunc: func(logger *Logger, target *Target) error { return nil },
-		hashFunc:  func() (hasher, error) { return e.hashFile(name) },
+		hashFunc:  internal.Memoise(func() (hasher, error) { return e.hashFile(name) }),
 	}
 	e.targets = append(e.targets, target)
 	e.outputs[RefKey(name)] = target
 	return target, nil
+}
+
+func (e *Engine) defaultCleanFunc(logger *Logger, target *Target) error {
+	seen := map[string]bool{}
+	var remove []string
+	for _, output := range target.outputs.Strings() {
+		if seen[output] {
+			continue
+		}
+		seen[output] = true
+		remove = append(remove, output)
+
+	}
+	logger.Noticef("$ rm -rf %s", shellquote.Join(remove...))
+	for _, output := range remove {
+		err := os.RemoveAll(output)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return participle.Wrapf(target.pos, err, "failed to remove %q", output)
+		}
+	}
+	return nil
 }
 
 func (e *Engine) hashFile(name string) (hasher, error) {

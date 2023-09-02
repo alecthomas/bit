@@ -179,6 +179,36 @@ func TestParser(t *testing.T) {
 				},
 			},
 		},
+		{name: "SmallBitfileWithDocs",
+			input: `
+				# This is a comment
+				# This is another comment
+				%{DEST}/bit:
+				  build: foo
+`,
+			expected: &Bitfile{
+				Entries: []Entry{
+					&Target{
+						Docs: []string{"This is a comment", "This is another comment"},
+						Outputs: &RefList{
+							Refs: []*Ref{
+								{
+									Text: "%{DEST}/bit",
+								},
+							},
+						},
+						Directives: []Directive{
+							&Command{
+								Command: "build",
+								Value: &Block{
+									Body: "foo",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -191,7 +221,7 @@ func TestParser(t *testing.T) {
 			bitfile, err := parser.ParseString("", input, options...)
 			assert.NoError(t, err, "%s\n%s", repr.String(tokens, repr.Indent("  ")), repr.String(bitfile, repr.Indent("  ")))
 			normaliseAllNodes(bitfile)
-			assert.Equal(t, test.expected, bitfile)
+			assert.Equal(t, test.expected, bitfile, repr.String(tokens, repr.Indent("  ")))
 		})
 	}
 }

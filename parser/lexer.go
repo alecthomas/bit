@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"strings"
+
 	"github.com/alecthomas/participle/v2/lexer"
 
 	"github.com/alecthomas/bit/parser/lexer/continuation"
@@ -11,7 +13,7 @@ var baseLexer = lexer.MustStateful(lexer.Rules{
 	"Root": {
 		{"Continuation", `[ \t]*\\\n[ \t]*`, nil},
 		{"NL", `[\n][ \t]*`, nil},
-		{"Comment", "#[^\n]*", nil},
+		{"Comment", "#[^\n]*\n?", nil},
 		{"String", `"(\\.|[^"])*"`, nil}, // This will need to be a LOT smarter do deal with Bash strings.
 		{"StringLiteral", `'[^']*'`, nil},
 		{"MultilineString", `'''`, lexer.Push("MultilineString")},
@@ -28,6 +30,11 @@ var baseLexer = lexer.MustStateful(lexer.Rules{
 	},
 })
 var lex = continuation.New(indenter.New(baseLexer))
+
+func cleanComment(token lexer.Token) (lexer.Token, error) {
+	token.Value = strings.TrimSpace(strings.TrimPrefix(token.Value, "#"))
+	return token, nil
+}
 
 func unquoteMultilineString(t lexer.Token) (lexer.Token, error) { //nolint:unparam
 	t.Value = t.Value[3 : len(t.Value)-3]

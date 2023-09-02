@@ -1,4 +1,4 @@
-package glob
+package internal
 
 import (
 	"io/fs"

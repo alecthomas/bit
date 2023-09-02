@@ -39,7 +39,7 @@ What's implemented so far:
   - [x] [Inputs](#inputs-directive-optional)
   - [x] [Outputs](#outputs-directive-optional)
   - [ ] [Hash](#hash-directive-optional)
-  - [ ] [Clean](#clean-directive-optional)
+  - [x] [Clean](#clean-directive-optional)
 
 ## Motivation
 
@@ -120,13 +120,13 @@ They take the form:
 implicit <replace>: <pattern>
 ```
 
-Where any text matching `*` is extracted from `<pattern>` and interpolated 
+Where any text matching `@` is extracted from `<pattern>` and interpolated 
 into `<replace>`.
 
 eg.
 
 ```
-implicit *.o: *.c
+implicit @.o: @.c
   inputs: %(cc -MM %{IN} | cut -d: -f2-)%
   build: cc -c %{IN} -o %{OUT}
 ```
