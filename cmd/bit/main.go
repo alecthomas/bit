@@ -42,7 +42,7 @@ func main() {
 		}
 
 	case cli.Clean:
-		err = eng.Clean()
+		err = eng.Clean(cli.Target)
 		reportError(logger, err)
 
 	case cli.Deps:

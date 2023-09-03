@@ -36,6 +36,7 @@ type Target struct {
 	storedHash hasher
 	// Hash computed from the filesystem.
 	realHash  hasher
+	chdir     string
 	synthetic bool
 }
 
@@ -90,6 +91,17 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if err := engine.analyse(bitfile); err != nil {
+		return nil, err
+	}
+	if err := engine.evaluate(); err != nil {
+		return nil, err
+	}
+	return engine, nil
+}
+
+func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 	for _, entry := range bitfile.Entries {
 		switch entry := entry.(type) {
 		case *parser.Target:
@@ -98,8 +110,9 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 				pos:       entry.Pos,
 				inputs:    entry.Inputs,
 				outputs:   entry.Outputs,
-				cleanFunc: engine.defaultCleanFunc,
-				buildFunc: engine.defaultBuildFunc,
+				cleanFunc: e.defaultCleanFunc,
+				buildFunc: e.defaultBuildFunc,
+				chdir:     ".",
 			}
 			if entry.Inputs == nil {
 				target.inputs = &parser.RefList{Pos: entry.Pos}
@@ -107,15 +120,15 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			if entry.Outputs == nil {
 				target.outputs = &parser.RefList{Pos: entry.Pos}
 			}
-			logger := engine.targetLogger(target) //nolint:govet
+			logger := e.targetLogger(target)
 			for _, directive := range entry.Directives {
 				switch directive := directive.(type) {
 				case *parser.Command:
 					if directive.Override == parser.OverrideDelete && directive.Value != nil {
-						return nil, participle.Errorf(directive.Pos, "delete override cannot have a command body")
+						return participle.Errorf(directive.Pos, "delete override cannot have a command body")
 					}
 					if directive.Override != parser.OverrideDelete && directive.Value == nil {
-						return nil, participle.Errorf(directive.Pos, "command is missing command body")
+						return participle.Errorf(directive.Pos, "command is missing command body")
 					}
 					switch directive.Command {
 					case "build":
@@ -124,7 +137,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 					case "inputs", "outputs":
 						refs, err := parser.ParseRefList(directive.Value.Body)
 						if err != nil {
-							return nil, participle.Errorf(directive.Value.Pos, "failed to parse %s: %s", directive.Command, err)
+							return participle.Errorf(directive.Value.Pos, "failed to parse %s: %s", directive.Command, err)
 						}
 						if directive.Command == "inputs" {
 							target.inputs.Refs = append(target.inputs.Refs, refs.Refs...)
@@ -133,9 +146,9 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 						}
 
 					case "hash":
-						cmd, err := engine.evaluateString(directive.Value.Pos, directive.Value.Body, target, map[string]bool{})
+						cmd, err := e.evaluateString(directive.Value.Pos, directive.Value.Body, target, map[string]bool{})
 						if err != nil {
-							return nil, participle.Errorf(directive.Value.Pos, "hash command is invalid")
+							return participle.Errorf(directive.Value.Pos, "hash command is invalid")
 						}
 						target.hashPos = directive.Value.Pos
 						target.hashFunc = internal.Memoise(func() (hasher, error) {
@@ -151,46 +164,49 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 						})
 
 					case "clean":
-						if err := engine.setTargetCleanFunc(target, directive); err != nil {
-							return nil, err
+						if err := e.setTargetCleanFunc(target, directive); err != nil {
+							return err
 						}
 
 					default:
-						return nil, participle.Errorf(directive.Pos, "unsupported command %q", directive.Command)
+						return participle.Errorf(directive.Pos, "unsupported command %q", directive.Command)
 					}
 
+				case *parser.Chdir:
+					dir, err := e.evaluateString(directive.Dir.Pos, directive.Dir.Text, target, map[string]bool{})
+					if err != nil {
+						return participle.Errorf(directive.Dir.Pos, "failed to evaluate chdir %q: %s", directive.Dir.Text, err)
+					}
+					target.chdir = dir
+
 				default:
-					return nil, participle.Errorf(directive.Position(), "unsupported directive %T", directive)
+					return participle.Errorf(directive.Position(), "unsupported directive %T", directive)
 				}
 			}
 			if target.build == nil {
-				return nil, participle.Errorf(entry.Pos, "target has no build command")
+				return participle.Errorf(entry.Pos, "target has no build command")
 			}
 			if target.outputs == nil {
-				return nil, participle.Errorf(entry.Pos, "target has no outputs")
+				return participle.Errorf(entry.Pos, "target has no outputs")
 			}
-			engine.targets = append(engine.targets, target)
+			e.targets = append(e.targets, target)
 
 		case *parser.Assignment:
 			if entry.Export {
-				if err := engine.exportVariable(logger, entry); err != nil {
-					return nil, err
+				if err := e.exportVariable(e.log, entry); err != nil {
+					return err
 				}
 			} else {
-				engine.setVariable(logger, entry)
+				e.setVariable(e.log, entry)
 			}
 
 		// case *parser.VirtualTarget:
 		// case *parser.Template:
 		default:
-			return nil, participle.Errorf(entry.Position(), "unsupported entry type %T", entry)
+			return participle.Errorf(entry.Position(), "unsupported entry type %T", entry)
 		}
 	}
-
-	if err := engine.evaluate(); err != nil {
-		return nil, err
-	}
-	return engine, nil
+	return nil
 }
 
 func (e *Engine) setVariable(logger *Logger, entry *parser.Assignment) {
@@ -260,7 +276,7 @@ func (e *Engine) setTargetCleanFunc(target *Target, directive *parser.Command) e
 
 	case parser.OverrideReplace:
 		target.cleanFunc = func(logger *Logger, target *Target) error {
-			return logger.Exec(directive.Value.Body)
+			return logger.Exec(target.chdir, directive.Value.Body)
 		}
 
 	case parser.OverrideAppend:
@@ -269,13 +285,13 @@ func (e *Engine) setTargetCleanFunc(target *Target, directive *parser.Command) e
 			if err := cleanFunc(logger, target); err != nil {
 				return err
 			}
-			return logger.Exec(directive.Value.Body)
+			return logger.Exec(target.chdir, directive.Value.Body)
 		}
 
 	case parser.OverridePrepend:
 		cleanFunc := target.cleanFunc
 		target.cleanFunc = func(logger *Logger, target *Target) error {
-			if err := logger.Exec(directive.Value.Body); err != nil {
+			if err := logger.Exec(target.chdir, directive.Value.Body); err != nil {
 				return err
 			}
 			return cleanFunc(logger, target)
@@ -287,10 +303,23 @@ func (e *Engine) setTargetCleanFunc(target *Target, directive *parser.Command) e
 	return nil
 }
 
-func (e *Engine) Clean() error {
+func (e *Engine) Clean(outputs []string) error {
+	outputsSet := map[string]bool{}
+	for _, output := range outputs {
+		outputsSet[output] = true
+	}
+nextTarget:
 	for _, target := range e.targets {
 		if target.synthetic {
 			continue
+		}
+		if len(outputsSet) > 0 {
+			for _, output := range target.outputs.Refs {
+				if !outputsSet[output.Text] {
+					continue nextTarget
+				}
+				break
+			}
 		}
 		logger := e.targetLogger(target)
 		err := target.cleanFunc(logger, target)
@@ -388,7 +417,7 @@ func (e *Engine) defaultBuildFunc(log *Logger, target *Target) error {
 	if err != nil {
 		return participle.Wrapf(block.Pos, err, "invalid command %q", command)
 	}
-	err = log.Exec(command)
+	err = log.Exec(target.chdir, command)
 	if err != nil {
 		return participle.Wrapf(block.Pos, err, "failed to run command %q", command)
 	}
@@ -677,6 +706,7 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 		cleanFunc: e.defaultCleanFunc,
 		buildFunc: func(logger *Logger, target *Target) error { return nil },
 		hashFunc:  internal.Memoise(func() (hasher, error) { return e.hashFile(name) }),
+		chdir:     ".",
 	}
 	e.targets = append(e.targets, target)
 	e.outputs[RefKey(name)] = target

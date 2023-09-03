@@ -29,7 +29,7 @@ What's implemented so far:
 - [x] Output verification
 - [x] [Dependencies](#dependencies)
 - [x] Hashing
-- [x] Concrete [targets](#targets)
+- [x] [Concrete targets](#targets)
 - [ ] [Implicit targets](#implicit-targets)
 - [ ] [Virtual targets](#virtual-targets)
 - [ ] [Templates](#templates)
@@ -69,7 +69,7 @@ expansion. Bit will report an error for globs in outputs.
 Variables are in the form:
 
 ```
-var = value
+[export] var = value
 ```
 
 Or:
@@ -80,8 +80,14 @@ var =
   value
 ```
 
-Variables can be prefixed with `export` to make them available 
-to child processes as environment variables.
+If a variable is prefixed with `export` it will be made available to child
+processes as environment variables.
+
+eg.
+
+```
+export GRADLE_OPTS = -Dorg.gradle.console=plain
+```
 
 They can be set on the command line, at the top level of a `Bitfile`,
 or in a target. Variables are interpolated with the syntax `%{var}`. Interpolation 
@@ -103,6 +109,7 @@ Targets are in the form:
 output1 output2 ...: input1 input2 ...
   < other-target                            # Inherit from a target
   < template(arg1=value, arg2=value, ...)   # Inherit from a template
+  cd dir                                    # Change directory
   var = value                               # Set variable
   -var                                      # Delete variable
   var += value                              # Append to variable
@@ -113,11 +120,24 @@ output1 output2 ...: input1 input2 ...
   ^directive: parameters                    # Prepend to inherited directive
 ```
 
+eg.
+
+
+```
+kotlin-runtime/ftl-runtime/build/libs/ftl-runtime.jar: \
+      kotlin-runtime/ftl-runtime/**/*.{kt,kts} \
+      kotlin-runtime/gradle/libs.versions.toml \
+      **/*.proto **/buf.* \
+      protos/xyz/block/ftl/v1/schema/schema.proto
+  build: cd kotlin-runtime/ftl-runtime && gradle jar
+  +clean: cd kotlin-runtime/ftl-runtime && gradle clean
+```
+
 
 ### Implicit targets
 
-Implicit targets are patterns that result in concrete targets for any matching files.
-They take the form:
+Implicit targets are patterns that result in concrete targets for any matching
+files. They take the form:
 
 ```
 implicit <replace>: <pattern>
@@ -292,6 +312,13 @@ directive:
 ```
 
 Available directives are:
+#### `cd` directive (optional)
+
+The `cd` directive changes the working directory for the target.
+
+```
+cd directory
+```
 
 #### `hash` directive (optional)
 

@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
+	"github.com/kballard/go-shellquote"
 	"github.com/mattn/go-isatty"
 )
 
@@ -145,7 +146,12 @@ func (l *Logger) Errorf(format string, args ...interface{}) {
 }
 
 // Exec a command
-func (l *Logger) Exec(command string) error {
+func (l *Logger) Exec(dir, command string) error {
+	if dir == "" || dir == "." {
+		dir = "."
+	} else {
+		l.Noticef("$ cd %s", shellquote.Join(dir))
+	}
 	lines := strings.Split(command, "\n")
 	for i, line := range lines {
 		if i == 0 {
@@ -162,6 +168,7 @@ func (l *Logger) Exec(command string) error {
 	defer p.Close()
 	w := l.WriterAt(LogLevelInfo)
 	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd.Dir = dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid:  true,
 		Setctty: true,

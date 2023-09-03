@@ -16,7 +16,7 @@ var parser = participle.MustBuild[Bitfile](
 	participle.Map(cleanComment, "Comment"),
 	participle.UseLookahead(1),
 	participle.Union[Entry](&Template{}, &VirtualTarget{}, &ImplicitTarget{}, &Assignment{}, &Target{}),
-	participle.Union[Directive](&Inherit{}, &Assignment{}, &Command{}),
+	participle.Union[Directive](&Inherit{}, &Chdir{}, &Assignment{}, &Command{}),
 )
 
 var refListParser = participle.MustBuild[RefList](
@@ -107,6 +107,17 @@ type Entry interface {
 	Node
 	entry()
 }
+
+type Chdir struct {
+	Pos lexer.Position
+
+	Docs []string `@Comment*`
+
+	Dir *Ref `"cd" @@`
+}
+
+func (c *Chdir) Position() lexer.Position { return c.Pos }
+func (c *Chdir) directive()               {}
 
 type Assignment struct {
 	Pos lexer.Position
