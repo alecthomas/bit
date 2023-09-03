@@ -30,7 +30,7 @@ What's implemented so far:
 - [x] [Dependencies](#dependencies)
 - [x] Hashing
 - [x] [Concrete targets](#targets)
-- [ ] [Implicit targets](#implicit-targets)
+- [x] [Implicit targets](#implicit-targets)
 - [ ] [Virtual targets](#virtual-targets)
 - [ ] [Templates](#templates)
 - [ ] [Inheritance](#inheritance)
@@ -149,9 +149,14 @@ into `<replace>`.
 eg.
 
 ```
+# Build all C files
 implicit @.o: @.c
   inputs: %(cc -MM %{IN} | cut -d: -f2-)%
   build: cc -c %{IN} -o %{OUT}
+  
+# Build all Go binaries in cmd/
+implicit build/@: cmd/@ **/*.go
+  build: go build -o %{OUT} -tags release ./cmd/%{PATTERN}
 ```
 
 Given the file `input.c`, the previous `implicit` will result in the

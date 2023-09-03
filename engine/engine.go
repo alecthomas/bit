@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"github.com/alecthomas/participle/v2"
 	"github.com/alecthomas/participle/v2/lexer"
 	"github.com/kballard/go-shellquote"
+	deepcopy "golang.design/x/reflect"
 
 	"github.com/alecthomas/bit/engine/internal"
 	"github.com/alecthomas/bit/parser"
@@ -92,6 +95,12 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 		return nil, err
 	}
 
+	if err := engine.evaluateGlobalVariables(bitfile); err != nil {
+		return nil, err
+	}
+	if err := engine.expandImplicits(bitfile); err != nil {
+		return nil, err
+	}
 	if err := engine.analyse(bitfile); err != nil {
 		return nil, err
 	}
@@ -179,6 +188,12 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 					}
 					target.chdir = dir
 
+				case *parser.Assignment:
+					if directive.Export {
+						return participle.Errorf(directive.Pos, "exported variables are not supported on targets yet")
+					}
+					target.vars[directive.Name] = directive.Value
+
 				default:
 					return participle.Errorf(directive.Position(), "unsupported directive %T", directive)
 				}
@@ -192,13 +207,7 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 			e.targets = append(e.targets, target)
 
 		case *parser.Assignment:
-			if entry.Export {
-				if err := e.exportVariable(e.log, entry); err != nil {
-					return err
-				}
-			} else {
-				e.setVariable(e.log, entry)
-			}
+			// Done in an earlier phase
 
 		// case *parser.VirtualTarget:
 		// case *parser.Template:
@@ -435,7 +444,7 @@ func (e *Engine) recursivelyComputeHash(target *Target, refHasher outputRefHashe
 		// }
 		inputTarget, err := e.getTarget(input.Text)
 		if err != nil {
-			return 0, err
+			return 0, participle.Wrapf(input.Pos, err, "couldn't find matching input")
 		}
 		subh, err := e.recursivelyComputeHash(inputTarget, refHasher, seen, forEach)
 		if err != nil {
@@ -617,6 +626,7 @@ func (e *Engine) targetLogger(target *Target) *Logger {
 	return e.log.Scope(strings.Join(target.outputs.Strings(), ":"))
 }
 
+// Evaluate variables and commands in a string.
 func (e *Engine) evaluateString(pos lexer.Position, v string, target *Target, seen map[string]bool) (string, error) {
 	text, err := parser.ParseTextString(v)
 	if err != nil {
@@ -670,19 +680,26 @@ func (e *Engine) capture(log *Logger, command string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// Evaluat a variable. "target" may be nil.
 func (e *Engine) evaluateVar(v *parser.VarFragment, target *Target, seen map[string]bool) (string, error) {
 	name := v.Var
 	if seen[name] {
 		return "", fmt.Errorf("circular variable reference %q", name)
 	}
+	seen[name] = true
+	defer delete(seen, name)
+
 	var block *parser.Block
 	var ok bool
-	if block, ok = target.vars[name]; !ok {
+	if target != nil {
+		block, ok = target.vars[name]
+	}
+	if !ok {
 		if block, ok = e.vars[name]; !ok {
+			debug.PrintStack()
 			return "", fmt.Errorf("unknown variable %q", name)
 		}
 	}
-	seen[name] = true
 	return e.evaluateString(block.Pos, block.Body, target, seen)
 }
 
@@ -757,6 +774,95 @@ func (e *Engine) Deps() map[string][]string {
 		}
 	}
 	return deps
+}
+
+func (e *Engine) expandImplicits(bitfile *parser.Bitfile) error {
+	outEntries := make([]parser.Entry, 0, len(bitfile.Entries))
+	for _, entry := range bitfile.Entries {
+		implicit, ok := entry.(*parser.ImplicitTarget)
+		if !ok {
+			outEntries = append(outEntries, entry)
+			continue
+		}
+		patternIndex := -1
+		for i, ref := range implicit.Pattern.Refs {
+			evaluated, err := e.evaluateString(ref.Pos, ref.Text, nil, map[string]bool{})
+			if err != nil {
+				return err
+			}
+			if strings.Contains(evaluated, "@") {
+				if patternIndex != -1 {
+					return participle.Errorf(implicit.Pattern.Pos, "pattern must contain exactly one @")
+				}
+				patternIndex = i
+			}
+		}
+		if patternIndex == -1 {
+			return participle.Errorf(implicit.Pattern.Pos, "pattern must contain exactly one @")
+		}
+
+		pattern := implicit.Pattern.Refs[patternIndex].Text
+		pattern = regexp.QuoteMeta(pattern)
+		pattern = strings.ReplaceAll(pattern, "@", "([^/]+)")
+
+		// Based on https://www.gnu.org/software/make/manual/make.html#Implicit-Rule-Search
+		// This simplistic implementation seems to work, but might need to be extended at some point.
+		var re *regexp.Regexp
+		if strings.Contains(pattern, "/") {
+			re = regexp.MustCompile("^" + pattern + "$")
+		} else {
+			re = regexp.MustCompile("/" + pattern + "$")
+		}
+
+		// Create a new target for each file that matches the pattern.
+		for _, file := range e.globber.Files() {
+			matches := re.FindStringSubmatch(file)
+			if matches == nil {
+				continue
+			}
+			target := &parser.Target{
+				Pos:        implicit.Pos,
+				Docs:       implicit.Docs,
+				Directives: deepcopy.DeepCopy(implicit.Directives),
+				Inputs:     deepcopy.DeepCopy(implicit.Pattern),
+				Outputs:    deepcopy.DeepCopy(implicit.Replace),
+			}
+			target.Directives = append(target.Directives, &parser.Assignment{
+				Pos:  implicit.Pos,
+				Name: "PATTERN",
+				Value: &parser.Block{
+					Pos:  implicit.Pattern.Pos,
+					Body: matches[1],
+				},
+			})
+			for _, input := range target.Inputs.Refs {
+				input.Text = strings.ReplaceAll(input.Text, "@", matches[1])
+			}
+			for _, output := range target.Outputs.Refs {
+				output.Text = strings.ReplaceAll(output.Text, "@", matches[1])
+			}
+			outEntries = append(outEntries, target)
+		}
+	}
+	bitfile.Entries = outEntries
+	return nil
+}
+
+func (e *Engine) evaluateGlobalVariables(bitfile *parser.Bitfile) error {
+	for _, entry := range bitfile.Entries {
+		entry, ok := entry.(*parser.Assignment)
+		if !ok {
+			continue
+		}
+		if entry.Export {
+			if err := e.exportVariable(e.log, entry); err != nil {
+				return err
+			}
+		} else {
+			e.setVariable(e.log, entry)
+		}
+	}
+	return nil
 }
 
 // Translate fragment position into Bitfile position.

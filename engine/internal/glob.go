@@ -13,7 +13,6 @@ import (
 type Globber struct {
 	dir        string
 	files      []string
-	cache      map[string][]string
 	extraFiles func() []string
 }
 
@@ -53,7 +52,6 @@ func NewGlobber(dir string, extraFiles func() []string) (*Globber, error) {
 	return &Globber{
 		dir:        dir,
 		files:      files,
-		cache:      map[string][]string{},
 		extraFiles: extraFiles,
 	}, nil
 }
@@ -62,34 +60,34 @@ func (g *Globber) IsGlob(glob string) bool {
 	return strings.ContainsAny(glob, "*?{}[]")
 }
 
+func (g *Globber) Files() []string {
+	extra := g.extraFiles()
+	out := make([]string, len(g.files), len(g.files)+len(extra))
+	copy(out, g.files)
+	seen := map[string]struct{}{}
+	for _, file := range g.files {
+		seen[file] = struct{}{}
+	}
+	for _, file := range extra {
+		if _, ok := seen[file]; ok {
+			continue
+		}
+		seen[file] = struct{}{}
+		out = append(out, file)
+	}
+	return out
+}
+
 // MatchFilesystem returns a list of files matching the given glob.
 func (g *Globber) MatchFilesystem(glob string) []string {
-	if cached, ok := g.cache[glob]; ok {
-		return cached
-	}
 	if !g.IsGlob(glob) {
 		return []string{glob}
 	}
-	seen := map[string]struct{}{}
 	var matches []string
-	for _, file := range g.files {
-		if _, ok := seen[file]; ok {
-			continue
-		}
-		seen[file] = struct{}{}
+	for _, file := range g.Files() {
 		if ok, err := doublestar.Match(glob, file); ok && err == nil {
 			matches = append(matches, file)
 		}
 	}
-	for _, file := range g.extraFiles() {
-		if _, ok := seen[file]; ok {
-			continue
-		}
-		seen[file] = struct{}{}
-		if ok, err := doublestar.Match(glob, file); ok && err == nil {
-			matches = append(matches, file)
-		}
-	}
-	g.cache[glob] = matches
 	return matches
 }
