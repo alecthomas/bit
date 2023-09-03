@@ -113,6 +113,7 @@ type Assignment struct {
 
 	Docs []string `@Comment*`
 
+	Export   bool     `@"export"?`
 	Name     string   `@Ident`
 	Override Override `@@?`
 	Value    *Block   `"=" @@`

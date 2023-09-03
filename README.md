@@ -80,6 +80,9 @@ var =
   value
 ```
 
+Variables can be prefixed with `export` to make them available 
+to child processes as environment variables.
+
 They can be set on the command line, at the top level of a `Bitfile`,
 or in a target. Variables are interpolated with the syntax `%{var}`. Interpolation 
 occurs after inheritance and before any other evaluation.
@@ -164,12 +167,12 @@ Dockerfile or any of the files in the current directory change:
 virtual docker-container: docker-image
   hash: docker inspect docker-container
   create: docker run --restart=always -d docker-image
-  delete: docker rm -f docker-container
+  clean: docker rm -f docker-container
   
 virtual docker-image: Dockerfile ./**
   hash: docker image inspect docker-image
   create: docker build -f Dockerfile -t docker-image .
-  delete: docker rmi docker-image
+  clean: docker rmi docker-image
 ```
 
 ### Templates
@@ -346,12 +349,10 @@ dest = ./build
 version = %(git describe --tags --always)
 
 virtual k8s-postgres:
-  < k8s-apply(manifest="db.yml", resource="pod/ftl-pg-cluster-1-0"):
-  dir: ./db
+  < k8s-apply(manifest="deployment/db.yml", resource="pod/ftl-pg-cluster-1-0"):
 
 virtual k8s-ftl-controller: k8s-postgres
-  < k8s-apply(manifest="ftl-controller.yml", resource="deployment/ftl-controller")
-  dir: ./ftl-controller
+  < k8s-apply(manifest="deployment/ftl-controller.yml", resource="deployment/ftl-controller")
 
 virtual release: %{dest}/ftl %{dest}/ftl-controller %{dest}/ftl-runner \
     docker-ftl-runner docker-ftl-controller
@@ -367,8 +368,10 @@ virtual release: %{dest}/ftl %{dest}/ftl-controller %{dest}/ftl-runner \
   +build: echo "Runner built"
 
 dist/*: src/** *.json *.ts *.js plop/**
-  dir: console/client
-  build: npm install && npm run build
+  build:
+    cd console/client
+    npm install
+    npm run build
 
 protos/**/*.go console/client/src/protos/**/*.ts
     backend/common/3rdparty/protos/**/*.go: protos/**.proto buf.work.yaml **/buf.yaml **/buf.gen.yaml
@@ -380,12 +383,12 @@ protos/**/*.go console/client/src/protos/**/*.ts
 
 db.go models.go queries.sql.go \
     %(shell grep -q copyfrom queries.sql && echo copyfrom.go):
-  dir: backend/controller/internal/sql
   inputs:
     sqlc.yaml
     schema/*.sql
     queries.sql
   build:
+    cd backend/controller/internal/sql
     sqlc generate -f ../../../../sqlc.yaml --experimental
     # sqlc 1.18.0 generates a file with a missing import
     gosimports -w querier.go
@@ -397,8 +400,8 @@ virtual docker-ftl-controller:
   < docker(dockerfile="Dockerfile.controller", tag="ghcr.io/tbd54566975/ftl-controller:latest")
 
 build/libs/ftl-runtime.jar: src/** build.gradle.kts gradle.properties settings.gradle.kts
-  dir: kotlin-runtime/ftl-runtime
-  build: gradle jar
+  build: cd kotlin-runtime/ftl-runtme && gradle jar
+  clean: cd kotlin-runtime/ftl-runtme && gradle clean
 
 template go-cmd(pkg):
   inputs: %(go list -f '{{ join .Deps "\n" }}' %{pkg} | grep github.com/TBD54566975/ftl | cut -d/ -f4-)
@@ -407,10 +410,10 @@ template go-cmd(pkg):
 template k8s-apply(manifest, resource): %{manifest}
   hash: kubectl get -o yaml %{resource}
   build: kubectl apply -f %{manifest}
-  delete: kubectl delete %{resource}
+  clean: kubectl delete %{resource}
 
 template docker(dockerfile, tag, context="."): %{dockerfile} %{context}
   hash: docker image inspect %{tag}
   build: docker build -f %{dockerfile} -t %{tag} %{context}
-  delete: docker rmi %{tag}
+  clean: docker rmi %{tag}
 ```

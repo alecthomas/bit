@@ -107,12 +107,15 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			if entry.Outputs == nil {
 				target.outputs = &parser.RefList{Pos: entry.Pos}
 			}
-			logger := engine.targetLogger(target)
+			logger := engine.targetLogger(target) //nolint:govet
 			for _, directive := range entry.Directives {
 				switch directive := directive.(type) {
 				case *parser.Command:
+					if directive.Override == parser.OverrideDelete && directive.Value != nil {
+						return nil, participle.Errorf(directive.Pos, "delete override cannot have a command body")
+					}
 					if directive.Override != parser.OverrideDelete && directive.Value == nil {
-						return nil, participle.Errorf(directive.Pos, "command is missing body")
+						return nil, participle.Errorf(directive.Pos, "command is missing command body")
 					}
 					switch directive.Command {
 					case "build":
@@ -148,26 +151,8 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 						})
 
 					case "clean":
-						switch directive.Override {
-						case parser.OverrideDelete:
-							target.cleanFunc = func(logger *Logger, target *Target) error { return nil }
-
-						case parser.OverrideReplace:
-							target.cleanFunc = func(logger *Logger, target *Target) error {
-								return logger.Exec(directive.Value.Body)
-							}
-
-						case parser.OverrideAppend:
-							cleanFunc := target.cleanFunc
-							target.cleanFunc = func(logger *Logger, target *Target) error {
-								if err := cleanFunc(logger, target); err != nil {
-									return err
-								}
-								return logger.Exec(directive.Value.Body)
-							}
-
-						default:
-							return nil, participle.Errorf(directive.Pos, "clean does not support the %s override", directive.Override)
+						if err := engine.setTargetCleanFunc(target, directive); err != nil {
+							return nil, err
 						}
 
 					default:
@@ -187,7 +172,13 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			engine.targets = append(engine.targets, target)
 
 		case *parser.Assignment:
-			engine.vars[entry.Name] = entry.Value
+			if entry.Export {
+				if err := engine.exportVariable(logger, entry); err != nil {
+					return nil, err
+				}
+			} else {
+				engine.setVariable(logger, entry)
+			}
 
 		// case *parser.VirtualTarget:
 		// case *parser.Template:
@@ -200,6 +191,100 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 		return nil, err
 	}
 	return engine, nil
+}
+
+func (e *Engine) setVariable(logger *Logger, entry *parser.Assignment) {
+	switch entry.Override {
+	case parser.OverrideDelete:
+		logger.Debugf("unset %s", entry.Name)
+		delete(e.vars, entry.Name)
+
+	case parser.OverrideReplace:
+		logger.Debugf("%s=%s", entry.Name, shellquote.Join(entry.Value.Body))
+		e.vars[entry.Name] = entry.Value
+
+	case parser.OverrideAppend:
+		logger.Debugf("%s=$%s%s", entry.Name, entry.Name, shellquote.Join(entry.Value.Body))
+		if _, ok := e.vars[entry.Name]; !ok {
+			e.vars[entry.Name] = entry.Value
+		} else {
+			e.vars[entry.Name].Body += entry.Value.Body
+		}
+
+	case parser.OverridePrepend:
+		logger.Debugf("%s=%s$%s", entry.Name, shellquote.Join(entry.Value.Body), entry.Name)
+		if _, ok := e.vars[entry.Name]; !ok {
+			e.vars[entry.Name] = entry.Value
+		} else {
+			e.vars[entry.Name].Body = entry.Value.Body + e.vars[entry.Name].Body
+		}
+	}
+}
+
+func (e *Engine) exportVariable(logger *Logger, entry *parser.Assignment) error {
+	switch entry.Override {
+	case parser.OverrideDelete:
+		logger.Debugf("unset %s", entry.Name, shellquote.Join(entry.Value.Body))
+		if err := os.Unsetenv(entry.Name); err != nil {
+			return participle.Wrapf(entry.Pos, err, "failed to unset environment variable %q", entry.Name)
+		}
+
+	case parser.OverrideReplace:
+		logger.Debugf("export %s=%s", entry.Name, shellquote.Join(entry.Value.Body))
+		if err := os.Setenv(entry.Name, entry.Value.Body); err != nil {
+			return participle.Wrapf(entry.Pos, err, "failed to set environment variable %q", entry.Name)
+		}
+
+	case parser.OverrideAppend:
+		logger.Debugf("export %s=$%s%s", entry.Name, entry.Name, shellquote.Join(entry.Value.Body))
+		value := os.Getenv(entry.Name) + entry.Value.Body
+		if err := os.Setenv(entry.Name, value); err != nil {
+			return participle.Wrapf(entry.Pos, err, "failed to set environment variable %q", entry.Name)
+		}
+
+	case parser.OverridePrepend:
+		logger.Debugf("export %s=%s$%s", entry.Name, shellquote.Join(entry.Value.Body), entry.Name)
+		value := entry.Value.Body + os.Getenv(entry.Name)
+		if err := os.Setenv(entry.Name, value); err != nil {
+			return participle.Wrapf(entry.Pos, err, "failed to set environment variable %q", entry.Name)
+		}
+
+	}
+	return nil
+}
+
+func (e *Engine) setTargetCleanFunc(target *Target, directive *parser.Command) error {
+	switch directive.Override {
+	case parser.OverrideDelete:
+		target.cleanFunc = func(logger *Logger, target *Target) error { return nil }
+
+	case parser.OverrideReplace:
+		target.cleanFunc = func(logger *Logger, target *Target) error {
+			return logger.Exec(directive.Value.Body)
+		}
+
+	case parser.OverrideAppend:
+		cleanFunc := target.cleanFunc
+		target.cleanFunc = func(logger *Logger, target *Target) error {
+			if err := cleanFunc(logger, target); err != nil {
+				return err
+			}
+			return logger.Exec(directive.Value.Body)
+		}
+
+	case parser.OverridePrepend:
+		cleanFunc := target.cleanFunc
+		target.cleanFunc = func(logger *Logger, target *Target) error {
+			if err := logger.Exec(directive.Value.Body); err != nil {
+				return err
+			}
+			return cleanFunc(logger, target)
+		}
+
+	default:
+		return participle.Errorf(directive.Pos, "clean does not support the %s override", directive.Override)
+	}
+	return nil
 }
 
 func (e *Engine) Clean() error {
