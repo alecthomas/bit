@@ -38,7 +38,7 @@ What's implemented so far:
   - [x] [Build](#create-directive-optional)
   - [x] [Inputs](#inputs-directive-optional)
   - [x] [Outputs](#outputs-directive-optional)
-  - [ ] [Hash](#hash-directive-optional)
+  - [x] [Hash](#hash-directive-optional)
   - [x] [Clean](#clean-directive-optional)
 
 ## Motivation

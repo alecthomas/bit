@@ -352,7 +352,7 @@ func (e *Engine) Close() error {
 	for _, target := range e.targets {
 		for _, output := range target.outputs.Refs {
 			e.db.Delete(output.Text)
-			h, err := e.realRefHasher(output)
+			h, err := e.realRefHasher(target, output)
 			if err != nil {
 				continue
 			}
@@ -424,9 +424,10 @@ func (e *Engine) defaultBuildFunc(log *Logger, target *Target) error {
 	return nil
 }
 
-type refHasher func(ref *parser.Ref) (hasher, error)
+// A function used to compute a hash of an output.
+type outputRefHasher func(target *Target, ref *parser.Ref) (hasher, error)
 
-func (e *Engine) recursivelyComputeHash(target *Target, refHasher refHasher, seen map[string]*parser.Ref, forEach func(*Target, hasher)) (hasher, error) {
+func (e *Engine) recursivelyComputeHash(target *Target, refHasher outputRefHasher, seen map[string]*parser.Ref, forEach func(*Target, hasher)) (hasher, error) {
 	h := newHasher()
 	for _, input := range target.inputs.Refs {
 		// if orig, ok := seen[input.Text]; ok {
@@ -444,7 +445,7 @@ func (e *Engine) recursivelyComputeHash(target *Target, refHasher refHasher, see
 	}
 	for _, output := range target.outputs.Refs {
 		seen[output.Text] = output
-		rh, err := refHasher(output)
+		rh, err := refHasher(target, output)
 		if err != nil {
 			return 0, participle.Wrapf(output.Pos, err, "hash failed")
 		}
@@ -455,7 +456,7 @@ func (e *Engine) recursivelyComputeHash(target *Target, refHasher refHasher, see
 }
 
 // Compute hash of target - inputs and outputs.
-func (e *Engine) computeHash(target *Target, refHasher refHasher) (hasher, error) {
+func (e *Engine) computeHash(target *Target, refHasher outputRefHasher) (hasher, error) {
 	h := newHasher()
 	for _, input := range target.inputs.Refs {
 		inputTarget, err := e.getTarget(input.Text)
@@ -465,7 +466,7 @@ func (e *Engine) computeHash(target *Target, refHasher refHasher) (hasher, error
 		h.int(uint64(inputTarget.storedHash))
 	}
 	for _, output := range target.outputs.Refs {
-		rh, err := refHasher(output)
+		rh, err := refHasher(target, output)
 		if err != nil {
 			return 0, participle.Wrapf(output.Pos, err, "hash failed")
 		}
@@ -474,7 +475,7 @@ func (e *Engine) computeHash(target *Target, refHasher refHasher) (hasher, error
 	return h, nil
 }
 
-func (e *Engine) dbRefHasher(ref *parser.Ref) (hasher, error) {
+func (e *Engine) dbRefHasher(target *Target, ref *parser.Ref) (hasher, error) { //nolint:revive
 	h, ok := e.db.Get(ref.Text)
 	if !ok {
 		return 0, nil
@@ -483,14 +484,25 @@ func (e *Engine) dbRefHasher(ref *parser.Ref) (hasher, error) {
 }
 
 // Hash real files.
-func (e *Engine) realRefHasher(ref *parser.Ref) (hasher, error) {
+func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (hasher, error) {
 	h := newHasher()
+	h.string(ref.Text)
+
+	// If we have a hash function, use that for every reference.
+	if target.hashFunc != nil {
+		hf, err := target.hashFunc.Get()
+		if err != nil {
+			return 0, participle.Errorf(target.hashPos, "failed to compute hash: %s", err)
+		}
+		h.update(hf)
+		return h, nil
+	}
+
 	info, err := os.Stat(ref.Text)
 	if err != nil {
 		return 0, err
 	}
 
-	h.string(ref.Text)
 	h.int(uint64(info.Mode()))
 	if !info.IsDir() {
 		h.int(uint64(info.Size()))
@@ -705,7 +717,6 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 		vars:      Vars{},
 		cleanFunc: e.defaultCleanFunc,
 		buildFunc: func(logger *Logger, target *Target) error { return nil },
-		hashFunc:  internal.Memoise(func() (hasher, error) { return e.hashFile(name) }),
 		chdir:     ".",
 	}
 	e.targets = append(e.targets, target)
@@ -732,19 +743,6 @@ func (e *Engine) defaultCleanFunc(logger *Logger, target *Target) error {
 		}
 	}
 	return nil
-}
-
-func (e *Engine) hashFile(name string) (hasher, error) {
-	name = e.normalisePath(name)
-	info, err := os.Stat(name)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, fmt.Errorf("no such file or target %q", name)
-	} else if err != nil {
-		return 0, err
-	}
-	h := newHasher()
-	h.int(uint64(info.ModTime().UnixNano()))
-	return h, nil
 }
 
 func (e *Engine) Deps() map[string][]string {

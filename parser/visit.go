@@ -85,7 +85,7 @@ func (r *RefList) children() []Node {
 
 func (c *Command) children() []Node { return []Node{c.Value} }
 
-func (c *Chdir) children() []Node { return nil }
+func (c *Chdir) children() []Node { return []Node{c.Dir} }
 
 func (a *Argument) children() []Node { return []Node{a.Value} }
 
