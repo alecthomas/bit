@@ -34,7 +34,7 @@ What's implemented so far:
 - [ ] [Virtual targets](#virtual-targets)
 - [ ] [Templates](#templates)
 - [ ] [Inheritance](#inheritance)
-- [ ] Directives
+- [x] Directives
   - [x] [Build](#create-directive-optional)
   - [x] [Inputs](#inputs-directive-optional)
   - [x] [Outputs](#outputs-directive-optional)
