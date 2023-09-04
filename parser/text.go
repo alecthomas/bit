@@ -7,7 +7,7 @@ import (
 
 var textLexer = lexer.MustSimple([]lexer.SimpleRule{
 	{"Cmd", `%\((.|\n)*?\)%`},
-	{"Var", `%{[a-zA-Z_][-a-zA-Z0-9_]*}`},
+	{"Var", `%{[a-zA-Z0-9_][-a-zA-Z0-9_]*}`},
 	{"WS", `[ \t\n\r]+`},
 	{"Other", `.`},
 })
@@ -16,7 +16,7 @@ var textParser = participle.MustBuild[Text](
 	participle.UseLookahead(3),
 	participle.Map(unwrapVar, "Var"),
 	participle.Map(unwrapCmd, "Cmd"),
-	participle.Union[Fragment](&TextFragment{}, &VarFragment{}, &CmdFragment{}),
+	participle.Union[Fragment](&VarFragment{}, &CmdFragment{}, &TextFragment{}),
 )
 
 func ParseTextString(input string) (*Text, error) {
@@ -27,7 +27,7 @@ func ParseTextString(input string) (*Text, error) {
 type Text struct {
 	Pos lexer.Position
 
-	Fragments []Fragment `@@+`
+	Fragments []Fragment `@@*`
 }
 
 // Fragment is a fragment of Text.

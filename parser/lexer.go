@@ -19,7 +19,7 @@ var baseLexer = lexer.MustStateful(lexer.Rules{
 		{"MultilineString", `'''`, lexer.Push("MultilineString")},
 		{"Ident", `[a-zA-Z_][-a-zA-Z0-9_]*`, nil},
 		{"Cmd", `%\((.|\n)*?\)%`, nil},
-		{"Var", `%{[a-zA-Z_][-a-zA-Z0-9_]*}`, nil},
+		{"Var", `%{[0-9a-zA-Z_][-a-zA-Z0-9_]*}`, nil},
 		{"Number", `[0-9]+`, nil},
 		{"WS", `[ \t]+`, nil},
 		{"Other", `.`, nil},

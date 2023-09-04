@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime/debug"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/alecthomas/participle/v2"
@@ -39,7 +39,7 @@ type Target struct {
 	storedHash hasher
 	// Hash computed from the filesystem.
 	realHash  hasher
-	chdir     string
+	chdir     *parser.Ref
 	synthetic bool
 }
 
@@ -84,10 +84,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 		inputs:  map[RefKey]*Target{},
 		outputs: map[RefKey]*Target{},
 		vars: map[string]*parser.Block{
-			"CWD": &parser.Block{
-				Pos:  bitfile.Pos,
-				Body: cwd,
-			},
+			"CWD": {Pos: bitfile.Pos, Body: cwd},
 		},
 	}
 	engine.globber, err = internal.NewGlobber(cwd, engine.Outputs)
@@ -95,7 +92,7 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 		return nil, err
 	}
 
-	if err := engine.evaluateGlobalVariables(bitfile); err != nil {
+	if err := engine.setGlobalVariables(bitfile); err != nil {
 		return nil, err
 	}
 	if err := engine.expandImplicits(bitfile); err != nil {
@@ -121,7 +118,7 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 				outputs:   entry.Outputs,
 				cleanFunc: e.defaultCleanFunc,
 				buildFunc: e.defaultBuildFunc,
-				chdir:     ".",
+				chdir:     &parser.Ref{Text: "."},
 			}
 			if entry.Inputs == nil {
 				target.inputs = &parser.RefList{Pos: entry.Pos}
@@ -155,14 +152,14 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 						}
 
 					case "hash":
-						cmd, err := e.evaluateString(directive.Value.Pos, directive.Value.Body, target, map[string]bool{})
-						if err != nil {
-							return participle.Errorf(directive.Value.Pos, "hash command is invalid")
-						}
 						target.hashPos = directive.Value.Pos
 						target.hashFunc = internal.Memoise(func() (hasher, error) {
-							logger.Debugf("$ %s (hashing function)", cmd)
-							cmd := exec.Command("sh", "-c", cmd)
+							command, err := e.evaluateString(directive.Value.Pos, directive.Value.Body, target, map[string]bool{})
+							if err != nil {
+								return 0, participle.Errorf(directive.Value.Pos, "hash command is invalid")
+							}
+							logger.Debugf("$ %s (hashing function)", command)
+							cmd := exec.Command("sh", "-c", command)
 							output, err := cmd.CombinedOutput()
 							if err != nil {
 								return 0, participle.Errorf(directive.Value.Pos, "failed to run hash command: %s", err)
@@ -182,11 +179,7 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 					}
 
 				case *parser.Chdir:
-					dir, err := e.evaluateString(directive.Dir.Pos, directive.Dir.Text, target, map[string]bool{})
-					if err != nil {
-						return participle.Errorf(directive.Dir.Pos, "failed to evaluate chdir %q: %s", directive.Dir.Text, err)
-					}
-					target.chdir = dir
+					target.chdir = directive.Dir
 
 				case *parser.Assignment:
 					if directive.Export {
@@ -219,6 +212,7 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 }
 
 func (e *Engine) setVariable(logger *Logger, entry *parser.Assignment) {
+	logger = logger.Scope(entry.Name)
 	switch entry.Override {
 	case parser.OverrideDelete:
 		logger.Debugf("unset %s", entry.Name)
@@ -247,6 +241,7 @@ func (e *Engine) setVariable(logger *Logger, entry *parser.Assignment) {
 }
 
 func (e *Engine) exportVariable(logger *Logger, entry *parser.Assignment) error {
+	logger = logger.Scope(entry.Name)
 	switch entry.Override {
 	case parser.OverrideDelete:
 		logger.Debugf("unset %s", entry.Name, shellquote.Join(entry.Value.Body))
@@ -285,7 +280,7 @@ func (e *Engine) setTargetCleanFunc(target *Target, directive *parser.Command) e
 
 	case parser.OverrideReplace:
 		target.cleanFunc = func(logger *Logger, target *Target) error {
-			return logger.Exec(target.chdir, directive.Value.Body)
+			return logger.Exec(target.chdir.Text, directive.Value.Body)
 		}
 
 	case parser.OverrideAppend:
@@ -294,13 +289,13 @@ func (e *Engine) setTargetCleanFunc(target *Target, directive *parser.Command) e
 			if err := cleanFunc(logger, target); err != nil {
 				return err
 			}
-			return logger.Exec(target.chdir, directive.Value.Body)
+			return logger.Exec(target.chdir.Text, directive.Value.Body)
 		}
 
 	case parser.OverridePrepend:
 		cleanFunc := target.cleanFunc
 		target.cleanFunc = func(logger *Logger, target *Target) error {
-			if err := logger.Exec(target.chdir, directive.Value.Body); err != nil {
+			if err := logger.Exec(target.chdir.Text, directive.Value.Body); err != nil {
 				return err
 			}
 			return cleanFunc(logger, target)
@@ -376,7 +371,11 @@ func (e *Engine) Build(outputs []string) error {
 		outputs = e.Outputs()
 	}
 	for _, name := range outputs {
-		name = e.normalisePath(name)
+		var err error
+		name, err = e.normalisePath(name)
+		if err != nil {
+			return err
+		}
 		log := e.log.Scope(name)
 
 		target, err := e.getTarget(name)
@@ -385,7 +384,9 @@ func (e *Engine) Build(outputs []string) error {
 		}
 
 		if target.storedHash == target.realHash {
-			log.Debugf("Up to date.")
+			if !target.synthetic {
+				log.Debugf("Up to date.")
+			}
 			continue
 		}
 		log.Tracef("Building.")
@@ -426,7 +427,7 @@ func (e *Engine) defaultBuildFunc(log *Logger, target *Target) error {
 	if err != nil {
 		return participle.Wrapf(block.Pos, err, "invalid command %q", command)
 	}
-	err = log.Exec(target.chdir, command)
+	err = log.Exec(target.chdir.Text, command)
 	if err != nil {
 		return participle.Wrapf(block.Pos, err, "failed to run command %q", command)
 	}
@@ -520,11 +521,12 @@ func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (hasher, error) 
 	return h, nil
 }
 
+// Expand variables and normalise path references.
 func (e *Engine) evaluate() error {
 	collectedOutputs := map[string]bool{}
-	// First pass - expand variables and normalise path references.
+
+	// Evaluate outputs first so that inputs can potentially match against them.
 	for _, target := range e.targets {
-		logger := e.targetLogger(target)
 		var outputs []*parser.Ref
 		for _, ref := range target.outputs.Refs {
 			evaluated, err := e.evaluateString(ref.Pos, ref.Text, target, map[string]bool{})
@@ -538,10 +540,13 @@ func (e *Engine) evaluate() error {
 			}
 			for _, subRef := range subRefs.Refs {
 				subRef.Pos = ref.Pos
-				subRef.Text = e.normalisePath(subRef.Text)
+				subRef.Text, err = e.normalisePath(subRef.Text)
+				if err != nil {
+					return participle.Errorf(subRef.Pos, "%s", err)
+				}
 				// TODO: Supporting brace expansion would be very useful here.
 				if e.globber.IsGlob(subRef.Text) {
-					return participle.Errorf(ref.Pos, "globs are not allowed in output")
+					return participle.Errorf(ref.Pos, "globs are not allowed in output (%s)", subRef.Text)
 				}
 				outputs = append(outputs, subRefs.Refs...)
 				key := RefKey(subRef.Text)
@@ -554,6 +559,19 @@ func (e *Engine) evaluate() error {
 		}
 		target.outputs.Refs = outputs
 		slices.SortFunc(target.outputs.Refs, func(a, b *parser.Ref) int { return strings.Compare(a.Text, b.Text) })
+
+		evaluated, err := e.evaluateString(target.chdir.Pos, target.chdir.Text, target, map[string]bool{})
+		if err != nil {
+			return err
+		}
+		target.chdir.Text, err = e.normalisePath(evaluated)
+		if err != nil {
+			return participle.Errorf(target.chdir.Pos, "%s", err)
+		}
+	}
+
+	for _, target := range e.targets {
+		logger := e.targetLogger(target)
 
 		// Expand input globs.
 		collectedInputs := map[string]bool{}
@@ -575,11 +593,7 @@ func (e *Engine) evaluate() error {
 				}
 
 				for _, match := range matches {
-					inputs = append(inputs,
-						&parser.Ref{
-							Pos:  ref.Pos,
-							Text: match,
-						})
+					inputs = append(inputs, &parser.Ref{Pos: ref.Pos, Text: match})
 					e.inputs[RefKey(match)] = target
 					collectedInputs[match] = true
 				}
@@ -630,7 +644,11 @@ func (e *Engine) targetLogger(target *Target) *Logger {
 func (e *Engine) evaluateString(pos lexer.Position, v string, target *Target, seen map[string]bool) (string, error) {
 	text, err := parser.ParseTextString(v)
 	if err != nil {
-		return "", err
+		var perr participle.Error
+		if errors.As(err, &perr) {
+			return "", participle.Errorf(translateVarPos(pos, perr.Position()), "%s", perr.Message())
+		}
+		return "", participle.Errorf(pos, "%s", err)
 	}
 
 	out := &strings.Builder{}
@@ -639,12 +657,7 @@ func (e *Engine) evaluateString(pos lexer.Position, v string, target *Target, se
 		case *parser.VarFragment:
 			str, err := e.evaluateVar(fragment, target, seen)
 			if err != nil {
-				var perr participle.Error
-				if errors.As(err, &perr) {
-					return "", err
-				}
-				pos = translateVarPos(pos, fragment)
-				return "", participle.Errorf(pos, "%s", err)
+				return "", err
 			}
 			out.WriteString(str)
 
@@ -680,7 +693,7 @@ func (e *Engine) capture(log *Logger, command string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// Evaluat a variable. "target" may be nil.
+// Evaluate a variable. "target" may be nil.
 func (e *Engine) evaluateVar(v *parser.VarFragment, target *Target, seen map[string]bool) (string, error) {
 	name := v.Var
 	if seen[name] {
@@ -696,27 +709,37 @@ func (e *Engine) evaluateVar(v *parser.VarFragment, target *Target, seen map[str
 	}
 	if !ok {
 		if block, ok = e.vars[name]; !ok {
-			debug.PrintStack()
 			return "", fmt.Errorf("unknown variable %q", name)
 		}
 	}
 	return e.evaluateString(block.Pos, block.Body, target, seen)
 }
 
-func (e *Engine) normalisePath(path string) string {
+func (e *Engine) normalisePath(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		path = filepath.Clean(filepath.Join(e.cwd, path))
 	}
-	return strings.TrimPrefix(path, e.cwd+"/")
+	if path == e.cwd {
+		return ".", nil
+	}
+	path = strings.TrimPrefix(path, e.cwd+"/")
+	if !filepath.IsLocal(path) {
+		return "", fmt.Errorf("path %q is not local", path)
+	}
+	return path, nil
 }
 
 func (e *Engine) getTarget(name string) (*Target, error) {
-	name = e.normalisePath(name)
+	var err error
+	name, err = e.normalisePath(name)
+	if err != nil {
+		return nil, err
+	}
 	target, ok := e.outputs[RefKey(name)]
 	if ok {
 		return target, nil
 	}
-	_, err := os.Stat(name)
+	_, err = os.Stat(name)
 	if err != nil {
 		return nil, fmt.Errorf("no such file or target %q", name)
 	}
@@ -734,7 +757,7 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 		vars:      Vars{},
 		cleanFunc: e.defaultCleanFunc,
 		buildFunc: func(logger *Logger, target *Target) error { return nil },
-		chdir:     ".",
+		chdir:     &parser.Ref{Text: "."},
 	}
 	e.targets = append(e.targets, target)
 	e.outputs[RefKey(name)] = target
@@ -784,71 +807,101 @@ func (e *Engine) expandImplicits(bitfile *parser.Bitfile) error {
 			outEntries = append(outEntries, entry)
 			continue
 		}
-		patternIndex := -1
-		for i, ref := range implicit.Pattern.Refs {
-			evaluated, err := e.evaluateString(ref.Pos, ref.Text, nil, map[string]bool{})
-			if err != nil {
-				return err
-			}
-			if strings.Contains(evaluated, "@") {
-				if patternIndex != -1 {
-					return participle.Errorf(implicit.Pattern.Pos, "pattern must contain exactly one @")
-				}
-				patternIndex = i
-			}
-		}
-		if patternIndex == -1 {
-			return participle.Errorf(implicit.Pattern.Pos, "pattern must contain exactly one @")
+		evaluated, err := e.evaluateString(implicit.Pattern.Pos, implicit.Pattern.Text, nil, map[string]bool{})
+		if err != nil {
+			return err
 		}
 
-		pattern := implicit.Pattern.Refs[patternIndex].Text
-		pattern = regexp.QuoteMeta(pattern)
-		pattern = strings.ReplaceAll(pattern, "@", "([^/]+)")
+		glob, err := e.normalisePath(evaluated)
+		if err != nil {
+			return participle.Errorf(implicit.Pattern.Pos, "%s", err)
+		}
+		logger := e.log.Scope(glob)
+		logger.Tracef("Expanding implicit target")
 
-		// Based on https://www.gnu.org/software/make/manual/make.html#Implicit-Rule-Search
-		// This simplistic implementation seems to work, but might need to be extended at some point.
-		var re *regexp.Regexp
-		if strings.Contains(pattern, "/") {
-			re = regexp.MustCompile("^" + pattern + "$")
-		} else {
-			re = regexp.MustCompile("/" + pattern + "$")
+		if strings.ContainsAny(glob, "[]") {
+			return participle.Errorf(implicit.Pattern.Pos, "implicit pattern glob does not currently support [], {} or ?")
 		}
 
+		re := e.globToRe(glob)
+		logger.Tracef("Implicit pattern: %s -> %s", glob, re)
+
+		count := 0
 		// Create a new target for each file that matches the pattern.
-		for _, file := range e.globber.Files() {
+		for _, file := range e.globber.MatchFilesystem(glob) {
 			matches := re.FindStringSubmatch(file)
-			if matches == nil {
-				continue
-			}
+			count++
+			logger.Tracef("Matched %s", file)
 			target := &parser.Target{
 				Pos:        implicit.Pos,
 				Docs:       implicit.Docs,
 				Directives: deepcopy.DeepCopy(implicit.Directives),
-				Inputs:     deepcopy.DeepCopy(implicit.Pattern),
-				Outputs:    deepcopy.DeepCopy(implicit.Replace),
+				Inputs:     &parser.RefList{Pos: implicit.Pattern.Pos, Refs: []*parser.Ref{deepcopy.DeepCopy(implicit.Pattern)}},
+				Outputs:    &parser.RefList{Pos: implicit.Replace.Pos, Refs: []*parser.Ref{deepcopy.DeepCopy(implicit.Replace)}},
 			}
+			target.Inputs.Refs[0].Text = file
 			target.Directives = append(target.Directives, &parser.Assignment{
 				Pos:  implicit.Pos,
-				Name: "PATTERN",
+				Name: "IN",
 				Value: &parser.Block{
 					Pos:  implicit.Pattern.Pos,
-					Body: matches[1],
+					Body: file,
+				},
+			}, &parser.Assignment{
+				Pos:  implicit.Pos,
+				Name: "OUT",
+				Value: &parser.Block{
+					Pos:  implicit.Replace.Pos,
+					Body: implicit.Replace.Text,
 				},
 			})
-			for _, input := range target.Inputs.Refs {
-				input.Text = strings.ReplaceAll(input.Text, "@", matches[1])
-			}
-			for _, output := range target.Outputs.Refs {
-				output.Text = strings.ReplaceAll(output.Text, "@", matches[1])
+			for i, match := range matches {
+				target.Directives = append(target.Directives, &parser.Assignment{
+					Pos:  implicit.Pos,
+					Name: strconv.Itoa(i),
+					Value: &parser.Block{
+						Pos:  implicit.Pattern.Pos,
+						Body: match,
+					},
+				})
 			}
 			outEntries = append(outEntries, target)
 		}
+		logger.Tracef("Matched %d files", count)
 	}
 	bitfile.Entries = outEntries
 	return nil
 }
 
-func (e *Engine) evaluateGlobalVariables(bitfile *parser.Bitfile) error {
+var globSplitter = regexp.MustCompile(`\*\*/|\*|[^[?*{]+|{[^}]+}|\?`)
+
+func (e *Engine) globToRe(glob string) *regexp.Regexp {
+	pattern := ""
+	parts := globSplitter.FindAllString(glob, -1)
+	for _, part := range parts {
+		switch {
+		case part == "?":
+			pattern += "."
+
+		case part == "*":
+			pattern += "([^/]*)"
+
+		case part == "**/":
+			pattern += "(.*?/?)?"
+
+		case strings.HasPrefix(part, "{") && strings.HasSuffix(part, "}"):
+			pattern += "(" + strings.Join(strings.Split(part[1:len(part)-1], ","), "|") + ")"
+
+		default:
+			pattern += regexp.QuoteMeta(part)
+		}
+	}
+	re := regexp.MustCompile("^" + pattern + "$")
+	return re
+}
+
+// Evaluate global variables into the engine.
+func (e *Engine) setGlobalVariables(bitfile *parser.Bitfile) error {
 	for _, entry := range bitfile.Entries {
 		entry, ok := entry.(*parser.Assignment)
 		if !ok {
@@ -866,13 +919,13 @@ func (e *Engine) evaluateGlobalVariables(bitfile *parser.Bitfile) error {
 }
 
 // Translate fragment position into Bitfile position.
-func translateVarPos(pos lexer.Position, fragment *parser.VarFragment) lexer.Position {
-	if fragment.Pos.Line != 1 {
-		pos.Line += fragment.Pos.Line - 1
-		pos.Column = fragment.Pos.Column - 1
+func translateVarPos(parent lexer.Position, pos lexer.Position) lexer.Position {
+	if pos.Line != 1 {
+		parent.Line += pos.Line - 1
+		parent.Column = pos.Column - 1
 	} else {
-		pos.Column += fragment.Pos.Column - 1
+		parent.Column += pos.Column - 1
 	}
-	pos.Offset += fragment.Pos.Offset
-	return pos
+	parent.Offset += pos.Offset
+	return parent
 }

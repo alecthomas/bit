@@ -136,27 +136,33 @@ kotlin-runtime/ftl-runtime/build/libs/ftl-runtime.jar: \
 
 ### Implicit targets
 
-Implicit targets are patterns that result in concrete targets for any matching
+Implicit targets are patterns that generate concrete targets for any matching
 files. They take the form:
 
 ```
-implicit <replace>: <pattern>
+implicit <template>: <pattern>
+  ...
 ```
 
-Where any text matching `@` is extracted from `<pattern>` and interpolated 
-into `<replace>`.
+Unlike a normal target, there can only be a single input and output
+defined in the heading. The `inputs` and `outputs` directives can be
+used to define additional inputs and outputs.
+
+`<pattern>` is a glob pattern, where each glob is a capture group `%{N}`.
+The capture groups are then substituted into `<template>` to produce the
+concrete target.
+
+That is, each of `**/`, `*`, `{a,b}`, and `?`, are treated as capture groups.
+Of particular note is that the capture group for `**/` includes the trailing `/`,
+if any. This is because `**/` can also capture the empty path.
 
 eg.
 
 ```
 # Build all C files
-implicit @.o: @.c
+implicit %{1}%{2}.o: **/*.c
   inputs: %(cc -MM %{IN} | cut -d: -f2-)%
-  build: cc -c %{IN} -o %{OUT}
-  
-# Build all Go binaries in cmd/
-implicit build/@: cmd/@ **/*.go
-  build: go build -o %{OUT} -tags release ./cmd/%{PATTERN}
+  build: cc -c %{2} -o %{OUT}
 ```
 
 Given the file `input.c`, the previous `implicit` will result in the
@@ -166,6 +172,15 @@ following concrete target:
 input.o: input.c
   inputs: input.c header.h
   build: cc -c input.c -o input.o
+```
+
+Another example, of building Go binaries from every directory under `cmd/`:
+
+```
+# Build all Go binaries in cmd/
+implicit build/%{1}: cmd/*
+  inputs: **/*.go
+  build: go build -o %{OUT} -tags release ./cmd/%{PATTERN}
 ```
 
 ### Virtual targets

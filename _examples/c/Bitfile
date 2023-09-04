@@ -1,6 +1,6 @@
 myprog: *.o
   build: cc -o %{OUT} %{IN}
 
-implicit @.o: @.c
-  inputs: %(cc -MM %{PATTERN}.c | cut -d: -f2-)%
-  build: cc -c -o %{PATTERN}.o %{PATTERN}.c
+implicit %{1}%{2}.o: **/*.c
+  inputs: %(cc -MM %{1}%{2}.c | cut -d: -f2-)%
+  build: cc -c -o %{1}%{2}.o %{1}%{2}.c

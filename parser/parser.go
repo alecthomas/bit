@@ -165,14 +165,13 @@ type ImplicitTarget struct {
 
 	Docs []string `@Comment*`
 
-	Replace *RefList `"implicit" @@`
-	Pattern *RefList `":" @@`
+	Replace *Ref `"implicit" @@`
+	Pattern *Ref `":" @@`
 
 	Directives []Directive `Indent NL* (@@ NL*)* Dedent`
 }
 
 func (i *ImplicitTarget) Position() lexer.Position { return i.Pos }
-func (i *ImplicitTarget) children() []Node         { return nil }
 func (i *ImplicitTarget) entry()                   {}
 
 type Template struct {

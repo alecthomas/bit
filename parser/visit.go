@@ -64,6 +64,14 @@ func (t *Template) children() []Node {
 	return out
 }
 
+func (i *ImplicitTarget) children() []Node {
+	out := []Node{i.Replace, i.Pattern}
+	for _, d := range i.Directives {
+		out = append(out, d)
+	}
+	return out
+}
+
 func (i *Inherit) children() []Node {
 	out := make([]Node, 0, len(i.Parameters))
 	for _, p := range i.Parameters {
