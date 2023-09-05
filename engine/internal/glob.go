@@ -26,6 +26,7 @@ func NewGlobber(dir string, extraFiles func() []string) (*Globber, error) {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
+	ignore = append(ignore, "**/.*")
 	for i, glob := range ignore {
 		if strings.HasPrefix(glob, "!") {
 			ignore[i] = glob[1:]

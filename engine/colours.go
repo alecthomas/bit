@@ -3,11 +3,17 @@ package engine
 import (
 	"fmt"
 	"hash/fnv"
+	"os"
 	"strconv"
+
+	"github.com/mattn/go-isatty"
 )
 
 var (
 	colours = func() []string {
+		if !isatty.IsTerminal(os.Stdout.Fd()) {
+			return []string{""}
+		}
 		rgb256Colours := []string{"000000", "008000", "808000", "000080", "800080", "008080", "c0c0c0",
 			"00ff00", "ffff00", "0000ff", "ff00ff", "00ffff", "ffffff", "000000", "00005f", "000087", "0000af",
 			"0000d7", "0000ff", "005f00", "005f5f", "005f87", "005faf", "005fd7", "005fff", "008700", "00875f",
