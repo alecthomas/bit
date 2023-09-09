@@ -161,52 +161,64 @@ func TestParser(t *testing.T) {
 				Entries: []Entry{
 					&Target{
 						Outputs: &RefList{
-							Refs: []*Ref{
-								{
-									Text: "%{DEST}/bit",
-								},
-							},
+							Refs: []*Ref{{Text: "%{DEST}/bit"}},
 						},
 						Directives: []Directive{
-							&Command{
-								Command: "inputs",
-								Value: &Block{
-									Body: "%{DEST}\n**/*.go",
-								},
-							},
+							&Command{Command: "inputs", Value: &Block{Body: "%{DEST}\n**/*.go"}},
 						},
 					},
 				},
 			},
 		},
-		{name: "SmallBitfileWithDocs",
+		{name: "SmallBitfileWithTargetDocs",
 			input: `
 				# This is a comment
 				# This is another comment
 				%{DEST}/bit:
 				  build: foo
-`,
+				`,
 			expected: &Bitfile{
 				Entries: []Entry{
 					&Target{
-						Docs: []string{"This is a comment", "This is another comment"},
+						Docs: &Docs{Docs: "This is a comment\nThis is another comment"},
 						Outputs: &RefList{
-							Refs: []*Ref{
-								{
-									Text: "%{DEST}/bit",
-								},
-							},
+							Refs: []*Ref{{Text: "%{DEST}/bit"}},
 						},
 						Directives: []Directive{
-							&Command{
-								Command: "build",
-								Value: &Block{
-									Body: "foo",
-								},
-							},
+							&Command{Command: "build", Value: &Block{Body: "foo"}},
 						},
 					},
 				},
+			},
+		},
+		{name: "BitfileWithDocs",
+			input: `
+				# This is a comment
+				# This is another comment
+
+				%{DEST}/bit:
+				  build: foo
+				`,
+			expected: &Bitfile{
+				Docs: &Docs{Docs: "This is a comment\nThis is another comment"},
+				Entries: []Entry{
+					&Target{
+						Outputs: &RefList{
+							Refs: []*Ref{{Text: "%{DEST}/bit"}},
+						},
+						Directives: []Directive{
+							&Command{Command: "build", Value: &Block{Body: "foo"}},
+						},
+					},
+				},
+			},
+		},
+		{name: "EmptyBitfileWithDocs",
+			input: `
+				# This is a comment
+				# This is another comment`,
+			expected: &Bitfile{
+				Docs: &Docs{Docs: "This is a comment\nThis is another comment"},
 			},
 		},
 	}
@@ -270,7 +282,7 @@ func TestParseSamples(t *testing.T) {
 }
 
 func TestParseRefList(t *testing.T) {
-	refs, err := ParseRefList(`a b c`)
+	refs, err := ParseRefList(lexer.Position{}, `a b c`)
 	assert.NoError(t, err)
 	normaliseAllNodes(refs)
 	assert.Equal(t, &RefList{Refs: []*Ref{{Text: "a"}, {Text: "b"}, {Text: "c"}}}, refs)

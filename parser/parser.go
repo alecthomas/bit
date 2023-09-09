@@ -1,14 +1,13 @@
 package parser
 
 import (
+	"errors"
 	"io"
 	"strings"
 
 	"github.com/alecthomas/participle/v2"
 	"github.com/alecthomas/participle/v2/lexer"
 )
-
-var parserOptions = []participle.Option{}
 
 var parser = participle.MustBuild[Bitfile](
 	participle.Lexer(lex),
@@ -21,6 +20,9 @@ var parser = participle.MustBuild[Bitfile](
 
 var refListParser = participle.MustBuild[RefList](
 	participle.Lexer(lex),
+	participle.Unquote("String"),
+	participle.Map(unquoteMultilineString, "MultilineString"),
+	participle.Map(unquoteStringLiteral, "StringLiteral"),
 	participle.Elide("NL"),
 	participle.UseLookahead(3),
 )
@@ -45,8 +47,22 @@ func ParseString(filename, input string) (*Bitfile, error) {
 	return parser.ParseString(filename, input)
 }
 
-func ParseRefList(text string) (*RefList, error) {
-	return refListParser.ParseString("", strings.ReplaceAll(text, "\n", " "))
+func ParseRefList(parent lexer.Position, text string) (*RefList, error) {
+	refs, err := refListParser.ParseString("", strings.ReplaceAll(text, "\n", " "))
+	if err != nil {
+		if perr := (&participle.ParseError{}); errors.As(err, &perr) {
+			perr.Pos = parent.Add(perr.Position())
+		} else if uerr := (&participle.UnexpectedTokenError{}); errors.As(err, &uerr) {
+			uerr.Unexpected.Pos = parent.Add(uerr.Position())
+		} else if lerr := (&lexer.Error{}); errors.As(err, &lerr) {
+			lerr.Pos = parent.Add(lerr.Position())
+		}
+		return nil, err
+	}
+	for _, ref := range refs.Refs {
+		ref.Pos = parent.Add(ref.Position())
+	}
+	return refs, nil
 }
 
 //go:generate stringer -type=Override -linecomment
@@ -95,10 +111,20 @@ func (o *Override) Parse(lex *lexer.PeekingLexer) error {
 type Bitfile struct {
 	Pos lexer.Position
 
-	Entries []Entry `(@@ NL*)* EOF`
+	Docs *Docs `(@@ (NL|EOF))?`
+
+	Entries []Entry `(@@ NL*)* NL* EOF`
 }
 
 func (b *Bitfile) Position() lexer.Position { return b.Pos }
+
+type Docs struct {
+	Pos lexer.Position
+
+	Docs string `@Comment NL?` // NL is optional for comments at EOF
+}
+
+func (d *Docs) Position() lexer.Position { return d.Pos }
 
 // Entry is a top-level entry in a Bitfile.
 //
@@ -111,7 +137,7 @@ type Entry interface {
 type Chdir struct {
 	Pos lexer.Position
 
-	Docs []string `@Comment*`
+	Docs *Docs `@@?`
 
 	Dir *Ref `"cd" @@`
 }
@@ -122,7 +148,7 @@ func (c *Chdir) directive()               {}
 type Assignment struct {
 	Pos lexer.Position
 
-	Docs []string `@Comment*`
+	Docs *Docs `@@?`
 
 	Export   bool     `@"export"?`
 	Name     string   `@Ident`
@@ -137,7 +163,7 @@ func (a *Assignment) directive()               {}
 type Target struct {
 	Pos lexer.Position
 
-	Docs []string `@Comment*`
+	Docs *Docs `@@?`
 
 	Outputs    *RefList    `@@* ":"`
 	Inputs     *RefList    `@@* NL*`
@@ -150,7 +176,7 @@ func (*Target) entry()                     {}
 type VirtualTarget struct {
 	Pos lexer.Position
 
-	Docs []string `@Comment*`
+	Docs *Docs `@@?`
 
 	Name       string      `"virtual" @Ident ":"`
 	Inputs     *RefList    `@@* NL*`
@@ -163,7 +189,7 @@ func (*VirtualTarget) entry()                     {}
 type ImplicitTarget struct {
 	Pos lexer.Position
 
-	Docs []string `@Comment*`
+	Docs *Docs `@@?`
 
 	Replace *Ref `"implicit" @@`
 	Pattern *Ref `":" @@`
@@ -177,7 +203,7 @@ func (i *ImplicitTarget) entry()                   {}
 type Template struct {
 	Pos lexer.Position
 
-	Docs []string `@Comment*`
+	Docs *Docs `@@?`
 
 	Name       string       `"template" @Ident`
 	Parameters []*Parameter `"(" (@@ ("," @@)*)? ")"`
@@ -283,7 +309,7 @@ type Ref struct {
 
 	// This is a bit hairy because we need to explicitly match WS
 	// to "un"-elide it, but we don't want to capture it.
-	Text string `WS? ((?!WS) @(Var | Cmd | Ident | Number | "/" | "." | "*" | "@" | "[" | "]" | "{" | "}" | "!" | ","))+ | @(String | StringLiteral | MultilineString)`
+	Text string `WS? ((?!WS) @(Var | Cmd | Ident | Number | "-" | "/" | "." | "*" | "@" | "[" | "]" | "{" | "}" | "!" | ","))+ | @(String | StringLiteral | MultilineString)`
 }
 
 func (r *Ref) Position() lexer.Position { return r.Pos }

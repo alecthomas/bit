@@ -107,6 +107,16 @@ func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
 	return engine, nil
 }
 
+// Files lists all files that are referenced by the engine.
+func (e *Engine) Files() []string {
+	return e.globber.Files()
+}
+
+// Ignored returns all files that are ignored by the engine.
+func (e *Engine) Ignored() []string {
+	return e.globber.Ignored()
+}
+
 func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 	for _, entry := range bitfile.Entries {
 		switch entry := entry.(type) {
@@ -124,6 +134,7 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 				target.inputs = &parser.RefList{Pos: entry.Pos}
 			}
 			if entry.Outputs == nil {
+				fmt.Println(entry.Pos)
 				target.outputs = &parser.RefList{Pos: entry.Pos}
 			}
 			logger := e.targetLogger(target)
@@ -141,7 +152,7 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 						target.build = directive
 
 					case "inputs", "outputs":
-						refs, err := parser.ParseRefList(directive.Value.Body)
+						refs, err := parser.ParseRefList(directive.Pos, directive.Value.Body)
 						if err != nil {
 							return participle.Errorf(directive.Value.Pos, "failed to parse %s: %s", directive.Command, err)
 						}
@@ -367,15 +378,23 @@ func (e *Engine) Close() error {
 }
 
 func (e *Engine) Build(outputs []string) error {
+	return e.build(outputs, map[string]bool{})
+}
+
+func (e *Engine) build(outputs []string, seen map[string]bool) error {
 	if len(outputs) == 0 {
 		outputs = e.Outputs()
 	}
 	for _, name := range outputs {
-		var err error
-		name, err = e.normalisePath(name)
+		name, err := e.normalisePath(name) //nolint:govet
 		if err != nil {
 			return err
 		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+
 		log := e.log.Scope(name)
 
 		target, err := e.getTarget(name)
@@ -389,14 +408,15 @@ func (e *Engine) Build(outputs []string) error {
 			}
 			continue
 		}
-		log.Tracef("Building.")
 
 		// Build dependencies.
 		for _, input := range target.inputs.Refs {
-			if err := e.Build([]string{input.Text}); err != nil {
+			if err := e.build([]string{input.Text}, seen); err != nil {
 				return participle.Wrapf(input.Pos, err, "build failed")
 			}
 		}
+
+		log.Tracef("Building.")
 
 		// Build target.
 		err = target.buildFunc(log, target)
@@ -437,12 +457,13 @@ func (e *Engine) defaultBuildFunc(log *Logger, target *Target) error {
 // A function used to compute a hash of an output.
 type outputRefHasher func(target *Target, ref *parser.Ref) (hasher, error)
 
-func (e *Engine) recursivelyComputeHash(target *Target, refHasher outputRefHasher, seen map[string]*parser.Ref, forEach func(*Target, hasher)) (hasher, error) {
+func (e *Engine) recursivelyComputeHash(target *Target, refHasher outputRefHasher, seen map[string]bool, forEach func(*Target, hasher)) (hasher, error) {
 	h := newHasher()
 	for _, input := range target.inputs.Refs {
-		// if orig, ok := seen[input.Text]; ok {
-		// 	return 0, participle.Errorf(input.Pos, "circular dependency %s", orig.Pos)
-		// }
+		if _, ok := seen[input.Text]; ok {
+			continue
+		}
+		seen[input.Text] = true
 		inputTarget, err := e.getTarget(input.Text)
 		if err != nil {
 			return 0, participle.Wrapf(input.Pos, err, "couldn't find matching input")
@@ -454,7 +475,6 @@ func (e *Engine) recursivelyComputeHash(target *Target, refHasher outputRefHashe
 		h.update(subh)
 	}
 	for _, output := range target.outputs.Refs {
-		seen[output.Text] = output
 		rh, err := refHasher(target, output)
 		if err != nil {
 			return 0, participle.Wrapf(output.Pos, err, "hash failed")
@@ -534,12 +554,11 @@ func (e *Engine) evaluate() error {
 				return err
 			}
 
-			subRefs, err := parser.ParseRefList(evaluated)
+			subRefs, err := parser.ParseRefList(ref.Pos, evaluated)
 			if err != nil {
 				return participle.Errorf(ref.Pos, "failed to parse output %q: %s", evaluated, err)
 			}
 			for _, subRef := range subRefs.Refs {
-				subRef.Pos = ref.Pos
 				subRef.Text, err = e.normalisePath(subRef.Text)
 				if err != nil {
 					return participle.Errorf(subRef.Pos, "%s", err)
@@ -581,7 +600,7 @@ func (e *Engine) evaluate() error {
 			if err != nil {
 				return err
 			}
-			innerRefs, err := parser.ParseRefList(evaluated)
+			innerRefs, err := parser.ParseRefList(ref.Pos, evaluated)
 			if err != nil {
 				return participle.Errorf(ref.Pos, "failed to parse input %q: %s", evaluated, err)
 			}
@@ -615,13 +634,13 @@ func (e *Engine) evaluate() error {
 	// Second pass - restore hashes from the DB.
 	for _, target := range e.targets {
 		logger := e.targetLogger(target)
-		_, err := e.recursivelyComputeHash(target, e.dbRefHasher, map[string]*parser.Ref{}, func(target *Target, h hasher) {
+		_, err := e.recursivelyComputeHash(target, e.dbRefHasher, map[string]bool{}, func(target *Target, h hasher) {
 			target.storedHash = h
 		})
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		_, err = e.recursivelyComputeHash(target, e.realRefHasher, map[string]*parser.Ref{}, func(target *Target, h hasher) {
+		_, err = e.recursivelyComputeHash(target, e.realRefHasher, map[string]bool{}, func(target *Target, h hasher) {
 			target.realHash = h
 		})
 		if err != nil && !errors.Is(err, os.ErrNotExist) {

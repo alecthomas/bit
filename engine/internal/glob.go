@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"errors"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -11,30 +10,32 @@ import (
 
 // Globber is a file globber that respects .gitingore files.
 type Globber struct {
-	dir        string
-	files      []string
-	extraFiles func() []string
+	dir     string
+	ignore  []string
+	files   []string
+	outputs func() []string
 }
 
 // NewGlobber creates a new Globber for the given directory.
 //
-// The extraFiles function is called to provide additional files to be
-// considered when globbing. This is useful for files output by the
+// The "outputs" function is called to provide additional files to be
+// considered when globbing. This is used for files output by the
 // build process.
-func NewGlobber(dir string, extraFiles func() []string) (*Globber, error) {
-	ignore, err := GlobifyGitIgnoreFile(dir)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-	ignore = append(ignore, "**/.*")
-	for i, glob := range ignore {
-		if strings.HasPrefix(glob, "!") {
-			ignore[i] = glob[1:]
-			continue
-		}
-	}
+func NewGlobber(root string, outputs func() []string) (*Globber, error) {
+	ignore := LoadGitIgnore(root)
 	var files []string
-	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if path == root {
+			return nil
+		}
+		if d.IsDir() && path != root {
+			extraIgnores := LoadGitIgnore(path)
+			for _, extraIgnore := range extraIgnores {
+				extraIgnore = strings.TrimPrefix(strings.TrimPrefix(filepath.Join(path, extraIgnore), root), "/")
+				ignore = append(ignore, extraIgnore)
+			}
+		}
+		path = strings.TrimPrefix(path, root+"/")
 		for _, ignore := range ignore {
 			if ok, err := doublestar.Match(ignore, path); ok || err != nil {
 				if d.IsDir() {
@@ -43,7 +44,6 @@ func NewGlobber(dir string, extraFiles func() []string) (*Globber, error) {
 				return nil
 			}
 		}
-		path = strings.TrimPrefix(path, dir+"/")
 		files = append(files, path)
 		return nil
 	})
@@ -51,9 +51,10 @@ func NewGlobber(dir string, extraFiles func() []string) (*Globber, error) {
 		return nil, err
 	}
 	return &Globber{
-		dir:        dir,
-		files:      files,
-		extraFiles: extraFiles,
+		dir:     root,
+		ignore:  ignore,
+		files:   files,
+		outputs: outputs,
 	}, nil
 }
 
@@ -61,8 +62,12 @@ func (g *Globber) IsGlob(glob string) bool {
 	return strings.ContainsAny(glob, "*?{}[]")
 }
 
+func (g *Globber) Ignored() []string {
+	return g.ignore
+}
+
 func (g *Globber) Files() []string {
-	extra := g.extraFiles()
+	extra := g.outputs()
 	out := make([]string, len(g.files), len(g.files)+len(extra))
 	copy(out, g.files)
 	seen := map[string]struct{}{}

@@ -25,15 +25,15 @@ func Visit(node Node, visitor Visitor) error {
 func (a *Assignment) children() []Node { return []Node{a.Value} }
 
 func (b *Bitfile) children() []Node {
-	out := make([]Node, len(b.Entries))
-	for i, e := range b.Entries {
-		out[i] = e
+	out := []Node{b.Docs}
+	for _, e := range b.Entries {
+		out = append(out, e)
 	}
 	return out
 }
 
 func (t *Target) children() []Node {
-	var out []Node
+	out := []Node{t.Docs}
 	out = append(out, t.Inputs)
 	out = append(out, t.Outputs)
 	for _, d := range t.Directives {
@@ -43,7 +43,7 @@ func (t *Target) children() []Node {
 }
 
 func (t *VirtualTarget) children() []Node {
-	var out []Node
+	out := []Node{t.Docs}
 	out = append(out, t.Inputs)
 	for _, d := range t.Directives {
 		out = append(out, d)
@@ -52,7 +52,7 @@ func (t *VirtualTarget) children() []Node {
 }
 
 func (t *Template) children() []Node {
-	var out []Node
+	out := []Node{t.Docs}
 	for _, p := range t.Parameters {
 		out = append(out, p)
 	}
@@ -65,7 +65,7 @@ func (t *Template) children() []Node {
 }
 
 func (i *ImplicitTarget) children() []Node {
-	out := []Node{i.Replace, i.Pattern}
+	out := []Node{i.Docs, i.Replace, i.Pattern}
 	for _, d := range i.Directives {
 		out = append(out, d)
 	}
@@ -93,7 +93,7 @@ func (r *RefList) children() []Node {
 
 func (c *Command) children() []Node { return []Node{c.Value} }
 
-func (c *Chdir) children() []Node { return []Node{c.Dir} }
+func (c *Chdir) children() []Node { return []Node{c.Docs, c.Dir} }
 
 func (a *Argument) children() []Node { return []Node{a.Value} }
 
@@ -104,3 +104,5 @@ func (*Block) children() []Node { return nil }
 func (*String) children() []Node { return nil }
 
 func (*Ref) children() []Node { return nil }
+
+func (d *Docs) children() []Node { return nil }
