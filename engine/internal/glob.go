@@ -129,5 +129,16 @@ func (g *Globber) MatchFilesystem(glob string) []string {
 			matches = append(matches, file)
 		}
 	}
+	sort.Strings(matches)
+	// Remove duplicates.
+	move := 0
+	for i := 1; i < len(matches); i++ {
+		if matches[i] == matches[i-1] {
+			move++
+			continue
+		}
+		matches[i-move] = matches[i]
+	}
+	matches = matches[:len(matches)-move]
 	return matches
 }
