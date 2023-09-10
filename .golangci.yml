@@ -71,6 +71,7 @@ linters:
     - interfacebloat
     - tagalign
     - wrapcheck
+    - makezero
 
 linters-settings:
   exhaustive:

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 
 	"github.com/alecthomas/kong"
@@ -17,14 +19,15 @@ import (
 
 type CLI struct {
 	engine.LogConfig
-	File     *os.File           `short:"f" help:"Bitfile to load." required:"" default:"Bitfile"`
-	Chdir    kong.ChangeDirFlag `short:"C" help:"Change to directory before running." placeholder:"DIR"`
-	Timing   bool               `short:"t" help:"Print timing information."`
-	Dot      bool               `xor:"command" help:"Print dependency graph as a .dot file."`
-	List     bool               `short:"l" xor:"command" help:"List available targets."`
-	Describe string             `short:"D" xor:"command" help:"Describe an aspect of the Bit build. ${describe_help}" required:"" enum:"files,deps,targets,ignored" placeholder:"ASPECT"`
-	Clean    bool               `short:"c" xor:"command" help:"Clean targets."`
-	Target   []string           `arg:"" optional:"" help:"Target to run."`
+	CPUProfile string             `help:"Write CPU profile to file." type:"file" hidden:""`
+	File       *os.File           `short:"f" help:"Bitfile to load." required:"" default:"Bitfile"`
+	Chdir      kong.ChangeDirFlag `short:"C" help:"Change to directory before running." placeholder:"DIR"`
+	Timing     bool               `short:"t" help:"Print timing information."`
+	Dot        bool               `xor:"command" help:"Print dependency graph as a .dot file."`
+	List       bool               `short:"l" xor:"command" help:"List available targets."`
+	Describe   string             `short:"D" xor:"command" help:"Describe an aspect of the Bit build. ${describe_help}" required:"" enum:"files,deps,targets,ignored" placeholder:"ASPECT"`
+	Clean      bool               `short:"c" xor:"command" help:"Clean targets."`
+	Target     []string           `arg:"" optional:"" help:"Target to run."`
 }
 
 const description = `
@@ -50,6 +53,16 @@ func main() {
 	reportError(cli.File, logger, err)
 	eng, err := engine.Compile(logger, bitfile)
 	reportError(cli.File, logger, err)
+
+	if cli.CPUProfile != "" {
+		f, err := os.Create(cli.CPUProfile)
+		reportError(cli.File, logger, err)
+		// The default is 100, but if we're only measuring Bit itself, and not
+		// builds, that's too low.
+		runtime.SetCPUProfileRate(500)
+		_ = pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
 
 	switch {
 	case cli.List, cli.Describe == "targets":

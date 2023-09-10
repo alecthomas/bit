@@ -3,6 +3,7 @@ package internal
 import (
 	"io/fs"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -10,9 +11,11 @@ import (
 
 // Globber is a file globber that respects .gitingore files.
 type Globber struct {
-	dir     string
-	ignore  []string
-	files   []string
+	dir    string
+	ignore []string
+	files  []string
+	// Doesn't cache outputs
+	cache   map[string][]string
 	outputs func() []string
 }
 
@@ -50,11 +53,13 @@ func NewGlobber(root string, outputs func() []string) (*Globber, error) {
 	if err != nil {
 		return nil, err
 	}
+	sort.Strings(files)
 	return &Globber{
 		dir:     root,
 		ignore:  ignore,
 		files:   files,
 		outputs: outputs,
+		cache:   map[string][]string{},
 	}, nil
 }
 
@@ -89,8 +94,37 @@ func (g *Globber) MatchFilesystem(glob string) []string {
 	if !g.IsGlob(glob) {
 		return []string{glob}
 	}
+	prefix, _ := doublestar.SplitPattern(glob)
+	if prefix == "." {
+		prefix = ""
+	}
 	var matches []string
-	for _, file := range g.Files() {
+
+	// start := time.Now()
+
+	// Try and load from cache. On a large monorepo This can significantly speed
+	// up matching.
+	if value, ok := g.cache[glob]; ok {
+		matches = make([]string, len(value))
+		copy(matches, value)
+	} else {
+		// We've sorted the files, so we can do a binary search to find the
+		// start. This is still not ideal though, as we're still iterating over
+		// the entire range of files matching the prefix. For example a glob
+		// like "apps/*/cmd/*" Will still have to iterate over all files in "apps".
+		// If we stored the file list in a tree format, we could speed this up
+		// significantly.
+		start := sort.SearchStrings(g.files, prefix)
+		for i := start; i < len(g.files) && strings.HasPrefix(g.files[i], prefix); i++ {
+			file := g.files[i]
+			if ok, err := doublestar.Match(glob, file); ok && err == nil {
+				matches = append(matches, file)
+			}
+		}
+		g.cache[glob] = matches
+	}
+	// fmt.Println(glob, time.Since(start))
+	for _, file := range g.outputs() {
 		if ok, err := doublestar.Match(glob, file); ok && err == nil {
 			matches = append(matches, file)
 		}
