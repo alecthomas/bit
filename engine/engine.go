@@ -19,6 +19,7 @@ import (
 	deepcopy "golang.design/x/reflect"
 
 	"github.com/alecthomas/bit/engine/internal"
+	"github.com/alecthomas/bit/engine/logging"
 	"github.com/alecthomas/bit/parser"
 )
 
@@ -31,8 +32,8 @@ type Target struct {
 	build     *parser.Command
 	hashPos   lexer.Position
 	vars      Vars
-	buildFunc func(logger *Logger, target *Target) error
-	cleanFunc func(logger *Logger, target *Target) error
+	buildFunc func(logger *logging.Logger, target *Target) error
+	cleanFunc func(logger *logging.Logger, target *Target) error
 	// Hash function for virtual targets.
 	hashFunc *internal.MemoisedFunction[hasher]
 	// Hash stored in the DB.
@@ -48,7 +49,7 @@ type RefKey string
 type Engine struct {
 	cwd     string
 	globber *internal.Globber
-	log     *Logger
+	log     *logging.Logger
 	vars    Vars
 	db      *HashDB
 	targets []*Target
@@ -57,7 +58,7 @@ type Engine struct {
 }
 
 // Compile a Bitfile into an Engine ready to build targets.
-func Compile(logger *Logger, bitfile *parser.Bitfile) (*Engine, error) {
+func Compile(logger *logging.Logger, bitfile *parser.Bitfile) (*Engine, error) {
 	cachedir, err := os.UserCacheDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user cache dir: %w", err)
@@ -222,7 +223,7 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 	return nil
 }
 
-func (e *Engine) setVariable(logger *Logger, entry *parser.Assignment) {
+func (e *Engine) setVariable(logger *logging.Logger, entry *parser.Assignment) {
 	logger = logger.Scope(entry.Name)
 	switch entry.Override {
 	case parser.OverrideDelete:
@@ -251,7 +252,7 @@ func (e *Engine) setVariable(logger *Logger, entry *parser.Assignment) {
 	}
 }
 
-func (e *Engine) exportVariable(logger *Logger, entry *parser.Assignment) error {
+func (e *Engine) exportVariable(logger *logging.Logger, entry *parser.Assignment) error {
 	logger = logger.Scope(entry.Name)
 	switch entry.Override {
 	case parser.OverrideDelete:
@@ -287,16 +288,16 @@ func (e *Engine) exportVariable(logger *Logger, entry *parser.Assignment) error 
 func (e *Engine) setTargetCleanFunc(target *Target, directive *parser.Command) error {
 	switch directive.Override {
 	case parser.OverrideDelete:
-		target.cleanFunc = func(logger *Logger, target *Target) error { return nil }
+		target.cleanFunc = func(logger *logging.Logger, target *Target) error { return nil }
 
 	case parser.OverrideReplace:
-		target.cleanFunc = func(logger *Logger, target *Target) error {
+		target.cleanFunc = func(logger *logging.Logger, target *Target) error {
 			return logger.Exec(target.chdir.Text, directive.Value.Body)
 		}
 
 	case parser.OverrideAppend:
 		cleanFunc := target.cleanFunc
-		target.cleanFunc = func(logger *Logger, target *Target) error {
+		target.cleanFunc = func(logger *logging.Logger, target *Target) error {
 			if err := cleanFunc(logger, target); err != nil {
 				return err
 			}
@@ -305,7 +306,7 @@ func (e *Engine) setTargetCleanFunc(target *Target, directive *parser.Command) e
 
 	case parser.OverridePrepend:
 		cleanFunc := target.cleanFunc
-		target.cleanFunc = func(logger *Logger, target *Target) error {
+		target.cleanFunc = func(logger *logging.Logger, target *Target) error {
 			if err := logger.Exec(target.chdir.Text, directive.Value.Body); err != nil {
 				return err
 			}
@@ -441,7 +442,7 @@ func (e *Engine) build(outputs []string, seen map[string]bool) error {
 	return nil
 }
 
-func (e *Engine) defaultBuildFunc(log *Logger, target *Target) error {
+func (e *Engine) defaultBuildFunc(log *logging.Logger, target *Target) error {
 	block := target.build.Value
 	command, err := e.evaluateString(block.Pos, block.Body, target, map[string]bool{})
 	if err != nil {
@@ -655,7 +656,7 @@ func (e *Engine) evaluate() error {
 	return nil
 }
 
-func (e *Engine) targetLogger(target *Target) *Logger {
+func (e *Engine) targetLogger(target *Target) *logging.Logger {
 	return e.log.Scope(strings.Join(target.outputs.Strings(), ":"))
 }
 
@@ -699,12 +700,12 @@ func (e *Engine) evaluateString(pos lexer.Position, v string, target *Target, se
 	return out.String(), nil
 }
 
-func (e *Engine) capture(log *Logger, command string) (string, error) {
+func (e *Engine) capture(log *logging.Logger, command string) (string, error) {
 	log.Tracef("$ %s", command)
 	cmd := exec.Command("sh", "-c", command)
 	stdout := &strings.Builder{}
 	cmd.Stdout = stdout
-	cmd.Stderr = e.log.WriterAt(LogLevelError)
+	cmd.Stderr = e.log.WriterAt(logging.LogLevelError)
 	err := cmd.Run()
 	if err != nil {
 		return "", err
@@ -775,7 +776,7 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 		},
 		vars:      Vars{},
 		cleanFunc: e.defaultCleanFunc,
-		buildFunc: func(logger *Logger, target *Target) error { return nil },
+		buildFunc: func(logger *logging.Logger, target *Target) error { return nil },
 		chdir:     &parser.Ref{Text: "."},
 	}
 	e.targets = append(e.targets, target)
@@ -783,7 +784,7 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 	return target, nil
 }
 
-func (e *Engine) defaultCleanFunc(logger *Logger, target *Target) error {
+func (e *Engine) defaultCleanFunc(logger *logging.Logger, target *Target) error {
 	seen := map[string]bool{}
 	var remove []string
 	for _, output := range target.outputs.Strings() {

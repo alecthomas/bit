@@ -14,11 +14,12 @@ import (
 	"github.com/alecthomas/participle/v2"
 
 	"github.com/alecthomas/bit/engine"
+	"github.com/alecthomas/bit/engine/logging"
 	"github.com/alecthomas/bit/parser"
 )
 
 type CLI struct {
-	engine.LogConfig
+	logging.LogConfig
 	CPUProfile string             `help:"Write CPU profile to file." type:"file" hidden:""`
 	File       *os.File           `short:"f" help:"Bitfile to load." required:"" default:"Bitfile"`
 	Chdir      kong.ChangeDirFlag `short:"C" help:"Change to directory before running." placeholder:"DIR"`
@@ -48,7 +49,7 @@ func main() {
 `,
 	})
 	defer cli.File.Close()
-	logger := engine.NewLogger(cli.LogConfig)
+	logger := logging.NewLogger(cli.LogConfig)
 	bitfile, err := parser.Parse(cli.File.Name(), cli.File)
 	reportError(cli.File, logger, err)
 	eng, err := engine.Compile(logger, bitfile)
@@ -118,7 +119,7 @@ func main() {
 
 }
 
-func reportError(file *os.File, logger *engine.Logger, err error) {
+func reportError(file *os.File, logger *logging.Logger, err error) {
 	if err == nil {
 		return
 	}
