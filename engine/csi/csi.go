@@ -20,46 +20,58 @@ func NewReader(r io.Reader) *Reader {
 }
 
 func (r *Reader) Read() (Segment, error) {
+	var buf []byte
 	for {
-		var buf []byte
 		b, err := r.r.ReadByte()
 		if err != nil {
+			if buf != nil {
+				return Text(buf), nil
+			}
 			return nil, err
 		}
+
+		// Not an escape sequence, accumulate.
+		if b != '\033' {
+			buf = append(buf, b)
+			continue
+		}
+
+		// Flush any buffered text.
+		if b == '\033' && len(buf) > 0 {
+			_ = r.r.UnreadByte()
+			return Text(buf), nil
+		}
+
 		buf = append(buf, b)
-		switch b {
-		case '\033':
+
+		// Escape sequence.
+		b, err = r.r.ReadByte()
+		if err != nil {
+			return Text(buf), nil
+		}
+		buf = append(buf, b)
+		c := CSI{}
+		for {
+			// Aborted escape sequence.
 			b, err := r.r.ReadByte()
 			if err != nil {
 				return Text(buf), nil
 			}
 			buf = append(buf, b)
-			c := CSI{}
-			for {
-				// Aborted escape sequence.
-				b, err := r.r.ReadByte()
-				if err != nil {
-					return Text(buf), nil
-				}
-				buf = append(buf, b)
-				switch {
-				case b >= 0x30 && b <= 0x3f:
-					c.Params = append(c.Params, b)
+			switch {
+			case b >= 0x30 && b <= 0x3f:
+				c.Params = append(c.Params, b)
 
-				case b >= 0x20 && b <= 0x2f:
-					c.Intermediate = append(c.Intermediate, b)
+			case b >= 0x20 && b <= 0x2f:
+				c.Intermediate = append(c.Intermediate, b)
 
-				case b >= 0x40 && b <= 0x7e:
-					c.Final = b
-					return c, nil
+			case b >= 0x40 && b <= 0x7e:
+				c.Final = b
+				return c, nil
 
-				default:
-					return Text(buf), nil
-				}
+			default:
+				return Text(buf), nil
 			}
-
-		default:
-			return Text(buf), nil
 		}
 	}
 }
