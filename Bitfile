@@ -4,7 +4,8 @@ DEST = ./build
   build: mkdir -p %{DEST}
 
 %{DEST}/bit: **/*.go %{DEST}
-  build: go build -v -o %{DEST}/bit ./cmd/bit
+  build:
+    go build -v -o %{DEST}/bit ./cmd/bit
 
 parser/override_string.go: parser/parser.go
   build: go generate %{IN}
