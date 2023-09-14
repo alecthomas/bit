@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strings"
 	"syscall"
@@ -162,10 +163,7 @@ func (l *Logger) Errorf(format string, args ...interface{}) {
 	l.logf(LogLevelError, format, args...)
 }
 
-// Exec a command
-//
-// TODO: Override the PTY width to be the terminal width minus the margin. We'd have
-// to trap SIGWINCH, get our width, then update the PTY width accordingly.
+// Exec a command.
 func (l *Logger) Exec(dir, command string) error {
 	if dir == "" || dir == "." {
 		dir = "."
@@ -185,6 +183,17 @@ func (l *Logger) Exec(dir, command string) error {
 	if err != nil {
 		return err
 	}
+
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	defer signal.Stop(winch)
+	go func() {
+		for range winch {
+			if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+				_ = pty.Setsize(p, &pty.Winsize{Rows: uint16(h), Cols: uint16(w) - 17})
+			}
+		}
+	}()
 	// Resize the PTY to exclude the margin.
 	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
 		_ = pty.Setsize(p, &pty.Winsize{Rows: uint16(h), Cols: uint16(w) - 17})

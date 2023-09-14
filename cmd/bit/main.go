@@ -18,7 +18,10 @@ import (
 	"github.com/alecthomas/bit/parser"
 )
 
+var version = "dev"
+
 type CLI struct {
+	Version kong.VersionFlag `help:"Show version."`
 	logging.LogConfig
 	CPUProfile string             `help:"Write CPU profile to file." type:"file" hidden:""`
 	File       *os.File           `short:"f" help:"Bitfile to load." required:"" default:"Bitfile"`
@@ -40,6 +43,7 @@ func main() {
 	kong.Parse(cli, kong.Description(description), kong.HelpOptions{
 		FlagsLast: true,
 	}, kong.Vars{
+		"version": version,
 		"describe_help": `Where ASPECT is one of:
 		files: list all files Bit has determined are inputs and outputs
 		deps: show dependency graph

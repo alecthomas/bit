@@ -16,7 +16,6 @@ require (
 )
 
 require (
-	github.com/aoldershaw/ansi v0.0.0-20210128170437-8c5426635e02
 	github.com/hexops/gotextdiff v1.0.3 // indirect
 	golang.org/x/sys v0.12.0 // indirect
 	golang.org/x/term v0.12.0
