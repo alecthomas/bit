@@ -7,8 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/alecthomas/bit/engine/csi"
@@ -201,6 +201,7 @@ func (l *Logger) Exec(dir, command string) error {
 	defer t.Close()
 	defer p.Close()
 	lw := l.WriterAt(LogLevelInfo)
+	defer lw.Close()
 	cmd := exec.Command("/bin/sh", "-c", command)
 	cmd.Dir = dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -218,55 +219,105 @@ func (l *Logger) Exec(dir, command string) error {
 }
 
 // WriterAt returns a writer that logs each line at the given level.
-func (l *Logger) WriterAt(level LogLevel) *io.PipeWriter {
+func (l *Logger) WriterAt(level LogLevel) io.WriteCloser {
 	// Based on MIT licensed Logrus https://github.com/sirupsen/logrus/blob/bdc0db8ead3853c56b7cd1ac2ba4e11b47d7da6b/writer.go#L27
 	reader, writer := io.Pipe()
 
-	go l.writerScanner(reader, level)
-	runtime.SetFinalizer(writer, writerFinalizer)
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go l.writerScanner(wg, reader, level)
+	return &pipeWait{r: reader, PipeWriter: writer, wg: wg}
+}
 
-	return writer
+type pipeWait struct {
+	r *io.PipeReader
+	*io.PipeWriter
+	wg *sync.WaitGroup
+}
+
+func (p pipeWait) Close() error {
+	err := p.PipeWriter.Close()
+	p.wg.Wait()
+	return err
 }
 
 // There is a bit of magic here to support cursor horizontal absolute escape
 // sequences. When a new position is requested, we add the width of the margin.
-func (l *Logger) writerScanner(r *io.PipeReader, level LogLevel) {
+func (l *Logger) writerScanner(wg *sync.WaitGroup, r *io.PipeReader, level LogLevel) {
 	defer r.Close()
+	defer wg.Done()
+
+	w, _ := os.OpenFile("foo", os.O_WRONLY|os.O_APPEND, 0600)
+	defer w.Close()
 
 	esc := csi.NewReader(r)
+	drawPrefix := true
+	var newline []byte
 	for {
 		segment, err := esc.Read()
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+			os.Stdout.Write(newline)
 			return
 		} else if err != nil {
 			l.Warnf("error reading CSI sequence: %s", err)
 			return
 		}
+
+		// If we have a CSI sequence, possibly intercept it to cater for the margin.
+		// But in all cases we want to transform it to Text.
 		if cs, ok := segment.(csi.CSI); ok {
-			if cs.Final == 'G' {
-				params, err := cs.IntParams()
-				if err != nil || len(params) != 1 {
-					segment = csi.Text(cs.String())
-				} else {
-					// We have a CHA sequence, so add the margin width.
-					col := params[0]
-					col += 18
-					segment = csi.Text(fmt.Sprintf("\033[%dG", col))
-				}
-			} else {
+			// All the cases we intercept are single parameter sequences.
+			params, err := cs.IntParams()
+			if err != nil || len(params) != 1 {
 				segment = csi.Text(cs.String())
+			} else {
+				switch cs.Final {
+				case 'G': // G is cursor horizontal absolute.
+					// We have a CHA sequence, so add the margin width.
+					col := params[0] + 18
+					segment = csi.Text(fmt.Sprintf("\033[%dG", col))
+
+				case 'K': // K is erase in line. We want to intercept 1 (clear to start of line) and 2 (clear entire line).
+					if params[0] == 1 || params[0] == 2 {
+						// Save the cursor position.
+						text := []byte("\033[s")
+						// Apply the CSI.
+						text = append(text, cs.String()...)
+						// Move to the start of the line.
+						text = append(text, "\033[1G"...)
+						// Write the prefix.
+						text = append(text, l.getPrefix(level)...)
+						// Restore the cursor position.
+						text = append(text, "\033[u"...)
+
+						segment = csi.Text(text)
+					} else {
+						segment = csi.Text(cs.String())
+					}
+				default:
+					segment = csi.Text(cs.String())
+				}
 			}
 		}
 
 		for _, b := range segment.(csi.Text) { //nolint:forcetypeassert
-			os.Stdout.Write([]byte{b})
+			w.Write([]byte{b}) //nolint:errcheck
 			if b == '\r' || b == '\n' {
-				os.Stdout.Write([]byte(l.getPrefix(level)))
+				newline = append(newline, b)
+				continue
 			}
+			if drawPrefix {
+				os.Stdout.Write([]byte(l.getPrefix(level)))
+				drawPrefix = false
+			}
+			for _, nl := range newline {
+				os.Stdout.Write([]byte{nl})
+				if nl == '\n' {
+					os.Stdout.Write([]byte(l.getPrefix(level)))
+				}
+			}
+			newline = nil
+			os.Stdout.Write([]byte{b})
 		}
 	}
-}
-
-func writerFinalizer(writer *io.PipeWriter) {
-	_ = writer.Close()
 }

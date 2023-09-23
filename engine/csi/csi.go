@@ -76,10 +76,15 @@ func (r *Reader) Read() (Segment, error) {
 	}
 }
 
-// Segment is a segment of a terminal stream.
+// Segment of a terminal stream, either [CSI] or [Text].
 //
 //sumtype:decl
-type Segment interface{ segment() }
+type Segment interface {
+	segment()
+	String() string
+}
+
+var _ Segment = CSI{}
 
 // CSI represents an escape sequence.
 type CSI struct {
@@ -103,11 +108,14 @@ func (c CSI) IntParams() ([]int, error) {
 	return out, nil
 }
 
-func (c *CSI) String() string {
+func (c CSI) String() string {
 	return fmt.Sprintf("\033[%s%s%c", c.Params, c.Intermediate, c.Final)
 }
+
+var _ Segment = Text{}
 
 // Text is a text segment.
 type Text []byte
 
-func (t Text) segment() {}
+func (t Text) segment()       {}
+func (t Text) String() string { return string(t) }
