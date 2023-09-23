@@ -247,9 +247,6 @@ func (l *Logger) writerScanner(wg *sync.WaitGroup, r *io.PipeReader, level LogLe
 	defer r.Close()
 	defer wg.Done()
 
-	w, _ := os.OpenFile("foo", os.O_WRONLY|os.O_APPEND, 0600)
-	defer w.Close()
-
 	esc := csi.NewReader(r)
 	drawPrefix := true
 	var newline []byte
@@ -301,7 +298,6 @@ func (l *Logger) writerScanner(wg *sync.WaitGroup, r *io.PipeReader, level LogLe
 		}
 
 		for _, b := range segment.(csi.Text) { //nolint:forcetypeassert
-			w.Write([]byte{b}) //nolint:errcheck
 			if b == '\r' || b == '\n' {
 				newline = append(newline, b)
 				continue
