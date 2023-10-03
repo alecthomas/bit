@@ -307,6 +307,8 @@ func (r *RefList) Strings() []string {
 type Ref struct {
 	Pos lexer.Position
 
+	// Text is the text body of a Ref.
+	//
 	// This is a bit hairy because we need to explicitly match WS
 	// to "un"-elide it, but we don't want to capture it.
 	Text string `WS? ((?!WS) @(Var | Cmd | Ident | Number | "-" | "/" | "." | "*" | "@" | "[" | "]" | "{" | "}" | "!" | ","))+ | @(String | StringLiteral | MultilineString)`

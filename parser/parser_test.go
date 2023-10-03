@@ -4,7 +4,6 @@ import (
 	"embed"
 	"io/fs"
 	"os"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -232,28 +231,9 @@ func TestParser(t *testing.T) {
 			}
 			bitfile, err := parser.ParseString("", input, options...)
 			assert.NoError(t, err, "%s\n%s", repr.String(tokens, repr.Indent("  ")), repr.String(bitfile, repr.Indent("  ")))
-			normaliseAllNodes(bitfile)
-			assert.Equal(t, test.expected, bitfile, repr.String(tokens, repr.Indent("  ")))
+			assert.Equal(t, test.expected, bitfile, repr.String(tokens, repr.Indent("  ")), assert.Exclude[lexer.Position]())
 		})
 	}
-}
-
-func normaliseAllNodes[T Node](node T) T {
-	_ = Visit(node, func(node Node, next func() error) error {
-		normaliseNode(node)
-		return next()
-	})
-	return node
-}
-
-func normaliseNode[T any](node T) T {
-	v := reflect.Indirect(reflect.ValueOf(node))
-	f := v.FieldByName("Pos")
-	if !f.CanAddr() {
-		panic(node)
-	}
-	f.Set(reflect.Zero(f.Type()))
-	return node
 }
 
 func tokenise(t *testing.T, input string) []lexer.Token {
@@ -284,6 +264,5 @@ func TestParseSamples(t *testing.T) {
 func TestParseRefList(t *testing.T) {
 	refs, err := ParseRefList(lexer.Position{}, `a b c`)
 	assert.NoError(t, err)
-	normaliseAllNodes(refs)
-	assert.Equal(t, &RefList{Refs: []*Ref{{Text: "a"}, {Text: "b"}, {Text: "c"}}}, refs)
+	assert.Equal(t, &RefList{Refs: []*Ref{{Text: "a"}, {Text: "b"}, {Text: "c"}}}, refs, assert.Exclude[lexer.Position]())
 }

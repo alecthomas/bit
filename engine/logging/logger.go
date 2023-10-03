@@ -256,6 +256,7 @@ func (l *Logger) writerScanner(wg *sync.WaitGroup, r *io.PipeReader, level LogLe
 			os.Stdout.Write(newline)
 			return
 		} else if err != nil {
+			os.Stdout.Write(newline)
 			l.Warnf("error reading CSI sequence: %s", err)
 			return
 		}
