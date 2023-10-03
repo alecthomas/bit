@@ -11,7 +11,6 @@ import (
 
 // Globber is a file globber that respects .gitingore files.
 type Globber struct {
-	dir    string
 	ignore []string
 	files  []string
 	// Doesn't cache outputs
@@ -19,27 +18,29 @@ type Globber struct {
 	outputs func() []string
 }
 
-// NewGlobber creates a new Globber for the given directory.
+// NewGlobber creates a new Globber for the given fs.FS.
 //
 // The "outputs" function is called to provide additional files to be
 // considered when globbing. This is used for files output by the
 // build process.
-func NewGlobber(root string, outputs func() []string) (*Globber, error) {
-	ignore := LoadGitIgnore(root)
+func NewGlobber(root fs.FS, outputs func() []string) (*Globber, error) {
+	ignores := LoadGitIgnore(root, ".")
 	var files []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if path == root {
+	err := fs.WalkDir(root, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == "." {
 			return nil
 		}
-		if d.IsDir() && path != root {
-			extraIgnores := LoadGitIgnore(path)
+		if d.IsDir() && path != "." {
+			extraIgnores := LoadGitIgnore(root, path)
 			for _, extraIgnore := range extraIgnores {
-				extraIgnore = strings.TrimPrefix(strings.TrimPrefix(filepath.Join(path, extraIgnore), root), "/")
-				ignore = append(ignore, extraIgnore)
+				extraIgnore = filepath.Join(path, extraIgnore)
+				ignores = append(ignores, extraIgnore)
 			}
 		}
-		path = strings.TrimPrefix(path, root+"/")
-		for _, ignore := range ignore {
+		for _, ignore := range ignores {
 			if ok, err := doublestar.Match(ignore, path); ok || err != nil {
 				if d.IsDir() {
 					return filepath.SkipDir
@@ -55,8 +56,7 @@ func NewGlobber(root string, outputs func() []string) (*Globber, error) {
 	}
 	sort.Strings(files)
 	return &Globber{
-		dir:     root,
-		ignore:  ignore,
+		ignore:  ignores,
 		files:   files,
 		outputs: outputs,
 		cache:   map[string][]string{},

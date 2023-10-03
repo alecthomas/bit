@@ -15,8 +15,8 @@ jobs:
         uses: cashapp/activate-hermit@v1
       - name: Test
         run: go test ./...
-  lint:
-    name: Lint
+  sum-types:
+    name: Check Exhaustive Type Switch
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -25,3 +25,13 @@ jobs:
         uses: cashapp/activate-hermit@v1
       - name: golangci-lint
         run: golangci-lint run
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Init Hermit
+        uses: cashapp/activate-hermit@v1
+      - name: go-check-sumtype
+        run: go-check-sumtype ./...

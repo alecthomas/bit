@@ -88,7 +88,7 @@ func Compile(logger *logging.Logger, bitfile *parser.Bitfile) (*Engine, error) {
 			"CWD": {Pos: bitfile.Pos, Body: cwd},
 		},
 	}
-	engine.globber, err = internal.NewGlobber(cwd, engine.Outputs)
+	engine.globber, err = internal.NewGlobber(os.DirFS(cwd), engine.Outputs)
 	if err != nil {
 		return nil, err
 	}

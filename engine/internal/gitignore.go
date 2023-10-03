@@ -2,18 +2,17 @@ package internal
 
 import (
 	"bufio"
-	"os"
+	"io/fs"
 	"path"
-	"path/filepath"
 	"strings"
 )
 
-func LoadGitIgnore(dir string) []string {
+func LoadGitIgnore(root fs.FS, dir string) []string {
 	ignore := []string{
 		"**/.*",
 		"**/.*/**",
 	}
-	r, err := os.Open(filepath.Join(dir, ".gitignore"))
+	r, err := root.Open(path.Join(dir, ".gitignore"))
 	if err != nil {
 		return nil
 	}
