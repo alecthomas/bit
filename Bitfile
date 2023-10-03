@@ -7,5 +7,5 @@ DEST = ./build
   build:
     go build -v -o %{DEST}/bit ./cmd/bit
 
-parser/override_string.go: parser/parser.go
+parser/override_enumer.go: parser/parser.go
   build: go generate %{IN}

@@ -65,7 +65,7 @@ func ParseRefList(parent lexer.Position, text string) (*RefList, error) {
 	return refs, nil
 }
 
-//go:generate stringer -type=Override -linecomment
+//go:generate enumer -type=Override -linecomment
 type Override int
 
 const (
@@ -77,8 +77,8 @@ const (
 
 var _ participle.Parseable = (*Override)(nil)
 
-func (o *Override) GoString() string {
-	switch *o {
+func (o Override) GoString() string {
+	switch o {
 	case OverrideReplace:
 		return "OverrideReplace"
 	case OverridePrepend:
