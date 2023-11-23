@@ -320,6 +320,10 @@ func (e *Engine) setTargetCleanFunc(target *Target, directive *parser.Command) e
 }
 
 func (e *Engine) Clean(outputs []string) error {
+	outputs, err := e.expandOutputs(outputs)
+	if err != nil {
+		return err
+	}
 	outputsSet := map[string]bool{}
 	for _, output := range outputs {
 		outputsSet[output] = true
@@ -379,7 +383,24 @@ func (e *Engine) Close() error {
 }
 
 func (e *Engine) Build(outputs []string) error {
+	outputs, err := e.expandOutputs(outputs)
+	if err != nil {
+		return err
+	}
 	return e.build(outputs, map[string]bool{})
+}
+
+// Glob-expand outputs.
+func (e *Engine) expandOutputs(outputs []string) ([]string, error) {
+	expanded := []string{}
+	for _, output := range outputs {
+		glob, err := e.normalisePath(output)
+		if err != nil {
+			return nil, err
+		}
+		expanded = append(expanded, e.globber.MatchFilesystem(glob)...)
+	}
+	return expanded, nil
 }
 
 func (e *Engine) build(outputs []string, seen map[string]bool) error {

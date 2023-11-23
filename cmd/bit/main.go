@@ -31,7 +31,7 @@ type CLI struct {
 	List       bool               `short:"l" xor:"command" help:"List available targets."`
 	Describe   string             `short:"D" xor:"command" help:"Describe an aspect of the Bit build. ${describe_help}" required:"" enum:"files,deps,targets,ignored" placeholder:"ASPECT"`
 	Clean      bool               `short:"c" xor:"command" help:"Clean targets."`
-	Target     []string           `arg:"" optional:"" help:"Target to run."`
+	Target     []string           `arg:"" optional:"" help:"Targets to run (supports globbing)."`
 }
 
 const description = `
