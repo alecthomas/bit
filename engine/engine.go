@@ -394,11 +394,15 @@ func (e *Engine) Build(outputs []string) error {
 func (e *Engine) expandOutputs(outputs []string) ([]string, error) {
 	expanded := []string{}
 	for _, output := range outputs {
-		glob, err := e.normalisePath(output)
+		normalised, err := e.normalisePath(output)
 		if err != nil {
 			return nil, err
 		}
-		expanded = append(expanded, e.globber.MatchFilesystem(glob)...)
+		globbed := e.globber.MatchFilesystem(normalised)
+		if len(globbed) == 0 {
+			return nil, fmt.Errorf("no matching outputs for %q", normalised)
+		}
+		expanded = append(expanded, globbed...)
 	}
 	return expanded, nil
 }
