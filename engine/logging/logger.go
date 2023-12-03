@@ -11,7 +11,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/alecthomas/bit/engine/csi"
+	"github.com/alecthomas/bit/engine/logging/csi"
 	"github.com/creack/pty"
 	"github.com/kballard/go-shellquote"
 	"github.com/mattn/go-isatty"

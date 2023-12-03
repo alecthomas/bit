@@ -9,13 +9,13 @@ import (
 
 type HashDB struct {
 	path   string
-	hashes map[string]hasher
+	hashes map[string]Hasher
 }
 
 func NewHashDB(path string) (*HashDB, error) {
 	db := &HashDB{
 		path:   path,
-		hashes: map[string]hasher{},
+		hashes: map[string]Hasher{},
 	}
 	r, err := os.Open(path)
 	if err == nil {
@@ -48,12 +48,12 @@ func (db *HashDB) Close() error {
 	return os.Rename(db.path+"~", db.path)
 }
 
-func (db *HashDB) Get(path string) (hasher, bool) {
+func (db *HashDB) Get(path string) (Hasher, bool) {
 	h, ok := db.hashes[path]
 	return h, ok
 }
 
-func (db *HashDB) Set(path string, hash hasher) {
+func (db *HashDB) Set(path string, hash Hasher) {
 	db.hashes[path] = hash
 }
 

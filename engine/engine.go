@@ -35,11 +35,11 @@ type Target struct {
 	buildFunc func(logger *logging.Logger, target *Target) error
 	cleanFunc func(logger *logging.Logger, target *Target) error
 	// Hash function for virtual targets.
-	hashFunc *internal.MemoisedFunction[hasher]
+	hashFunc *internal.MemoisedFunction[Hasher]
 	// Hash stored in the DB.
-	storedHash hasher
+	storedHash Hasher
 	// Hash computed from the filesystem.
-	realHash  hasher
+	realHash  Hasher
 	chdir     *parser.Ref
 	synthetic bool
 }
@@ -165,7 +165,7 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 
 					case "hash":
 						target.hashPos = directive.Value.Pos
-						target.hashFunc = internal.Memoise(func() (hasher, error) {
+						target.hashFunc = internal.Memoise(func() (Hasher, error) {
 							command, err := e.evaluateString(directive.Value.Pos, directive.Value.Body, target, map[string]bool{})
 							if err != nil {
 								return 0, participle.Errorf(directive.Value.Pos, "hash command is invalid")
@@ -176,8 +176,8 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 							if err != nil {
 								return 0, participle.Errorf(directive.Value.Pos, "failed to run hash command: %s", err)
 							}
-							hfh := newHasher()
-							hfh.bytes(output)
+							hfh := NewHasher()
+							hfh.Bytes(output)
 							return hfh, nil
 						})
 
@@ -481,10 +481,10 @@ func (e *Engine) defaultBuildFunc(log *logging.Logger, target *Target) error {
 }
 
 // A function used to compute a hash of an output.
-type outputRefHasher func(target *Target, ref *parser.Ref) (hasher, error)
+type outputRefHasher func(target *Target, ref *parser.Ref) (Hasher, error)
 
-func (e *Engine) recursivelyComputeHash(target *Target, refHasher outputRefHasher, seen map[string]bool, forEach func(*Target, hasher)) (hasher, error) {
-	h := newHasher()
+func (e *Engine) recursivelyComputeHash(target *Target, refHasher outputRefHasher, seen map[string]bool, forEach func(*Target, Hasher)) (Hasher, error) {
+	h := NewHasher()
 	for _, input := range target.inputs.Refs {
 		if _, ok := seen[input.Text]; ok {
 			continue
@@ -498,40 +498,40 @@ func (e *Engine) recursivelyComputeHash(target *Target, refHasher outputRefHashe
 		if err != nil {
 			return 0, err
 		}
-		h.update(subh)
+		h.Update(subh)
 	}
 	for _, output := range target.outputs.Refs {
 		rh, err := refHasher(target, output)
 		if err != nil {
 			return 0, participle.Wrapf(output.Pos, err, "hash failed")
 		}
-		h.update(rh)
+		h.Update(rh)
 	}
 	forEach(target, h)
 	return h, nil
 }
 
 // Compute hash of target - inputs and outputs.
-func (e *Engine) computeHash(target *Target, refHasher outputRefHasher) (hasher, error) {
-	h := newHasher()
+func (e *Engine) computeHash(target *Target, refHasher outputRefHasher) (Hasher, error) {
+	h := NewHasher()
 	for _, input := range target.inputs.Refs {
 		inputTarget, err := e.getTarget(input.Text)
 		if err != nil {
 			return 0, err
 		}
-		h.int(uint64(inputTarget.storedHash))
+		h.Int(uint64(inputTarget.storedHash))
 	}
 	for _, output := range target.outputs.Refs {
 		rh, err := refHasher(target, output)
 		if err != nil {
 			return 0, participle.Wrapf(output.Pos, err, "hash failed")
 		}
-		h.update(rh)
+		h.Update(rh)
 	}
 	return h, nil
 }
 
-func (e *Engine) dbRefHasher(target *Target, ref *parser.Ref) (hasher, error) { //nolint:revive
+func (e *Engine) dbRefHasher(target *Target, ref *parser.Ref) (Hasher, error) { //nolint:revive
 	h, ok := e.db.Get(ref.Text)
 	if !ok {
 		return 0, nil
@@ -540,8 +540,8 @@ func (e *Engine) dbRefHasher(target *Target, ref *parser.Ref) (hasher, error) { 
 }
 
 // Hash real files.
-func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (hasher, error) {
-	h := newHasher()
+func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (Hasher, error) {
+	h := NewHasher()
 	h.string(ref.Text)
 
 	// If we have a hash function, use that for every reference.
@@ -550,7 +550,7 @@ func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (hasher, error) 
 		if err != nil {
 			return 0, participle.Errorf(target.hashPos, "failed to compute hash: %s", err)
 		}
-		h.update(hf)
+		h.Update(hf)
 		return h, nil
 	}
 
@@ -559,10 +559,10 @@ func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (hasher, error) 
 		return 0, err
 	}
 
-	h.int(uint64(info.Mode()))
+	h.Int(uint64(info.Mode()))
 	if !info.IsDir() {
-		h.int(uint64(info.Size()))
-		h.int(uint64(info.ModTime().UnixNano()))
+		h.Int(uint64(info.Size()))
+		h.Int(uint64(info.ModTime().UnixNano()))
 	}
 	return h, nil
 }
@@ -660,13 +660,13 @@ func (e *Engine) evaluate() error {
 	// Second pass - restore hashes from the DB.
 	for _, target := range e.targets {
 		logger := e.targetLogger(target)
-		_, err := e.recursivelyComputeHash(target, e.dbRefHasher, map[string]bool{}, func(target *Target, h hasher) {
+		_, err := e.recursivelyComputeHash(target, e.dbRefHasher, map[string]bool{}, func(target *Target, h Hasher) {
 			target.storedHash = h
 		})
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		_, err = e.recursivelyComputeHash(target, e.realRefHasher, map[string]bool{}, func(target *Target, h hasher) {
+		_, err = e.recursivelyComputeHash(target, e.realRefHasher, map[string]bool{}, func(target *Target, h Hasher) {
 			target.realHash = h
 		})
 		if err != nil && !errors.Is(err, os.ErrNotExist) {

@@ -8,20 +8,20 @@ import (
 const offset64 = 14695981039346656037
 const prime64 = 1099511628211
 
-type hasher uint64
+type Hasher uint64
 
-func newHasher() hasher { return offset64 }
+func NewHasher() Hasher { return offset64 }
 
 // Update the hash with a uint64.
-func (h *hasher) int(data uint64) {
+func (h *Hasher) Int(data uint64) {
 	f := *h
-	f ^= hasher(data)
+	f ^= Hasher(data)
 	f *= prime64
 	*h = f
 }
 
 // Update the hash with another hash.
-func (h *hasher) update(other hasher) {
+func (h *Hasher) Update(other Hasher) {
 	f := *h
 	f ^= other
 	f *= prime64
@@ -29,25 +29,25 @@ func (h *hasher) update(other hasher) {
 }
 
 // Update the hash with a string.
-func (h *hasher) string(data string) {
+func (h *Hasher) string(data string) {
 	f := *h
 	for _, c := range data {
-		f ^= hasher(c)
+		f ^= Hasher(c)
 		f *= prime64
 	}
 	*h = f
 }
 
 // Update the hash with a byte slice.
-func (h *hasher) bytes(data []byte) {
+func (h *Hasher) Bytes(data []byte) {
 	f := *h
 	for _, c := range data {
-		f ^= hasher(c)
+		f ^= Hasher(c)
 		f *= prime64
 	}
 	*h = f
 }
 
-func (h *hasher) String() string {
+func (h *Hasher) String() string {
 	return fmt.Sprintf("%x", uint64(*h))
 }
