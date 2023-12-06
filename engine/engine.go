@@ -542,7 +542,7 @@ func (e *Engine) dbRefHasher(target *Target, ref *parser.Ref) (Hasher, error) { 
 // Hash real files.
 func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (Hasher, error) {
 	h := NewHasher()
-	h.string(ref.Text)
+	h.Str(ref.Text)
 
 	// If we have a hash function, use that for every reference.
 	if target.hashFunc != nil {

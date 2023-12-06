@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"sort"
 	"strings"
 
 	"github.com/alecthomas/kong"
@@ -81,6 +82,7 @@ func main() {
 
 	case cli.Describe == "deps":
 		deps := eng.Deps()
+		deps = mergeDepsWithCommonInputs(deps)
 		for in, deps := range deps {
 			w := len(in) + 1
 			fmt.Printf("%s:", in)
@@ -92,6 +94,7 @@ func main() {
 				w += len(dep)
 				fmt.Printf(" %s", dep)
 			}
+			fmt.Println()
 			fmt.Println()
 		}
 
@@ -152,4 +155,19 @@ func reportError(file *os.File, logger *logging.Logger, err error) {
 		logger.Errorf("%s^ error: %s", strings.Repeat(" ", pos.Column+len(prefix)-1), perr.Message())
 	}
 	os.Exit(1)
+}
+func mergeDepsWithCommonInputs(deps map[string][]string) map[string][]string {
+	inputHashes := map[engine.Hasher][]string{}
+	for output, inputs := range deps {
+		sort.Strings(inputs)
+		hasher := engine.NewHasher()
+		engine.HashSlice(&hasher, inputs)
+		inputHashes[hasher] = append(inputHashes[hasher], output)
+	}
+	merged := map[string][]string{}
+	for _, outputs := range inputHashes {
+		key := strings.Join(outputs, " \\\n")
+		merged[key] = deps[outputs[0]]
+	}
+	return merged
 }
