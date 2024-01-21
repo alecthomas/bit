@@ -16,6 +16,8 @@ require (
 	golang.design/x/reflect v0.0.0-20220504060917-02c43be63f3b
 )
 
+require github.com/alecthomas/types v0.10.1
+
 require (
 	github.com/hexops/gotextdiff v1.0.3 // indirect
 	golang.org/x/sys v0.16.0 // indirect

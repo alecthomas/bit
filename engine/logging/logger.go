@@ -11,8 +11,8 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/alecthomas/bit/engine/internal/eventsource"
 	"github.com/alecthomas/bit/engine/logging/csi"
+	"github.com/alecthomas/types/eventsource"
 	"github.com/creack/pty"
 	"github.com/kballard/go-shellquote"
 	"github.com/mattn/go-isatty"
@@ -111,7 +111,7 @@ func (l *Logger) Scope(scope string) *Logger {
 		scope += strings.Repeat(" ", margin-len(scope))
 	}
 	scope = strings.ReplaceAll(scope, "%", "%%")
-	return &Logger{scope: scope, level: l.level}
+	return &Logger{scope: scope, level: l.level, size: l.size}
 }
 
 var ansiTable = func() map[LogLevel]string {
