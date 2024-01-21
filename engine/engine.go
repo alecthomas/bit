@@ -135,7 +135,6 @@ func (e *Engine) analyse(bitfile *parser.Bitfile) error {
 				target.inputs = &parser.RefList{Pos: entry.Pos}
 			}
 			if entry.Outputs == nil {
-				fmt.Println(entry.Pos)
 				target.outputs = &parser.RefList{Pos: entry.Pos}
 			}
 			logger := e.targetLogger(target)
@@ -350,6 +349,7 @@ nextTarget:
 	return nil
 }
 
+// Outputs returns the list of explicit outputs.
 func (e *Engine) Outputs() []string {
 	set := map[string]bool{}
 	for _, target := range e.targets {
@@ -408,9 +408,6 @@ func (e *Engine) expandOutputs(outputs []string) ([]string, error) {
 }
 
 func (e *Engine) build(outputs []string, seen map[string]bool) error {
-	if len(outputs) == 0 {
-		outputs = e.Outputs()
-	}
 	for _, name := range outputs {
 		name, err := e.normalisePath(name) //nolint:govet
 		if err != nil {
@@ -442,7 +439,7 @@ func (e *Engine) build(outputs []string, seen map[string]bool) error {
 			}
 		}
 
-		log.Tracef("Building.")
+		log.Debugf("Building.")
 
 		// Build target.
 		err = target.buildFunc(log, target)
@@ -675,6 +672,8 @@ func (e *Engine) evaluate() error {
 		var changed string
 		if target.storedHash != target.realHash {
 			changed = " (changed)"
+		} else {
+			changed = " (no change)"
 		}
 		logger.Tracef("Hash: %016x -> %016x%s", target.storedHash, target.realHash, changed)
 	}
@@ -801,8 +800,11 @@ func (e *Engine) getTarget(name string) (*Target, error) {
 		},
 		vars:      Vars{},
 		cleanFunc: e.defaultCleanFunc,
-		buildFunc: func(logger *logging.Logger, target *Target) error { return nil },
-		chdir:     &parser.Ref{Text: "."},
+		buildFunc: func(logger *logging.Logger, target *Target) error {
+			logger.Tracef("No-op build for synthetic target")
+			return nil
+		},
+		chdir: &parser.Ref{Text: "."},
 	}
 	e.targets = append(e.targets, target)
 	e.outputs[RefKey(name)] = target

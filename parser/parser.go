@@ -291,6 +291,17 @@ type RefList struct {
 
 func (r *RefList) Position() lexer.Position { return r.Pos }
 
+func (r *RefList) String() string {
+	if r == nil {
+		return ""
+	}
+	strs := make([]string, len(r.Refs))
+	for i, ref := range r.Refs {
+		strs[i] = ref.String()
+	}
+	return strings.Join(strs, " ")
+}
+
 // Strings returns all the refs in the list as strings.
 func (r *RefList) Strings() []string {
 	if r == nil {
@@ -307,10 +318,10 @@ func (r *RefList) Strings() []string {
 type Ref struct {
 	Pos lexer.Position
 
-	// Text is the text body of a Ref.
-	//
 	// This is a bit hairy because we need to explicitly match WS
 	// to "un"-elide it, but we don't want to capture it.
+
+	// Text is the text body of a Ref.
 	Text string `WS? ((?!WS) @(Var | Cmd | Ident | Number | "-" | "/" | "." | "*" | "@" | "[" | "]" | "{" | "}" | "!" | ","))+ | @(String | StringLiteral | MultilineString)`
 }
 

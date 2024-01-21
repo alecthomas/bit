@@ -3,7 +3,8 @@ module github.com/alecthomas/bit
 go 1.21.6
 
 require (
-	github.com/alecthomas/assert/v2 v2.4.1
+	github.com/alecthomas/assert/v2 v2.4.0
+	github.com/alecthomas/atomic v0.1.0-alpha2
 	github.com/alecthomas/kong v0.8.1
 	github.com/alecthomas/participle/v2 v2.1.1
 	github.com/alecthomas/repr v0.3.0

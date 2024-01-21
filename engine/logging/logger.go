@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/alecthomas/bit/engine/internal/eventsource"
 	"github.com/alecthomas/bit/engine/logging/csi"
 	"github.com/creack/pty"
 	"github.com/kballard/go-shellquote"
@@ -20,8 +21,8 @@ import (
 
 type LogConfig struct {
 	Level LogLevel `help:"Log level (${enum})." enum:"trace,debug,info,notice,warn,error" default:"info"`
-	Debug bool     `help:"Enable debug mode." xor:"trace"`
-	Trace bool     `help:"Enable trace mode." xor:"trace"`
+	Debug bool     `help:"Force debug logging." xor:"level"`
+	Trace bool     `help:"Force trace logging." xor:"level"`
 }
 
 type LogLevel int
@@ -74,9 +75,14 @@ func (l *LogLevel) UnmarshalText(text []byte) error {
 	return nil
 }
 
+type terminalSize struct {
+	margin, width, height uint16
+}
+
 type Logger struct {
 	level LogLevel
 	scope string
+	size  *eventsource.EventSource[terminalSize]
 }
 
 func NewLogger(config LogConfig) *Logger {
@@ -86,15 +92,24 @@ func NewLogger(config LogConfig) *Logger {
 	} else if config.Debug {
 		level = LogLevelDebug
 	}
-	return &Logger{level: level}
+	logger := &Logger{
+		level: level,
+		size:  eventsource.New[terminalSize](),
+	}
+	logger.syncTermSize()
+	return logger
 }
 
 // Scope returns a new logger with the given scope.
 func (l *Logger) Scope(scope string) *Logger {
-	if len(scope) > 16 {
-		scope = "…" + scope[len(scope)-15:]
+	// Margin is 20% of terminal.
+	size := l.size.Load()
+	margin := int(size.margin)
+	if len(scope) > margin {
+		scope = "…" + scope[len(scope)-margin+1:]
+	} else {
+		scope += strings.Repeat(" ", margin-len(scope))
 	}
-	scope = fmt.Sprintf("%-16s", scope)
 	scope = strings.ReplaceAll(scope, "%", "%%")
 	return &Logger{scope: scope, level: l.level}
 }
@@ -184,20 +199,19 @@ func (l *Logger) Exec(dir, command string) error {
 		return err
 	}
 
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
-	go func() {
-		for range winch {
-			if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-				_ = pty.Setsize(p, &pty.Winsize{Rows: uint16(h), Cols: uint16(w) - 17})
-			}
-		}
-	}()
+	changes := l.size.Subscribe(nil)
+	defer l.size.Unsubscribe(changes)
+
 	// Resize the PTY to exclude the margin.
 	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-		_ = pty.Setsize(p, &pty.Winsize{Rows: uint16(h), Cols: uint16(w) - 17})
+		_ = pty.Setsize(p, &pty.Winsize{Rows: uint16(h), Cols: uint16(w) - (l.size.Load().margin + 1)})
 	}
+
+	go func() {
+		for size := range changes {
+			_ = pty.Setsize(p, &pty.Winsize{Rows: size.height, Cols: size.width - (size.margin + 1)})
+		}
+	}()
 	defer t.Close()
 	defer p.Close()
 	lw := l.WriterAt(LogLevelInfo)
@@ -317,4 +331,27 @@ func (l *Logger) writerScanner(wg *sync.WaitGroup, r *io.PipeReader, level LogLe
 			os.Stdout.Write([]byte{b})
 		}
 	}
+}
+
+func (l *Logger) syncTermSize() {
+	// Initialise terminal size.
+	size := terminalSize{margin: 16, width: 80, height: 25}
+	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+		margin := uint16(max(16, w/5))
+		size = terminalSize{margin: margin, width: uint16(w), height: uint16(h)}
+	}
+	l.size.Store(size)
+
+	// Watch WINCH for changes.
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	defer signal.Stop(winch)
+	go func() {
+		for range winch {
+			if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+				margin := uint16(max(16, w/5))
+				l.size.Store(terminalSize{margin: margin, width: uint16(w), height: uint16(h)})
+			}
+		}
+	}()
 }

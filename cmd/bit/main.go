@@ -46,10 +46,11 @@ func main() {
 	}, kong.Vars{
 		"version": version,
 		"describe_help": `Where ASPECT is one of:
-		files: list all files Bit has determined are inputs and outputs
-		deps: show dependency graph
-		targets: list all targets
-		ignored: list all loaded ignore patterns (from .gitignore files)
+
+	files: list all files Bit has determined are inputs and outputs
+	deps: show dependency graph
+	targets: list all targets
+	ignored: list all loaded ignore patterns (from .gitignore files)
 
 `,
 	})
@@ -72,8 +73,8 @@ func main() {
 
 	switch {
 	case cli.List, cli.Describe == "targets":
-		for _, target := range eng.Outputs() {
-			fmt.Println(target)
+		for _, output := range eng.Outputs() {
+			fmt.Println(output)
 		}
 
 	case cli.Clean:
