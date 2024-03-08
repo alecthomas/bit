@@ -671,11 +671,11 @@ func (e *Engine) evaluate() error {
 		}
 		var changed string
 		if target.storedHash != target.realHash {
-			changed = " (changed)"
+			changed = "(changed)"
 		} else {
-			changed = " (no change)"
+			changed = "(no change)"
 		}
-		logger.Tracef("Hash: %016x -> %016x%s", target.storedHash, target.realHash, changed)
+		logger.Tracef("%s - %s - %016x -> %016x", changed, target.outputs, target.storedHash, target.realHash)
 	}
 	return nil
 }

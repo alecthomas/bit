@@ -102,16 +102,21 @@ func NewLogger(config LogConfig) *Logger {
 
 // Scope returns a new logger with the given scope.
 func (l *Logger) Scope(scope string) *Logger {
+	return &Logger{scope: scope, level: l.level, size: l.size}
+}
+
+func (l *Logger) getScope() string {
 	// Margin is 20% of terminal.
 	size := l.size.Load()
 	margin := int(size.margin)
+	scope := l.scope
 	if len(scope) > margin {
 		scope = "…" + scope[len(scope)-margin+1:]
 	} else {
 		scope += strings.Repeat(" ", margin-len(scope))
 	}
 	scope = strings.ReplaceAll(scope, "%", "%%")
-	return &Logger{scope: scope, level: l.level, size: l.size}
+	return scope
 }
 
 var ansiTable = func() map[LogLevel]string {
@@ -140,8 +145,9 @@ func (l *Logger) getPrefix(level LogLevel) string {
 		return ""
 	}
 	prefix := ansiTable[level]
-	if l.scope != "" {
-		prefix = targetColour(l.scope) + l.scope + "\033[0m" + "| " + prefix
+	scope := l.getScope()
+	if scope != "" {
+		prefix = targetColour(scope) + scope + "\033[0m" + "| " + prefix
 	}
 	return prefix
 }
@@ -203,9 +209,8 @@ func (l *Logger) Exec(dir, command string) error {
 	defer l.size.Unsubscribe(changes)
 
 	// Resize the PTY to exclude the margin.
-	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-		_ = pty.Setsize(p, &pty.Winsize{Rows: uint16(h), Cols: uint16(w) - (l.size.Load().margin + 1)})
-	}
+	size := l.size.Load()
+	_ = pty.Setsize(p, &pty.Winsize{Rows: size.height, Cols: size.width - (l.size.Load().margin + 1)})
 
 	go func() {
 		for size := range changes {
@@ -286,7 +291,7 @@ func (l *Logger) writerScanner(wg *sync.WaitGroup, r *io.PipeReader, level LogLe
 				switch cs.Final {
 				case 'G': // G is cursor horizontal absolute.
 					// We have a CHA sequence, so add the margin width.
-					col := params[0] + 18
+					col := params[0] + int(l.size.Load().margin) + 2
 					segment = csi.Text(fmt.Sprintf("\033[%dG", col))
 
 				case 'K': // K is erase in line. We want to intercept 1 (clear to start of line) and 2 (clear entire line).
@@ -345,8 +350,8 @@ func (l *Logger) syncTermSize() {
 	// Watch WINCH for changes.
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
 	go func() {
+		defer signal.Stop(winch)
 		for range winch {
 			if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
 				margin := uint16(max(16, w/5))
