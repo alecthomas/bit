@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -392,6 +393,9 @@ func (e *Engine) Build(outputs []string) error {
 
 // Glob-expand outputs.
 func (e *Engine) expandOutputs(outputs []string) ([]string, error) {
+	if len(outputs) == 0 {
+		return e.Outputs(), nil
+	}
 	expanded := []string{}
 	for _, output := range outputs {
 		normalised, err := e.normalisePath(output)
@@ -555,12 +559,17 @@ func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (Hasher, error) 
 	if err != nil {
 		return 0, err
 	}
-
 	h.Int(uint64(info.Mode()))
-	if !info.IsDir() {
-		h.Int(uint64(info.Size()))
-		h.Int(uint64(info.ModTime().UnixNano()))
+	if info.IsDir() {
+		return h, nil
 	}
+
+	r, err := os.Open(ref.Text)
+	if err != nil {
+		return 0, err
+	}
+	defer r.Close()
+	_, _ = io.Copy(&h, r)
 	return h, nil
 }
 

@@ -36,6 +36,11 @@ func HashSlice[T string | uint64 | []byte | Hasher](hasher *Hasher, slice []T) {
 
 func NewHasher() Hasher { return offset64 }
 
+func (h *Hasher) Write(data []byte) (int, error) {
+	h.Bytes(data)
+	return len(data), nil
+}
+
 // Int updates the hash with a uint64.
 func (h *Hasher) Int(data uint64) {
 	f := *h
