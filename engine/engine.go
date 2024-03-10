@@ -48,14 +48,15 @@ type Target struct {
 type RefKey string
 
 type Engine struct {
-	cwd     string
-	globber *internal.Globber
-	log     *logging.Logger
-	vars    Vars
-	db      *HashDB
-	targets []*Target
-	outputs map[RefKey]*Target
-	inputs  map[RefKey]*Target
+	cwd       string
+	globber   *internal.Globber
+	log       *logging.Logger
+	vars      Vars
+	db        *HashDB
+	targets   []*Target
+	outputs   map[RefKey]*Target
+	inputs    map[RefKey]*Target
+	cacheHash map[string]Hasher
 }
 
 // Compile a Bitfile into an Engine ready to build targets.
@@ -88,6 +89,7 @@ func Compile(logger *logging.Logger, bitfile *parser.Bitfile) (*Engine, error) {
 		vars: map[string]*parser.Block{
 			"CWD": {Pos: bitfile.Pos, Body: cwd},
 		},
+		cacheHash: map[string]Hasher{},
 	}
 	engine.globber, err = internal.NewGlobber(os.DirFS(cwd), engine.Outputs)
 	if err != nil {
@@ -542,6 +544,9 @@ func (e *Engine) dbRefHasher(target *Target, ref *parser.Ref) (Hasher, error) { 
 
 // Hash real files.
 func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (Hasher, error) {
+	if h, ok := e.cacheHash[ref.Text]; ok {
+		return h, nil
+	}
 	h := NewHasher()
 	h.Str(ref.Text)
 
@@ -570,6 +575,7 @@ func (e *Engine) realRefHasher(target *Target, ref *parser.Ref) (Hasher, error) 
 	}
 	defer r.Close()
 	_, _ = io.Copy(&h, r)
+	e.cacheHash[ref.Text] = h
 	return h, nil
 }
 
