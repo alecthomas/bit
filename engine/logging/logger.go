@@ -345,7 +345,7 @@ func (l *Logger) syncTermSize() {
 		margin := uint16(max(16, w/5))
 		size = terminalSize{margin: margin, width: uint16(w), height: uint16(h)}
 	}
-	l.size.Store(size)
+	_ = l.size.Store(size)
 
 	// Watch WINCH for changes.
 	winch := make(chan os.Signal, 1)
@@ -355,7 +355,7 @@ func (l *Logger) syncTermSize() {
 		for range winch {
 			if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
 				margin := uint16(max(16, w/5))
-				l.size.Store(terminalSize{margin: margin, width: uint16(w), height: uint16(h)})
+				_ = l.size.Store(terminalSize{margin: margin, width: uint16(w), height: uint16(h)})
 			}
 		}
 	}()

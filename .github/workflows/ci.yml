@@ -16,7 +16,7 @@ jobs:
       - name: Test
         run: go test ./...
   sum-types:
-    name: Check Exhaustive Type Switch
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -26,7 +26,7 @@ jobs:
       - name: golangci-lint
         run: golangci-lint run
   lint:
-    name: Lint
+    name: Check Exhaustive Type Switch
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
