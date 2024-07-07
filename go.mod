@@ -3,7 +3,7 @@ module github.com/alecthomas/bit
 go 1.22.2
 
 require (
-	github.com/alecthomas/assert/v2 v2.8.1
+	github.com/alecthomas/assert/v2 v2.10.0
 	github.com/alecthomas/atomic v0.1.0-alpha2
 	github.com/alecthomas/kong v0.9.0
 	github.com/alecthomas/participle/v2 v2.1.1
@@ -16,10 +16,10 @@ require (
 	golang.design/x/reflect v0.0.0-20220504060917-02c43be63f3b
 )
 
-require github.com/alecthomas/types v0.13.0
+require github.com/alecthomas/types v0.16.0
 
 require (
 	github.com/hexops/gotextdiff v1.0.3 // indirect
-	golang.org/x/sys v0.19.0 // indirect
-	golang.org/x/term v0.19.0
+	golang.org/x/sys v0.22.0 // indirect
+	golang.org/x/term v0.22.0
 )
