@@ -20,6 +20,6 @@ require github.com/alecthomas/types v0.16.0
 
 require (
 	github.com/hexops/gotextdiff v1.0.3 // indirect
-	golang.org/x/sys v0.22.0 // indirect
-	golang.org/x/term v0.22.0
+	golang.org/x/sys v0.23.0 // indirect
+	golang.org/x/term v0.23.0
 )
