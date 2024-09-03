@@ -1,11 +1,6 @@
 run:
   tests: true
   timeout: 5m
-  skip-dirs:
-    - resources
-    - old
-  skip-files:
-    - cmd/protopkg/main.go
 
 output:
   print-issued-lines: false
@@ -13,15 +8,14 @@ output:
 linters:
   enable-all: true
   disable:
-    - maligned
-    - megacheck
+    - mnd # So annoying
+    - execinquery
     - lll
     - typecheck # `go build` catches this, and it doesn't currently work with Go 1.11 modules
     - goimports # horrendously slow with go modules :(
     - dupl # has never been actually useful
     - gochecknoglobals
     - gochecknoinits
-    - interfacer # author deprecated it because it provides bad suggestions
     - funlen
     - whitespace
     - godox
@@ -30,22 +24,18 @@ linters:
     - gomnd
     - gocognit
     - gocyclo
-    - scopelint
     - godot
     - nestif
     - testpackage
-    - goerr113
     - gci
     - gofumpt
-    - exhaustivestruct
     - nlreturn
     - forbidigo
     - cyclop
     - paralleltest
-    - ifshort # so annoying
-    - golint
     - tagliatelle
     - gomoddirectives
+    - err113
     - varnamelen
     - ireturn
     - containedctx
@@ -53,14 +43,10 @@ linters:
     - contextcheck
     - nonamedreturns
     - exhaustruct
-    - nosnakecase
     - nosprintfhostport
     - nilerr
     - goconst
     - prealloc
-    - deadcode # doesn't support generics
-    - varcheck # doesn't support generics
-    - structcheck # doesn't support generics
     - rowserrcheck # doesn't support generics
     - wastedassign # doesn't support generics
     - goprintffuncname
@@ -70,15 +56,20 @@ linters:
     - gofmt # autofmt
     - interfacebloat
     - tagalign
+    - nolintlint
+    - protogetter
+    - thelper
     - wrapcheck
+    - perfsprint
     - makezero
+    - exportloopref
 
 linters-settings:
   exhaustive:
     default-signifies-exhaustive: true
   govet:
-    check-shadowing: true
-    use-installed-packages: true
+    enable:
+      - "shadow"
   dupl:
     threshold: 100
   goconst:
@@ -89,18 +80,30 @@ linters-settings:
   gocritic:
     disabled-checks:
       - ifElseChain
+  errcheck:
+    check-blank: true
   depguard:
     rules:
       main:
-        files:
-          - "**/*.go"
         deny:
+          - pkg: github.com/pkg/errors
+            desc: "use fmt.Errorf or errors.New"
           - pkg: github.com/stretchr/testify
-            desc: "use github.com/alecthomas/assert/v2 instead"
+            desc: "use github.com/alecthomas/assert/v2"
+          - pkg: github.com/alecthomas/errors
+            desc: "use fmt.Errorf or errors.New"
+          - pkg: braces.dev/errtrace
+            desc: "use fmt.Errorf or errors.New"
+  # wrapcheck:
+  #   ignorePackageGlobs:
+  #     - github.com/TBD54566975/ftl/*
 
 issues:
   max-same-issues: 0
   max-issues-per-linter: 0
+  exclude-dirs:
+    - resources
+    - old
   exclude-use-default: false
   exclude:
     # Captured by errcheck.
@@ -122,8 +125,17 @@ issues:
     - "blank-imports"
     - 'should have comment \(or a comment on this block\) or be unexported'
     - caseOrder
+    - unused-parameter
+    - "^loopclosure:"
+    - 'shadow: declaration of "ctx" shadows declaration at'
+    - 'shadow: declaration of "ok" shadows declaration'
+    - "^dot-imports:"
+    - "fmt.Errorf can be replaced with errors.New"
+    - "fmt.Sprintf can be replaced with string concatenation"
+    - "strings.Title has been deprecated"
+    - "error returned from external package is unwrapped.*TranslatePGError"
     - "struct literal uses unkeyed fields"
     - "bad syntax for struct tag key"
-    - indent-error-flow
-    - unexported-return
-    - "^exported:"
+    - "exported: comment on exported type"
+    - "Error return value of .* is not checked"
+    - "G115"

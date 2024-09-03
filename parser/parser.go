@@ -68,6 +68,7 @@ func ParseRefList(parent lexer.Position, text string) (*RefList, error) {
 //go:generate enumer -type=Override -linecomment
 type Override int
 
+//nolint:revive
 const (
 	OverrideReplace Override = iota // replace
 	OverridePrepend                 // prepend
@@ -276,7 +277,7 @@ func (p *Parameter) Position() lexer.Position { return p.Pos }
 type Block struct {
 	Pos lexer.Position
 
-	Body string `WS? ((Indent NL+ @(WS | ~Dedent)+ Dedent) 
+	Body string `WS? ((Indent NL+ @(WS | ~Dedent)+ Dedent)
 						| @(WS | ~(NL|Dedent))*)`
 }
 

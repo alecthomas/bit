@@ -95,7 +95,7 @@ func (i *indentLexer) Next() (lexer.Token, error) {
 
 	nlPos := t.Pos
 	var appended []lexer.Token
-	for j := 0; j < strings.Count(t.Value, "\n"); j++ {
+	for range strings.Count(t.Value, "\n") {
 		appended = append(appended, lexer.Token{Pos: nlPos, Type: i.nlType, Value: "\n"})
 		nlPos.Line++
 		nlPos.Column = 1

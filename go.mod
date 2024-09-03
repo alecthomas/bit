@@ -1,6 +1,6 @@
 module github.com/alecthomas/bit
 
-go 1.22.2
+go 1.23.0
 
 require (
 	github.com/alecthomas/assert/v2 v2.10.0

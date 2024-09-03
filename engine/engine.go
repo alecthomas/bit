@@ -290,7 +290,7 @@ func (e *Engine) exportVariable(logger *logging.Logger, entry *parser.Assignment
 func (e *Engine) setTargetCleanFunc(target *Target, directive *parser.Command) error {
 	switch directive.Override {
 	case parser.OverrideDelete:
-		target.cleanFunc = func(logger *logging.Logger, target *Target) error { return nil }
+		target.cleanFunc = func(_ *logging.Logger, target *Target) error { return nil }
 
 	case parser.OverrideReplace:
 		target.cleanFunc = func(logger *logging.Logger, target *Target) error {
