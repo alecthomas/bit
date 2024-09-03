@@ -9,7 +9,7 @@ require (
 	github.com/alecthomas/participle/v2 v2.1.1
 	github.com/alecthomas/repr v0.4.0
 	github.com/bmatcuk/doublestar/v4 v4.6.1
-	github.com/creack/pty v1.1.21
+	github.com/creack/pty v1.1.23
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 	github.com/lithammer/dedent v1.1.0
 	github.com/mattn/go-isatty v0.0.20
@@ -20,6 +20,6 @@ require github.com/alecthomas/types v0.16.0
 
 require (
 	github.com/hexops/gotextdiff v1.0.3 // indirect
-	golang.org/x/sys v0.22.0 // indirect
-	golang.org/x/term v0.22.0
+	golang.org/x/sys v0.23.0 // indirect
+	golang.org/x/term v0.23.0
 )
