@@ -57,7 +57,7 @@ var (
 func targetColour(name string) string {
 	h := fnv.New32a()
 	h.Write([]byte(name))
-	return colours[h.Sum32()%uint32(len(colours))]
+	return colours[h.Sum32()%uint32(len(colours))] //nolint:gosec
 }
 
 func parseRGB(s string) (int, int, int) {

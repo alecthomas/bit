@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strconv"
 )
 
 // fnv64a hash function.
@@ -78,5 +79,5 @@ func (h *Hasher) Bytes(data []byte) {
 }
 
 func (h *Hasher) String() string {
-	return fmt.Sprintf("%x", uint64(*h))
+	return strconv.FormatUint(uint64(*h), 16)
 }

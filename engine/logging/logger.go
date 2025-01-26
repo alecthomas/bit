@@ -342,8 +342,8 @@ func (l *Logger) syncTermSize() {
 	// Initialise terminal size.
 	size := terminalSize{margin: 16, width: 80, height: 25}
 	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-		margin := uint16(max(16, w/5))
-		size = terminalSize{margin: margin, width: uint16(w), height: uint16(h)}
+		margin := uint16(max(16, w/5)) //nolint:gosec
+		size = terminalSize{margin: margin, width: uint16(w), height: uint16(h)} //nolint:gosec
 	}
 	_ = l.size.Store(size)
 
@@ -354,8 +354,8 @@ func (l *Logger) syncTermSize() {
 		defer signal.Stop(winch)
 		for range winch {
 			if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
-				margin := uint16(max(16, w/5))
-				_ = l.size.Store(terminalSize{margin: margin, width: uint16(w), height: uint16(h)})
+				margin := uint16(max(16, w/5)) //nolint:gosec
+				_ = l.size.Store(terminalSize{margin: margin, width: uint16(w), height: uint16(h)}) //nolint:gosec
 			}
 		}
 	}()

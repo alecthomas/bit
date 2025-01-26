@@ -44,7 +44,7 @@ func (e *EventSource[T]) Swap(value T) T {
 	return rv
 }
 
-func (e *EventSource[T]) CompareAndSwap(old, new T) bool { //nolint:predeclared
+func (e *EventSource[T]) CompareAndSwap(old, new T) bool { //nolint
 	if e.value.CompareAndSwap(old, new) {
 		e.Publish(new)
 		return true
