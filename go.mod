@@ -8,7 +8,7 @@ require (
 	github.com/alecthomas/kong v1.6.1
 	github.com/alecthomas/participle/v2 v2.1.1
 	github.com/alecthomas/repr v0.4.0
-	github.com/bmatcuk/doublestar/v4 v4.8.0
+	github.com/bmatcuk/doublestar/v4 v4.8.1
 	github.com/creack/pty v1.1.24
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 	github.com/lithammer/dedent v1.1.0
