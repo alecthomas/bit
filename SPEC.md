@@ -359,7 +359,7 @@ Test blocks expose two outputs: `report` (path to the JUnit XML file) and `passe
 
 ## 10. State
 
-When a provider returns non-nil `state` in its `apply-result`, the runtime persists it in the configured backend. On subsequent runs, this state is passed back as `prior_state`. Providers that return nil state have nothing persisted — the runtime treats them identically, there is no separate category of "stateful" vs "stateless" provider.
+When a provider returns non-nil `state` in its `apply-result`, the runtime persists it in the configured backend. State is serialized as JSON (`serde_json::Value`). On subsequent runs, this state is passed back as `prior_state`. Providers that return nil state have nothing persisted — the runtime treats them identically, there is no separate category of "stateful" vs "stateless" provider.
 
 ### Protected Blocks
 
@@ -444,7 +444,7 @@ pub enum ResourceKind {
 
 pub struct ApplyResult {
     pub outputs: Map,
-    pub state: Option<Vec<u8>>,
+    pub state: Option<serde_json::Value>,
 }
 
 /// A provider groups related resources and shared functions.
@@ -463,10 +463,10 @@ pub trait Resource {
     fn kind(&self) -> ResourceKind;
 
     fn resolve(&self, inputs: &Map) -> Result<ResolveResult>;
-    fn plan(&self, inputs: &Map, prior_state: Option<&[u8]>) -> Result<PlanResult>;
-    fn apply(&self, inputs: &Map, prior_state: Option<&[u8]>) -> Result<ApplyResult>;
-    fn destroy(&self, prior_state: &[u8]) -> Result<()>;
-    fn refresh(&self, prior_state: &[u8]) -> Result<ApplyResult>;
+    fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult>;
+    fn apply(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<ApplyResult>;
+    fn destroy(&self, prior_state: &serde_json::Value) -> Result<()>;
+    fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult>;
 }
 ```
 
