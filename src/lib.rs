@@ -3,6 +3,7 @@ pub mod cache;
 pub mod dag;
 pub mod engine;
 pub mod expr;
+pub mod loader;
 pub mod parser;
 pub mod provider;
 pub mod providers;
