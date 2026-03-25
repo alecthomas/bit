@@ -21,6 +21,7 @@ pub enum EvalError {
 }
 
 /// Scope for variable lookups during expression evaluation.
+#[derive(Clone)]
 pub struct Scope {
     vars: HashMap<String, Value>,
 }
