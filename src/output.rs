@@ -11,6 +11,11 @@ pub enum Event {
     Skipped,
     Done,
     Failed,
+    Create,
+    Update,
+    Replace,
+    Destroy,
+    NoChange,
 }
 
 impl Event {
@@ -20,6 +25,11 @@ impl Event {
             Event::Skipped => "·",
             Event::Done => "✔",
             Event::Failed => "✘",
+            Event::Create => "+",
+            Event::Update => "~",
+            Event::Replace => "!",
+            Event::Destroy => "-",
+            Event::NoChange => "·",
         }
     }
 
@@ -29,6 +39,11 @@ impl Event {
             Event::Skipped => Color::Primary,
             Event::Done => Color::Green,
             Event::Failed => Color::Red,
+            Event::Create => Color::Green,
+            Event::Update => Color::Yellow,
+            Event::Replace => Color::Magenta,
+            Event::Destroy => Color::Red,
+            Event::NoChange => Color::Primary,
         }
     }
 }

@@ -5,10 +5,10 @@ use std::process;
 use clap::{Parser, Subcommand};
 use yansi::Paint;
 
-use bit::engine::{self, BlockPlan};
+use bit::engine;
 use bit::loader;
 use bit::output::Output;
-use bit::provider::{PlanAction, ProviderRegistry};
+use bit::provider::ProviderRegistry;
 use bit::providers::exec::ExecProvider;
 use bit::state;
 use bit::value::Map;
@@ -81,27 +81,6 @@ fn load_module(registry: &ProviderRegistry) -> (bit::dag::Dag, loader::BaseScope
     (dag, base, store)
 }
 
-fn print_plans(plans: &[BlockPlan], verb: &str) {
-    if plans.is_empty() {
-        println!("No blocks to {verb}.");
-        return;
-    }
-    for bp in plans {
-        let (symbol, color) = match bp.plan.action {
-            PlanAction::Create => ("+", yansi::Color::Green),
-            PlanAction::Update => ("~", yansi::Color::Yellow),
-            PlanAction::Replace => ("!", yansi::Color::Magenta),
-            PlanAction::Destroy => ("-", yansi::Color::Red),
-            PlanAction::None => (" ", yansi::Color::Primary),
-        };
-        let prefix = Paint::paint(&symbol, color).bold();
-        let name = Paint::paint(bp.name.as_str(), color).bold();
-        println!("  {prefix} {name}: {}", bp.plan.description);
-    }
-    let changes = plans.iter().filter(|p| p.plan.action != PlanAction::None).count();
-    println!("\n{} block(s) {verb}.", changes.to_string().bold());
-}
-
 fn main() {
     let cli = Cli::parse();
     let registry = default_registry();
@@ -109,8 +88,11 @@ fn main() {
     match cli.command {
         Command::Plan { target } => {
             let (mut dag, base, _store) = load_module(&registry);
-            match engine::plan(&mut dag, &base, target.as_deref()) {
-                Ok(plans) => print_plans(&plans, "to change"),
+            let names = dag.block_names();
+            let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            let output = Output::new(&name_refs);
+            match engine::plan(&mut dag, &base, &output, target.as_deref()) {
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
                     process::exit(1);

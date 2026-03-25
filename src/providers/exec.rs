@@ -97,14 +97,14 @@ impl Resource for ExecResource {
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
                 action: PlanAction::Create,
-                description: format!("run: {command}"),
+                description: command.to_string(),
             });
         };
 
         if prior.command != command {
             return Ok(PlanResult {
                 action: PlanAction::Update,
-                description: format!("run: {command}"),
+                description: command.to_string(),
             });
         }
 
@@ -112,7 +112,7 @@ impl Resource for ExecResource {
         if current_hashes != prior.input_hashes {
             return Ok(PlanResult {
                 action: PlanAction::Update,
-                description: format!("run: {command}"),
+                description: command.to_string(),
             });
         }
 

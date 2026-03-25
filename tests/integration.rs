@@ -53,7 +53,7 @@ fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
 fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let module = parser::parse(input).expect("parse failed");
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store).expect("load failed");
-    engine::plan(&mut dag, &base, None).expect("plan failed")
+    engine::plan(&mut dag, &base, &Output::new(&[]), None).expect("plan failed")
 }
 
 fn run_destroy(input: &str, store: &MemoryStore) {

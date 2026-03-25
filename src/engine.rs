@@ -1,5 +1,6 @@
 use crate::dag::{Dag, DagError};
 use crate::expr::{self, EvalError, Scope};
+
 use crate::loader::BaseScope;
 use crate::output::{Event, Output};
 use crate::provider::{BoxError, PlanAction, PlanResult, ResourceKind};
@@ -32,8 +33,23 @@ pub struct BlockPlan {
     pub plan: PlanResult,
 }
 
+fn plan_action_to_event(action: &PlanAction) -> Event {
+    match action {
+        PlanAction::Create => Event::Create,
+        PlanAction::Update => Event::Update,
+        PlanAction::Replace => Event::Replace,
+        PlanAction::Destroy => Event::Destroy,
+        PlanAction::None => Event::NoChange,
+    }
+}
+
 /// Plan all blocks in the DAG (or a target subset), returning what would change.
-pub fn plan(dag: &mut Dag, base: &BaseScope, target: Option<&str>) -> Result<Vec<BlockPlan>, EngineError> {
+pub fn plan(
+    dag: &mut Dag,
+    base: &BaseScope,
+    output: &Output,
+    target: Option<&str>,
+) -> Result<Vec<BlockPlan>, EngineError> {
     let order = match target {
         Some(t) => dag.target_order(t)?,
         None => dag.topo_order()?,
@@ -44,6 +60,7 @@ pub fn plan(dag: &mut Dag, base: &BaseScope, target: Option<&str>) -> Result<Vec
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
+        let writer = output.writer(name);
 
         let inputs = eval_fields(&node.fields, &scope).map_err(|e| EngineError::Eval {
             block: name.clone(),
@@ -70,7 +87,8 @@ pub fn plan(dag: &mut Dag, base: &BaseScope, target: Option<&str>) -> Result<Vec
             ));
         }
 
-        // Put empty outputs in scope for downstream planning
+        writer.event(plan_action_to_event(&result.action), &result.description);
+
         scope.set(name, Value::Map(Map::new()));
 
         plans.push(BlockPlan {
@@ -333,7 +351,7 @@ mod tests {
         let module = parser::parse(&input).unwrap();
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        let plans = plan(&mut dag, &base, None).unwrap();
+        let plans = plan(&mut dag, &base, &Output::new(&[]), None).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].plan.action, PlanAction::Create);
     }

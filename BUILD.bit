@@ -1,4 +1,5 @@
-let inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
+#let inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
+let inputs = exec("cargo package --list --allow-dirty") | lines
 
 # Debug build
 debug = exec {
@@ -13,9 +14,6 @@ release = exec {
   output = "target/release/bit"
   inputs = inputs
 }
-
-# Build debug and release binaries
-target build = [debug, release]
 
 # Build debug binary only
 target debug = [debug]
