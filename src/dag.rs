@@ -137,6 +137,17 @@ impl Dag {
     pub fn has_block(&self, name: &str) -> bool {
         self.indices.contains_key(name)
     }
+
+    /// Get the names of blocks that `name` depends on (direct dependencies).
+    pub fn deps(&self, name: &str) -> Vec<String> {
+        let Some(&idx) = self.indices.get(name) else {
+            return vec![];
+        };
+        self.graph
+            .neighbors_directed(idx, petgraph::Direction::Incoming)
+            .map(|n| self.graph[n].name.clone())
+            .collect()
+    }
 }
 
 impl Default for Dag {

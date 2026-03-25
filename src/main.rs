@@ -38,6 +38,11 @@ enum Command {
     },
     /// List top-level targets
     List,
+    /// Show the dependency graph
+    Graph {
+        /// Target to show (default: all blocks)
+        target: Option<String>,
+    },
 }
 
 fn default_registry() -> ProviderRegistry {
@@ -175,6 +180,34 @@ fn main() {
                         Some(doc) => println!("  {} — {}", name.bold(), doc.dim()),
                         None => println!("  {}", name.bold()),
                     }
+                }
+            }
+        }
+        Command::Graph { target } => {
+            let (dag, _base, _store) = load_module(&registry);
+            let order = match target.as_deref() {
+                Some(t) => match dag.target_order(t) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        eprintln!("{} {e}", "error:".red().bold());
+                        process::exit(1);
+                    }
+                },
+                None => match dag.topo_order() {
+                    Ok(o) => o,
+                    Err(e) => {
+                        eprintln!("{} {e}", "error:".red().bold());
+                        process::exit(1);
+                    }
+                },
+            };
+            for name in &order {
+                let deps = dag.deps(name);
+                if deps.is_empty() {
+                    println!("  {}", name.bold());
+                } else {
+                    let dep_list = deps.join(", ");
+                    println!("  {} {} {}", name.bold(), "<-".dim(), dep_list.dim());
                 }
             }
         }
