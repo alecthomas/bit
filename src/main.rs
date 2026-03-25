@@ -28,11 +28,13 @@ enum Command {
         target: Option<String>,
     },
     /// Apply all blocks (or a target)
+    #[command(alias = "build")]
     Apply {
         /// Target to apply (default: all blocks)
         target: Option<String>,
     },
     /// Destroy blocks in reverse dependency order
+    #[command(alias = "clean")]
     Destroy {
         /// Target to destroy (default: all blocks)
         target: Option<String>,
