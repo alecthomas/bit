@@ -141,12 +141,18 @@ fn main() {
         }
         Command::List => {
             let (dag, _base, _store) = load_module(&registry);
-            let targets = dag.target_names();
+            let targets = dag.targets();
             if targets.is_empty() {
                 println!("No targets defined.");
             } else {
-                for t in &targets {
-                    println!("  {t}");
+                let mut names: Vec<_> = targets.keys().collect();
+                names.sort();
+                for name in names {
+                    let target = &targets[name];
+                    match &target.doc {
+                        Some(doc) => println!("  {name} — {doc}"),
+                        None => println!("  {name}"),
+                    }
                 }
             }
         }

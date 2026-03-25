@@ -31,11 +31,17 @@ pub struct DagNode {
     pub prior_state: Option<serde_json::Value>,
 }
 
+/// A named target with optional documentation.
+pub struct DagTarget {
+    pub blocks: Vec<String>,
+    pub doc: Option<String>,
+}
+
 /// The dependency graph of blocks, ready for the engine.
 pub struct Dag {
     graph: DiGraph<DagNode, ()>,
     indices: HashMap<String, NodeIndex>,
-    targets: HashMap<String, Vec<String>>,
+    targets: HashMap<String, DagTarget>,
 }
 
 impl Dag {
@@ -70,8 +76,8 @@ impl Dag {
     }
 
     /// Register a target.
-    pub fn add_target(&mut self, name: String, blocks: Vec<String>) {
-        self.targets.insert(name, blocks);
+    pub fn add_target(&mut self, name: String, blocks: Vec<String>, doc: Option<String>) {
+        self.targets.insert(name, DagTarget { blocks, doc });
     }
 
     /// Validate the graph has no cycles.
@@ -89,10 +95,11 @@ impl Dag {
     /// Return block names for a target in topological order.
     /// Includes all transitive dependencies.
     pub fn target_order(&self, target: &str) -> Result<Vec<String>, DagError> {
-        let block_names = self
+        let t = self
             .targets
             .get(target)
             .ok_or_else(|| DagError::UnknownBlock(format!("target '{target}'")))?;
+        let block_names = &t.blocks;
 
         let mut needed = HashSet::new();
         for name in block_names {
@@ -116,9 +123,9 @@ impl Dag {
         self.indices.get(name).copied().map(|idx| &mut self.graph[idx])
     }
 
-    /// Get all target names.
-    pub fn target_names(&self) -> Vec<String> {
-        self.targets.keys().cloned().collect()
+    /// Get all targets with their docs.
+    pub fn targets(&self) -> &HashMap<String, DagTarget> {
+        &self.targets
     }
 
     /// Get all block names.

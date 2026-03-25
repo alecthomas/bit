@@ -25,15 +25,32 @@ pub fn parse(input: &str) -> Result<Module, ParseError> {
 // ── Whitespace & Comments ──
 
 fn ws(input: &mut &str) -> ModalResult<()> {
-    repeat(
-        0..,
-        alt((
-            take_while(1.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n').void(),
-            ('#', take_while(0.., |c: char| c != '\n')).void(),
-        )),
-    )
-    .map(|()| ())
-    .parse_next(input)
+    take_while(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n')
+        .void()
+        .parse_next(input)
+}
+
+/// Collect adjacent `# ...` comment lines as a doc string.
+/// Only consumes comment lines — leaves other whitespace to `ws`/`lex`.
+fn doc_comments(input: &mut &str) -> ModalResult<Option<String>> {
+    let mut lines = Vec::new();
+    loop {
+        // Skip blank lines between/before comments
+        take_while(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n').parse_next(input)?;
+        if input.starts_with('#') {
+            let _: char = any.parse_next(input)?;
+            opt(' ').parse_next(input)?;
+            let text: &str = take_while(0.., |c: char| c != '\n').parse_next(input)?;
+            lines.push(text.to_owned());
+        } else {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(lines.join("\n")))
+    }
 }
 
 /// Consume trailing whitespace after a parser.
@@ -342,18 +359,18 @@ fn field(input: &mut &str) -> ModalResult<Field> {
 // ── Statements ──
 
 fn module(input: &mut &str) -> ModalResult<Module> {
-    ws(input)?;
-    let statements = repeat(0.., statement).parse_next(input)?;
+    let statements = repeat(0.., doc_statement).parse_next(input)?;
     Ok(Module { statements })
 }
 
-fn statement(input: &mut &str) -> ModalResult<Statement> {
+fn doc_statement(input: &mut &str) -> ModalResult<Statement> {
+    let doc = doc_comments(input)?;
     alt((
         let_stmt.map(Statement::Let),
         param_stmt.map(Statement::Param),
-        target_stmt.map(Statement::Target),
+        |input: &mut &str| target_stmt(doc.clone(), input).map(Statement::Target),
         output_stmt.map(Statement::Output),
-        block_stmt.map(Statement::Block),
+        |input: &mut &str| block_stmt(doc.clone(), input).map(Statement::Block),
     ))
     .context(StrContext::Label("statement"))
     .parse_next(input)
@@ -388,7 +405,7 @@ fn param_stmt(input: &mut &str) -> ModalResult<Param> {
     Ok(Param { name, typ: t, default })
 }
 
-fn target_stmt(input: &mut &str) -> ModalResult<Target> {
+fn target_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Target> {
     keyword("target").parse_next(input)?;
     let name = cut_err(ident_string)
         .context(StrContext::Label("target name"))
@@ -399,7 +416,7 @@ fn target_stmt(input: &mut &str) -> ModalResult<Target> {
     let blocks = cut_err(delimited(lex('['), separated(0.., dotted_ident, lex(',')), lex(']')))
         .context(StrContext::Label("target block list"))
         .parse_next(input)?;
-    Ok(Target { name, blocks })
+    Ok(Target { name, doc, blocks })
 }
 
 fn dotted_ident(input: &mut &str) -> ModalResult<String> {
@@ -438,7 +455,7 @@ fn block_field(input: &mut &str) -> ModalResult<Field> {
     Ok(f)
 }
 
-fn block_stmt(input: &mut &str) -> ModalResult<Block> {
+fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
     let protected = opt(keyword("protected")).map(|o| o.is_some()).parse_next(input)?;
     let name = ident_string.parse_next(input)?;
     lex('=').parse_next(input)?;
@@ -465,6 +482,7 @@ fn block_stmt(input: &mut &str) -> ModalResult<Block> {
 
     Ok(Block {
         name,
+        doc,
         protected,
         provider,
         resource,
@@ -866,6 +884,56 @@ mod tests {
                 assert_eq!(b.fields[1].name, "output");
             }
             _ => panic!("expected Block"),
+        }
+    }
+
+    #[test]
+    fn parse_doc_comment_on_target() {
+        let input = "# Build everything\ntarget build = [server]\n";
+        let result = parse(input).unwrap();
+        match &result.statements[0] {
+            Statement::Target(t) => {
+                assert_eq!(t.name, "build");
+                assert_eq!(t.doc, Some("Build everything".into()));
+            }
+            _ => panic!("expected Target"),
+        }
+    }
+
+    #[test]
+    fn parse_doc_comment_on_block() {
+        let input = "# The main server binary\nserver = go.binary { main = \"./cmd/server\" }\n";
+        let result = parse(input).unwrap();
+        match &result.statements[0] {
+            Statement::Block(b) => {
+                assert_eq!(b.name, "server");
+                assert_eq!(b.doc, Some("The main server binary".into()));
+            }
+            _ => panic!("expected Block"),
+        }
+    }
+
+    #[test]
+    fn parse_multiline_doc_comment() {
+        let input = "# Build and push\n# the Docker image\ntarget deploy = [image]\n";
+        let result = parse(input).unwrap();
+        match &result.statements[0] {
+            Statement::Target(t) => {
+                assert_eq!(t.doc, Some("Build and push\nthe Docker image".into()));
+            }
+            _ => panic!("expected Target"),
+        }
+    }
+
+    #[test]
+    fn parse_no_doc_comment() {
+        let input = "target build = [server]\n";
+        let result = parse(input).unwrap();
+        match &result.statements[0] {
+            Statement::Target(t) => {
+                assert_eq!(t.doc, None);
+            }
+            _ => panic!("expected Target"),
         }
     }
 }

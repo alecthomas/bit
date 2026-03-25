@@ -1,15 +1,22 @@
+# Debug build
 debug = exec {
   command = "cargo build"
   output = "target/debug/bit"
   inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
 }
 
+# Optimised release build
 release = exec {
   command = "cargo build --release"
   output = "target/release/bit"
   inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
 }
 
+# Build debug and release binaries
 target build = [debug, release]
+
+# Build debug binary only
 target debug = [debug]
+
+# Build release binary only
 target release = [release]

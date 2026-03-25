@@ -20,6 +20,7 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub name: String,
+    pub doc: Option<String>,
     pub protected: bool,
     pub provider: String,
     pub resource: String,
@@ -51,6 +52,7 @@ pub struct Param {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
     pub name: String,
+    pub doc: Option<String>,
     pub blocks: Vec<String>,
 }
 
@@ -106,6 +108,7 @@ mod tests {
     fn build_simple_block() {
         let block = Block {
             name: "server".into(),
+            doc: None,
             protected: false,
             provider: "go".into(),
             resource: "binary".into(),
@@ -197,6 +200,7 @@ mod tests {
                 }),
                 Statement::Target(Target {
                     name: "build".into(),
+                    doc: None,
                     blocks: vec!["server".into(), "image".into()],
                 }),
             ],

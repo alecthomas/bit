@@ -84,7 +84,7 @@ pub fn load(
                 scope.set(&b.name, Value::Map(Map::new()));
             }
             Statement::Target(t) => {
-                dag.add_target(t.name.clone(), t.blocks.clone());
+                dag.add_target(t.name.clone(), t.blocks.clone(), t.doc.clone());
             }
             Statement::Output(_) => {
                 // Outputs are deferred — they reference block outputs
@@ -281,5 +281,21 @@ deploy = exec {
         let mi = order.iter().position(|n| n == "migrations").unwrap();
         let di = order.iter().position(|n| n == "deploy").unwrap();
         assert!(mi < di);
+    }
+
+    #[test]
+    fn load_target_doc() {
+        let input = r#"
+server = exec {
+  command = "build"
+  output = "out"
+}
+# Build the server
+target build = [server]
+"#;
+        let module = parser::parse(input).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
+        let targets = dag.targets();
+        assert_eq!(targets["build"].doc.as_deref(), Some("Build the server"));
     }
 }
