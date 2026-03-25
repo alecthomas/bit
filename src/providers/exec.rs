@@ -183,11 +183,13 @@ impl Resource for ExecResource {
         })
     }
 
-    fn destroy(&self, prior_state: &ExecState) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &ExecState, writer: &BlockWriter) -> Result<(), BoxError> {
         let path = Path::new(&prior_state.output);
         if path.is_dir() {
+            writer.line(&format!("rm -rf {}", prior_state.output));
             fs::remove_dir_all(path).ok();
         } else if path.is_file() {
+            writer.line(&format!("rm {}", prior_state.output));
             fs::remove_file(path).ok();
         }
         Ok(())
@@ -362,7 +364,9 @@ mod tests {
         };
 
         let resource = ExecResource;
-        Resource::destroy(&resource, &state).unwrap();
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        Resource::destroy(&resource, &state, &writer).unwrap();
         assert!(!output.exists());
     }
 

@@ -182,7 +182,12 @@ pub fn apply(
 }
 
 /// Destroy blocks in reverse dependency order.
-pub fn destroy(dag: &mut Dag, store: &dyn StateStore, target: Option<&str>) -> Result<(), EngineError> {
+pub fn destroy(
+    dag: &mut Dag,
+    store: &dyn StateStore,
+    output: &Output,
+    target: Option<&str>,
+) -> Result<(), EngineError> {
     let mut order = match target {
         Some(t) => dag.target_order(t)?,
         None => dag.topo_order()?,
@@ -191,22 +196,31 @@ pub fn destroy(dag: &mut Dag, store: &dyn StateStore, target: Option<&str>) -> R
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
+        let writer = output.writer(name);
 
         if node.protected {
+            writer.event(Event::Skipped, "protected");
             continue;
         }
 
         let Some(prior_state) = &node.prior_state else {
+            writer.event(Event::Skipped, "no state");
             continue;
         };
 
-        node.resource.destroy(prior_state).map_err(|e| EngineError::Provider {
-            block: name.clone(),
-            phase: "destroy",
-            source: e,
+        writer.event(Event::Starting, "destroying");
+
+        node.resource.destroy(prior_state, &writer).map_err(|e| {
+            writer.event(Event::Failed, &e.to_string());
+            EngineError::Provider {
+                block: name.clone(),
+                phase: "destroy",
+                source: e,
+            }
         })?;
 
         store.remove(name)?;
+        writer.event(Event::Done, "");
     }
 
     Ok(())
@@ -343,7 +357,7 @@ mod tests {
 
         // Reload with state, then destroy
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        destroy(&mut dag, &store, None).unwrap();
+        destroy(&mut dag, &store, &Output::new(&[]), None).unwrap();
         assert!(store.list().unwrap().is_empty());
     }
 
@@ -363,7 +377,7 @@ mod tests {
         apply(&mut dag, &base, &store, &Output::new(&[]), None).unwrap();
 
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        destroy(&mut dag, &store, None).unwrap();
+        destroy(&mut dag, &store, &Output::new(&[]), None).unwrap();
         // State should still exist — destroy was skipped
         assert!(!store.list().unwrap().is_empty());
     }

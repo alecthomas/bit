@@ -111,7 +111,7 @@ pub trait Resource {
         prior_state: Option<&Self::State>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<Self::State>, BoxError>;
-    fn destroy(&self, prior_state: &Self::State) -> Result<(), BoxError>;
+    fn destroy(&self, prior_state: &Self::State, writer: &BlockWriter) -> Result<(), BoxError>;
     fn refresh(&self, prior_state: &Self::State) -> Result<ApplyResult<Self::State>, BoxError>;
 }
 
@@ -129,7 +129,7 @@ pub trait DynResource {
         prior_state: Option<&serde_json::Value>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value>, BoxError>;
-    fn destroy(&self, prior_state: &serde_json::Value) -> Result<(), BoxError>;
+    fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError>;
     fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult<serde_json::Value>, BoxError>;
 }
 
@@ -171,9 +171,9 @@ impl<R: Resource> DynResource for R {
         })
     }
 
-    fn destroy(&self, prior_state: &serde_json::Value) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError> {
         let state: R::State = serde_json::from_value(prior_state.clone())?;
-        Resource::destroy(self, &state)
+        Resource::destroy(self, &state, writer)
     }
 
     fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult<serde_json::Value>, BoxError> {
@@ -301,7 +301,7 @@ mod tests {
             })
         }
 
-        fn destroy(&self, _prior_state: &StubState) -> Result<(), BoxError> {
+        fn destroy(&self, _prior_state: &StubState, _writer: &BlockWriter) -> Result<(), BoxError> {
             Ok(())
         }
 

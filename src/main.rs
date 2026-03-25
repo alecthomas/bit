@@ -132,40 +132,11 @@ fn main() {
         }
         Command::Destroy { target } => {
             let (mut dag, _base, store) = load_module(&registry);
-            // Show what will be destroyed before doing it
-            let order = match target.as_deref() {
-                Some(t) => dag.target_order(t),
-                None => dag.topo_order(),
-            };
-            match order {
-                Ok(mut names) => {
-                    names.reverse();
-                    for name in &names {
-                        if let Some(node) = dag.get_node(name) {
-                            if node.protected {
-                                println!("  {} {}: {}", " ".bold(), name.bold(), "protected, skipping".dim());
-                            } else if node.prior_state.is_some() {
-                                println!("  {} {}", "-".red().bold(), name.red().bold());
-                            }
-                        }
-                    }
-                    let had_output = names.iter().any(|n| {
-                        dag.get_node(n)
-                            .is_some_and(|node| node.protected || node.prior_state.is_some())
-                    });
-                    match engine::destroy(&mut dag, store.as_ref(), target.as_deref()) {
-                        Ok(()) => {
-                            if had_output {
-                                println!();
-                            }
-                            println!("{}", "Destroy complete.".green());
-                        }
-                        Err(e) => {
-                            eprintln!("{} {e}", "error:".red().bold());
-                            process::exit(1);
-                        }
-                    }
-                }
+            let names = dag.block_names();
+            let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            let output = Output::new(&name_refs);
+            match engine::destroy(&mut dag, store.as_ref(), &output, target.as_deref()) {
+                Ok(()) => {}
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
                     process::exit(1);
