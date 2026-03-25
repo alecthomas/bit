@@ -1,46 +1,49 @@
-use std::collections::HashMap;
-
 use crate::ast::{Module, Statement};
+use crate::dag::{Dag, DagError, DagNode, collect_block_refs, collect_depends_on};
 use crate::expr::{self, EvalError, Scope};
+use crate::provider::ProviderRegistry;
+use crate::state::{StateError, StateStore};
 use crate::value::{Map, Value};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
-    #[error("eval error: {0}")]
+    #[error("{0}")]
     Eval(#[from] EvalError),
+    #[error("{0}")]
+    Dag(#[from] DagError),
+    #[error("{0}")]
+    State(#[from] StateError),
     #[error("missing required param: {0}")]
     MissingParam(String),
-    #[error("duplicate name: {0}")]
-    Duplicate(String),
+    #[error("unknown provider/resource: {0}.{1}")]
+    UnknownResource(String, String),
 }
 
-/// A loaded block ready for the engine.
-#[derive(Debug, Clone)]
-pub struct LoadedBlock {
-    pub name: String,
-    pub provider: String,
-    pub resource: String,
-    pub protected: bool,
-    pub inputs: Map,
+/// The base scope of evaluated params and let bindings, shared with the engine
+/// for deferred field evaluation.
+pub struct BaseScope {
+    pub scope: Scope,
 }
 
-/// Result of loading a module.
-#[derive(Debug)]
-pub struct LoadedModule {
-    pub blocks: Vec<LoadedBlock>,
-    pub targets: HashMap<String, Vec<String>>,
-    pub outputs: HashMap<String, Value>,
-}
-
-/// Load a parsed module: evaluate lets, resolve params, evaluate block fields.
+/// Parse a module and build a fully wired DAG.
 ///
-/// `params` supplies values for declared parameters. Params with defaults
-/// fall back to those defaults if not supplied.
-pub fn load(module: &Module, params: &Map) -> Result<LoadedModule, LoadError> {
+/// - Evaluates params and let bindings into a base scope
+/// - Looks up resource implementations from the registry
+/// - Loads prior state from the store
+/// - Builds dependency edges from field refs and depends_on
+/// - Validates no cycles
+///
+/// Field expressions are NOT evaluated here — they're deferred to execution
+/// time because they may reference upstream block outputs.
+pub fn load(
+    module: &Module,
+    params: &Map,
+    registry: &ProviderRegistry,
+    store: &dyn StateStore,
+) -> Result<(Dag, BaseScope), LoadError> {
     let mut scope = Scope::new();
-    let mut blocks = Vec::new();
-    let mut targets = HashMap::new();
-    let mut outputs = HashMap::new();
+    let mut dag = Dag::new();
+    let mut block_names = Vec::new();
 
     for stmt in &module.statements {
         match stmt {
@@ -59,42 +62,86 @@ pub fn load(module: &Module, params: &Map) -> Result<LoadedModule, LoadError> {
                 scope.set(&l.name, value);
             }
             Statement::Block(b) => {
-                let mut inputs = Map::new();
-                for field in &b.fields {
-                    let value = expr::eval(&field.value, &scope)?;
-                    inputs.insert(field.name.clone(), value);
-                }
-                blocks.push(LoadedBlock {
+                let resource = registry
+                    .get_resource(&b.provider, &b.resource)
+                    .ok_or_else(|| LoadError::UnknownResource(b.provider.clone(), b.resource.clone()))?;
+
+                let prior_state = store.load(&b.name)?;
+
+                dag.add_node(DagNode {
                     name: b.name.clone(),
                     provider: b.provider.clone(),
-                    resource: b.resource.clone(),
+                    resource_name: b.resource.clone(),
                     protected: b.protected,
-                    inputs,
-                });
-                // Make block available in scope as a map (outputs filled later by engine)
+                    fields: b.fields.clone(),
+                    resource,
+                    prior_state,
+                })?;
+
+                block_names.push(b.name.clone());
+
+                // Register block name in scope as placeholder for non-dotted refs
                 scope.set(&b.name, Value::Map(Map::new()));
             }
             Statement::Target(t) => {
-                targets.insert(t.name.clone(), t.blocks.clone());
+                dag.add_target(t.name.clone(), t.blocks.clone());
             }
-            Statement::Output(o) => {
-                let value = expr::eval(&o.value, &scope)?;
-                outputs.insert(o.name.clone(), value);
+            Statement::Output(_) => {
+                // Outputs are deferred — they reference block outputs
+                // which aren't available until execution.
             }
         }
     }
 
-    Ok(LoadedModule {
-        blocks,
-        targets,
-        outputs,
-    })
+    // Build dependency edges from field refs and depends_on
+    for stmt in &module.statements {
+        if let Statement::Block(b) = stmt {
+            let refs = collect_block_refs(&b.fields);
+            for dep in &refs {
+                if dag.has_block(dep) && dep != &b.name {
+                    dag.add_edge(dep, &b.name)?;
+                }
+            }
+            for dep in collect_depends_on(&b.fields) {
+                if dag.has_block(&dep) && dep != b.name {
+                    dag.add_edge(&dep, &b.name)?;
+                }
+            }
+        }
+    }
+
+    dag.validate()?;
+
+    Ok((dag, BaseScope { scope }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parser;
+    use crate::providers::exec::ExecProvider;
+
+    fn test_registry() -> ProviderRegistry {
+        let mut reg = ProviderRegistry::new();
+        reg.register(Box::new(ExecProvider));
+        reg
+    }
+
+    struct EmptyStore;
+    impl StateStore for EmptyStore {
+        fn load(&self, _block: &str) -> Result<Option<serde_json::Value>, StateError> {
+            Ok(None)
+        }
+        fn save(&self, _block: &str, _state: &serde_json::Value) -> Result<(), StateError> {
+            Ok(())
+        }
+        fn remove(&self, _block: &str) -> Result<(), StateError> {
+            Ok(())
+        }
+        fn list(&self) -> Result<Vec<String>, StateError> {
+            Ok(vec![])
+        }
+    }
 
     #[test]
     fn load_simple_block() {
@@ -105,18 +152,15 @@ server = exec {
 }
 "#;
         let module = parser::parse(input).unwrap();
-        let result = load(&module, &Map::new()).unwrap();
-        assert_eq!(result.blocks.len(), 1);
-        assert_eq!(result.blocks[0].name, "server");
-        assert_eq!(result.blocks[0].provider, "exec");
-        assert_eq!(
-            result.blocks[0].inputs.get("command").unwrap().as_str(),
-            Some("go build")
-        );
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
+        let node = dag.get_node("server").unwrap();
+        assert_eq!(node.provider, "exec");
+        assert_eq!(node.resource_name, "exec");
+        assert_eq!(node.fields.len(), 2);
     }
 
     #[test]
-    fn load_let_binding() {
+    fn load_with_let_binding() {
         let input = r#"
 let name = "hello"
 server = exec {
@@ -125,8 +169,9 @@ server = exec {
 }
 "#;
         let module = parser::parse(input).unwrap();
-        let result = load(&module, &Map::new()).unwrap();
-        assert_eq!(result.blocks[0].inputs.get("command").unwrap().as_str(), Some("hello"));
+        let (dag, scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
+        assert!(dag.get_node("server").is_some());
+        assert_eq!(scope.scope.get("name").unwrap().as_str(), Some("hello"));
     }
 
     #[test]
@@ -141,31 +186,36 @@ server = exec {
         let module = parser::parse(input).unwrap();
         let mut params = Map::new();
         params.insert("env".into(), Value::Str("prod".into()));
-        let result = load(&module, &params).unwrap();
-        assert_eq!(result.blocks[0].inputs.get("command").unwrap().as_str(), Some("prod"));
-    }
-
-    #[test]
-    fn load_param_with_default() {
-        let input = r#"
-param replicas : int = 3
-server = exec {
-  command = "echo"
-  output = "out"
-}
-"#;
-        let module = parser::parse(input).unwrap();
-        let result = load(&module, &Map::new()).unwrap();
-        // Param was set in scope but not used by the block — just verify no error
-        assert_eq!(result.blocks.len(), 1);
+        let (_dag, scope) = load(&module, &params, &test_registry(), &EmptyStore).unwrap();
+        assert_eq!(scope.scope.get("env").unwrap().as_str(), Some("prod"));
     }
 
     #[test]
     fn load_missing_param() {
         let input = "param env : string\n";
         let module = parser::parse(input).unwrap();
-        let result = load(&module, &Map::new());
+        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore);
         assert!(matches!(result, Err(LoadError::MissingParam(_))));
+    }
+
+    #[test]
+    fn load_dependency_edges() {
+        let input = r#"
+a = exec {
+  command = "build a"
+  output = "a"
+}
+b = exec {
+  command = a.path
+  output = "b"
+}
+"#;
+        let module = parser::parse(input).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
+        let order = dag.topo_order().unwrap();
+        let ai = order.iter().position(|n| n == "a").unwrap();
+        let bi = order.iter().position(|n| n == "b").unwrap();
+        assert!(ai < bi);
     }
 
     #[test]
@@ -178,57 +228,58 @@ server = exec {
 target build = [server]
 "#;
         let module = parser::parse(input).unwrap();
-        let result = load(&module, &Map::new()).unwrap();
-        assert_eq!(result.targets["build"], vec!["server"]);
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
+        let order = dag.target_order("build").unwrap();
+        assert_eq!(order, vec!["server"]);
     }
 
     #[test]
-    fn load_output() {
+    fn load_cycle_detected() {
         let input = r#"
-let version = "1.0"
-output ver = version
+a = exec {
+  command = b.path
+  output = "a"
+}
+b = exec {
+  command = a.path
+  output = "b"
+}
 "#;
         let module = parser::parse(input).unwrap();
-        let result = load(&module, &Map::new()).unwrap();
-        assert_eq!(result.outputs.get("ver").unwrap().as_str(), Some("1.0"));
+        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore);
+        assert!(matches!(result, Err(LoadError::Dag(DagError::Cycle))));
     }
 
     #[test]
-    fn load_interpolation_in_block() {
+    fn load_unknown_provider() {
         let input = r#"
-let tag = "latest"
-image = exec {
-  command = "docker build -t myapp:${tag}"
-  output = "image"
+server = go.binary {
+  main = "./cmd/server"
 }
 "#;
         let module = parser::parse(input).unwrap();
-        let result = load(&module, &Map::new()).unwrap();
-        assert_eq!(
-            result.blocks[0].inputs.get("command").unwrap().as_str(),
-            Some("docker build -t myapp:latest")
-        );
+        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore);
+        assert!(matches!(result, Err(LoadError::UnknownResource(..))));
     }
 
     #[test]
-    fn load_multiple_blocks_with_targets() {
+    fn load_depends_on_creates_edge() {
         let input = r#"
-server = exec {
-  command = "go build"
-  output = "server"
+migrations = exec {
+  command = "migrate"
+  output = "m"
 }
-image = exec {
-  command = "docker build"
-  output = "image"
+deploy = exec {
+  command = "deploy"
+  output = "d"
+  depends_on = [migrations]
 }
-target build = [server, image]
-target deploy = [image]
 "#;
         let module = parser::parse(input).unwrap();
-        let result = load(&module, &Map::new()).unwrap();
-        assert_eq!(result.blocks.len(), 2);
-        assert_eq!(result.targets.len(), 2);
-        assert_eq!(result.targets["build"], vec!["server", "image"]);
-        assert_eq!(result.targets["deploy"], vec!["image"]);
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
+        let order = dag.topo_order().unwrap();
+        let mi = order.iter().position(|n| n == "migrations").unwrap();
+        let di = order.iter().position(|n| n == "deploy").unwrap();
+        assert!(mi < di);
     }
 }
