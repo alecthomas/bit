@@ -3,8 +3,9 @@ use std::path::Path;
 use std::process;
 
 use clap::{Parser, Subcommand};
+use yansi::Paint;
 
-use bit::engine;
+use bit::engine::{self, BlockPlan};
 use bit::loader;
 use bit::provider::{PlanAction, ProviderRegistry};
 use bit::providers::exec::ExecProvider;
@@ -51,25 +52,46 @@ fn load_module(registry: &ProviderRegistry) -> (bit::dag::Dag, loader::BaseScope
     let source = match fs::read_to_string("BUILD.bit") {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: cannot read BUILD.bit: {e}");
+            eprintln!("{} cannot read BUILD.bit: {e}", "error:".red().bold());
             process::exit(1);
         }
     };
     let module = match bit::parser::parse(&source) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
     };
     let (dag, base) = match loader::load(&module, &Map::new(), registry, store.as_ref()) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
     };
     (dag, base, store)
+}
+
+fn print_plans(plans: &[BlockPlan], verb: &str) {
+    if plans.is_empty() {
+        println!("No blocks to {verb}.");
+        return;
+    }
+    for bp in plans {
+        let (symbol, color) = match bp.plan.action {
+            PlanAction::Create => ("+", yansi::Color::Green),
+            PlanAction::Update => ("~", yansi::Color::Yellow),
+            PlanAction::Replace => ("!", yansi::Color::Magenta),
+            PlanAction::Destroy => ("-", yansi::Color::Red),
+            PlanAction::None => (" ", yansi::Color::Primary),
+        };
+        let prefix = Paint::paint(&symbol, color).bold();
+        let name = Paint::paint(bp.name.as_str(), color).bold();
+        println!("  {prefix} {name}: {}", bp.plan.description);
+    }
+    let changes = plans.iter().filter(|p| p.plan.action != PlanAction::None).count();
+    println!("\n{} block(s) to {verb}.", changes.to_string().bold());
 }
 
 fn main() {
@@ -80,26 +102,9 @@ fn main() {
         Command::Plan { target } => {
             let (mut dag, base, _store) = load_module(&registry);
             match engine::plan(&mut dag, &base, target.as_deref()) {
-                Ok(plans) => {
-                    if plans.is_empty() {
-                        println!("No blocks to plan.");
-                        return;
-                    }
-                    for bp in &plans {
-                        let symbol = match bp.plan.action {
-                            PlanAction::Create => "+",
-                            PlanAction::Update => "~",
-                            PlanAction::Replace => "!",
-                            PlanAction::Destroy => "-",
-                            PlanAction::None => " ",
-                        };
-                        println!("  {symbol} {}: {}", bp.name, bp.plan.description);
-                    }
-                    let changes = plans.iter().filter(|p| p.plan.action != PlanAction::None).count();
-                    println!("\n{changes} block(s) to change.");
-                }
+                Ok(plans) => print_plans(&plans, "change"),
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    eprintln!("{} {e}", "error:".red().bold());
                     process::exit(1);
                 }
             }
@@ -107,34 +112,51 @@ fn main() {
         Command::Apply { target } => {
             let (mut dag, base, store) = load_module(&registry);
             match engine::apply(&mut dag, &base, store.as_ref(), target.as_deref()) {
-                Ok(results) => {
-                    for bp in &results {
-                        let symbol = match bp.plan.action {
-                            PlanAction::Create => "+",
-                            PlanAction::Update => "~",
-                            PlanAction::Replace => "!",
-                            PlanAction::Destroy => "-",
-                            PlanAction::None => " ",
-                        };
-                        println!("  {symbol} {}: {}", bp.name, bp.plan.description);
-                    }
-                    let changes = results.iter().filter(|p| p.plan.action != PlanAction::None).count();
-                    println!("\n{changes} block(s) applied.");
-                }
+                Ok(results) => print_plans(&results, "apply"),
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    eprintln!("{} {e}", "error:".red().bold());
                     process::exit(1);
                 }
             }
         }
         Command::Destroy { target } => {
             let (mut dag, _base, store) = load_module(&registry);
-            match engine::destroy(&mut dag, store.as_ref(), target.as_deref()) {
-                Ok(()) => {
-                    println!("Destroy complete.");
+            // Show what will be destroyed before doing it
+            let order = match target.as_deref() {
+                Some(t) => dag.target_order(t),
+                None => dag.topo_order(),
+            };
+            match order {
+                Ok(mut names) => {
+                    names.reverse();
+                    for name in &names {
+                        if let Some(node) = dag.get_node(name) {
+                            if node.protected {
+                                println!("  {} {}: {}", " ".bold(), name.bold(), "protected, skipping".dim());
+                            } else if node.prior_state.is_some() {
+                                println!("  {} {}", "-".red().bold(), name.red().bold());
+                            }
+                        }
+                    }
+                    let had_output = names.iter().any(|n| {
+                        dag.get_node(n)
+                            .is_some_and(|node| node.protected || node.prior_state.is_some())
+                    });
+                    match engine::destroy(&mut dag, store.as_ref(), target.as_deref()) {
+                        Ok(()) => {
+                            if had_output {
+                                println!();
+                            }
+                            println!("{}", "Destroy complete.".green());
+                        }
+                        Err(e) => {
+                            eprintln!("{} {e}", "error:".red().bold());
+                            process::exit(1);
+                        }
+                    }
                 }
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    eprintln!("{} {e}", "error:".red().bold());
                     process::exit(1);
                 }
             }
@@ -150,8 +172,8 @@ fn main() {
                 for name in names {
                     let target = &targets[name];
                     match &target.doc {
-                        Some(doc) => println!("  {name} — {doc}"),
-                        None => println!("  {name}"),
+                        Some(doc) => println!("  {} — {}", name.bold(), doc.dim()),
+                        None => println!("  {}", name.bold()),
                     }
                 }
             }
