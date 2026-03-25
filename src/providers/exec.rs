@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::BufReader;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::output::BlockWriter;
 use crate::provider::{
     ApplyResult, BoxError, DynResource, FuncSignature, OutputSchema, PlanAction, PlanResult, Provider, ResolveResult,
     ResolvedInput, ResolvedPath, Resource, ResourceKind,
@@ -120,11 +122,15 @@ impl Resource for ExecResource {
         })
     }
 
-    fn apply(&self, inputs: &Map, _prior_state: Option<&ExecState>) -> Result<ApplyResult<ExecState>, BoxError> {
+    fn apply(
+        &self,
+        inputs: &Map,
+        _prior_state: Option<&ExecState>,
+        writer: &BlockWriter,
+    ) -> Result<ApplyResult<ExecState>, BoxError> {
         let command = extract_string(inputs, "command")?;
         let output = extract_string(inputs, "output")?;
 
-        // Create output directory if it doesn't exist
         let output_path = Path::new(&output);
         if output.ends_with('/') {
             fs::create_dir_all(output_path)?;
@@ -134,15 +140,30 @@ impl Resource for ExecResource {
             fs::create_dir_all(parent)?;
         }
 
-        let result = Command::new("sh")
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(&command)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| format!("failed to execute command: {e}"))?;
 
-        if !result.status.success() {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            return Err(format!("command failed: {stderr}").into());
+        // Stream stdout and stderr through the block writer
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        std::thread::scope(|s| {
+            if let Some(out) = stdout {
+                s.spawn(|| writer.pipe_stdout(BufReader::new(out)));
+            }
+            if let Some(err) = stderr {
+                s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
+            }
+        });
+
+        let status = child.wait().map_err(|e| format!("failed to wait for command: {e}"))?;
+        if !status.success() {
+            return Err(format!("command exited with {status}").into());
         }
 
         let input_hashes = hash_inputs(inputs);
@@ -306,7 +327,9 @@ mod tests {
         inputs.insert("inputs".into(), Value::List(vec![]));
 
         let resource = ExecResource;
-        let result = Resource::apply(&resource, &inputs, None).unwrap();
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
         assert!(result.state.is_some());
         assert!(output.exists());
         assert_eq!(fs::read_to_string(&output).unwrap().trim(), "hello");
@@ -320,7 +343,9 @@ mod tests {
         inputs.insert("inputs".into(), Value::List(vec![]));
 
         let resource = ExecResource;
-        assert!(Resource::apply(&resource, &inputs, None).is_err());
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        assert!(Resource::apply(&resource, &inputs, None, &writer).is_err());
     }
 
     #[test]

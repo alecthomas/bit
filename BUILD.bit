@@ -1,15 +1,17 @@
+let inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
+
 # Debug build
 debug = exec {
   command = "cargo build"
   output = "target/debug/bit"
-  inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
+  inputs = inputs
 }
 
 # Optimised release build
 release = exec {
   command = "cargo build --release"
   output = "target/release/bit"
-  inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
+  inputs = inputs
 }
 
 # Build debug and release binaries

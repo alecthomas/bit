@@ -4,6 +4,7 @@ use std::error::Error;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::output::BlockWriter;
 use crate::value::{Map, Type, Value};
 
 /// Shorthand for the boxed error type used at provider boundaries.
@@ -104,7 +105,12 @@ pub trait Resource {
     fn outputs(&self) -> Vec<OutputSchema>;
     fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError>;
     fn plan(&self, inputs: &Map, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
-    fn apply(&self, inputs: &Map, prior_state: Option<&Self::State>) -> Result<ApplyResult<Self::State>, BoxError>;
+    fn apply(
+        &self,
+        inputs: &Map,
+        prior_state: Option<&Self::State>,
+        writer: &BlockWriter,
+    ) -> Result<ApplyResult<Self::State>, BoxError>;
     fn destroy(&self, prior_state: &Self::State) -> Result<(), BoxError>;
     fn refresh(&self, prior_state: &Self::State) -> Result<ApplyResult<Self::State>, BoxError>;
 }
@@ -121,6 +127,7 @@ pub trait DynResource {
         &self,
         inputs: &Map,
         prior_state: Option<&serde_json::Value>,
+        writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value>, BoxError>;
     fn destroy(&self, prior_state: &serde_json::Value) -> Result<(), BoxError>;
     fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult<serde_json::Value>, BoxError>;
@@ -154,9 +161,10 @@ impl<R: Resource> DynResource for R {
         &self,
         inputs: &Map,
         prior_state: Option<&serde_json::Value>,
+        writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value>, BoxError> {
         let state = prior_state.map(|v| serde_json::from_value(v.clone())).transpose()?;
-        let result = Resource::apply(self, inputs, state.as_ref())?;
+        let result = Resource::apply(self, inputs, state.as_ref(), writer)?;
         Ok(ApplyResult {
             outputs: result.outputs,
             state: result.state.map(serde_json::to_value).transpose()?,
@@ -281,7 +289,12 @@ mod tests {
             })
         }
 
-        fn apply(&self, _inputs: &Map, _prior_state: Option<&StubState>) -> Result<ApplyResult<StubState>, BoxError> {
+        fn apply(
+            &self,
+            _inputs: &Map,
+            _prior_state: Option<&StubState>,
+            _writer: &BlockWriter,
+        ) -> Result<ApplyResult<StubState>, BoxError> {
             Ok(ApplyResult {
                 outputs: Map::new(),
                 state: Some(StubState { version: 1 }),
@@ -327,7 +340,9 @@ mod tests {
     #[test]
     fn apply_returns_typed_state() {
         let resource = StubResource;
-        let result = Resource::apply(&resource, &Map::new(), None).unwrap();
+        let output = crate::output::Output::new(&[]);
+        let writer = output.writer("test");
+        let result = Resource::apply(&resource, &Map::new(), None, &writer).unwrap();
         assert_eq!(result.state, Some(StubState { version: 1 }));
     }
 
@@ -338,7 +353,9 @@ mod tests {
         let resource = reg.get_resource("stub", "thing").unwrap();
 
         // Apply through DynResource — state comes back as JSON
-        let result = resource.apply(&Map::new(), None).unwrap();
+        let output = crate::output::Output::new(&[]);
+        let writer = output.writer("test");
+        let result = resource.apply(&Map::new(), None, &writer).unwrap();
         let json_state = result.state.unwrap();
         assert_eq!(json_state, serde_json::json!({"version": 1}));
 

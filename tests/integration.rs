@@ -2,6 +2,7 @@ use std::fs;
 
 use bit::engine;
 use bit::loader;
+use bit::output::Output;
 use bit::parser;
 use bit::provider::ProviderRegistry;
 use bit::providers::exec::ExecProvider;
@@ -46,7 +47,7 @@ impl StateStore for MemoryStore {
 fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let module = parser::parse(input).expect("parse failed");
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store).expect("load failed");
-    engine::apply(&mut dag, &base, store, None).expect("apply failed")
+    engine::apply(&mut dag, &base, store, &Output::new(&[]), None).expect("apply failed")
 }
 
 fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
@@ -189,7 +190,7 @@ fn target_filters_execution() {
     let store = MemoryStore::new();
     let module = parser::parse(&input).unwrap();
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), &store).unwrap();
-    let results = engine::apply(&mut dag, &base, &store, Some("just_a")).unwrap();
+    let results = engine::apply(&mut dag, &base, &store, &Output::new(&[]), Some("just_a")).unwrap();
     assert_eq!(results.len(), 1);
     assert!(out_a.exists());
     assert!(!out_b.exists());

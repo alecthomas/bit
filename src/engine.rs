@@ -1,6 +1,7 @@
 use crate::dag::{Dag, DagError};
 use crate::expr::{self, EvalError, Scope};
 use crate::loader::BaseScope;
+use crate::output::{Event, Output};
 use crate::provider::{BoxError, PlanAction, PlanResult, ResourceKind};
 use crate::state::{StateError, StateStore};
 use crate::value::{Map, Value};
@@ -88,6 +89,7 @@ pub fn apply(
     dag: &mut Dag,
     base: &BaseScope,
     store: &dyn StateStore,
+    output: &Output,
     target: Option<&str>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = match target {
@@ -100,6 +102,7 @@ pub fn apply(
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
+        let writer = output.writer(name);
 
         let inputs = eval_fields(&node.fields, &scope).map_err(|e| EngineError::Eval {
             block: name.clone(),
@@ -127,6 +130,7 @@ pub fn apply(
         }
 
         if plan_result.action == PlanAction::None {
+            writer.event(Event::Skipped, "no changes");
             scope.set(name, Value::Map(Map::new()));
             results.push(BlockPlan {
                 name: name.clone(),
@@ -135,14 +139,19 @@ pub fn apply(
             continue;
         }
 
-        let apply_result =
-            node.resource
-                .apply(&inputs, node.prior_state.as_ref())
-                .map_err(|e| EngineError::Provider {
+        writer.event(Event::Starting, &plan_result.description);
+
+        let apply_result = node
+            .resource
+            .apply(&inputs, node.prior_state.as_ref(), &writer)
+            .map_err(|e| {
+                writer.event(Event::Failed, &e.to_string());
+                EngineError::Provider {
                     block: name.clone(),
                     phase: "apply",
                     source: e,
-                })?;
+                }
+            })?;
 
         // Persist state
         if let Some(state) = &apply_result.state {
@@ -154,8 +163,11 @@ pub fn apply(
             && let Some(passed) = apply_result.outputs.get("passed").and_then(|v| v.as_bool())
             && !passed
         {
+            writer.event(Event::Failed, "tests failed");
             return Err(EngineError::TestFailed(name.clone()));
         }
+
+        writer.event(Event::Done, "");
 
         // Inject outputs into scope for downstream blocks
         scope.set(name, Value::Map(apply_result.outputs));
@@ -257,7 +269,8 @@ mod tests {
         let module = parser::parse(input).expect("parse failed");
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).expect("load failed");
-        apply(&mut dag, &base, &store, None)
+        let output = Output::new(&[]);
+        apply(&mut dag, &base, &store, &output, None)
     }
 
     #[test]
@@ -325,7 +338,7 @@ mod tests {
 
         // Apply first
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        apply(&mut dag, &base, &store, None).unwrap();
+        apply(&mut dag, &base, &store, &Output::new(&[]), None).unwrap();
         assert!(!store.list().unwrap().is_empty());
 
         // Reload with state, then destroy
@@ -347,7 +360,7 @@ mod tests {
         let store = MemoryStore::new();
 
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        apply(&mut dag, &base, &store, None).unwrap();
+        apply(&mut dag, &base, &store, &Output::new(&[]), None).unwrap();
 
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
         destroy(&mut dag, &store, None).unwrap();
@@ -374,7 +387,7 @@ mod tests {
         let module = parser::parse(&input).unwrap();
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        let results = apply(&mut dag, &base, &store, Some("just_a")).unwrap();
+        let results = apply(&mut dag, &base, &store, &Output::new(&[]), Some("just_a")).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "a");
         assert!(out_a.exists());

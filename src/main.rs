@@ -7,6 +7,7 @@ use yansi::Paint;
 
 use bit::engine::{self, BlockPlan};
 use bit::loader;
+use bit::output::Output;
 use bit::provider::{PlanAction, ProviderRegistry};
 use bit::providers::exec::ExecProvider;
 use bit::state;
@@ -116,8 +117,11 @@ fn main() {
         }
         Command::Apply { target } => {
             let (mut dag, base, store) = load_module(&registry);
-            match engine::apply(&mut dag, &base, store.as_ref(), target.as_deref()) {
-                Ok(results) => print_plans(&results, "applied"),
+            let names = dag.block_names();
+            let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            let output = Output::new(&name_refs);
+            match engine::apply(&mut dag, &base, store.as_ref(), &output, target.as_deref()) {
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
                     process::exit(1);
