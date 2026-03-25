@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::provider::{
-    ApplyResult, BoxError, DynResource, FuncSignature, PlanAction, PlanResult, Provider, ResolveResult, ResolvedInput,
-    ResolvedPath, Resource, ResourceKind,
+    ApplyResult, BoxError, DynResource, FuncSignature, OutputSchema, PlanAction, PlanResult, Provider, ResolveResult,
+    ResolvedInput, ResolvedPath, Resource, ResourceKind,
 };
-use crate::value::{Map, Value};
+use crate::value::{Map, Type, Value};
 
 /// State persisted between runs for an exec block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,8 +50,14 @@ impl Resource for ExecResource {
     }
 
     fn kind(&self) -> ResourceKind {
-        // Default to Build; the engine can override based on the block's `kind` field.
         ResourceKind::Build
+    }
+
+    fn outputs(&self) -> Vec<OutputSchema> {
+        vec![OutputSchema {
+            name: "path".into(),
+            typ: Type::String,
+        }]
     }
 
     /// Expand input globs to concrete files with content hashes.
