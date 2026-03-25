@@ -91,7 +91,7 @@ fn print_plans(plans: &[BlockPlan], verb: &str) {
         println!("  {prefix} {name}: {}", bp.plan.description);
     }
     let changes = plans.iter().filter(|p| p.plan.action != PlanAction::None).count();
-    println!("\n{} block(s) to {verb}.", changes.to_string().bold());
+    println!("\n{} block(s) {verb}.", changes.to_string().bold());
 }
 
 fn main() {
@@ -102,7 +102,7 @@ fn main() {
         Command::Plan { target } => {
             let (mut dag, base, _store) = load_module(&registry);
             match engine::plan(&mut dag, &base, target.as_deref()) {
-                Ok(plans) => print_plans(&plans, "change"),
+                Ok(plans) => print_plans(&plans, "to change"),
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
                     process::exit(1);
@@ -112,7 +112,7 @@ fn main() {
         Command::Apply { target } => {
             let (mut dag, base, store) = load_module(&registry);
             match engine::apply(&mut dag, &base, store.as_ref(), target.as_deref()) {
-                Ok(results) => print_plans(&results, "apply"),
+                Ok(results) => print_plans(&results, "applied"),
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
                     process::exit(1);

@@ -102,7 +102,15 @@ impl Resource for ExecResource {
         if prior.command != command {
             return Ok(PlanResult {
                 action: PlanAction::Update,
-                description: format!("command changed: {command}"),
+                description: format!("run: {command}"),
+            });
+        }
+
+        let current_hashes = hash_inputs(inputs);
+        if current_hashes != prior.input_hashes {
+            return Ok(PlanResult {
+                action: PlanAction::Update,
+                description: format!("run: {command}"),
             });
         }
 
@@ -137,20 +145,7 @@ impl Resource for ExecResource {
             return Err(format!("command failed: {stderr}").into());
         }
 
-        // Build input hashes for state
-        let input_globs = extract_string_list(inputs, "inputs").unwrap_or_default();
-        let mut input_hashes = HashMap::new();
-        for pattern in &input_globs {
-            if let Ok(entries) = glob::glob(pattern) {
-                for entry in entries.flatten() {
-                    if entry.is_file()
-                        && let Ok(hash) = hash_file(&entry)
-                    {
-                        input_hashes.insert(entry.to_string_lossy().into_owned(), hash);
-                    }
-                }
-            }
-        }
+        let input_hashes = hash_inputs(inputs);
 
         let mut outputs = Map::new();
         outputs.insert("path".into(), Value::Str(output.clone()));
@@ -207,6 +202,23 @@ fn extract_string_list(inputs: &Map, key: &str) -> Result<Vec<String>, BoxError>
                 .ok_or_else(|| format!("'{key}' must contain only strings").into())
         })
         .collect()
+}
+
+fn hash_inputs(inputs: &Map) -> HashMap<String, String> {
+    let globs = extract_string_list(inputs, "inputs").unwrap_or_default();
+    let mut hashes = HashMap::new();
+    for pattern in &globs {
+        if let Ok(entries) = glob::glob(pattern) {
+            for entry in entries.flatten() {
+                if entry.is_file()
+                    && let Ok(hash) = hash_file(&entry)
+                {
+                    hashes.insert(entry.to_string_lossy().into_owned(), hash);
+                }
+            }
+        }
+    }
+    hashes
 }
 
 fn hash_file(path: &Path) -> Result<String, BoxError> {
