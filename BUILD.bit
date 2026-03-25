@@ -1,0 +1,15 @@
+debug = exec {
+  command = "cargo build"
+  output = "target/debug/bit"
+  inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
+}
+
+release = exec {
+  command = "cargo build --release"
+  output = "target/release/bit"
+  inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
+}
+
+target build = [debug, release]
+target debug = [debug]
+target release = [release]
