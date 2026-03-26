@@ -86,13 +86,6 @@ pub trait Provider {
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError>;
 }
 
-/// Declares a named, typed output that a resource produces.
-#[derive(Debug, Clone)]
-pub struct OutputSchema {
-    pub name: String,
-    pub typ: Type,
-}
-
 /// A resource with a concrete, type-safe state type.
 ///
 /// Providers implement this. The `DynResource` trait (automatically implemented
@@ -102,7 +95,8 @@ pub trait Resource {
 
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    fn outputs(&self) -> Vec<OutputSchema>;
+    fn input_schema(&self) -> Type;
+    fn output_schema(&self) -> Type;
     fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError>;
     fn plan(&self, inputs: &Map, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
@@ -120,7 +114,8 @@ pub trait Resource {
 pub trait DynResource {
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    fn outputs(&self) -> Vec<OutputSchema>;
+    fn input_schema(&self) -> Type;
+    fn output_schema(&self) -> Type;
     fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError>;
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError>;
     fn apply(
@@ -144,8 +139,12 @@ impl<R: Resource> DynResource for R {
         Resource::kind(self)
     }
 
-    fn outputs(&self) -> Vec<OutputSchema> {
-        Resource::outputs(self)
+    fn input_schema(&self) -> Type {
+        Resource::input_schema(self)
+    }
+
+    fn output_schema(&self) -> Type {
+        Resource::output_schema(self)
     }
 
     fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError> {
@@ -265,8 +264,18 @@ mod tests {
             ResourceKind::Build
         }
 
-        fn outputs(&self) -> Vec<OutputSchema> {
-            vec![]
+        fn input_schema(&self) -> Type {
+            Type::Struct {
+                description: String::new(),
+                fields: vec![],
+            }
+        }
+
+        fn output_schema(&self) -> Type {
+            Type::Struct {
+                description: String::new(),
+                fields: vec![],
+            }
         }
 
         fn resolve(&self, _inputs: &Map) -> Result<ResolveResult, BoxError> {

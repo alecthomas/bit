@@ -9,10 +9,10 @@ use sha2::{Digest, Sha256};
 
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, DynResource, FuncSignature, OutputSchema, PlanAction, PlanResult, Provider, ResolveResult,
-    ResolvedInput, ResolvedPath, Resource, ResourceKind,
+    ApplyResult, BoxError, DynResource, FuncSignature, PlanAction, PlanResult, Provider, ResolveResult, ResolvedInput,
+    ResolvedPath, Resource, ResourceKind,
 };
-use crate::value::{Map, Type, Value};
+use crate::value::{FieldDef, Map, Type, Value};
 
 /// State persisted between runs for an exec block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,11 +55,43 @@ impl Resource for ExecResource {
         ResourceKind::Build
     }
 
-    fn outputs(&self) -> Vec<OutputSchema> {
-        vec![OutputSchema {
-            name: "path".into(),
-            typ: Type::String,
-        }]
+    fn input_schema(&self) -> Type {
+        Type::Struct {
+            description: "exec block inputs".into(),
+            fields: vec![
+                FieldDef {
+                    name: "command".into(),
+                    description: "shell command to run".into(),
+                    typ: Type::String,
+                    ..FieldDef::defaults()
+                },
+                FieldDef {
+                    name: "output".into(),
+                    description: "output file or directory".into(),
+                    typ: Type::String,
+                    ..FieldDef::defaults()
+                },
+                FieldDef {
+                    name: "inputs".into(),
+                    description: "glob patterns for input files".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    default: Some(Value::List(vec![])),
+                },
+            ],
+        }
+    }
+
+    fn output_schema(&self) -> Type {
+        Type::Struct {
+            description: "exec block outputs".into(),
+            fields: vec![FieldDef {
+                name: "path".into(),
+                description: "path to the output".into(),
+                typ: Type::String,
+                ..FieldDef::defaults()
+            }],
+        }
     }
 
     /// Expand input globs to concrete files with content hashes.
