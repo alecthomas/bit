@@ -12,7 +12,22 @@ use crate::provider::{
     ApplyResult, BoxError, DynResource, FuncSignature, PlanAction, PlanResult, Provider, ResolveResult, ResolvedInput,
     ResolvedPath, Resource, ResourceKind,
 };
-use crate::value::{FieldDef, Map, Type, Value};
+use crate::value::Value;
+
+/// Typed inputs for an exec block, deserialized from the block's fields.
+#[derive(Debug, Deserialize)]
+pub struct ExecInputs {
+    pub command: String,
+    pub output: String,
+    #[serde(default)]
+    pub inputs: Vec<String>,
+}
+
+/// Typed outputs for an exec block, serialized into the scope for downstream blocks.
+#[derive(Debug, Serialize)]
+pub struct ExecOutputs {
+    pub path: String,
+}
 
 /// State persisted between runs for an exec block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +61,8 @@ struct ExecResource;
 
 impl Resource for ExecResource {
     type State = ExecState;
+    type Inputs = ExecInputs;
+    type Outputs = ExecOutputs;
 
     fn name(&self) -> &str {
         "exec"
@@ -55,52 +72,11 @@ impl Resource for ExecResource {
         ResourceKind::Build
     }
 
-    fn input_schema(&self) -> Type {
-        Type::Struct {
-            description: "exec block inputs".into(),
-            fields: vec![
-                FieldDef {
-                    name: "command".into(),
-                    description: "shell command to run".into(),
-                    typ: Type::String,
-                    ..FieldDef::defaults()
-                },
-                FieldDef {
-                    name: "output".into(),
-                    description: "output file or directory".into(),
-                    typ: Type::String,
-                    ..FieldDef::defaults()
-                },
-                FieldDef {
-                    name: "inputs".into(),
-                    description: "glob patterns for input files".into(),
-                    typ: Type::List(Box::new(Type::String)),
-                    required: false,
-                    default: Some(Value::List(vec![])),
-                },
-            ],
-        }
-    }
-
-    fn output_schema(&self) -> Type {
-        Type::Struct {
-            description: "exec block outputs".into(),
-            fields: vec![FieldDef {
-                name: "path".into(),
-                description: "path to the output".into(),
-                typ: Type::String,
-                ..FieldDef::defaults()
-            }],
-        }
-    }
-
-    /// Expand input globs to concrete files with content hashes.
-    fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError> {
-        let input_globs = extract_string_list(inputs, "inputs")?;
+    fn resolve(&self, inputs: &ExecInputs) -> Result<ResolveResult, BoxError> {
         let mut paths = Vec::new();
         let mut watches = Vec::new();
 
-        for pattern in &input_globs {
+        for pattern in &inputs.inputs {
             watches.push(pattern.clone());
             for entry in glob::glob(pattern).map_err(|e| format!("invalid glob '{pattern}': {e}"))? {
                 let path = entry.map_err(|e| format!("glob error: {e}"))?;
@@ -124,27 +100,26 @@ impl Resource for ExecResource {
         })
     }
 
-    fn plan(&self, inputs: &Map, prior_state: Option<&ExecState>) -> Result<PlanResult, BoxError> {
-        let command = extract_string(inputs, "command")?;
+    fn plan(&self, inputs: &ExecInputs, prior_state: Option<&ExecState>) -> Result<PlanResult, BoxError> {
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
                 action: PlanAction::Create,
-                description: command.to_string(),
+                description: inputs.command.clone(),
             });
         };
 
-        if prior.command != command {
+        if prior.command != inputs.command {
             return Ok(PlanResult {
                 action: PlanAction::Update,
-                description: command.to_string(),
+                description: inputs.command.clone(),
             });
         }
 
-        let current_hashes = hash_inputs(inputs);
+        let current_hashes = hash_input_globs(&inputs.inputs);
         if current_hashes != prior.input_hashes {
             return Ok(PlanResult {
                 action: PlanAction::Update,
-                description: command.to_string(),
+                description: inputs.command.clone(),
             });
         }
 
@@ -156,15 +131,12 @@ impl Resource for ExecResource {
 
     fn apply(
         &self,
-        inputs: &Map,
+        inputs: &ExecInputs,
         _prior_state: Option<&ExecState>,
         writer: &BlockWriter,
-    ) -> Result<ApplyResult<ExecState>, BoxError> {
-        let command = extract_string(inputs, "command")?;
-        let output = extract_string(inputs, "output")?;
-
-        let output_path = Path::new(&output);
-        if output.ends_with('/') {
+    ) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
+        let output_path = Path::new(&inputs.output);
+        if inputs.output.ends_with('/') {
             fs::create_dir_all(output_path)?;
         } else if let Some(parent) = output_path.parent()
             && !parent.as_os_str().is_empty()
@@ -174,13 +146,12 @@ impl Resource for ExecResource {
 
         let mut child = Command::new("sh")
             .arg("-c")
-            .arg(&command)
+            .arg(&inputs.command)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("failed to execute command: {e}"))?;
 
-        // Stream stdout and stderr through the block writer
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
@@ -198,20 +169,17 @@ impl Resource for ExecResource {
             return Err(format!("command exited with {status}").into());
         }
 
-        let input_hashes = hash_inputs(inputs);
-
-        let mut outputs = Map::new();
-        outputs.insert("path".into(), Value::Str(output.clone()));
-
-        let state = ExecState {
-            command,
-            output,
-            input_hashes,
-        };
+        let input_hashes = hash_input_globs(&inputs.inputs);
 
         Ok(ApplyResult {
-            outputs,
-            state: Some(state),
+            outputs: ExecOutputs {
+                path: inputs.output.clone(),
+            },
+            state: Some(ExecState {
+                command: inputs.command.clone(),
+                output: inputs.output.clone(),
+                input_hashes,
+            }),
         })
     }
 
@@ -227,42 +195,19 @@ impl Resource for ExecResource {
         Ok(())
     }
 
-    fn refresh(&self, prior_state: &ExecState) -> Result<ApplyResult<ExecState>, BoxError> {
-        let mut outputs = Map::new();
-        outputs.insert("path".into(), Value::Str(prior_state.output.clone()));
+    fn refresh(&self, prior_state: &ExecState) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
         Ok(ApplyResult {
-            outputs,
+            outputs: ExecOutputs {
+                path: prior_state.output.clone(),
+            },
             state: Some(prior_state.clone()),
         })
     }
 }
 
-fn extract_string(inputs: &Map, key: &str) -> Result<String, BoxError> {
-    inputs
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned())
-        .ok_or_else(|| format!("missing or invalid '{key}' field").into())
-}
-
-fn extract_string_list(inputs: &Map, key: &str) -> Result<Vec<String>, BoxError> {
-    let list = inputs
-        .get(key)
-        .and_then(|v| v.as_list())
-        .ok_or_else(|| format!("missing or invalid '{key}' field"))?;
-    list.iter()
-        .map(|v| {
-            v.as_str()
-                .map(|s| s.to_owned())
-                .ok_or_else(|| format!("'{key}' must contain only strings").into())
-        })
-        .collect()
-}
-
-fn hash_inputs(inputs: &Map) -> HashMap<String, String> {
-    let globs = extract_string_list(inputs, "inputs").unwrap_or_default();
+fn hash_input_globs(globs: &[String]) -> HashMap<String, String> {
     let mut hashes = HashMap::new();
-    for pattern in &globs {
+    for pattern in globs {
         if let Ok(entries) = glob::glob(pattern) {
             for entry in entries.flatten() {
                 if entry.is_file()
@@ -286,6 +231,7 @@ fn hash_file(path: &Path) -> Result<String, BoxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::Map;
     use std::fs;
 
     #[test]
@@ -294,9 +240,11 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "hello").unwrap();
 
-        let pattern = dir.path().join("*.txt").to_string_lossy().into_owned();
-        let mut inputs = Map::new();
-        inputs.insert("inputs".into(), Value::List(vec![Value::Str(pattern)]));
+        let inputs = ExecInputs {
+            command: "echo".into(),
+            output: "out".into(),
+            inputs: vec![dir.path().join("*.txt").to_string_lossy().into_owned()],
+        };
 
         let resource = ExecResource;
         let result = Resource::resolve(&resource, &inputs).unwrap();
@@ -307,9 +255,11 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let mut inputs = Map::new();
-        inputs.insert("command".into(), Value::Str("echo hi".into()));
-
+        let inputs = ExecInputs {
+            command: "echo hi".into(),
+            output: "out".into(),
+            inputs: vec![],
+        };
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -317,15 +267,16 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let mut inputs = Map::new();
-        inputs.insert("command".into(), Value::Str("echo hi".into()));
-
+        let inputs = ExecInputs {
+            command: "echo hi".into(),
+            output: "out".into(),
+            inputs: vec![],
+        };
         let prior = ExecState {
             command: "echo hi".into(),
             output: "out/".into(),
             input_hashes: HashMap::new(),
         };
-
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -333,15 +284,16 @@ mod tests {
 
     #[test]
     fn plan_update_when_command_changed() {
-        let mut inputs = Map::new();
-        inputs.insert("command".into(), Value::Str("echo bye".into()));
-
+        let inputs = ExecInputs {
+            command: "echo bye".into(),
+            output: "out".into(),
+            inputs: vec![],
+        };
         let prior = ExecState {
             command: "echo hi".into(),
             output: "out/".into(),
             input_hashes: HashMap::new(),
         };
-
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
@@ -351,15 +303,11 @@ mod tests {
     fn apply_runs_command() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("result.txt");
-
-        let mut inputs = Map::new();
-        inputs.insert(
-            "command".into(),
-            Value::Str(format!("echo hello > {}", output.display())),
-        );
-        inputs.insert("output".into(), Value::Str(output.to_string_lossy().into_owned()));
-        inputs.insert("inputs".into(), Value::List(vec![]));
-
+        let inputs = ExecInputs {
+            command: format!("echo hello > {}", output.display()),
+            output: output.to_string_lossy().into_owned(),
+            inputs: vec![],
+        };
         let resource = ExecResource;
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
@@ -371,11 +319,11 @@ mod tests {
 
     #[test]
     fn apply_fails_on_bad_command() {
-        let mut inputs = Map::new();
-        inputs.insert("command".into(), Value::Str("false".into()));
-        inputs.insert("output".into(), Value::Str("/dev/null".into()));
-        inputs.insert("inputs".into(), Value::List(vec![]));
-
+        let inputs = ExecInputs {
+            command: "false".into(),
+            output: "/dev/null".into(),
+            inputs: vec![],
+        };
         let resource = ExecResource;
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
@@ -420,5 +368,27 @@ mod tests {
         let h2 = hash_file(&file).unwrap();
         assert_eq!(h1, h2);
         assert!(h1.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn dyn_resource_deserializes_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("result.txt");
+        let mut inputs = Map::new();
+        inputs.insert(
+            "command".into(),
+            Value::Str(format!("echo hello > {}", output.display())),
+        );
+        inputs.insert("output".into(), Value::Str(output.to_string_lossy().into_owned()));
+
+        let resource: Box<dyn DynResource> = Box::new(ExecResource);
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        let result = resource.apply(&inputs, None, &writer).unwrap();
+        assert!(result.state.is_some());
+        assert_eq!(
+            result.outputs.get("path").and_then(|v| v.as_str()),
+            Some(output.to_string_lossy().as_ref())
+        );
     }
 }

@@ -1,11 +1,9 @@
-use std::collections::HashSet;
-
 use crate::ast::{Module, Statement};
 use crate::dag::{Dag, DagError, DagNode, collect_block_refs, collect_depends_on};
 use crate::expr::{self, EvalError, Scope};
 use crate::provider::ProviderRegistry;
 use crate::state::{StateError, StateStore};
-use crate::value::{FieldDef, Map, Type, Value};
+use crate::value::{Map, Value};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -19,8 +17,6 @@ pub enum LoadError {
     MissingParam(String),
     #[error("unknown provider/resource: {0}.{1}")]
     UnknownResource(String, String),
-    #[error("block '{block}': {message}")]
-    Schema { block: String, message: String },
 }
 
 /// The base scope of evaluated params and let bindings, shared with the engine
@@ -70,12 +66,6 @@ pub fn load(
                     .get_resource(&b.provider, &b.resource)
                     .ok_or_else(|| LoadError::UnknownResource(b.provider.clone(), b.resource.clone()))?;
 
-                // Validate field names against the input schema
-                let schema = resource.input_schema();
-                if let Type::Struct { fields, .. } = &schema {
-                    validate_field_names(&b.name, &b.fields, fields)?;
-                }
-
                 let prior_state = store.load(&b.name)?;
 
                 dag.add_node(DagNode {
@@ -123,38 +113,6 @@ pub fn load(
     dag.validate()?;
 
     Ok((dag, BaseScope { scope }))
-}
-
-fn validate_field_names(
-    block_name: &str,
-    fields: &[crate::ast::Field],
-    schema_fields: &[FieldDef],
-) -> Result<(), LoadError> {
-    let known: HashSet<&str> = schema_fields.iter().map(|f| f.name.as_str()).collect();
-    let provided: HashSet<&str> = fields.iter().map(|f| f.name.as_str()).collect();
-
-    for name in &provided {
-        if *name == "depends_on" || *name == "kind" {
-            continue;
-        }
-        if !known.contains(name) {
-            return Err(LoadError::Schema {
-                block: block_name.into(),
-                message: format!("unknown field '{name}'"),
-            });
-        }
-    }
-
-    for field in schema_fields {
-        if field.required && field.default.is_none() && !provided.contains(field.name.as_str()) {
-            return Err(LoadError::Schema {
-                block: block_name.into(),
-                message: format!("missing required field '{}'", field.name),
-            });
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

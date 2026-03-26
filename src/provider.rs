@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::output::BlockWriter;
-use crate::value::{Map, Type, Value};
+use crate::value::{Map, Value};
 
 /// Shorthand for the boxed error type used at provider boundaries.
 pub type BoxError = Box<dyn Error + Send + Sync>;
@@ -49,10 +49,10 @@ pub struct PlanResult {
     pub description: String,
 }
 
-/// Result of the apply phase, parameterized by the provider's state type.
+/// Result of the apply phase, with typed state and outputs.
 #[derive(Debug, Clone)]
-pub struct ApplyResult<S> {
-    pub outputs: Map,
+pub struct ApplyResult<S, O> {
+    pub outputs: O,
     pub state: Option<S>,
 }
 
@@ -61,14 +61,14 @@ pub struct ApplyResult<S> {
 pub struct FuncSignature {
     pub name: String,
     pub params: Vec<FuncParam>,
-    pub returns: Type,
+    pub returns: crate::value::Type,
 }
 
 /// A parameter in a function signature.
 #[derive(Debug, Clone)]
 pub struct FuncParam {
     pub name: String,
-    pub typ: Type,
+    pub typ: crate::value::Type,
 }
 
 /// Whether a resource produces build artifacts or test results.
@@ -86,36 +86,34 @@ pub trait Provider {
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError>;
 }
 
-/// A resource with a concrete, type-safe state type.
+/// A resource with concrete, type-safe state, inputs, and outputs.
 ///
 /// Providers implement this. The `DynResource` trait (automatically implemented
-/// via blanket impl) handles JSON serialization at the registry boundary.
+/// via blanket impl) handles serde conversion at the registry boundary.
 pub trait Resource {
     type State: Serialize + DeserializeOwned;
+    type Inputs: DeserializeOwned;
+    type Outputs: Serialize;
 
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    fn input_schema(&self) -> Type;
-    fn output_schema(&self) -> Type;
-    fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError>;
-    fn plan(&self, inputs: &Map, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
+    fn resolve(&self, inputs: &Self::Inputs) -> Result<ResolveResult, BoxError>;
+    fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
-        inputs: &Map,
+        inputs: &Self::Inputs,
         prior_state: Option<&Self::State>,
         writer: &BlockWriter,
-    ) -> Result<ApplyResult<Self::State>, BoxError>;
+    ) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
     fn destroy(&self, prior_state: &Self::State, writer: &BlockWriter) -> Result<(), BoxError>;
-    fn refresh(&self, prior_state: &Self::State) -> Result<ApplyResult<Self::State>, BoxError>;
+    fn refresh(&self, prior_state: &Self::State) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
 }
 
-/// Object-safe resource trait used by the registry. Serializes state
-/// to/from `serde_json::Value` at the boundary.
+/// Object-safe resource trait used by the registry. Converts between
+/// `Map` and typed structs via serde at the boundary.
 pub trait DynResource {
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    fn input_schema(&self) -> Type;
-    fn output_schema(&self) -> Type;
     fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError>;
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError>;
     fn apply(
@@ -123,13 +121,63 @@ pub trait DynResource {
         inputs: &Map,
         prior_state: Option<&serde_json::Value>,
         writer: &BlockWriter,
-    ) -> Result<ApplyResult<serde_json::Value>, BoxError>;
+    ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError>;
-    fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult<serde_json::Value>, BoxError>;
+    fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
+}
+
+/// Convert a `Map` (HashMap<String, Value>) to a serde_json::Value for deserialization.
+fn map_to_json(map: &Map) -> Result<serde_json::Value, BoxError> {
+    // Value doesn't implement Serialize, so convert manually
+    fn value_to_json(v: &Value) -> serde_json::Value {
+        match v {
+            Value::Str(s) => serde_json::Value::String(s.clone()),
+            Value::Int(n) => serde_json::json!(n),
+            Value::Bool(b) => serde_json::json!(b),
+            Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
+            Value::Map(m) => {
+                let obj: serde_json::Map<String, serde_json::Value> =
+                    m.iter().map(|(k, v)| (k.clone(), value_to_json(v))).collect();
+                serde_json::Value::Object(obj)
+            }
+            Value::Null => serde_json::Value::Null,
+        }
+    }
+    let obj: serde_json::Map<String, serde_json::Value> =
+        map.iter().map(|(k, v)| (k.clone(), value_to_json(v))).collect();
+    Ok(serde_json::Value::Object(obj))
+}
+
+/// Convert a serializable struct back to a `Map`.
+fn json_to_map<T: Serialize>(outputs: &T) -> Result<Map, BoxError> {
+    fn json_to_value(v: &serde_json::Value) -> Value {
+        match v {
+            serde_json::Value::String(s) => Value::Str(s.clone()),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Int(i)
+                } else {
+                    Value::Str(n.to_string())
+                }
+            }
+            serde_json::Value::Bool(b) => Value::Bool(*b),
+            serde_json::Value::Array(items) => Value::List(items.iter().map(json_to_value).collect()),
+            serde_json::Value::Object(obj) => {
+                let m: Map = obj.iter().map(|(k, v)| (k.clone(), json_to_value(v))).collect();
+                Value::Map(m)
+            }
+            serde_json::Value::Null => Value::Null,
+        }
+    }
+    let json = serde_json::to_value(outputs)?;
+    match &json {
+        serde_json::Value::Object(obj) => Ok(obj.iter().map(|(k, v)| (k.clone(), json_to_value(v))).collect()),
+        _ => Err("outputs must serialize to a JSON object".into()),
+    }
 }
 
 /// Blanket impl: any `Resource` automatically becomes a `DynResource`
-/// by serializing/deserializing state at the boundary.
+/// by serializing/deserializing at the boundary.
 impl<R: Resource> DynResource for R {
     fn name(&self) -> &str {
         Resource::name(self)
@@ -139,21 +187,17 @@ impl<R: Resource> DynResource for R {
         Resource::kind(self)
     }
 
-    fn input_schema(&self) -> Type {
-        Resource::input_schema(self)
-    }
-
-    fn output_schema(&self) -> Type {
-        Resource::output_schema(self)
-    }
-
     fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError> {
-        Resource::resolve(self, inputs)
+        let json = map_to_json(inputs)?;
+        let typed: R::Inputs = serde_json::from_value(json)?;
+        Resource::resolve(self, &typed)
     }
 
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError> {
+        let json = map_to_json(inputs)?;
+        let typed: R::Inputs = serde_json::from_value(json)?;
         let state = prior_state.map(|v| serde_json::from_value(v.clone())).transpose()?;
-        Resource::plan(self, inputs, state.as_ref())
+        Resource::plan(self, &typed, state.as_ref())
     }
 
     fn apply(
@@ -161,11 +205,13 @@ impl<R: Resource> DynResource for R {
         inputs: &Map,
         prior_state: Option<&serde_json::Value>,
         writer: &BlockWriter,
-    ) -> Result<ApplyResult<serde_json::Value>, BoxError> {
+    ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
+        let json = map_to_json(inputs)?;
+        let typed: R::Inputs = serde_json::from_value(json)?;
         let state = prior_state.map(|v| serde_json::from_value(v.clone())).transpose()?;
-        let result = Resource::apply(self, inputs, state.as_ref(), writer)?;
+        let result = Resource::apply(self, &typed, state.as_ref(), writer)?;
         Ok(ApplyResult {
-            outputs: result.outputs,
+            outputs: json_to_map(&result.outputs)?,
             state: result.state.map(serde_json::to_value).transpose()?,
         })
     }
@@ -175,11 +221,11 @@ impl<R: Resource> DynResource for R {
         Resource::destroy(self, &state, writer)
     }
 
-    fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult<serde_json::Value>, BoxError> {
+    fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
         let state: R::State = serde_json::from_value(prior_state.clone())?;
         let result = Resource::refresh(self, &state)?;
         Ok(ApplyResult {
-            outputs: result.outputs,
+            outputs: json_to_map(&result.outputs)?,
             state: result.state.map(serde_json::to_value).transpose()?,
         })
     }
@@ -231,6 +277,12 @@ mod tests {
         version: u32,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct StubInputs {}
+
+    #[derive(Debug, Serialize)]
+    struct StubOutputs {}
+
     struct StubProvider;
 
     impl Provider for StubProvider {
@@ -255,6 +307,8 @@ mod tests {
 
     impl Resource for StubResource {
         type State = StubState;
+        type Inputs = StubInputs;
+        type Outputs = StubOutputs;
 
         fn name(&self) -> &str {
             "thing"
@@ -264,21 +318,7 @@ mod tests {
             ResourceKind::Build
         }
 
-        fn input_schema(&self) -> Type {
-            Type::Struct {
-                description: String::new(),
-                fields: vec![],
-            }
-        }
-
-        fn output_schema(&self) -> Type {
-            Type::Struct {
-                description: String::new(),
-                fields: vec![],
-            }
-        }
-
-        fn resolve(&self, _inputs: &Map) -> Result<ResolveResult, BoxError> {
+        fn resolve(&self, _inputs: &StubInputs) -> Result<ResolveResult, BoxError> {
             Ok(ResolveResult {
                 inputs: vec![],
                 watches: vec![],
@@ -286,7 +326,7 @@ mod tests {
             })
         }
 
-        fn plan(&self, _inputs: &Map, prior_state: Option<&StubState>) -> Result<PlanResult, BoxError> {
+        fn plan(&self, _inputs: &StubInputs, prior_state: Option<&StubState>) -> Result<PlanResult, BoxError> {
             let action = if prior_state.is_some() {
                 PlanAction::Update
             } else {
@@ -300,12 +340,12 @@ mod tests {
 
         fn apply(
             &self,
-            _inputs: &Map,
+            _inputs: &StubInputs,
             _prior_state: Option<&StubState>,
             _writer: &BlockWriter,
-        ) -> Result<ApplyResult<StubState>, BoxError> {
+        ) -> Result<ApplyResult<StubState, StubOutputs>, BoxError> {
             Ok(ApplyResult {
-                outputs: Map::new(),
+                outputs: StubOutputs {},
                 state: Some(StubState { version: 1 }),
             })
         }
@@ -314,9 +354,9 @@ mod tests {
             Ok(())
         }
 
-        fn refresh(&self, prior_state: &StubState) -> Result<ApplyResult<StubState>, BoxError> {
+        fn refresh(&self, prior_state: &StubState) -> Result<ApplyResult<StubState, StubOutputs>, BoxError> {
             Ok(ApplyResult {
-                outputs: Map::new(),
+                outputs: StubOutputs {},
                 state: Some(prior_state.clone()),
             })
         }
@@ -334,7 +374,7 @@ mod tests {
     #[test]
     fn resource_plan_create() {
         let resource = StubResource;
-        let result = Resource::plan(&resource, &Map::new(), None).unwrap();
+        let result = Resource::plan(&resource, &StubInputs {}, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
@@ -342,7 +382,7 @@ mod tests {
     fn resource_plan_update() {
         let resource = StubResource;
         let state = StubState { version: 1 };
-        let result = Resource::plan(&resource, &Map::new(), Some(&state)).unwrap();
+        let result = Resource::plan(&resource, &StubInputs {}, Some(&state)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 
@@ -351,7 +391,7 @@ mod tests {
         let resource = StubResource;
         let output = crate::output::Output::new(&[]);
         let writer = output.writer("test");
-        let result = Resource::apply(&resource, &Map::new(), None, &writer).unwrap();
+        let result = Resource::apply(&resource, &StubInputs {}, None, &writer).unwrap();
         assert_eq!(result.state, Some(StubState { version: 1 }));
     }
 
@@ -361,14 +401,12 @@ mod tests {
         reg.register(Box::new(StubProvider));
         let resource = reg.get_resource("stub", "thing").unwrap();
 
-        // Apply through DynResource — state comes back as JSON
         let output = crate::output::Output::new(&[]);
         let writer = output.writer("test");
         let result = resource.apply(&Map::new(), None, &writer).unwrap();
         let json_state = result.state.unwrap();
         assert_eq!(json_state, serde_json::json!({"version": 1}));
 
-        // Plan with that JSON state — deserialized back to StubState internally
         let plan = resource.plan(&Map::new(), Some(&json_state)).unwrap();
         assert_eq!(plan.action, PlanAction::Update);
     }
