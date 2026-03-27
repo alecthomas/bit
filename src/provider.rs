@@ -12,6 +12,15 @@ pub type BoxError = Box<dyn Error + Send + Sync>;
 
 use std::path::PathBuf;
 
+/// Files that a block depends on and produces.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedFiles {
+    /// Files that are inputs to this block (source files, config, etc.)
+    pub inputs: Vec<PathBuf>,
+    /// Files that this block produces as outputs (binaries, artifacts, etc.)
+    pub outputs: Vec<PathBuf>,
+}
+
 /// What action the plan phase determined is needed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanAction {
@@ -77,8 +86,8 @@ pub trait Resource {
 
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    /// Return the list of files that this block depends on.
-    fn resolve(&self, inputs: &Self::Inputs) -> Result<Vec<PathBuf>, BoxError>;
+    /// Return the input and output files for this block.
+    fn resolve(&self, inputs: &Self::Inputs) -> Result<ResolvedFiles, BoxError>;
     fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -95,7 +104,7 @@ pub trait Resource {
 pub trait DynResource {
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    fn resolve(&self, inputs: &Map) -> Result<Vec<PathBuf>, BoxError>;
+    fn resolve(&self, inputs: &Map) -> Result<ResolvedFiles, BoxError>;
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -130,7 +139,7 @@ impl<R: Resource> DynResource for R {
         Resource::kind(self)
     }
 
-    fn resolve(&self, inputs: &Map) -> Result<Vec<PathBuf>, BoxError> {
+    fn resolve(&self, inputs: &Map) -> Result<ResolvedFiles, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         Resource::resolve(self, &typed)
     }
@@ -258,8 +267,8 @@ mod tests {
             ResourceKind::Build
         }
 
-        fn resolve(&self, _inputs: &StubInputs) -> Result<Vec<PathBuf>, BoxError> {
-            Ok(vec![])
+        fn resolve(&self, _inputs: &StubInputs) -> Result<ResolvedFiles, BoxError> {
+            Ok(ResolvedFiles::default())
         }
 
         fn plan(&self, _inputs: &StubInputs, prior_state: Option<&StubState>) -> Result<PlanResult, BoxError> {

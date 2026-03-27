@@ -119,23 +119,27 @@ impl Resource for ImageResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &ImageInputs) -> Result<Vec<PathBuf>, BoxError> {
+    fn resolve(&self, inputs: &ImageInputs) -> Result<crate::provider::ResolvedFiles, BoxError> {
         let context = Path::new(&inputs.context);
         let dockerfile = context.join(&inputs.dockerfile);
 
-        let mut paths = Vec::new();
+        let mut input_files = Vec::new();
 
         // Include the Dockerfile itself
         if dockerfile.is_file() {
-            paths.push(dockerfile.clone());
+            input_files.push(dockerfile.clone());
         }
 
         // Parse Dockerfile to discover COPY/ADD source paths
         for src in &parse_dockerfile_sources(&dockerfile, context) {
-            paths.extend(expand_path(src));
+            input_files.extend(expand_path(src));
         }
 
-        Ok(paths)
+        // Docker images don't produce local output files
+        Ok(crate::provider::ResolvedFiles {
+            inputs: input_files,
+            outputs: vec![],
+        })
     }
 
     fn plan(&self, inputs: &ImageInputs, prior_state: Option<&ImageState>) -> Result<PlanResult, BoxError> {
@@ -364,9 +368,10 @@ mod tests {
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
         };
-        let paths = Resource::resolve(&ImageResource, &inputs).unwrap();
-        assert_eq!(paths.len(), 2);
-        assert!(paths.contains(&dockerfile));
-        assert!(paths.contains(&src_file));
+        let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
+        assert_eq!(resolved.inputs.len(), 2);
+        assert!(resolved.inputs.contains(&dockerfile));
+        assert!(resolved.inputs.contains(&src_file));
+        assert!(resolved.outputs.is_empty());
     }
 }

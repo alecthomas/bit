@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,8 @@ use crate::value::Value;
 #[derive(Debug, Deserialize)]
 pub struct ExecInputs {
     pub command: String,
-    pub output: String,
+    #[serde(deserialize_with = "string_or_vec")]
+    pub output: Vec<String>,
     #[serde(default)]
     pub inputs: Vec<String>,
 }
@@ -23,14 +24,49 @@ pub struct ExecInputs {
 /// Typed outputs for an exec block, serialized into the scope for downstream blocks.
 #[derive(Debug, Serialize)]
 pub struct ExecOutputs {
+    /// First output path (convenience for single-output blocks).
     pub path: String,
+    /// All output paths.
+    pub paths: Vec<String>,
 }
 
 /// State persisted between runs for an exec block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecState {
     pub command: String,
-    pub output: String,
+    pub output: Vec<String>,
+}
+
+/// Deserialize a field that can be either a single string or a list of strings.
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrVec;
+
+    impl<'de> de::Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or list of strings")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(vec![v.to_owned()])
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+            let mut v = Vec::new();
+            while let Some(s) = seq.next_element()? {
+                v.push(s);
+            }
+            Ok(v)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
 }
 
 pub struct ExecProvider;
@@ -68,22 +104,20 @@ impl Resource for ExecResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &ExecInputs) -> Result<Vec<PathBuf>, BoxError> {
-        let mut paths = Vec::new();
+    fn resolve(&self, inputs: &ExecInputs) -> Result<crate::provider::ResolvedFiles, BoxError> {
+        let mut input_files = Vec::new();
         for pattern in &inputs.inputs {
             for entry in glob::glob(pattern).map_err(|e| format!("invalid glob '{pattern}': {e}"))? {
                 let path = entry.map_err(|e| format!("glob error: {e}"))?;
                 if path.is_file() {
-                    paths.push(path);
+                    input_files.push(path);
                 }
             }
         }
-        // Include the output file/directory so changes or deletions are detected
-        let output = Path::new(&inputs.output);
-        if output.is_file() {
-            paths.push(output.to_path_buf());
-        }
-        Ok(paths)
+        Ok(crate::provider::ResolvedFiles {
+            inputs: input_files,
+            outputs: inputs.output.iter().map(|o| Path::new(o).to_path_buf()).collect(),
+        })
     }
 
     fn plan(&self, inputs: &ExecInputs, prior_state: Option<&ExecState>) -> Result<PlanResult, BoxError> {
@@ -113,13 +147,15 @@ impl Resource for ExecResource {
         _prior_state: Option<&ExecState>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
-        let output_path = Path::new(&inputs.output);
-        if inputs.output.ends_with('/') {
-            fs::create_dir_all(output_path)?;
-        } else if let Some(parent) = output_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent)?;
+        for output in &inputs.output {
+            let output_path = Path::new(output);
+            if output.ends_with('/') {
+                fs::create_dir_all(output_path)?;
+            } else if let Some(parent) = output_path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                fs::create_dir_all(parent)?;
+            }
         }
 
         let mut child = Command::new("sh")
@@ -149,7 +185,8 @@ impl Resource for ExecResource {
 
         Ok(ApplyResult {
             outputs: ExecOutputs {
-                path: inputs.output.clone(),
+                path: inputs.output.first().cloned().unwrap_or_default(),
+                paths: inputs.output.clone(),
             },
             state: Some(ExecState {
                 command: inputs.command.clone(),
@@ -159,13 +196,15 @@ impl Resource for ExecResource {
     }
 
     fn destroy(&self, prior_state: &ExecState, writer: &BlockWriter) -> Result<(), BoxError> {
-        let path = Path::new(&prior_state.output);
-        if path.is_dir() {
-            writer.line(&format!("rm -rf {}", prior_state.output));
-            fs::remove_dir_all(path).ok();
-        } else if path.is_file() {
-            writer.line(&format!("rm {}", prior_state.output));
-            fs::remove_file(path).ok();
+        for output in &prior_state.output {
+            let path = Path::new(output);
+            if path.is_dir() {
+                writer.line(&format!("rm -rf {output}"));
+                fs::remove_dir_all(path).ok();
+            } else if path.is_file() {
+                writer.line(&format!("rm {output}"));
+                fs::remove_file(path).ok();
+            }
         }
         Ok(())
     }
@@ -173,7 +212,8 @@ impl Resource for ExecResource {
     fn refresh(&self, prior_state: &ExecState) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
         Ok(ApplyResult {
             outputs: ExecOutputs {
-                path: prior_state.output.clone(),
+                path: prior_state.output.first().cloned().unwrap_or_default(),
+                paths: prior_state.output.clone(),
             },
             state: Some(prior_state.clone()),
         })
@@ -185,6 +225,7 @@ mod tests {
     use super::*;
     use crate::value::Map;
     use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn resolve_expands_globs() {
@@ -194,21 +235,22 @@ mod tests {
 
         let inputs = ExecInputs {
             command: "echo".into(),
-            output: "out".into(),
+            output: vec!["out".into()],
             inputs: vec![dir.path().join("*.txt").to_string_lossy().into_owned()],
         };
 
         let resource = ExecResource;
         let result = Resource::resolve(&resource, &inputs).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0], file);
+        assert_eq!(result.inputs.len(), 1);
+        assert_eq!(result.inputs[0], file);
+        assert_eq!(result.outputs, vec![PathBuf::from("out")]);
     }
 
     #[test]
     fn plan_create_when_no_prior_state() {
         let inputs = ExecInputs {
             command: "echo hi".into(),
-            output: "out".into(),
+            output: vec!["out".into()],
             inputs: vec![],
         };
         let resource = ExecResource;
@@ -220,12 +262,12 @@ mod tests {
     fn plan_none_when_unchanged() {
         let inputs = ExecInputs {
             command: "echo hi".into(),
-            output: "out".into(),
+            output: vec!["out".into()],
             inputs: vec![],
         };
         let prior = ExecState {
             command: "echo hi".into(),
-            output: "out/".into(),
+            output: vec!["out/".into()],
         };
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -236,12 +278,12 @@ mod tests {
     fn plan_update_when_command_changed() {
         let inputs = ExecInputs {
             command: "echo bye".into(),
-            output: "out".into(),
+            output: vec!["out".into()],
             inputs: vec![],
         };
         let prior = ExecState {
             command: "echo hi".into(),
-            output: "out/".into(),
+            output: vec!["out/".into()],
         };
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -254,7 +296,7 @@ mod tests {
         let output = dir.path().join("result.txt");
         let inputs = ExecInputs {
             command: format!("echo hello > {}", output.display()),
-            output: output.to_string_lossy().into_owned(),
+            output: vec![output.to_string_lossy().into_owned()],
             inputs: vec![],
         };
         let resource = ExecResource;
@@ -270,7 +312,7 @@ mod tests {
     fn apply_fails_on_bad_command() {
         let inputs = ExecInputs {
             command: "false".into(),
-            output: "/dev/null".into(),
+            output: vec!["/dev/null".into()],
             inputs: vec![],
         };
         let resource = ExecResource;
@@ -288,7 +330,7 @@ mod tests {
 
         let state = ExecState {
             command: "echo hi".into(),
-            output: output.to_string_lossy().into_owned(),
+            output: vec![output.to_string_lossy().into_owned()],
         };
 
         let resource = ExecResource;

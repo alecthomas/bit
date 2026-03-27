@@ -39,7 +39,7 @@ pub struct BlockPlan {
 /// outputs, and a combined hash of all inputs (resolved files + parent states).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct WrappedState {
-    provider: serde_json::Value,
+    state: serde_json::Value,
     outputs: Map,
     content_hash: String,
 }
@@ -47,27 +47,34 @@ struct WrappedState {
 /// Extract the provider state, outputs, and stored input hash from persisted state.
 fn unwrap_state(stored: &serde_json::Value) -> (Option<serde_json::Value>, Map, String) {
     if let Ok(wrapped) = serde_json::from_value::<WrappedState>(stored.clone()) {
-        (Some(wrapped.provider), wrapped.outputs, wrapped.content_hash)
+        (Some(wrapped.state), wrapped.outputs, wrapped.content_hash)
     } else {
         // Legacy state without wrapping
         (Some(stored.clone()), Map::new(), String::new())
     }
 }
 
-/// Compute a combined hash of resolved file inputs and parent block states.
+/// Cache of file path -> content hash, shared across all blocks in a run.
+type HashCache = std::collections::HashMap<std::path::PathBuf, String>;
+
+/// Compute a combined hash of files and parent block states.
 fn compute_content_hash(
-    resolved_files: &[std::path::PathBuf],
+    files: &[std::path::PathBuf],
     dag: &Dag,
     block_name: &str,
     store: &dyn StateStore,
+    cache: &mut HashCache,
 ) -> String {
     let mut hasher = Sha256::new();
 
-    // Hash resolved files (sorted for determinism)
-    let mut files = resolved_files.to_vec();
-    files.sort();
-    for file in &files {
-        if let Ok(hash) = hash_file(file) {
+    // Hash files (sorted for determinism)
+    let mut sorted = files.to_vec();
+    sorted.sort();
+    for file in &sorted {
+        let hash = cache
+            .entry(file.clone())
+            .or_insert_with(|| hash_file(file).unwrap_or_default());
+        if !hash.is_empty() {
             hasher.update(file.to_string_lossy().as_bytes());
             hasher.update(hash.as_bytes());
         }
@@ -112,6 +119,7 @@ pub fn plan(
     let mut scope = base.scope.clone();
     let mut plans = Vec::new();
     let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut hash_cache = HashCache::new();
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
@@ -127,16 +135,17 @@ pub fn plan(
             None => (None, Map::new(), String::new()),
         };
 
-        // Resolve file inputs
-        let resolved_files = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+        // Resolve files
+        let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
             block: name.clone(),
             phase: "resolve",
             source: e,
         })?;
 
-        // Check if inputs (files + parent states) changed
+        // Hash inputs + existing outputs + parent states to detect changes
+        let all_files: Vec<_> = resolved.inputs.iter().chain(&resolved.outputs).cloned().collect();
         let has_dirty_dep = dag.deps(name).iter().any(|d| dirty.contains(d));
-        let current_content_hash = compute_content_hash(&resolved_files, dag, name, store);
+        let current_content_hash = compute_content_hash(&all_files, dag, name, store, &mut hash_cache);
         let inputs_changed = has_dirty_dep || current_content_hash != stored_content_hash;
 
         let result = if inputs_changed && provider_state.is_some() {
@@ -200,6 +209,7 @@ pub fn apply(
 
     let mut scope = base.scope.clone();
     let mut results = Vec::new();
+    let mut hash_cache = HashCache::new();
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
@@ -215,13 +225,14 @@ pub fn apply(
             None => (None, Map::new(), String::new()),
         };
 
-        // Resolve file inputs and compute combined hash
-        let resolved_files = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+        // Resolve files and compute combined hash
+        let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
             block: name.clone(),
             phase: "resolve",
             source: e,
         })?;
-        let current_content_hash = compute_content_hash(&resolved_files, dag, name, store);
+        let all_files: Vec<_> = resolved.inputs.iter().chain(&resolved.outputs).cloned().collect();
+        let current_content_hash = compute_content_hash(&all_files, dag, name, store, &mut hash_cache);
         let inputs_changed = current_content_hash != stored_content_hash;
 
         let plan_result = if inputs_changed && provider_state.is_some() {
@@ -274,13 +285,23 @@ pub fn apply(
                 }
             })?;
 
-        // Persist wrapped state (provider state + outputs + input hash).
+        // Persist wrapped state (provider state + outputs + content hash).
         // Re-resolve after apply so output files are included in the hash.
+        // Invalidate cache for output files since apply may have changed them.
         if let Some(provider_state) = &apply_result.state {
-            let post_apply_files = node.resource.resolve(&inputs).unwrap_or_default();
-            let content_hash = compute_content_hash(&post_apply_files, dag, name, store);
+            let post_resolved = node.resource.resolve(&inputs).unwrap_or_default();
+            for output_file in &post_resolved.outputs {
+                hash_cache.remove(output_file);
+            }
+            let post_files: Vec<_> = post_resolved
+                .inputs
+                .iter()
+                .chain(&post_resolved.outputs)
+                .cloned()
+                .collect();
+            let content_hash = compute_content_hash(&post_files, dag, name, store, &mut hash_cache);
             let wrapped = WrappedState {
-                provider: provider_state.clone(),
+                state: provider_state.clone(),
                 outputs: apply_result.outputs.clone(),
                 content_hash,
             };
