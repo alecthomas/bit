@@ -9,6 +9,7 @@ use bit::engine;
 use bit::loader;
 use bit::output::Output;
 use bit::provider::ProviderRegistry;
+use bit::providers::docker::DockerProvider;
 use bit::providers::exec::ExecProvider;
 use bit::state;
 use bit::value::Map;
@@ -51,6 +52,7 @@ enum Command {
 fn default_registry() -> ProviderRegistry {
     let mut reg = ProviderRegistry::new();
     reg.register(Box::new(ExecProvider));
+    reg.register(Box::new(DockerProvider));
     reg
 }
 
