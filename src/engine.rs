@@ -5,6 +5,7 @@ use crate::expr::{self, EvalError, Scope};
 use crate::loader::BaseScope;
 use crate::output::{Event, Output};
 use crate::provider::{BoxError, PlanAction, PlanResult, ResourceKind};
+use crate::providers::hash_file;
 use crate::state::{StateError, StateStore};
 use crate::value::{Map, Value};
 
@@ -34,40 +35,54 @@ pub struct BlockPlan {
     pub plan: PlanResult,
 }
 
-/// Wrapped state persisted by the engine. Contains the provider's own state
-/// plus a hash of all dependency states, so changes in parents automatically
-/// invalidate children.
+/// Wrapped state persisted by the engine. Contains the provider's own state,
+/// outputs, and a combined hash of all inputs (resolved files + parent states).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct WrappedState {
     provider: serde_json::Value,
-    dep_hash: String,
+    outputs: Map,
+    content_hash: String,
 }
 
-/// Extract the provider state from a wrapped state, returning (provider_state, dep_hash).
-fn unwrap_state(stored: &serde_json::Value) -> (Option<serde_json::Value>, String) {
+/// Extract the provider state, outputs, and stored input hash from persisted state.
+fn unwrap_state(stored: &serde_json::Value) -> (Option<serde_json::Value>, Map, String) {
     if let Ok(wrapped) = serde_json::from_value::<WrappedState>(stored.clone()) {
-        (Some(wrapped.provider), wrapped.dep_hash)
+        (Some(wrapped.provider), wrapped.outputs, wrapped.content_hash)
     } else {
-        // Legacy state without wrapping — treat as provider state with empty dep hash
-        (Some(stored.clone()), String::new())
+        // Legacy state without wrapping
+        (Some(stored.clone()), Map::new(), String::new())
     }
 }
 
-/// Compute a hash of all dependency states for a block.
-fn compute_dep_hash(dag: &Dag, block_name: &str, store: &dyn StateStore) -> String {
-    let deps = dag.deps(block_name);
-    if deps.is_empty() {
-        return String::new();
-    }
+/// Compute a combined hash of resolved file inputs and parent block states.
+fn compute_content_hash(
+    resolved_files: &[std::path::PathBuf],
+    dag: &Dag,
+    block_name: &str,
+    store: &dyn StateStore,
+) -> String {
     let mut hasher = Sha256::new();
-    let mut sorted_deps = deps;
-    sorted_deps.sort();
-    for dep in &sorted_deps {
+
+    // Hash resolved files (sorted for determinism)
+    let mut files = resolved_files.to_vec();
+    files.sort();
+    for file in &files {
+        if let Ok(hash) = hash_file(file) {
+            hasher.update(file.to_string_lossy().as_bytes());
+            hasher.update(hash.as_bytes());
+        }
+    }
+
+    // Hash parent block states
+    let mut deps = dag.deps(block_name);
+    deps.sort();
+    for dep in &deps {
         if let Ok(Some(state)) = store.load(dep) {
             hasher.update(dep.as_bytes());
             hasher.update(state.to_string().as_bytes());
         }
     }
+
     format!("sha256:{:x}", hasher.finalize())
 }
 
@@ -107,35 +122,37 @@ pub fn plan(
             source: e,
         })?;
 
-        let (provider_state, stored_dep_hash) = match &node.prior_state {
+        let (provider_state, stored_outputs, stored_content_hash) = match &node.prior_state {
             Some(s) => unwrap_state(s),
-            None => (None, String::new()),
+            None => (None, Map::new(), String::new()),
         };
 
-        let mut result = node
-            .resource
-            .plan(&inputs, provider_state.as_ref())
-            .map_err(|e| EngineError::Provider {
-                block: name.clone(),
-                phase: "plan",
-                source: e,
-            })?;
+        // Resolve file inputs
+        let resolved_files = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+            block: name.clone(),
+            phase: "resolve",
+            source: e,
+        })?;
 
-        // If any dependency is dirty (within this plan), or if the stored
-        // dep hash differs from current (cross-run detection), force update.
-        if result.action == PlanAction::None {
-            let has_dirty_dep = dag.deps(name).iter().any(|d| dirty.contains(d));
-            let dep_hash_changed = {
-                let current = compute_dep_hash(dag, name, store);
-                current != stored_dep_hash
-            };
-            if has_dirty_dep || dep_hash_changed {
-                result = PlanResult {
-                    action: PlanAction::Update,
-                    description: "dependencies changed".into(),
-                };
+        // Check if inputs (files + parent states) changed
+        let has_dirty_dep = dag.deps(name).iter().any(|d| dirty.contains(d));
+        let current_content_hash = compute_content_hash(&resolved_files, dag, name, store);
+        let inputs_changed = has_dirty_dep || current_content_hash != stored_content_hash;
+
+        let result = if inputs_changed && provider_state.is_some() {
+            PlanResult {
+                action: PlanAction::Update,
+                description: "inputs changed".into(),
             }
-        }
+        } else {
+            node.resource
+                .plan(&inputs, provider_state.as_ref())
+                .map_err(|e| EngineError::Provider {
+                    block: name.clone(),
+                    phase: "plan",
+                    source: e,
+                })?
+        };
 
         if result.action != PlanAction::None {
             dirty.insert(name.clone());
@@ -154,7 +171,8 @@ pub fn plan(
 
         writer.event(plan_action_to_event(&result.action), &result.description);
 
-        scope.set(name, Value::Map(Map::new()));
+        // Use stored outputs so downstream blocks can reference them
+        scope.set(name, Value::Map(stored_outputs));
 
         plans.push(BlockPlan {
             name: name.clone(),
@@ -192,30 +210,34 @@ pub fn apply(
             source: e,
         })?;
 
-        let (provider_state, stored_dep_hash) = match &node.prior_state {
+        let (provider_state, stored_outputs, stored_content_hash) = match &node.prior_state {
             Some(s) => unwrap_state(s),
-            None => (None, String::new()),
+            None => (None, Map::new(), String::new()),
         };
 
-        let mut plan_result =
+        // Resolve file inputs and compute combined hash
+        let resolved_files = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+            block: name.clone(),
+            phase: "resolve",
+            source: e,
+        })?;
+        let current_content_hash = compute_content_hash(&resolved_files, dag, name, store);
+        let inputs_changed = current_content_hash != stored_content_hash;
+
+        let plan_result = if inputs_changed && provider_state.is_some() {
+            PlanResult {
+                action: PlanAction::Update,
+                description: "inputs changed".into(),
+            }
+        } else {
             node.resource
                 .plan(&inputs, provider_state.as_ref())
                 .map_err(|e| EngineError::Provider {
                     block: name.clone(),
                     phase: "plan",
                     source: e,
-                })?;
-
-        // Check if dependency states changed
-        if plan_result.action == PlanAction::None {
-            let current_dep_hash = compute_dep_hash(dag, name, store);
-            if current_dep_hash != stored_dep_hash {
-                plan_result = PlanResult {
-                    action: PlanAction::Update,
-                    description: "dependencies changed".into(),
-                };
-            }
-        }
+                })?
+        };
 
         if node.protected && matches!(plan_result.action, PlanAction::Replace | PlanAction::Destroy) {
             return Err(EngineError::Protected(
@@ -230,7 +252,7 @@ pub fn apply(
 
         if plan_result.action == PlanAction::None {
             writer.event(Event::Skipped, "no changes");
-            scope.set(name, Value::Map(Map::new()));
+            scope.set(name, Value::Map(stored_outputs));
             results.push(BlockPlan {
                 name: name.clone(),
                 plan: plan_result,
@@ -252,12 +274,15 @@ pub fn apply(
                 }
             })?;
 
-        // Persist wrapped state (provider state + dep hash)
+        // Persist wrapped state (provider state + outputs + input hash).
+        // Re-resolve after apply so output files are included in the hash.
         if let Some(provider_state) = &apply_result.state {
-            let dep_hash = compute_dep_hash(dag, name, store);
+            let post_apply_files = node.resource.resolve(&inputs).unwrap_or_default();
+            let content_hash = compute_content_hash(&post_apply_files, dag, name, store);
             let wrapped = WrappedState {
                 provider: provider_state.clone(),
-                dep_hash,
+                outputs: apply_result.outputs.clone(),
+                content_hash,
             };
             store.save(name, &serde_json::to_value(&wrapped).unwrap())?;
         }
@@ -312,7 +337,7 @@ pub fn destroy(
             continue;
         };
 
-        let (provider_state, _) = unwrap_state(stored);
+        let (provider_state, _, _) = unwrap_state(stored);
         let Some(provider_state) = provider_state else {
             writer.event(Event::Skipped, "no state");
             continue;

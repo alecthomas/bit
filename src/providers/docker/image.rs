@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 use std::io::BufReader;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use parse_dockerfile::Instruction;
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolveResult, ResolvedInput, ResolvedPath, Resource, ResourceKind,
-};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
 
 #[derive(Debug, Deserialize)]
 pub struct ImageInputs {
@@ -33,14 +32,76 @@ fn default_dockerfile() -> String {
 pub struct ImageOutputs {
     #[serde(rename = "ref")]
     pub image_ref: String,
-    pub digest: String,
+    pub image_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageState {
     pub tag: String,
-    pub digest: String,
-    pub dockerfile_hash: String,
+}
+
+/// Parse a Dockerfile and return local source paths from COPY/ADD instructions.
+/// Skips multi-stage `COPY --from=...` and ADD with URLs.
+fn parse_dockerfile_sources(dockerfile: &Path, context: &Path) -> Vec<PathBuf> {
+    let Ok(contents) = std::fs::read_to_string(dockerfile) else {
+        return vec![];
+    };
+    let Ok(parsed) = parse_dockerfile::parse(&contents) else {
+        return vec![];
+    };
+
+    let mut paths = Vec::new();
+    for instruction in &parsed.instructions {
+        match instruction {
+            Instruction::Copy(copy) => {
+                // Skip multi-stage copies (COPY --from=builder ...)
+                let has_from = copy.options.iter().any(|f| &*f.name.value == "from");
+                if has_from {
+                    continue;
+                }
+                for src in &copy.src {
+                    if let parse_dockerfile::Source::Path(p) = src {
+                        let src_path = &*p.value;
+                        paths.push(context.join(src_path));
+                    }
+                }
+            }
+            Instruction::Add(add) => {
+                for src in &add.src {
+                    if let parse_dockerfile::Source::Path(p) = src {
+                        let src_path = &*p.value;
+                        // Skip URLs
+                        if src_path.starts_with("http://") || src_path.starts_with("https://") {
+                            continue;
+                        }
+                        paths.push(context.join(src_path));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    paths
+}
+
+/// Expand a path (which may be a glob or directory) into individual files,
+/// returning (path, content_hash) pairs.
+/// Expand a path (file, directory, or glob) into individual files.
+fn expand_path(path: &Path) -> Vec<PathBuf> {
+    let pattern = path.to_string_lossy();
+
+    if path.is_dir() {
+        let glob_pattern = format!("{}/**/*", pattern);
+        if let Ok(entries) = glob::glob(&glob_pattern) {
+            return entries.flatten().filter(|e| e.is_file()).collect();
+        }
+        return vec![];
+    }
+
+    if let Ok(entries) = glob::glob(&pattern) {
+        return entries.flatten().filter(|e| e.is_file()).collect();
+    }
+    vec![]
 }
 
 pub struct ImageResource;
@@ -58,27 +119,23 @@ impl Resource for ImageResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &ImageInputs) -> Result<ResolveResult, BoxError> {
+    fn resolve(&self, inputs: &ImageInputs) -> Result<Vec<PathBuf>, BoxError> {
+        let context = Path::new(&inputs.context);
+        let dockerfile = context.join(&inputs.dockerfile);
+
         let mut paths = Vec::new();
 
-        let dockerfile = std::path::Path::new(&inputs.context).join(&inputs.dockerfile);
+        // Include the Dockerfile itself
         if dockerfile.is_file() {
-            let contents = std::fs::read(&dockerfile)?;
-            let hash = format!("sha256:{:x}", sha2::Sha256::digest(&contents));
-            paths.push(ResolvedPath {
-                path: dockerfile.to_string_lossy().into_owned(),
-                content_hash: hash,
-            });
+            paths.push(dockerfile.clone());
         }
 
-        Ok(ResolveResult {
-            inputs: vec![ResolvedInput {
-                key: "dockerfile".into(),
-                paths,
-            }],
-            watches: vec![inputs.dockerfile.clone()],
-            platform: vec![],
-        })
+        // Parse Dockerfile to discover COPY/ADD source paths
+        for src in &parse_dockerfile_sources(&dockerfile, context) {
+            paths.extend(expand_path(src));
+        }
+
+        Ok(paths)
     }
 
     fn plan(&self, inputs: &ImageInputs, prior_state: Option<&ImageState>) -> Result<PlanResult, BoxError> {
@@ -94,18 +151,6 @@ impl Resource for ImageResource {
                 action: PlanAction::Update,
                 description: format!("docker build -t {}", inputs.tag),
             });
-        }
-
-        let dockerfile = std::path::Path::new(&inputs.context).join(&inputs.dockerfile);
-        if dockerfile.is_file() {
-            let contents = std::fs::read(&dockerfile)?;
-            let hash = format!("sha256:{:x}", sha2::Sha256::digest(&contents));
-            if hash != prior.dockerfile_hash {
-                return Ok(PlanResult {
-                    action: PlanAction::Update,
-                    description: format!("docker build -t {}", inputs.tag),
-                });
-            }
         }
 
         Ok(PlanResult {
@@ -160,25 +205,15 @@ impl Resource for ImageResource {
             .output()
             .map_err(|e| format!("docker inspect failed: {e}"))?;
 
-        let digest = String::from_utf8_lossy(&digest_output.stdout).trim().to_owned();
-
-        let dockerfile = std::path::Path::new(&inputs.context).join(&inputs.dockerfile);
-        let dockerfile_hash = if dockerfile.is_file() {
-            let contents = std::fs::read(&dockerfile)?;
-            format!("sha256:{:x}", sha2::Sha256::digest(&contents))
-        } else {
-            String::new()
-        };
+        let image_id = String::from_utf8_lossy(&digest_output.stdout).trim().to_owned();
 
         Ok(ApplyResult {
             outputs: ImageOutputs {
                 image_ref: inputs.tag.clone(),
-                digest: digest.clone(),
+                image_id,
             },
             state: Some(ImageState {
                 tag: inputs.tag.clone(),
-                digest,
-                dockerfile_hash,
             }),
         })
     }
@@ -207,17 +242,14 @@ impl Resource for ImageResource {
             return Err(format!("image {} not found", prior_state.tag).into());
         }
 
-        let digest = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let image_id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
 
         Ok(ApplyResult {
             outputs: ImageOutputs {
                 image_ref: prior_state.tag.clone(),
-                digest: digest.clone(),
+                image_id,
             },
-            state: Some(ImageState {
-                digest,
-                ..prior_state.clone()
-            }),
+            state: Some(prior_state.clone()),
         })
     }
 }
@@ -243,13 +275,11 @@ mod tests {
         let inputs = ImageInputs {
             tag: "myapp:latest".into(),
             context: ".".into(),
-            dockerfile: "nonexistent".into(),
+            dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
         };
         let prior = ImageState {
             tag: "myapp:latest".into(),
-            digest: "sha256:abc".into(),
-            dockerfile_hash: String::new(),
         };
         let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -263,20 +293,70 @@ mod tests {
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
         };
-        let prior = ImageState {
-            tag: "myapp:v1".into(),
-            digest: "sha256:abc".into(),
-            dockerfile_hash: String::new(),
-        };
+        let prior = ImageState { tag: "myapp:v1".into() };
         let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 
     #[test]
-    fn plan_update_when_dockerfile_changed() {
+    fn parse_dockerfile_extracts_copy_sources() {
         let dir = tempfile::tempdir().unwrap();
         let dockerfile = dir.path().join("Dockerfile");
-        std::fs::write(&dockerfile, "FROM alpine\nRUN echo new").unwrap();
+        std::fs::write(
+            &dockerfile,
+            "FROM alpine\nCOPY src/ /app/src/\nCOPY config.toml /app/\n",
+        )
+        .unwrap();
+
+        let sources = parse_dockerfile_sources(&dockerfile, dir.path());
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0], dir.path().join("src/"));
+        assert_eq!(sources[1], dir.path().join("config.toml"));
+    }
+
+    #[test]
+    fn parse_dockerfile_skips_multistage_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let dockerfile = dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile,
+            concat!(
+                "FROM rust AS builder\n",
+                "COPY src/ /src/\n",
+                "FROM debian\n",
+                "COPY --from=builder /src/target/app /usr/bin/app\n",
+            ),
+        )
+        .unwrap();
+
+        let sources = parse_dockerfile_sources(&dockerfile, dir.path());
+        // Only the first COPY, not the --from=builder one
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0], dir.path().join("src/"));
+    }
+
+    #[test]
+    fn parse_dockerfile_skips_add_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let dockerfile = dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile,
+            "FROM alpine\nADD https://example.com/file.tar.gz /app/\nADD local.txt /app/\n",
+        )
+        .unwrap();
+
+        let sources = parse_dockerfile_sources(&dockerfile, dir.path());
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0], dir.path().join("local.txt"));
+    }
+
+    #[test]
+    fn resolve_includes_copy_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let dockerfile = dir.path().join("Dockerfile");
+        let src_file = dir.path().join("app.txt");
+        std::fs::write(&dockerfile, "FROM alpine\nCOPY app.txt /app/\n").unwrap();
+        std::fs::write(&src_file, "hello").unwrap();
 
         let inputs = ImageInputs {
             tag: "myapp:latest".into(),
@@ -284,12 +364,9 @@ mod tests {
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
         };
-        let prior = ImageState {
-            tag: "myapp:latest".into(),
-            digest: "sha256:abc".into(),
-            dockerfile_hash: "sha256:old".into(),
-        };
-        let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
-        assert_eq!(result.action, PlanAction::Update);
+        let paths = Resource::resolve(&ImageResource, &inputs).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&dockerfile));
+        assert!(paths.contains(&src_file));
     }
 }

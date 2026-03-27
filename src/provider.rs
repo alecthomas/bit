@@ -10,27 +10,7 @@ use crate::value::{Map, Value};
 /// Shorthand for the boxed error type used at provider boundaries.
 pub type BoxError = Box<dyn Error + Send + Sync>;
 
-/// Result of resolving a block's inputs.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResolveResult {
-    pub inputs: Vec<ResolvedInput>,
-    pub watches: Vec<String>,
-    pub platform: Vec<String>,
-}
-
-/// A named group of resolved file paths.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedInput {
-    pub key: String,
-    pub paths: Vec<ResolvedPath>,
-}
-
-/// A single file with its content hash.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedPath {
-    pub path: String,
-    pub content_hash: String,
-}
+use std::path::PathBuf;
 
 /// What action the plan phase determined is needed.
 #[derive(Debug, Clone, PartialEq)]
@@ -97,7 +77,8 @@ pub trait Resource {
 
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    fn resolve(&self, inputs: &Self::Inputs) -> Result<ResolveResult, BoxError>;
+    /// Return the list of files that this block depends on.
+    fn resolve(&self, inputs: &Self::Inputs) -> Result<Vec<PathBuf>, BoxError>;
     fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -114,7 +95,7 @@ pub trait Resource {
 pub trait DynResource {
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError>;
+    fn resolve(&self, inputs: &Map) -> Result<Vec<PathBuf>, BoxError>;
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -149,7 +130,7 @@ impl<R: Resource> DynResource for R {
         Resource::kind(self)
     }
 
-    fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError> {
+    fn resolve(&self, inputs: &Map) -> Result<Vec<PathBuf>, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         Resource::resolve(self, &typed)
     }
@@ -277,12 +258,8 @@ mod tests {
             ResourceKind::Build
         }
 
-        fn resolve(&self, _inputs: &StubInputs) -> Result<ResolveResult, BoxError> {
-            Ok(ResolveResult {
-                inputs: vec![],
-                watches: vec![],
-                platform: vec![],
-            })
+        fn resolve(&self, _inputs: &StubInputs) -> Result<Vec<PathBuf>, BoxError> {
+            Ok(vec![])
         }
 
         fn plan(&self, _inputs: &StubInputs, prior_state: Option<&StubState>) -> Result<PlanResult, BoxError> {
