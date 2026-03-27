@@ -15,8 +15,17 @@ release = exec {
   inputs = inputs
 }
 
+# Docker image
+image = docker.image {
+  tag = "bit:latest"
+  depends_on = [debug]
+}
+
 # Build debug binary only
 target debug = [debug]
 
 # Build release binary only
 target release = [release]
+
+# Build Docker image
+target image = [image]
