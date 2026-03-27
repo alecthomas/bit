@@ -126,54 +126,16 @@ pub trait DynResource {
     fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
 }
 
-/// Convert a `Map` (HashMap<String, Value>) to a serde_json::Value for deserialization.
-fn map_to_json(map: &Map) -> Result<serde_json::Value, BoxError> {
-    // Value doesn't implement Serialize, so convert manually
-    fn value_to_json(v: &Value) -> serde_json::Value {
-        match v {
-            Value::Str(s) => serde_json::Value::String(s.clone()),
-            Value::Int(n) => serde_json::json!(n),
-            Value::Bool(b) => serde_json::json!(b),
-            Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
-            Value::Map(m) => {
-                let obj: serde_json::Map<String, serde_json::Value> =
-                    m.iter().map(|(k, v)| (k.clone(), value_to_json(v))).collect();
-                serde_json::Value::Object(obj)
-            }
-            Value::Null => serde_json::Value::Null,
-        }
-    }
-    let obj: serde_json::Map<String, serde_json::Value> =
-        map.iter().map(|(k, v)| (k.clone(), value_to_json(v))).collect();
-    Ok(serde_json::Value::Object(obj))
+/// Deserialize a `Map` into a typed struct via serde.
+fn deserialize_inputs<T: DeserializeOwned>(map: &Map) -> Result<T, BoxError> {
+    let json = serde_json::to_value(map)?;
+    Ok(serde_json::from_value(json)?)
 }
 
-/// Convert a serializable struct back to a `Map`.
-fn json_to_map<T: Serialize>(outputs: &T) -> Result<Map, BoxError> {
-    fn json_to_value(v: &serde_json::Value) -> Value {
-        match v {
-            serde_json::Value::String(s) => Value::Str(s.clone()),
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Value::Int(i)
-                } else {
-                    Value::Str(n.to_string())
-                }
-            }
-            serde_json::Value::Bool(b) => Value::Bool(*b),
-            serde_json::Value::Array(items) => Value::List(items.iter().map(json_to_value).collect()),
-            serde_json::Value::Object(obj) => {
-                let m: Map = obj.iter().map(|(k, v)| (k.clone(), json_to_value(v))).collect();
-                Value::Map(m)
-            }
-            serde_json::Value::Null => Value::Null,
-        }
-    }
+/// Serialize a typed struct back into a `Map`.
+fn serialize_outputs<T: Serialize>(outputs: &T) -> Result<Map, BoxError> {
     let json = serde_json::to_value(outputs)?;
-    match &json {
-        serde_json::Value::Object(obj) => Ok(obj.iter().map(|(k, v)| (k.clone(), json_to_value(v))).collect()),
-        _ => Err("outputs must serialize to a JSON object".into()),
-    }
+    Ok(serde_json::from_value(json)?)
 }
 
 /// Blanket impl: any `Resource` automatically becomes a `DynResource`
@@ -188,14 +150,12 @@ impl<R: Resource> DynResource for R {
     }
 
     fn resolve(&self, inputs: &Map) -> Result<ResolveResult, BoxError> {
-        let json = map_to_json(inputs)?;
-        let typed: R::Inputs = serde_json::from_value(json)?;
+        let typed: R::Inputs = deserialize_inputs(inputs)?;
         Resource::resolve(self, &typed)
     }
 
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError> {
-        let json = map_to_json(inputs)?;
-        let typed: R::Inputs = serde_json::from_value(json)?;
+        let typed: R::Inputs = deserialize_inputs(inputs)?;
         let state = prior_state.map(|v| serde_json::from_value(v.clone())).transpose()?;
         Resource::plan(self, &typed, state.as_ref())
     }
@@ -206,12 +166,11 @@ impl<R: Resource> DynResource for R {
         prior_state: Option<&serde_json::Value>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
-        let json = map_to_json(inputs)?;
-        let typed: R::Inputs = serde_json::from_value(json)?;
+        let typed: R::Inputs = deserialize_inputs(inputs)?;
         let state = prior_state.map(|v| serde_json::from_value(v.clone())).transpose()?;
         let result = Resource::apply(self, &typed, state.as_ref(), writer)?;
         Ok(ApplyResult {
-            outputs: json_to_map(&result.outputs)?,
+            outputs: serialize_outputs(&result.outputs)?,
             state: result.state.map(serde_json::to_value).transpose()?,
         })
     }
@@ -225,7 +184,7 @@ impl<R: Resource> DynResource for R {
         let state: R::State = serde_json::from_value(prior_state.clone())?;
         let result = Resource::refresh(self, &state)?;
         Ok(ApplyResult {
-            outputs: json_to_map(&result.outputs)?,
+            outputs: serialize_outputs(&result.outputs)?,
             state: result.state.map(serde_json::to_value).transpose()?,
         })
     }

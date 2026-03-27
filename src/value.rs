@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 pub type Map = HashMap<String, Value>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum Value {
-    Str(String),
-    Int(i64),
+    Null,
     Bool(bool),
+    Int(i64),
+    Str(String),
     List(Vec<Value>),
     Map(Map),
-    Null,
 }
 
 impl fmt::Display for Value {
