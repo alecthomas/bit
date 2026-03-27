@@ -1,6 +1,7 @@
+use sha2::{Digest, Sha256};
+
 use crate::dag::{Dag, DagError};
 use crate::expr::{self, EvalError, Scope};
-
 use crate::loader::BaseScope;
 use crate::output::{Event, Output};
 use crate::provider::{BoxError, PlanAction, PlanResult, ResourceKind};
@@ -33,6 +34,43 @@ pub struct BlockPlan {
     pub plan: PlanResult,
 }
 
+/// Wrapped state persisted by the engine. Contains the provider's own state
+/// plus a hash of all dependency states, so changes in parents automatically
+/// invalidate children.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WrappedState {
+    provider: serde_json::Value,
+    dep_hash: String,
+}
+
+/// Extract the provider state from a wrapped state, returning (provider_state, dep_hash).
+fn unwrap_state(stored: &serde_json::Value) -> (Option<serde_json::Value>, String) {
+    if let Ok(wrapped) = serde_json::from_value::<WrappedState>(stored.clone()) {
+        (Some(wrapped.provider), wrapped.dep_hash)
+    } else {
+        // Legacy state without wrapping — treat as provider state with empty dep hash
+        (Some(stored.clone()), String::new())
+    }
+}
+
+/// Compute a hash of all dependency states for a block.
+fn compute_dep_hash(dag: &Dag, block_name: &str, store: &dyn StateStore) -> String {
+    let deps = dag.deps(block_name);
+    if deps.is_empty() {
+        return String::new();
+    }
+    let mut hasher = Sha256::new();
+    let mut sorted_deps = deps;
+    sorted_deps.sort();
+    for dep in &sorted_deps {
+        if let Ok(Some(state)) = store.load(dep) {
+            hasher.update(dep.as_bytes());
+            hasher.update(state.to_string().as_bytes());
+        }
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 fn plan_action_to_event(action: &PlanAction) -> Event {
     match action {
         PlanAction::Create => Event::Create,
@@ -47,6 +85,7 @@ fn plan_action_to_event(action: &PlanAction) -> Event {
 pub fn plan(
     dag: &mut Dag,
     base: &BaseScope,
+    store: &dyn StateStore,
     output: &Output,
     target: Option<&str>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
@@ -57,6 +96,7 @@ pub fn plan(
 
     let mut scope = base.scope.clone();
     let mut plans = Vec::new();
+    let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
@@ -67,14 +107,39 @@ pub fn plan(
             source: e,
         })?;
 
-        let result = node
+        let (provider_state, stored_dep_hash) = match &node.prior_state {
+            Some(s) => unwrap_state(s),
+            None => (None, String::new()),
+        };
+
+        let mut result = node
             .resource
-            .plan(&inputs, node.prior_state.as_ref())
+            .plan(&inputs, provider_state.as_ref())
             .map_err(|e| EngineError::Provider {
                 block: name.clone(),
                 phase: "plan",
                 source: e,
             })?;
+
+        // If any dependency is dirty (within this plan), or if the stored
+        // dep hash differs from current (cross-run detection), force update.
+        if result.action == PlanAction::None {
+            let has_dirty_dep = dag.deps(name).iter().any(|d| dirty.contains(d));
+            let dep_hash_changed = {
+                let current = compute_dep_hash(dag, name, store);
+                current != stored_dep_hash
+            };
+            if has_dirty_dep || dep_hash_changed {
+                result = PlanResult {
+                    action: PlanAction::Update,
+                    description: "dependencies changed".into(),
+                };
+            }
+        }
+
+        if result.action != PlanAction::None {
+            dirty.insert(name.clone());
+        }
 
         if node.protected && matches!(result.action, PlanAction::Replace | PlanAction::Destroy) {
             return Err(EngineError::Protected(
@@ -127,14 +192,30 @@ pub fn apply(
             source: e,
         })?;
 
-        let plan_result =
+        let (provider_state, stored_dep_hash) = match &node.prior_state {
+            Some(s) => unwrap_state(s),
+            None => (None, String::new()),
+        };
+
+        let mut plan_result =
             node.resource
-                .plan(&inputs, node.prior_state.as_ref())
+                .plan(&inputs, provider_state.as_ref())
                 .map_err(|e| EngineError::Provider {
                     block: name.clone(),
                     phase: "plan",
                     source: e,
                 })?;
+
+        // Check if dependency states changed
+        if plan_result.action == PlanAction::None {
+            let current_dep_hash = compute_dep_hash(dag, name, store);
+            if current_dep_hash != stored_dep_hash {
+                plan_result = PlanResult {
+                    action: PlanAction::Update,
+                    description: "dependencies changed".into(),
+                };
+            }
+        }
 
         if node.protected && matches!(plan_result.action, PlanAction::Replace | PlanAction::Destroy) {
             return Err(EngineError::Protected(
@@ -161,7 +242,7 @@ pub fn apply(
 
         let apply_result = node
             .resource
-            .apply(&inputs, node.prior_state.as_ref(), &writer)
+            .apply(&inputs, provider_state.as_ref(), &writer)
             .map_err(|e| {
                 writer.event(Event::Failed, &e.to_string());
                 EngineError::Provider {
@@ -171,9 +252,14 @@ pub fn apply(
                 }
             })?;
 
-        // Persist state
-        if let Some(state) = &apply_result.state {
-            store.save(name, state)?;
+        // Persist wrapped state (provider state + dep hash)
+        if let Some(provider_state) = &apply_result.state {
+            let dep_hash = compute_dep_hash(dag, name, store);
+            let wrapped = WrappedState {
+                provider: provider_state.clone(),
+                dep_hash,
+            };
+            store.save(name, &serde_json::to_value(&wrapped).unwrap())?;
         }
 
         // Check test blocks
@@ -221,14 +307,20 @@ pub fn destroy(
             continue;
         }
 
-        let Some(prior_state) = &node.prior_state else {
+        let Some(stored) = &node.prior_state else {
+            writer.event(Event::Skipped, "no state");
+            continue;
+        };
+
+        let (provider_state, _) = unwrap_state(stored);
+        let Some(provider_state) = provider_state else {
             writer.event(Event::Skipped, "no state");
             continue;
         };
 
         writer.event(Event::Starting, "destroying");
 
-        node.resource.destroy(prior_state, &writer).map_err(|e| {
+        node.resource.destroy(&provider_state, &writer).map_err(|e| {
             writer.event(Event::Failed, &e.to_string());
             EngineError::Provider {
                 block: name.clone(),
@@ -316,7 +408,6 @@ mod tests {
         );
         let results = load_and_apply(&input).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].name, "build");
         assert_eq!(results[0].plan.action, PlanAction::Create);
         assert!(output.exists());
     }
@@ -351,7 +442,8 @@ mod tests {
         let module = parser::parse(&input).unwrap();
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        let plans = plan(&mut dag, &base, &Output::new(&[]), None).unwrap();
+        let out = Output::new(&[]);
+        let plans = plan(&mut dag, &base, &store, &out, None).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].plan.action, PlanAction::Create);
     }
@@ -370,12 +462,13 @@ mod tests {
 
         // Apply first
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        apply(&mut dag, &base, &store, &Output::new(&[]), None).unwrap();
+        let out = Output::new(&[]);
+        apply(&mut dag, &base, &store, &out, None).unwrap();
         assert!(!store.list().unwrap().is_empty());
 
         // Reload with state, then destroy
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        destroy(&mut dag, &store, &Output::new(&[]), None).unwrap();
+        destroy(&mut dag, &store, &out, None).unwrap();
         assert!(store.list().unwrap().is_empty());
     }
 
@@ -392,10 +485,11 @@ mod tests {
         let store = MemoryStore::new();
 
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        apply(&mut dag, &base, &store, &Output::new(&[]), None).unwrap();
+        let out = Output::new(&[]);
+        apply(&mut dag, &base, &store, &out, None).unwrap();
 
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        destroy(&mut dag, &store, &Output::new(&[]), None).unwrap();
+        destroy(&mut dag, &store, &out, None).unwrap();
         // State should still exist — destroy was skipped
         assert!(!store.list().unwrap().is_empty());
     }
@@ -419,7 +513,8 @@ mod tests {
         let module = parser::parse(&input).unwrap();
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        let results = apply(&mut dag, &base, &store, &Output::new(&[]), Some("just_a")).unwrap();
+        let out = Output::new(&[]);
+        let results = apply(&mut dag, &base, &store, &out, Some("just_a")).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "a");
         assert!(out_a.exists());

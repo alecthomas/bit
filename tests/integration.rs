@@ -53,7 +53,7 @@ fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
 fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let module = parser::parse(input).expect("parse failed");
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store).expect("load failed");
-    engine::plan(&mut dag, &base, &Output::new(&[]), None).expect("plan failed")
+    engine::plan(&mut dag, &base, store, &Output::new(&[]), None).expect("plan failed")
 }
 
 fn run_destroy(input: &str, store: &MemoryStore) {
@@ -277,6 +277,86 @@ fn diamond_dependency() {
     assert!(out_b.exists());
     assert!(out_c.exists());
     assert!(out_d.exists());
+}
+
+#[test]
+fn dependency_change_propagates_to_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_a = dir.path().join("a.txt");
+    let out_b = dir.path().join("b.txt");
+
+    // Apply both blocks
+    let input_v1 = format!(
+        concat!(
+            "a = exec {{\n  command = \"echo v1 > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo ok > {}\"\n  output = \"{}\"\n  inputs = []\n  depends_on = [a]\n}}\n",
+        ),
+        out_a.display(),
+        out_a.display(),
+        out_b.display(),
+        out_b.display(),
+    );
+    let store = MemoryStore::new();
+    run_apply(&input_v1, &store);
+
+    // Second plan is noop
+    let plans = run_plan(&input_v1, &store);
+    assert_eq!(
+        plans[0].plan.action,
+        bit::provider::PlanAction::None,
+        "a should be unchanged"
+    );
+    assert_eq!(
+        plans[1].plan.action,
+        bit::provider::PlanAction::None,
+        "b should be unchanged"
+    );
+
+    // Change a's command (simulating a source change)
+    let input_v2 = format!(
+        concat!(
+            "a = exec {{\n  command = \"echo v2 > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo ok > {}\"\n  output = \"{}\"\n  inputs = []\n  depends_on = [a]\n}}\n",
+        ),
+        out_a.display(),
+        out_a.display(),
+        out_b.display(),
+        out_b.display(),
+    );
+
+    // Plan should show a as Update and b as Update (dependencies changed)
+    let plans = run_plan(&input_v2, &store);
+    assert_eq!(
+        plans[0].plan.action,
+        bit::provider::PlanAction::Update,
+        "a should need update"
+    );
+    assert_eq!(
+        plans[1].plan.action,
+        bit::provider::PlanAction::Update,
+        "b should need update due to dependency"
+    );
+
+    // Apply a only, then plan should still show b as needing update (cross-run)
+    let input_a_only = format!(
+        "a = exec {{\n  command = \"echo v2 > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        out_a.display(),
+        out_a.display(),
+    );
+    run_apply(&input_a_only, &store);
+
+    // Now plan the full config — a is clean but b's dep hash should differ
+    let plans = run_plan(&input_v2, &store);
+    assert_eq!(
+        plans[0].plan.action,
+        bit::provider::PlanAction::None,
+        "a should be clean after apply"
+    );
+    assert_eq!(
+        plans[1].plan.action,
+        bit::provider::PlanAction::Update,
+        "b should still need update (dep hash changed)"
+    );
 }
 
 #[test]

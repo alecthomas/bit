@@ -7,8 +7,7 @@ use sha2::Digest;
 
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolveResult, ResolvedInput, ResolvedPath,
-    Resource, ResourceKind,
+    ApplyResult, BoxError, PlanAction, PlanResult, ResolveResult, ResolvedInput, ResolvedPath, Resource, ResourceKind,
 };
 
 #[derive(Debug, Deserialize)]
@@ -82,11 +81,7 @@ impl Resource for ImageResource {
         })
     }
 
-    fn plan(
-        &self,
-        inputs: &ImageInputs,
-        prior_state: Option<&ImageState>,
-    ) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &ImageInputs, prior_state: Option<&ImageState>) -> Result<PlanResult, BoxError> {
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
                 action: PlanAction::Create,
@@ -202,10 +197,7 @@ impl Resource for ImageResource {
         Ok(())
     }
 
-    fn refresh(
-        &self,
-        prior_state: &ImageState,
-    ) -> Result<ApplyResult<ImageState, ImageOutputs>, BoxError> {
+    fn refresh(&self, prior_state: &ImageState) -> Result<ApplyResult<ImageState, ImageOutputs>, BoxError> {
         let output = Command::new("docker")
             .args(["inspect", "--format", "{{.Id}}", &prior_state.tag])
             .output()
@@ -233,7 +225,6 @@ impl Resource for ImageResource {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn plan_create_when_no_state() {
         let inputs = ImageInputs {

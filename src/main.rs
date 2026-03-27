@@ -89,11 +89,11 @@ fn main() {
 
     match cli.command {
         Command::Plan { target } => {
-            let (mut dag, base, _store) = load_module(&registry);
+            let (mut dag, base, store) = load_module(&registry);
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
-            match engine::plan(&mut dag, &base, &output, target.as_deref()) {
+            match engine::plan(&mut dag, &base, store.as_ref(), &output, target.as_deref()) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
@@ -163,13 +163,8 @@ fn main() {
                 },
             };
             for name in &order {
-                let deps = dag.deps(name);
-                if deps.is_empty() {
-                    println!("  {}", name.bold());
-                } else {
-                    let dep_list = deps.join(", ");
-                    println!("  {} {} {}", name.bold(), "<-".dim(), dep_list.dim());
-                }
+                let indent = "  ".repeat(dag.depth(name));
+                println!("{indent}{}", name.bold());
             }
         }
     }

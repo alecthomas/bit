@@ -148,6 +148,18 @@ impl Dag {
             .map(|n| self.graph[n].name.clone())
             .collect()
     }
+
+    /// Get the depth of a node (longest path from a root).
+    pub fn depth(&self, name: &str) -> usize {
+        let Some(&idx) = self.indices.get(name) else {
+            return 0;
+        };
+        self.graph
+            .neighbors_directed(idx, petgraph::Direction::Incoming)
+            .map(|n| self.depth(&self.graph[n].name) + 1)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 impl Default for Dag {
