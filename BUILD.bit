@@ -11,12 +11,18 @@ release = exec {
   command = "cargo build --release"
   output = "target/release/bit"
   inputs = inputs
+  depends_on = [test]
 }
 
-image = docker.image {
-  tag = "bit:latest"
-  after = [release]
+test = exec.test {
+  command = "cargo test --quiet"
+  inputs = inputs
 }
+
+# image = docker.image {
+#   tag = "bit:latest"
+#   after = [release]
+# }
 
 # Build debug binary only
 target debug = [debug]

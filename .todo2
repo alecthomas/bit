@@ -1,0 +1,180 @@
+{
+  "title": "Bit - Build It",
+  "tasks": [
+    {
+      "text": "Project setup: Cargo.toml dependencies, module structure, lib.rs",
+      "priority": "high",
+      "creation": 1774260708,
+      "completion": 1774261514
+    },
+    {
+      "text": "Core types: value.rs (Value, Map) and error.rs",
+      "priority": "high",
+      "creation": 1774260712,
+      "completion": 1774261568
+    },
+    {
+      "text": "AST types: ast.rs (Block, Let, Param, Target, Expr, etc.)",
+      "priority": "high",
+      "creation": 1774260716,
+      "completion": 1774261842
+    },
+    {
+      "text": "Parser: winnow-based parser for .bit syntax",
+      "priority": "high",
+      "creation": 1774260720,
+      "completion": 1774265062
+    },
+    {
+      "text": "Expression evaluator: interpolation, pipes, builtins (env, exec, glob)",
+      "priority": "high",
+      "creation": 1774260724,
+      "completion": 1774265062
+    },
+    {
+      "text": "Provider + Resource traits (provider.rs)",
+      "priority": "high",
+      "creation": 1774260727,
+      "completion": 1774265360
+    },
+    {
+      "text": "State trait + JSON file backend (state.rs)",
+      "priority": "high",
+      "creation": 1774260731,
+      "completion": 1774266559
+    },
+    {
+      "text": "Exec provider implementation (providers/exec.rs)",
+      "priority": "high",
+      "creation": 1774260737,
+      "completion": 1774352689
+    },
+    {
+      "text": "DAG builder: dependency graph from block references (dag.rs)",
+      "priority": "high",
+      "creation": 1774260741,
+      "completion": 1774352677
+    },
+    {
+      "text": "DAG builder: dependency graph from block references (dag.rs)",
+      "priority": "high",
+      "creation": 1774433401,
+      "completion": 1774433571
+    },
+    {
+      "text": "Loader: evaluate parsed AST (params, lets, blocks) into resolved config for the DAG",
+      "priority": "high",
+      "creation": 1774433406,
+      "completion": 1774433987
+    },
+    {
+      "text": "Engine: lifecycle orchestrator resolve → plan → apply (engine.rs)",
+      "priority": "high",
+      "creation": 1774260744,
+      "completion": 1774437469
+    },
+    {
+      "text": "CLI: clap commands (plan, apply, destroy, list)",
+      "priority": "high",
+      "creation": 1774260748,
+      "completion": 1774437953
+    },
+    {
+      "text": "Integration tests: end-to-end with sample .bit files",
+      "priority": "high",
+      "creation": 1774260752,
+      "completion": 1774439267
+    },
+    {
+      "text": "Cache: content hashing + cache key computation (cache.rs)",
+      "priority": "high",
+      "creation": 1774260734,
+      "completion": 1774439788
+    },
+    {
+      "text": "Unify plan() and apply_order() into single code path with mode flag",
+      "priority": "veryhigh",
+      "creation": 1774689104
+    },
+    {
+      "text": "Atomic state writes (write-to-temp-then-rename) in JsonFileStore",
+      "priority": "high",
+      "creation": 1774689105
+    },
+    {
+      "text": "Deduplicate DAG edges when same dep comes from expression ref and depends_on",
+      "priority": "medium",
+      "creation": 1774689106
+    },
+    {
+      "text": "Memoize depth() and add cycle protection",
+      "priority": "medium",
+      "creation": 1774689107
+    },
+    {
+      "text": "Move hash_file from providers module to engine or shared util",
+      "priority": "medium",
+      "creation": 1774689107
+    },
+    {
+      "text": "Stream hash_file instead of reading entire file into memory",
+      "priority": "medium",
+      "creation": 1774689108
+    },
+    {
+      "text": "Error on missing files in compute_content_hash instead of silent skip",
+      "priority": "medium",
+      "creation": 1774689108
+    },
+    {
+      "text": "Handle apply_result.state = None explicitly (delete state vs retain)",
+      "priority": "medium",
+      "creation": 1774689109
+    },
+    {
+      "text": "Add proper legacy state migration instead of silent fallback in unwrap_state",
+      "priority": "medium",
+      "creation": 1774689110
+    },
+    {
+      "text": "Docker image plan() should not run subprocesses — move image existence check elsewhere",
+      "priority": "medium",
+      "creation": 1774689111
+    },
+    {
+      "text": "Error on unknown block names in target definitions",
+      "priority": "medium",
+      "creation": 1774689111
+    },
+    {
+      "text": "Error on string literals in depends_on/after instead of silent ignore",
+      "priority": "low",
+      "creation": 1774689117
+    },
+    {
+      "text": "ExecTestResource::refresh should not assume passed:true",
+      "priority": "low",
+      "creation": 1774689118
+    },
+    {
+      "text": "Exec plan should compare output paths, not just command",
+      "priority": "low",
+      "creation": 1774689119
+    },
+    {
+      "text": "Validate target block references at load time",
+      "priority": "low",
+      "creation": 1774689119
+    },
+    {
+      "text": "ProviderRegistry::get_resource allocates all resources to find one",
+      "priority": "low",
+      "creation": 1774689119
+    },
+    {
+      "text": "Engine should not override provider plan() after the fact — pass content-changed signal into plan or check before calling it",
+      "priority": "high",
+      "creation": 1774689212
+    }
+  ]
+}
