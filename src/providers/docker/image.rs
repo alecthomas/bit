@@ -174,27 +174,27 @@ impl Resource for ImageResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &ImageInputs) -> Result<crate::provider::ResolvedFiles, BoxError> {
+    fn resolve(&self, inputs: &ImageInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
+        use crate::provider::ResolvedFile;
         let context = Path::new(&inputs.context);
         let dockerfile = context.join(&inputs.dockerfile);
         let dockerignore = load_dockerignore(context);
 
-        let mut input_files = Vec::new();
+        let mut files = Vec::new();
 
         // Include the Dockerfile itself (never ignored)
         if dockerfile.is_file() {
-            input_files.push(dockerfile.clone());
+            files.push(ResolvedFile::Input(dockerfile.clone()));
         }
 
         // Parse Dockerfile to discover COPY/ADD source paths, filtered by .dockerignore
         for src in &parse_dockerfile_sources(&dockerfile, context) {
-            input_files.extend(expand_path(src, &dockerignore));
+            for path in expand_path(src, &dockerignore) {
+                files.push(ResolvedFile::Input(path));
+            }
         }
 
-        Ok(crate::provider::ResolvedFiles {
-            inputs: input_files,
-            outputs: vec![],
-        })
+        Ok(files)
     }
 
     fn plan(&self, inputs: &ImageInputs, prior_state: Option<&ImageState>) -> Result<PlanResult, BoxError> {
@@ -447,15 +447,16 @@ mod tests {
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
         };
+        use crate::provider::ResolvedFile;
         let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
-        assert_eq!(resolved.inputs.len(), 2);
-        assert!(resolved.inputs.contains(&dockerfile));
-        assert!(resolved.inputs.contains(&src_file));
-        assert!(resolved.outputs.is_empty());
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains(&ResolvedFile::Input(dockerfile)));
+        assert!(resolved.contains(&ResolvedFile::Input(src_file)));
     }
 
     #[test]
     fn resolve_respects_dockerignore() {
+        use crate::provider::ResolvedFile;
         let dir = tempfile::tempdir().unwrap();
         let dockerfile = dir.path().join("Dockerfile");
         let src_dir = dir.path().join("src");
@@ -472,13 +473,13 @@ mod tests {
             build_args: HashMap::new(),
         };
         let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
-        assert_eq!(resolved.inputs.len(), 3); // Dockerfile + main.rs + test.log
+        assert_eq!(resolved.len(), 3); // Dockerfile + main.rs + test.log
 
         // Add .dockerignore to exclude .log files
         std::fs::write(dir.path().join(".dockerignore"), "*.log\n").unwrap();
         let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
-        assert_eq!(resolved.inputs.len(), 2); // Dockerfile + main.rs
-        assert!(resolved.inputs.contains(&dockerfile));
-        assert!(resolved.inputs.contains(&src_dir.join("main.rs")));
+        assert_eq!(resolved.len(), 2); // Dockerfile + main.rs
+        assert!(resolved.contains(&ResolvedFile::Input(dockerfile)));
+        assert!(resolved.contains(&ResolvedFile::Input(src_dir.join("main.rs"))));
     }
 }

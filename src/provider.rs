@@ -12,13 +12,15 @@ pub type BoxError = Box<dyn Error + Send + Sync>;
 
 use std::path::PathBuf;
 
-/// Files that a block depends on and produces.
-#[derive(Debug, Clone, Default)]
-pub struct ResolvedFiles {
-    /// Files that are inputs to this block (source files, config, etc.)
-    pub inputs: Vec<PathBuf>,
-    /// Files that this block produces as outputs (binaries, artifacts, etc.)
-    pub outputs: Vec<PathBuf>,
+/// A file or glob pattern returned by a provider's `resolve()`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedFile {
+    /// A specific input file.
+    Input(PathBuf),
+    /// A glob pattern that expands to input files. The engine handles expansion.
+    InputGlob(String),
+    /// A specific output file (binary, artifact, etc.)
+    Output(PathBuf),
 }
 
 /// What action the plan phase determined is needed.
@@ -86,8 +88,8 @@ pub trait Resource {
 
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    /// Return the input and output files for this block.
-    fn resolve(&self, inputs: &Self::Inputs) -> Result<ResolvedFiles, BoxError>;
+    /// Return the input files, input globs, and output files for this block.
+    fn resolve(&self, inputs: &Self::Inputs) -> Result<Vec<ResolvedFile>, BoxError>;
     fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -104,7 +106,7 @@ pub trait Resource {
 pub trait DynResource {
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    fn resolve(&self, inputs: &Map) -> Result<ResolvedFiles, BoxError>;
+    fn resolve(&self, inputs: &Map) -> Result<Vec<ResolvedFile>, BoxError>;
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -139,7 +141,7 @@ impl<R: Resource> DynResource for R {
         Resource::kind(self)
     }
 
-    fn resolve(&self, inputs: &Map) -> Result<ResolvedFiles, BoxError> {
+    fn resolve(&self, inputs: &Map) -> Result<Vec<ResolvedFile>, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         Resource::resolve(self, &typed)
     }
@@ -267,8 +269,8 @@ mod tests {
             ResourceKind::Build
         }
 
-        fn resolve(&self, _inputs: &StubInputs) -> Result<ResolvedFiles, BoxError> {
-            Ok(ResolvedFiles::default())
+        fn resolve(&self, _inputs: &StubInputs) -> Result<Vec<ResolvedFile>, BoxError> {
+            Ok(vec![])
         }
 
         fn plan(&self, _inputs: &StubInputs, prior_state: Option<&StubState>) -> Result<PlanResult, BoxError> {

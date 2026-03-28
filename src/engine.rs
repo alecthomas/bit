@@ -4,7 +4,7 @@ use crate::dag::{Dag, DagError};
 use crate::expr::{self, EvalError, Scope};
 use crate::loader::BaseScope;
 use crate::output::{Event, Output};
-use crate::provider::{BoxError, PlanAction, PlanResult, ResourceKind};
+use crate::provider::{BoxError, PlanAction, PlanResult, ResolvedFile, ResourceKind};
 use crate::providers::hash_file;
 use crate::state::{StateError, StateStore};
 use crate::value::{Map, Value};
@@ -93,6 +93,29 @@ fn compute_content_hash(
     format!("sha256:{:x}", hasher.finalize())
 }
 
+/// Expand resolved file entries into concrete file paths.
+/// InputGlob patterns are expanded via filesystem glob.
+fn expand_resolved(entries: &[ResolvedFile]) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in entries {
+        match entry {
+            ResolvedFile::Input(p) | ResolvedFile::Output(p) => {
+                files.push(p.clone());
+            }
+            ResolvedFile::InputGlob(pattern) => {
+                if let Ok(paths) = glob::glob(pattern) {
+                    for path in paths.flatten() {
+                        if path.is_file() {
+                            files.push(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    files
+}
+
 fn plan_action_to_event(action: &PlanAction) -> Event {
     match action {
         PlanAction::Create => Event::Create,
@@ -143,7 +166,7 @@ pub fn plan(
         })?;
 
         // Hash inputs + existing outputs + parent states to detect changes
-        let all_files: Vec<_> = resolved.inputs.iter().chain(&resolved.outputs).cloned().collect();
+        let all_files = expand_resolved(&resolved);
         let has_dirty_dep = dag.content_deps(name).iter().any(|d| dirty.contains(d));
         let current_content_hash = compute_content_hash(&all_files, dag, name, store, &mut hash_cache);
         let inputs_changed = has_dirty_dep || current_content_hash != stored_content_hash;
@@ -231,7 +254,7 @@ pub fn apply(
             phase: "resolve",
             source: e,
         })?;
-        let all_files: Vec<_> = resolved.inputs.iter().chain(&resolved.outputs).cloned().collect();
+        let all_files = expand_resolved(&resolved);
         let current_content_hash = compute_content_hash(&all_files, dag, name, store, &mut hash_cache);
         let inputs_changed = current_content_hash != stored_content_hash;
 
@@ -289,16 +312,14 @@ pub fn apply(
         // Re-resolve after apply so output files are included in the hash.
         // Invalidate cache for output files since apply may have changed them.
         if let Some(provider_state) = &apply_result.state {
-            let post_resolved = node.resource.resolve(&inputs).unwrap_or_default();
-            for output_file in &post_resolved.outputs {
-                hash_cache.remove(output_file);
+            let post_entries = node.resource.resolve(&inputs).unwrap_or_default();
+            // Invalidate cache for output files since apply may have changed them
+            for entry in &post_entries {
+                if let ResolvedFile::Output(p) = entry {
+                    hash_cache.remove(p);
+                }
             }
-            let post_files: Vec<_> = post_resolved
-                .inputs
-                .iter()
-                .chain(&post_resolved.outputs)
-                .cloned()
-                .collect();
+            let post_files = expand_resolved(&post_entries);
             let content_hash = compute_content_hash(&post_files, dag, name, store, &mut hash_cache);
             let wrapped = WrappedState {
                 state: provider_state.clone(),

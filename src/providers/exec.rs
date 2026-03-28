@@ -104,20 +104,17 @@ impl Resource for ExecResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &ExecInputs) -> Result<crate::provider::ResolvedFiles, BoxError> {
-        let mut input_files = Vec::new();
-        for pattern in &inputs.inputs {
-            for entry in glob::glob(pattern).map_err(|e| format!("invalid glob '{pattern}': {e}"))? {
-                let path = entry.map_err(|e| format!("glob error: {e}"))?;
-                if path.is_file() {
-                    input_files.push(path);
-                }
-            }
+    fn resolve(&self, inputs: &ExecInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
+        use crate::provider::ResolvedFile;
+        let mut files: Vec<ResolvedFile> = inputs
+            .inputs
+            .iter()
+            .map(|p| ResolvedFile::InputGlob(p.clone()))
+            .collect();
+        for output in &inputs.output {
+            files.push(ResolvedFile::Output(Path::new(output).to_path_buf()));
         }
-        Ok(crate::provider::ResolvedFiles {
-            inputs: input_files,
-            outputs: inputs.output.iter().map(|o| Path::new(o).to_path_buf()).collect(),
-        })
+        Ok(files)
     }
 
     fn plan(&self, inputs: &ExecInputs, prior_state: Option<&ExecState>) -> Result<PlanResult, BoxError> {
@@ -228,22 +225,20 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn resolve_expands_globs() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("test.txt");
-        fs::write(&file, "hello").unwrap();
+    fn resolve_returns_globs_and_outputs() {
+        use crate::provider::ResolvedFile;
 
         let inputs = ExecInputs {
             command: "echo".into(),
             output: vec!["out".into()],
-            inputs: vec![dir.path().join("*.txt").to_string_lossy().into_owned()],
+            inputs: vec!["src/**/*.rs".into()],
         };
 
         let resource = ExecResource;
         let result = Resource::resolve(&resource, &inputs).unwrap();
-        assert_eq!(result.inputs.len(), 1);
-        assert_eq!(result.inputs[0], file);
-        assert_eq!(result.outputs, vec![PathBuf::from("out")]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], ResolvedFile::InputGlob("src/**/*.rs".into()));
+        assert_eq!(result[1], ResolvedFile::Output(PathBuf::from("out")));
     }
 
     #[test]
