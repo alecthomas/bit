@@ -85,13 +85,11 @@ fn parse_dockerfile_sources(dockerfile: &Path, context: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Parse a .dockerignore file into a GlobSet matcher.
-/// Returns (ignore_set, negation_set) — a path is ignored if it matches
-/// ignore_set and does NOT match negation_set.
+/// Parse a .dockerignore file into ignore/negate pattern lists.
 fn load_dockerignore(context: &Path) -> Option<DockerIgnore> {
     let contents = std::fs::read_to_string(context.join(".dockerignore")).ok()?;
-    let mut ignore_builder = globset::GlobSetBuilder::new();
-    let mut negate_builder = globset::GlobSetBuilder::new();
+    let mut ignore = Vec::new();
+    let mut negate = Vec::new();
 
     for line in contents.lines() {
         let line = line.trim();
@@ -104,38 +102,49 @@ fn load_dockerignore(context: &Path) -> Option<DockerIgnore> {
             (line, false)
         };
 
-        // Patterns are relative to context; add **/ prefix for matching
-        // anywhere in the tree, unless the pattern contains a slash
+        // Patterns without a slash match anywhere in the tree
         let glob_pattern = if pattern.contains('/') {
             pattern.to_owned()
         } else {
             format!("**/{pattern}")
         };
 
-        let Ok(glob) = globset::Glob::new(&glob_pattern) else {
+        let Ok(pat) = glob::Pattern::new(&glob_pattern) else {
             continue;
         };
+        // Also match contents of directories (e.g. "src/build" also matches "src/build/**")
+        let dir_pat = glob::Pattern::new(&format!("{glob_pattern}/**")).ok();
         if is_negation {
-            negate_builder.add(glob);
+            negate.push(pat);
+            if let Some(dp) = dir_pat {
+                negate.push(dp);
+            }
         } else {
-            ignore_builder.add(glob);
+            ignore.push(pat);
+            if let Some(dp) = dir_pat {
+                ignore.push(dp);
+            }
         }
     }
 
     Some(DockerIgnore {
-        ignore: ignore_builder.build().ok()?,
-        negate: negate_builder.build().ok()?,
+        context: context.to_path_buf(),
+        ignore,
+        negate,
     })
 }
 
 struct DockerIgnore {
-    ignore: globset::GlobSet,
-    negate: globset::GlobSet,
+    context: PathBuf,
+    ignore: Vec<glob::Pattern>,
+    negate: Vec<glob::Pattern>,
 }
 
 impl DockerIgnore {
     fn is_ignored(&self, path: &Path) -> bool {
-        self.ignore.is_match(path) && !self.negate.is_match(path)
+        // Match against the path relative to the build context
+        let rel = path.strip_prefix(&self.context).unwrap_or(path);
+        self.ignore.iter().any(|p| p.matches_path(rel)) && !self.negate.iter().any(|p| p.matches_path(rel))
     }
 }
 
@@ -336,6 +345,8 @@ impl Resource for ImageResource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ResolvedFile;
+
     #[test]
     fn plan_create_when_no_state() {
         let inputs = ImageInputs {
@@ -447,7 +458,6 @@ mod tests {
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
         };
-        use crate::provider::ResolvedFile;
         let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
         assert_eq!(resolved.len(), 2);
         assert!(resolved.contains(&ResolvedFile::Input(dockerfile)));
@@ -481,5 +491,112 @@ mod tests {
         assert_eq!(resolved.len(), 2); // Dockerfile + main.rs
         assert!(resolved.contains(&ResolvedFile::Input(dockerfile)));
         assert!(resolved.contains(&ResolvedFile::Input(src_dir.join("main.rs"))));
+    }
+
+    #[test]
+    fn dockerignore_negation() {
+        let dir = tempfile::tempdir().unwrap();
+        let dockerfile = dir.path().join("Dockerfile");
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(&dockerfile, "FROM alpine\nCOPY src/ /app/\n").unwrap();
+        std::fs::write(src_dir.join("a.log"), "log").unwrap();
+        std::fs::write(src_dir.join("important.log"), "keep").unwrap();
+        std::fs::write(src_dir.join("main.rs"), "fn main() {}").unwrap();
+
+        // Ignore all .log except important.log
+        std::fs::write(dir.path().join(".dockerignore"), "*.log\n!important.log\n").unwrap();
+
+        let inputs = ImageInputs {
+            tag: "test:latest".into(),
+            context: dir.path().to_string_lossy().into_owned(),
+            dockerfile: "Dockerfile".into(),
+            build_args: HashMap::new(),
+        };
+        let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
+        // Dockerfile + main.rs + important.log (a.log excluded)
+        assert_eq!(resolved.len(), 3);
+        assert!(resolved.contains(&ResolvedFile::Input(src_dir.join("main.rs"))));
+        assert!(resolved.contains(&ResolvedFile::Input(src_dir.join("important.log"))));
+        assert!(!resolved.contains(&ResolvedFile::Input(src_dir.join("a.log"))));
+    }
+
+    #[test]
+    fn dockerignore_comments_and_blank_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let dockerfile = dir.path().join("Dockerfile");
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(&dockerfile, "FROM alpine\nCOPY src/ /app/\n").unwrap();
+        std::fs::write(src_dir.join("keep.txt"), "keep").unwrap();
+        std::fs::write(src_dir.join("drop.tmp"), "drop").unwrap();
+
+        std::fs::write(
+            dir.path().join(".dockerignore"),
+            "# This is a comment\n\n*.tmp\n\n# Another comment\n",
+        )
+        .unwrap();
+
+        let inputs = ImageInputs {
+            tag: "test:latest".into(),
+            context: dir.path().to_string_lossy().into_owned(),
+            dockerfile: "Dockerfile".into(),
+            build_args: HashMap::new(),
+        };
+        let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
+        assert_eq!(resolved.len(), 2); // Dockerfile + keep.txt
+        assert!(resolved.contains(&ResolvedFile::Input(src_dir.join("keep.txt"))));
+        assert!(!resolved.contains(&ResolvedFile::Input(src_dir.join("drop.tmp"))));
+    }
+
+    #[test]
+    fn dockerignore_subdirectory_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let dockerfile = dir.path().join("Dockerfile");
+        let src_dir = dir.path().join("src");
+        let build_dir = dir.path().join("src").join("build");
+        std::fs::create_dir_all(&build_dir).unwrap();
+        std::fs::write(&dockerfile, "FROM alpine\nCOPY src/ /app/\n").unwrap();
+        std::fs::write(src_dir.join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(build_dir.join("output.o"), "binary").unwrap();
+
+        // Ignore the build subdirectory by path
+        std::fs::write(dir.path().join(".dockerignore"), "src/build\n").unwrap();
+
+        let inputs = ImageInputs {
+            tag: "test:latest".into(),
+            context: dir.path().to_string_lossy().into_owned(),
+            dockerfile: "Dockerfile".into(),
+            build_args: HashMap::new(),
+        };
+        let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
+        assert_eq!(resolved.len(), 2); // Dockerfile + main.rs
+        assert!(resolved.contains(&ResolvedFile::Input(src_dir.join("main.rs"))));
+        assert!(!resolved.contains(&ResolvedFile::Input(build_dir.join("output.o"))));
+    }
+
+    #[test]
+    fn dockerignore_matches_in_nested_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let dockerfile = dir.path().join("Dockerfile");
+        let deep = dir.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(&dockerfile, "FROM alpine\nCOPY a/ /app/\n").unwrap();
+        std::fs::write(deep.join("data.txt"), "data").unwrap();
+        std::fs::write(deep.join("cache.tmp"), "cache").unwrap();
+
+        // Pattern without slash matches anywhere in the tree
+        std::fs::write(dir.path().join(".dockerignore"), "*.tmp\n").unwrap();
+
+        let inputs = ImageInputs {
+            tag: "test:latest".into(),
+            context: dir.path().to_string_lossy().into_owned(),
+            dockerfile: "Dockerfile".into(),
+            build_args: HashMap::new(),
+        };
+        let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
+        assert_eq!(resolved.len(), 2); // Dockerfile + data.txt
+        assert!(resolved.contains(&ResolvedFile::Input(deep.join("data.txt"))));
+        assert!(!resolved.contains(&ResolvedFile::Input(deep.join("cache.tmp"))));
     }
 }
