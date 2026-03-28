@@ -239,7 +239,7 @@ impl Resource for ImageResource {
 
         Ok(PlanResult {
             action: PlanAction::None,
-            description: "no changes".into(),
+            description: format!("docker build -t {}", inputs.tag),
         })
     }
 

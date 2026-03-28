@@ -149,6 +149,19 @@ impl Dag {
         &self.targets
     }
 
+    /// Return test blocks and their transitive dependencies in topological order.
+    pub fn test_order(&self) -> Result<Vec<String>, DagError> {
+        use crate::provider::ResourceKind;
+        let mut needed = HashSet::new();
+        for &idx in self.indices.values() {
+            if self.graph[idx].resource.kind() == ResourceKind::Test {
+                collect_transitive_deps(&self.graph, idx, &mut needed);
+            }
+        }
+        let all = self.topo_order()?;
+        Ok(all.into_iter().filter(|n| needed.contains(n)).collect())
+    }
+
     /// Get all block names.
     pub fn block_names(&self) -> Vec<String> {
         self.indices.keys().cloned().collect()

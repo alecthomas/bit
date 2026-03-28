@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -77,7 +77,7 @@ impl Provider for ExecProvider {
     }
 
     fn resources(&self) -> Vec<Box<dyn DynResource>> {
-        vec![Box::new(ExecResource)]
+        vec![Box::new(ExecResource), Box::new(ExecTestResource)]
     }
 
     fn functions(&self) -> Vec<FuncSignature> {
@@ -125,16 +125,15 @@ impl Resource for ExecResource {
             });
         };
 
-        if prior.command != inputs.command {
-            return Ok(PlanResult {
-                action: PlanAction::Update,
-                description: inputs.command.clone(),
-            });
-        }
+        let action = if prior.command != inputs.command {
+            PlanAction::Update
+        } else {
+            PlanAction::None
+        };
 
         Ok(PlanResult {
-            action: PlanAction::None,
-            description: "no changes".into(),
+            action,
+            description: inputs.command.clone(),
         })
     }
 
@@ -211,6 +210,214 @@ impl Resource for ExecResource {
             outputs: ExecOutputs {
                 path: prior_state.output.first().cloned().unwrap_or_default(),
                 paths: prior_state.output.clone(),
+            },
+            state: Some(prior_state.clone()),
+        })
+    }
+}
+
+// --- exec.test resource ---
+
+/// Typed inputs for an exec.test block.
+#[derive(Debug, Deserialize)]
+pub struct ExecTestInputs {
+    pub command: String,
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub output: Vec<String>,
+    /// Optional jq expression to transform stdout into CTRF JSON.
+    #[serde(default)]
+    pub transform: Option<String>,
+}
+
+/// Outputs from an exec.test block.
+#[derive(Debug, Serialize)]
+pub struct ExecTestOutputs {
+    pub passed: bool,
+    pub report: crate::ctrf::Report,
+}
+
+/// State for an exec.test block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecTestState {
+    pub command: String,
+}
+
+struct ExecTestResource;
+
+impl Resource for ExecTestResource {
+    type State = ExecTestState;
+    type Inputs = ExecTestInputs;
+    type Outputs = ExecTestOutputs;
+
+    fn name(&self) -> &str {
+        "test"
+    }
+
+    fn kind(&self) -> ResourceKind {
+        ResourceKind::Test
+    }
+
+    fn resolve(&self, inputs: &ExecTestInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
+        use crate::provider::ResolvedFile;
+        let mut files: Vec<ResolvedFile> = inputs
+            .inputs
+            .iter()
+            .map(|p| ResolvedFile::InputGlob(p.clone()))
+            .collect();
+        for output in &inputs.output {
+            files.push(ResolvedFile::Output(Path::new(output).to_path_buf()));
+        }
+        Ok(files)
+    }
+
+    fn plan(&self, inputs: &ExecTestInputs, prior_state: Option<&ExecTestState>) -> Result<PlanResult, BoxError> {
+        let Some(prior) = prior_state else {
+            return Ok(PlanResult {
+                action: PlanAction::Create,
+                description: inputs.command.clone(),
+            });
+        };
+
+        let action = if prior.command != inputs.command {
+            PlanAction::Update
+        } else {
+            PlanAction::None
+        };
+
+        Ok(PlanResult {
+            action,
+            description: inputs.command.clone(),
+        })
+    }
+
+    fn apply(
+        &self,
+        inputs: &ExecTestInputs,
+        _prior_state: Option<&ExecTestState>,
+        writer: &BlockWriter,
+    ) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&inputs.command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("failed to execute command: {e}"))?;
+
+        // Capture stdout, pipe stderr to user
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+
+        let mut stdout_buf = String::new();
+        std::thread::scope(|s| {
+            let stdout_thread = stdout_handle.map(|out| {
+                s.spawn(|| {
+                    let mut buf = String::new();
+                    let mut reader = BufReader::new(out);
+                    loop {
+                        let mut line = String::new();
+                        match reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => buf.push_str(&line),
+                        }
+                    }
+                    buf
+                })
+            });
+            if let Some(err) = stderr_handle {
+                s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
+            }
+            if let Some(handle) = stdout_thread {
+                stdout_buf = handle.join().unwrap_or_default();
+            }
+        });
+
+        let status = child.wait().map_err(|e| format!("failed to wait for command: {e}"))?;
+        let passed = status.success();
+
+        use crate::ctrf::{self, Report, Results, Summary, Test, Tool};
+
+        let report = if let Some(expr) = &inputs.transform {
+            // Transform stdout with jq, result must be valid CTRF
+            let ctrf_json = crate::jq::transform(expr, &stdout_buf)?;
+            Report::from_json(&ctrf_json).map_err(|e| format!("failed to parse CTRF JSON: {e}"))?
+        } else if let Ok(report) = Report::from_json(stdout_buf.trim()) {
+            // Stdout is valid CTRF
+            report
+        } else {
+            // No CTRF output — synthesize from exit code
+            let status = if passed {
+                ctrf::Status::Passed
+            } else {
+                ctrf::Status::Failed
+            };
+            let tests = vec![Test {
+                name: inputs.command.clone(),
+                status,
+                duration: 0,
+                suite: None,
+                message: None,
+                trace: None,
+                file_path: None,
+                flaky: None,
+            }];
+            Report {
+                report_format: "CTRF".into(),
+                spec_version: "0.0.1".into(),
+                results: Results {
+                    tool: Tool {
+                        name: inputs.command.clone(),
+                        version: None,
+                    },
+                    summary: Summary::from_tests(&tests),
+                    tests,
+                    environment: None,
+                },
+            }
+        };
+
+        Ok(ApplyResult {
+            outputs: ExecTestOutputs { passed, report },
+            state: Some(ExecTestState {
+                command: inputs.command.clone(),
+            }),
+        })
+    }
+
+    fn destroy(&self, _prior_state: &ExecTestState, _writer: &BlockWriter) -> Result<(), BoxError> {
+        Ok(())
+    }
+
+    fn refresh(&self, prior_state: &ExecTestState) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
+        use crate::ctrf::{Report, Results, Summary, Tool};
+
+        Ok(ApplyResult {
+            outputs: ExecTestOutputs {
+                passed: true,
+                report: Report {
+                    report_format: "CTRF".into(),
+                    spec_version: "0.0.1".into(),
+                    results: Results {
+                        tool: Tool {
+                            name: prior_state.command.clone(),
+                            version: None,
+                        },
+                        summary: Summary {
+                            tests: 0,
+                            passed: 0,
+                            failed: 0,
+                            skipped: 0,
+                            pending: None,
+                            other: None,
+                            start: None,
+                            stop: None,
+                        },
+                        tests: vec![],
+                        environment: None,
+                    },
+                },
             },
             state: Some(prior_state.clone()),
         })
@@ -340,8 +547,9 @@ mod tests {
         let provider = ExecProvider;
         assert_eq!(provider.name(), "exec");
         let resources = provider.resources();
-        assert_eq!(resources.len(), 1);
+        assert_eq!(resources.len(), 2);
         assert_eq!(resources[0].name(), "exec");
+        assert_eq!(resources[1].name(), "test");
     }
 
     #[test]
@@ -364,5 +572,91 @@ mod tests {
             result.outputs.get("path").and_then(|v| v.as_str()),
             Some(output.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn test_resource_passes_on_success() {
+        let inputs = ExecTestInputs {
+            command: "true".into(),
+            inputs: vec![],
+            output: vec![],
+            transform: None,
+        };
+        let resource = ExecTestResource;
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        assert!(result.outputs.passed);
+    }
+
+    #[test]
+    fn test_resource_fails_on_nonzero_exit() {
+        let inputs = ExecTestInputs {
+            command: "false".into(),
+            inputs: vec![],
+            output: vec![],
+            transform: None,
+        };
+        let resource = ExecTestResource;
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        // apply should succeed (not error), but passed = false
+        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        assert!(!result.outputs.passed);
+    }
+
+    #[test]
+    fn test_resource_parses_ctrf_stdout() {
+        let ctrf = r#"{"reportFormat":"CTRF","specVersion":"0.0.1","results":{"tool":{"name":"test"},"summary":{"tests":1,"passed":1,"failed":0,"skipped":0},"tests":[{"name":"it_works","status":"passed","duration":5}]}}"#;
+        let inputs = ExecTestInputs {
+            command: format!("echo '{ctrf}'"),
+            inputs: vec![],
+            output: vec![],
+            transform: None,
+        };
+        let resource = ExecTestResource;
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        assert!(result.outputs.passed);
+        assert_eq!(result.outputs.report.results.summary.tests, 1);
+        assert_eq!(result.outputs.report.results.tests[0].name, "it_works");
+    }
+
+    #[test]
+    fn test_resource_applies_jq_transform() {
+        // Command outputs custom JSON, transform converts to CTRF
+        let inputs = ExecTestInputs {
+            command: r#"echo '{"ok": true, "count": 2}'"#.into(),
+            inputs: vec![],
+            output: vec![],
+            transform: Some(
+                r#"
+                {
+                    reportFormat: "CTRF",
+                    specVersion: "0.0.1",
+                    results: {
+                        tool: { name: "custom" },
+                        summary: { tests: .count, passed: .count, failed: 0, skipped: 0 },
+                        tests: [{ name: "all", status: "passed", duration: 0 }]
+                    }
+                }
+            "#
+                .into(),
+            ),
+        };
+        let resource = ExecTestResource;
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        assert!(result.outputs.passed);
+        assert_eq!(result.outputs.report.results.tool.name, "custom");
+        assert_eq!(result.outputs.report.results.summary.tests, 2);
+    }
+
+    #[test]
+    fn test_resource_kind_is_test() {
+        let resource = ExecTestResource;
+        assert_eq!(Resource::kind(&resource), ResourceKind::Test);
     }
 }

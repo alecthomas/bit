@@ -40,6 +40,8 @@ enum Command {
         /// Target to destroy (default: all blocks)
         target: Option<String>,
     },
+    /// Run test blocks and their dependencies
+    Test,
     /// List top-level targets
     List,
     /// Show the dependency graph
@@ -107,6 +109,19 @@ fn main() {
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
             match engine::apply(&mut dag, &base, store.as_ref(), &output, target.as_deref()) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("{} {e}", "error:".red().bold());
+                    process::exit(1);
+                }
+            }
+        }
+        Command::Test => {
+            let (mut dag, base, store) = load_module(&registry);
+            let names = dag.block_names();
+            let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            let output = Output::new(&name_refs);
+            match engine::test(&mut dag, &base, store.as_ref(), &output) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());

@@ -171,20 +171,18 @@ pub fn plan(
         let current_content_hash = compute_content_hash(&all_files, dag, name, store, &mut hash_cache);
         let inputs_changed = has_dirty_dep || current_content_hash != stored_content_hash;
 
-        let result = if inputs_changed && provider_state.is_some() {
-            PlanResult {
-                action: PlanAction::Update,
-                description: "inputs changed".into(),
-            }
-        } else {
-            node.resource
-                .plan(&inputs, provider_state.as_ref())
-                .map_err(|e| EngineError::Provider {
-                    block: name.clone(),
-                    phase: "plan",
-                    source: e,
-                })?
-        };
+        let mut result = node
+            .resource
+            .plan(&inputs, provider_state.as_ref())
+            .map_err(|e| EngineError::Provider {
+                block: name.clone(),
+                phase: "plan",
+                source: e,
+            })?;
+
+        if result.action == PlanAction::None && inputs_changed && provider_state.is_some() {
+            result.action = PlanAction::Update;
+        }
 
         if result.action != PlanAction::None {
             dirty.insert(name.clone());
@@ -216,8 +214,6 @@ pub fn plan(
 }
 
 /// Apply all blocks in the DAG (or a target subset).
-/// Walks topo order: evaluate fields, resolve, plan, apply, persist state,
-/// inject outputs into scope for downstream blocks.
 pub fn apply(
     dag: &mut Dag,
     base: &BaseScope,
@@ -229,12 +225,33 @@ pub fn apply(
         Some(t) => dag.target_order(t)?,
         None => dag.topo_order()?,
     };
+    apply_order(dag, base, store, output, &order)
+}
 
+/// Apply only test blocks and their transitive dependencies.
+pub fn test(
+    dag: &mut Dag,
+    base: &BaseScope,
+    store: &dyn StateStore,
+    output: &Output,
+) -> Result<Vec<BlockPlan>, EngineError> {
+    let order = dag.test_order()?;
+    apply_order(dag, base, store, output, &order)
+}
+
+/// Apply blocks in the given order.
+fn apply_order(
+    dag: &mut Dag,
+    base: &BaseScope,
+    store: &dyn StateStore,
+    output: &Output,
+    order: &[String],
+) -> Result<Vec<BlockPlan>, EngineError> {
     let mut scope = base.scope.clone();
     let mut results = Vec::new();
     let mut hash_cache = HashCache::new();
 
-    for name in &order {
+    for name in order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
         let writer = output.writer(name);
 
@@ -258,19 +275,22 @@ pub fn apply(
         let current_content_hash = compute_content_hash(&all_files, dag, name, store, &mut hash_cache);
         let inputs_changed = current_content_hash != stored_content_hash;
 
-        let plan_result = if inputs_changed && provider_state.is_some() {
-            PlanResult {
-                action: PlanAction::Update,
-                description: "inputs changed".into(),
-            }
-        } else {
+        // Never skip previously failed test blocks
+        let previously_failed = node.resource.kind() == ResourceKind::Test
+            && stored_outputs.get("passed").and_then(|v| v.as_bool()) == Some(false);
+
+        let mut plan_result =
             node.resource
                 .plan(&inputs, provider_state.as_ref())
                 .map_err(|e| EngineError::Provider {
                     block: name.clone(),
                     phase: "plan",
                     source: e,
-                })?
+                })?;
+
+        // Engine forces update if inputs changed or test previously failed
+        if plan_result.action == PlanAction::None && (inputs_changed || previously_failed) && provider_state.is_some() {
+            plan_result.action = PlanAction::Update;
         };
 
         if node.protected && matches!(plan_result.action, PlanAction::Replace | PlanAction::Destroy) {
