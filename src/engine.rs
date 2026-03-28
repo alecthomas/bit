@@ -44,14 +44,11 @@ struct WrappedState {
     content_hash: String,
 }
 
-/// Extract the provider state, outputs, and stored input hash from persisted state.
+/// Extract the provider state, outputs, and stored content hash from persisted state.
 fn unwrap_state(stored: &serde_json::Value) -> (Option<serde_json::Value>, Map, String) {
-    if let Ok(wrapped) = serde_json::from_value::<WrappedState>(stored.clone()) {
-        (Some(wrapped.state), wrapped.outputs, wrapped.content_hash)
-    } else {
-        // Legacy state without wrapping
-        (Some(stored.clone()), Map::new(), String::new())
-    }
+    let wrapped: WrappedState =
+        serde_json::from_value(stored.clone()).expect("corrupted state: not a valid WrappedState");
+    (Some(wrapped.state), wrapped.outputs, wrapped.content_hash)
 }
 
 /// Cache of file path -> content hash, shared across all blocks in a run.
