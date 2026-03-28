@@ -1,5 +1,5 @@
 use crate::ast::{Module, Statement};
-use crate::dag::{Dag, DagError, DagNode, collect_block_refs, collect_depends_on};
+use crate::dag::{Dag, DagError, DagNode, collect_after, collect_block_refs, collect_depends_on};
 use crate::expr::{self, EvalError, Scope};
 use crate::provider::ProviderRegistry;
 use crate::state::{StateError, StateStore};
@@ -93,18 +93,26 @@ pub fn load(
         }
     }
 
-    // Build dependency edges from field refs and depends_on
+    // Build dependency edges from field refs, depends_on, and after
     for stmt in &module.statements {
         if let Statement::Block(b) = stmt {
+            // Implicit deps from expression refs (content-coupled)
             let refs = collect_block_refs(&b.fields);
             for dep in &refs {
                 if dag.has_block(dep) && dep != &b.name {
-                    dag.add_edge(dep, &b.name)?;
+                    dag.add_dep_edge(dep, &b.name)?;
                 }
             }
+            // Explicit depends_on (content-coupled)
             for dep in collect_depends_on(&b.fields) {
                 if dag.has_block(&dep) && dep != b.name {
-                    dag.add_edge(&dep, &b.name)?;
+                    dag.add_dep_edge(&dep, &b.name)?;
+                }
+            }
+            // Explicit after (ordering-only)
+            for dep in collect_after(&b.fields) {
+                if dag.has_block(&dep) && dep != b.name {
+                    dag.add_ordering_edge(&dep, &b.name)?;
                 }
             }
         }

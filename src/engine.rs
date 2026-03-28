@@ -80,8 +80,8 @@ fn compute_content_hash(
         }
     }
 
-    // Hash parent block states
-    let mut deps = dag.deps(block_name);
+    // Hash parent block states (content-coupled deps only)
+    let mut deps = dag.content_deps(block_name);
     deps.sort();
     for dep in &deps {
         if let Ok(Some(state)) = store.load(dep) {
@@ -144,7 +144,7 @@ pub fn plan(
 
         // Hash inputs + existing outputs + parent states to detect changes
         let all_files: Vec<_> = resolved.inputs.iter().chain(&resolved.outputs).cloned().collect();
-        let has_dirty_dep = dag.deps(name).iter().any(|d| dirty.contains(d));
+        let has_dirty_dep = dag.content_deps(name).iter().any(|d| dirty.contains(d));
         let current_content_hash = compute_content_hash(&all_files, dag, name, store, &mut hash_cache);
         let inputs_changed = has_dirty_dep || current_content_hash != stored_content_hash;
 

@@ -1,23 +1,21 @@
 #let inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
 let inputs = exec("cargo package --list --allow-dirty") | lines
 
-# Debug build
 debug = exec {
   command = "cargo build"
   output = "target/debug/bit"
   inputs = inputs
 }
 
-# Optimised release build
 release = exec {
   command = "cargo build --release"
   output = "target/release/bit"
   inputs = inputs
 }
 
-# Docker image
 image = docker.image {
   tag = "bit:latest"
+  after = [release]
 }
 
 # Build debug binary only

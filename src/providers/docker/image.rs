@@ -38,6 +38,7 @@ pub struct ImageOutputs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageState {
     pub tag: String,
+    pub image_id: String,
 }
 
 /// Parse a Dockerfile and return local source paths from COPY/ADD instructions.
@@ -84,22 +85,76 @@ fn parse_dockerfile_sources(dockerfile: &Path, context: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Expand a path (which may be a glob or directory) into individual files,
-/// returning (path, content_hash) pairs.
-/// Expand a path (file, directory, or glob) into individual files.
-fn expand_path(path: &Path) -> Vec<PathBuf> {
+/// Parse a .dockerignore file into a GlobSet matcher.
+/// Returns (ignore_set, negation_set) — a path is ignored if it matches
+/// ignore_set and does NOT match negation_set.
+fn load_dockerignore(context: &Path) -> Option<DockerIgnore> {
+    let contents = std::fs::read_to_string(context.join(".dockerignore")).ok()?;
+    let mut ignore_builder = globset::GlobSetBuilder::new();
+    let mut negate_builder = globset::GlobSetBuilder::new();
+
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (pattern, is_negation) = if let Some(rest) = line.strip_prefix('!') {
+            (rest.trim(), true)
+        } else {
+            (line, false)
+        };
+
+        // Patterns are relative to context; add **/ prefix for matching
+        // anywhere in the tree, unless the pattern contains a slash
+        let glob_pattern = if pattern.contains('/') {
+            pattern.to_owned()
+        } else {
+            format!("**/{pattern}")
+        };
+
+        let Ok(glob) = globset::Glob::new(&glob_pattern) else {
+            continue;
+        };
+        if is_negation {
+            negate_builder.add(glob);
+        } else {
+            ignore_builder.add(glob);
+        }
+    }
+
+    Some(DockerIgnore {
+        ignore: ignore_builder.build().ok()?,
+        negate: negate_builder.build().ok()?,
+    })
+}
+
+struct DockerIgnore {
+    ignore: globset::GlobSet,
+    negate: globset::GlobSet,
+}
+
+impl DockerIgnore {
+    fn is_ignored(&self, path: &Path) -> bool {
+        self.ignore.is_match(path) && !self.negate.is_match(path)
+    }
+}
+
+/// Expand a path (file, directory, or glob) into individual files,
+/// filtering out paths matched by .dockerignore.
+fn expand_path(path: &Path, dockerignore: &Option<DockerIgnore>) -> Vec<PathBuf> {
     let pattern = path.to_string_lossy();
+    let filter = |e: &PathBuf| -> bool { e.is_file() && !dockerignore.as_ref().is_some_and(|di| di.is_ignored(e)) };
 
     if path.is_dir() {
         let glob_pattern = format!("{}/**/*", pattern);
         if let Ok(entries) = glob::glob(&glob_pattern) {
-            return entries.flatten().filter(|e| e.is_file()).collect();
+            return entries.flatten().filter(|e| filter(e)).collect();
         }
         return vec![];
     }
 
     if let Ok(entries) = glob::glob(&pattern) {
-        return entries.flatten().filter(|e| e.is_file()).collect();
+        return entries.flatten().filter(|e| filter(e)).collect();
     }
     vec![]
 }
@@ -122,20 +177,20 @@ impl Resource for ImageResource {
     fn resolve(&self, inputs: &ImageInputs) -> Result<crate::provider::ResolvedFiles, BoxError> {
         let context = Path::new(&inputs.context);
         let dockerfile = context.join(&inputs.dockerfile);
+        let dockerignore = load_dockerignore(context);
 
         let mut input_files = Vec::new();
 
-        // Include the Dockerfile itself
+        // Include the Dockerfile itself (never ignored)
         if dockerfile.is_file() {
             input_files.push(dockerfile.clone());
         }
 
-        // Parse Dockerfile to discover COPY/ADD source paths
+        // Parse Dockerfile to discover COPY/ADD source paths, filtered by .dockerignore
         for src in &parse_dockerfile_sources(&dockerfile, context) {
-            input_files.extend(expand_path(src));
+            input_files.extend(expand_path(src, &dockerignore));
         }
 
-        // Docker images don't produce local output files
         Ok(crate::provider::ResolvedFiles {
             inputs: input_files,
             outputs: vec![],
@@ -153,6 +208,22 @@ impl Resource for ImageResource {
         if prior.tag != inputs.tag {
             return Ok(PlanResult {
                 action: PlanAction::Update,
+                description: format!("docker build -t {}", inputs.tag),
+            });
+        }
+
+        // Check if the image still exists
+        let exists = Command::new("docker")
+            .args(["image", "inspect", &prior.image_id])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !exists {
+            return Ok(PlanResult {
+                action: PlanAction::Create,
                 description: format!("docker build -t {}", inputs.tag),
             });
         }
@@ -212,20 +283,21 @@ impl Resource for ImageResource {
         let image_id = String::from_utf8_lossy(&digest_output.stdout).trim().to_owned();
 
         Ok(ApplyResult {
+            state: Some(ImageState {
+                tag: inputs.tag.clone(),
+                image_id: image_id.clone(),
+            }),
             outputs: ImageOutputs {
                 image_ref: inputs.tag.clone(),
                 image_id,
             },
-            state: Some(ImageState {
-                tag: inputs.tag.clone(),
-            }),
         })
     }
 
     fn destroy(&self, prior_state: &ImageState, writer: &BlockWriter) -> Result<(), BoxError> {
-        writer.line(&format!("docker rmi {}", prior_state.tag));
+        writer.line(&format!("docker rmi {}", prior_state.image_id));
         let output = Command::new("docker")
-            .args(["rmi", &prior_state.tag])
+            .args(["rmi", &prior_state.image_id])
             .output()
             .map_err(|e| format!("docker rmi failed: {e}"))?;
 
@@ -251,9 +323,12 @@ impl Resource for ImageResource {
         Ok(ApplyResult {
             outputs: ImageOutputs {
                 image_ref: prior_state.tag.clone(),
-                image_id,
+                image_id: image_id.clone(),
             },
-            state: Some(prior_state.clone()),
+            state: Some(ImageState {
+                tag: prior_state.tag.clone(),
+                image_id,
+            }),
         })
     }
 }
@@ -275,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_none_when_unchanged() {
+    fn plan_create_when_image_deleted() {
         let inputs = ImageInputs {
             tag: "myapp:latest".into(),
             context: ".".into(),
@@ -284,9 +359,10 @@ mod tests {
         };
         let prior = ImageState {
             tag: "myapp:latest".into(),
+            image_id: "sha256:nonexistent".into(),
         };
         let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
-        assert_eq!(result.action, PlanAction::None);
+        assert_eq!(result.action, PlanAction::Create);
     }
 
     #[test]
@@ -297,7 +373,10 @@ mod tests {
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
         };
-        let prior = ImageState { tag: "myapp:v1".into() };
+        let prior = ImageState {
+            tag: "myapp:v1".into(),
+            image_id: "sha256:abc".into(),
+        };
         let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
@@ -373,5 +452,33 @@ mod tests {
         assert!(resolved.inputs.contains(&dockerfile));
         assert!(resolved.inputs.contains(&src_file));
         assert!(resolved.outputs.is_empty());
+    }
+
+    #[test]
+    fn resolve_respects_dockerignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let dockerfile = dir.path().join("Dockerfile");
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(&dockerfile, "FROM alpine\nCOPY src/ /app/src/\n").unwrap();
+        std::fs::write(src_dir.join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(src_dir.join("test.log"), "log output").unwrap();
+
+        // Without .dockerignore, both files are included
+        let inputs = ImageInputs {
+            tag: "myapp:latest".into(),
+            context: dir.path().to_string_lossy().into_owned(),
+            dockerfile: "Dockerfile".into(),
+            build_args: HashMap::new(),
+        };
+        let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
+        assert_eq!(resolved.inputs.len(), 3); // Dockerfile + main.rs + test.log
+
+        // Add .dockerignore to exclude .log files
+        std::fs::write(dir.path().join(".dockerignore"), "*.log\n").unwrap();
+        let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
+        assert_eq!(resolved.inputs.len(), 2); // Dockerfile + main.rs
+        assert!(resolved.inputs.contains(&dockerfile));
+        assert!(resolved.inputs.contains(&src_dir.join("main.rs")));
     }
 }

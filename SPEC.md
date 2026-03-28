@@ -37,7 +37,7 @@ image = docker.image {
 }
 ```
 
-For ordering without data flow:
+For ordering with content coupling (parent changes invalidate child):
 
 ```
 deploy = kubernetes.deployment {
@@ -45,6 +45,17 @@ deploy = kubernetes.deployment {
   depends_on = [migrations]
 }
 ```
+
+For ordering without content coupling (parent runs first, but changes don't invalidate child):
+
+```
+deploy = kubernetes.deployment {
+  image = image.ref
+  after = [migrations]
+}
+```
+
+`depends_on` means "I depend on this" — the parent's state is part of the child's content hash. `after` means "just run this first" — ordering only, no hash coupling. Expression refs (e.g. `image.ref`) implicitly create `depends_on` edges.
 
 ## 2. Modules
 
@@ -196,34 +207,29 @@ Utility-only providers (no resources, only functions) are valid.
 
 ### 5.3 Resolve
 
-Resources discover the full input set from minimal user configuration. This is what allows `.bit` files to be terse — the user writes `main = "./cmd/server"` and the resource discovers every contributing source file.
+Resources discover the full set of input and output files from minimal user configuration. This is what allows `.bit` files to be terse — the user writes `main = "./cmd/server"` and the resource discovers every contributing source file.
 
-Resolve returns:
+Resolve returns two lists of file paths:
 
-- **inputs** — concrete files with content hashes, forming the cache key.
-- **watches** — glob patterns monitored by the runtime. Any change to matching files (added, removed, or modified) invalidates the resolution.
-- **platform** — list of platform strings relevant to caching (see section 8).
+- **inputs** — source files the block depends on.
+- **outputs** — files the block produces.
+
+Providers do not hash files — the engine handles all hashing. Providers just declare what files matter.
 
 ```
 resolve-result {
   inputs: [
-    { key: "source_files", paths: [
-      { path: "cmd/server/main.go",  hash: "sha256:a1b2..." },
-      { path: "pkg/api/handler.go",  hash: "sha256:c3d4..." },
-    ]},
-    { key: "module_files", paths: [
-      { path: "go.mod", hash: "sha256:1111..." },
-    ]}
-  ],
-  watches: [
-    "cmd/server/*.go",
-    "pkg/api/*.go",
+    "cmd/server/main.go",
+    "pkg/api/handler.go",
     "go.mod",
-    "go.sum",
   ],
-  platform: ["linux", "x86_64", "glibc-2.31"],
+  outputs: [
+    "target/server",
+  ],
 }
 ```
+
+For example, the `docker.image` provider parses the Dockerfile to discover `COPY` and `ADD` source paths automatically, skipping multi-stage `COPY --from=...` and `ADD` with URLs.
 
 ## 6. Lifecycle
 
@@ -231,35 +237,44 @@ Every block goes through up to four phases: **resolve**, **plan**, **apply**, an
 
 ### 6.1 Resolve
 
-Resolve discovers the full set of inputs from the user-supplied configuration. The provider inspects source files, parses dependency graphs, and returns concrete files with content hashes, plus glob patterns for the runtime to watch.
+Resolve discovers the full set of input and output files from the user-supplied configuration. The provider inspects source files, parses dependency graphs, and returns file paths. The engine handles all hashing.
 
-For a `go.binary` block where the user writes `main = "./cmd/server"`, resolve follows the Go import graph and returns every `.go` file that contributes to the binary, plus watch patterns like `cmd/server/*.go` and `pkg/api/*.go`. A `kubernetes.deployment` provider may have no files to discover — resolve can return an empty input set, and the cache key is computed from user-supplied fields alone.
+For a `go.binary` block where the user writes `main = "./cmd/server"`, resolve follows the Go import graph and returns every `.go` file that contributes to the binary. A `kubernetes.deployment` provider may have no files to discover — resolve can return empty lists.
 
-**When resolve runs:**
-- On first build: always.
-- On subsequent builds: only if watch patterns show a change (files added, removed, or modified). If watches are clean, the cached resolution is reused.
+Resolve runs on every plan/apply. The engine caches file hashes within a run to avoid redundant I/O when blocks share input files.
 
-### 6.2 Plan
+### 6.2 Change Detection — Merkle Tree
 
-The runtime first checks the cache. If the cache key matches a previous result, the block is skipped — this applies to all providers uniformly.
+The engine uses a Merkle tree to detect changes. For each block, it computes a **content hash** from:
 
-On a cache miss, the runtime calls the provider's `plan` function with the current inputs and prior state (if any). Plan returns one of: `create`, `update`, `replace`, `destroy`, or `none`.
+1. The content hashes of all resolved input and output files.
+2. The full persisted state of all parent blocks in the DAG.
 
-A `go.binary` provider receiving no prior state returns `create`. A `kubernetes.deployment` provider compares inputs to prior state and returns `update` if the replica count changed, `replace` if the namespace changed. The protocol is the same — providers make finer-grained decisions when they have state to compare against.
+This single content hash is persisted alongside each block's state. On the next run, the engine recomputes the hash and compares — if it differs, the block needs rebuilding.
 
-When a block plans `create` and has no prior outputs, downstream blocks that reference its outputs are shown as "depends on (to be created)" rather than being planned in detail. Full plan-time propagation of unknown values may be added in a future version.
+This means changes propagate automatically through the DAG. If block A's inputs change, A's content hash changes. Block B depends on A, so A's persisted state is part of B's content hash — B is automatically invalidated too. No explicit dirty-tracking is needed across runs.
+
+During a single plan run, the engine also maintains a dirty set for within-run propagation: if a parent is planned for a change, all descendants are forced to update regardless of their stored content hash (since the parent's state hasn't been persisted yet).
+
+### 6.3 Plan
+
+The engine first checks the content hash. If it matches, the provider's `plan` is not called — the block is skipped. On a mismatch (or no prior state), the engine calls the provider's `plan` function with the current inputs and prior state.
+
+Plan returns one of: `create`, `update`, `replace`, `destroy`, or `none`. The provider handles domain-specific comparisons (e.g. tag changed, replica count changed). File-level change detection is handled entirely by the engine.
 
 **Protected blocks** — plan refuses `replace` or `destroy`. If the inputs would require either, the runtime errors and stops.
 
-### 6.3 Apply
+### 6.4 Apply
 
 Apply executes the planned action and returns an `apply-result` containing `outputs` (fields that downstream blocks can reference) and `state` (an opaque blob, or nil on failure). On failure it returns an error.
 
-The runtime persists non-nil state in the configured backend. On the next run, this state is passed back to `plan` and `apply` as `prior_state`. If state is nil, nothing is persisted.
+The engine persists a wrapped state containing the provider's state, the block's outputs, and the content hash. Outputs are persisted so that skipped blocks can still provide values to downstream blocks across runs. On the next run, this state is passed back to `plan` and `apply` as `prior_state`. If state is nil, nothing is persisted.
+
+After apply, the engine re-resolves files (since outputs now exist) and recomputes the content hash for persistence.
 
 **Test blocks** (`kind = "test"`) — apply runs the tests and returns normal outputs including `passed` (bool) and `report` (path to JUnit XML). If `passed` is false, the runtime stops downstream blocks. This is distinct from an error return, which indicates the test execution itself failed (e.g. the test binary crashed).
 
-### 6.4 Destroy
+### 6.5 Destroy
 
 Destroy removes everything a block has produced. The runtime calls the provider's `destroy` function with the prior state. The provider cleans up — deleting cached outputs for a build provider, tearing down external resources for an infrastructure provider. The runtime then removes any persisted state.
 
@@ -267,21 +282,22 @@ Destroy removes everything a block has produced. The runtime calls the provider'
 
 **Protected blocks** — destroy is a no-op. The runtime logs a notice and skips.
 
-### 6.5 Refresh
+### 6.6 Refresh
 
 Refresh queries the actual state of a resource and updates the persisted state to match reality. This detects drift — e.g. a deployment was manually scaled, a database was modified outside of bit.
 
 The runtime calls `refresh` with the prior state. The provider queries the real resource and returns updated outputs and state. Providers with no external resources to query can return immediately.
 
-### 6.6 Rollback
+### 6.7 Rollback
 
 **TBD.** If apply succeeds for a block but a downstream block fails (e.g. canary deploys but smoke tests fail), there is currently no mechanism to automatically roll back the already-applied blocks. This is a known gap. Future versions may support rollback policies or compensating actions.
 
-### 6.7 Phase Summary
+### 6.8 Phase Summary
 
 |  | Resolve | Plan | Apply | Destroy |
 |--|---------|------|-------|---------|
-| **All providers** | Discovers inputs, returns watches | Cache check → call plan on miss | Returns outputs + optional state | Cleans up outputs and/or external resources |
+| **Engine** | Calls provider resolve, hashes files + parent states | Compares content hash, calls provider plan on mismatch | Calls provider apply, persists state + outputs + content hash | Calls provider destroy, removes state |
+| **Provider** | Returns input/output file paths | Compares domain-specific fields (tag, command, etc.) | Executes the action, returns outputs + state | Cleans up produced artifacts |
 | **Protected** | Normal | Refuses replace/destroy | Normal for create/update | No-op |
 | **Test** | Normal | Normal | Returns passed + report | Normal |
 
@@ -299,7 +315,15 @@ docs = exec {
 }
 ```
 
-`inputs` is a list of globs. They serve as both the cache inputs (expanded to concrete files and hashed) and the watch patterns (monitored for changes). `command` is the shell command to run. `output` is the output directory or file.
+`inputs` is a list of globs, expanded to concrete files by the provider's `resolve()`. `command` is the shell command to run. `output` is the output file or directory — it can be a single string or a list for blocks that produce multiple artifacts:
+
+```
+build = exec {
+  command = "make all"
+  inputs  = ["src/**/*.c", "Makefile"]
+  output  = ["bin/server", "bin/cli"]
+}
+```
 
 Dynamic input discovery uses `exec()` in the expression language:
 
@@ -329,25 +353,34 @@ If an `exec` block becomes complex, that's the signal to write a real provider.
 
 ## 8. Caching and Invalidation
 
-### Cache Key
+### Content Hash (Merkle Tree)
+
+Each block's state includes a **content hash** computed by the engine:
 
 ```
-cache_key = hash(provider_version, resource, user_inputs, resolved_input_hashes, platform)
+content_hash = sha256(
+  sorted(resolved_input_files + resolved_output_files),  # path + content hash per file
+  sorted(parent_block_persisted_states),                  # name + full JSON per parent
+)
 ```
 
-### Platform
+This forms a Merkle tree over the DAG. A change in any leaf (source file) propagates up through every block that depends on it — transitively and automatically.
 
-The runtime collects a platform fingerprint (OS, architecture, OS version). Providers declare which platform components are relevant to their cache key via a `platform` field in the resolve result — a list of strings the provider considers significant. A `c.object` provider might return `["linux", "x86_64", "glibc-2.31"]`. A `postgres.database` provider returns `[]` because it doesn't produce platform-dependent outputs.
+### How It Works
 
-This is provider-driven because only the provider knows what matters. A Go cross-compilation with `GOOS=linux GOARCH=amd64` produces the same output regardless of the host OS, so the Go provider would include the *target* platform, not the host. A C provider using the system compiler cares about the host libc version. A Docker image build might care about nothing if building for a fixed platform.
+1. **Resolve** — the engine calls the provider's `resolve()` to get input and output file paths.
+2. **Hash** — the engine hashes all resolved files plus the persisted states of all parent blocks. File hashes are cached within a run so shared files (e.g. `src/**/*.rs` used by both `debug` and `release`) are only read once.
+3. **Compare** — if the computed content hash matches the stored one, the block is skipped.
+4. **Persist** — after apply, the engine re-resolves (outputs now exist), recomputes the content hash, and persists it alongside the provider's state and outputs.
 
 ### Invalidation
 
-1. **Check watches.** Compare current file set + hashes against cached snapshot. If identical, resolution is valid.
-2. **Resolution valid → check cache key.** Hit → skip. Miss → apply.
-3. **Resolution stale → re-resolve.** Get new inputs/watches, recompute cache key, check cache, apply on miss.
+Changes propagate through the DAG automatically:
 
-All blocks are cached identically. Same inputs and same provider produce the same cache key. If the cache key matches, the block is skipped.
+- **File changes** — a modified source file changes the content hash of every block that includes it.
+- **Parent changes** — a parent block's state is part of the child's content hash. If the parent rebuilds (changing its persisted state), all children are invalidated.
+- **Output deletion** — output files are included in the content hash. If an output is deleted, the hash changes and the block rebuilds.
+- **Within-run propagation** — during plan, the engine maintains a dirty set. If a parent is planned for a change, descendants are forced to update even though the parent's new state hasn't been persisted yet.
 
 ## 9. Tests
 
@@ -387,20 +420,10 @@ pub enum Value {
     Null,
 }
 
-pub struct ResolveResult {
-    pub inputs: Vec<ResolvedInput>,
-    pub watches: Vec<String>,
-    pub platform: Vec<String>,
-}
-
-pub struct ResolvedInput {
-    pub key: String,
-    pub paths: Vec<ResolvedPath>,
-}
-
-pub struct ResolvedPath {
-    pub path: String,
-    pub content_hash: String,
+/// Files that a block depends on and produces.
+pub struct ResolvedFiles {
+    pub inputs: Vec<PathBuf>,
+    pub outputs: Vec<PathBuf>,
 }
 
 pub enum PlanAction {
@@ -462,7 +485,7 @@ pub trait Resource {
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
 
-    fn resolve(&self, inputs: &Map) -> Result<ResolveResult>;
+    fn resolve(&self, inputs: &Map) -> Result<ResolvedFiles>;
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult>;
     fn apply(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<ApplyResult>;
     fn destroy(&self, prior_state: &serde_json::Value) -> Result<()>;
@@ -480,11 +503,14 @@ parse .bit files
 build DAG from references
   ▼
 for each block (topological order, parallel where possible):
-  ├─ check watches → unchanged → check cache → hit → skip
-  └─ changed or miss:
-      ├─ resolve
-      ├─ plan
-      └─ apply → store outputs + state
+  ├─ resolve → get input/output file paths
+  ├─ hash files + parent states → compute content hash
+  ├─ content hash matches stored → skip (load stored outputs into scope)
+  └─ mismatch or no prior state:
+      ├─ plan (provider-specific checks)
+      ├─ apply → get outputs + state
+      ├─ re-resolve → hash with outputs → compute final content hash
+      └─ persist state + outputs + content hash
 ```
 
 ## 13. CLI

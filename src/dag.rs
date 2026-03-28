@@ -2,9 +2,19 @@ use std::collections::{HashMap, HashSet};
 
 use petgraph::algo::toposort;
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef;
 
 use crate::ast::{Expr, Field, StringPart};
 use crate::provider::DynResource;
+
+/// The type of edge between two blocks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EdgeKind {
+    /// Content-coupled: parent state is part of child's content hash.
+    Dependency,
+    /// Ordering-only: parent runs first, but doesn't affect child's hash.
+    Ordering,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DagError {
@@ -39,7 +49,7 @@ pub struct DagTarget {
 
 /// The dependency graph of blocks, ready for the engine.
 pub struct Dag {
-    graph: DiGraph<DagNode, ()>,
+    graph: DiGraph<DagNode, EdgeKind>,
     indices: HashMap<String, NodeIndex>,
     targets: HashMap<String, DagTarget>,
 }
@@ -64,14 +74,25 @@ impl Dag {
         Ok(())
     }
 
-    /// Add a dependency edge: `from` must complete before `to`.
-    pub fn add_edge(&mut self, from: &str, to: &str) -> Result<(), DagError> {
+    /// Add a dependency edge: `from` must complete before `to`, and
+    /// `from`'s state is included in `to`'s content hash.
+    pub fn add_dep_edge(&mut self, from: &str, to: &str) -> Result<(), DagError> {
+        self.add_edge(from, to, EdgeKind::Dependency)
+    }
+
+    /// Add an ordering edge: `from` must complete before `to`, but
+    /// `from`'s state does not affect `to`'s content hash.
+    pub fn add_ordering_edge(&mut self, from: &str, to: &str) -> Result<(), DagError> {
+        self.add_edge(from, to, EdgeKind::Ordering)
+    }
+
+    fn add_edge(&mut self, from: &str, to: &str, kind: EdgeKind) -> Result<(), DagError> {
         let from_idx = self
             .indices
             .get(from)
             .ok_or_else(|| DagError::UnknownBlock(from.into()))?;
         let to_idx = self.indices.get(to).ok_or_else(|| DagError::UnknownBlock(to.into()))?;
-        self.graph.add_edge(*from_idx, *to_idx, ());
+        self.graph.add_edge(*from_idx, *to_idx, kind);
         Ok(())
     }
 
@@ -138,7 +159,7 @@ impl Dag {
         self.indices.contains_key(name)
     }
 
-    /// Get the names of blocks that `name` depends on (direct dependencies).
+    /// Get all parent block names (both dependency and ordering edges).
     pub fn deps(&self, name: &str) -> Vec<String> {
         let Some(&idx) = self.indices.get(name) else {
             return vec![];
@@ -147,6 +168,21 @@ impl Dag {
             .neighbors_directed(idx, petgraph::Direction::Incoming)
             .map(|n| self.graph[n].name.clone())
             .collect()
+    }
+
+    /// Get parent block names that are content-coupled (dependency edges only).
+    /// These are included in the content hash computation.
+    pub fn content_deps(&self, name: &str) -> Vec<String> {
+        let Some(&idx) = self.indices.get(name) else {
+            return vec![];
+        };
+        let mut result = Vec::new();
+        for edge in self.graph.edges_directed(idx, petgraph::Direction::Incoming) {
+            if *edge.weight() == EdgeKind::Dependency {
+                result.push(self.graph[edge.source()].name.clone());
+            }
+        }
+        result
     }
 
     /// Get the depth of a node (longest path from a root).
@@ -168,7 +204,7 @@ impl Default for Dag {
     }
 }
 
-fn collect_transitive_deps(graph: &DiGraph<DagNode, ()>, node: NodeIndex, result: &mut HashSet<String>) {
+fn collect_transitive_deps(graph: &DiGraph<DagNode, EdgeKind>, node: NodeIndex, result: &mut HashSet<String>) {
     let name = &graph[node].name;
     if !result.insert(name.clone()) {
         return;
@@ -192,6 +228,24 @@ pub fn collect_block_refs(fields: &[Field]) -> HashSet<String> {
 pub fn collect_depends_on(fields: &[Field]) -> Vec<String> {
     for field in fields {
         if field.name == "depends_on"
+            && let Expr::List(items) = &field.value
+        {
+            return items
+                .iter()
+                .filter_map(|e| match e {
+                    Expr::Ref(parts) => Some(parts[0].clone()),
+                    _ => None,
+                })
+                .collect();
+        }
+    }
+    vec![]
+}
+
+/// Extract explicit `after` entries from fields (ordering-only edges).
+pub fn collect_after(fields: &[Field]) -> Vec<String> {
+    for field in fields {
+        if field.name == "after"
             && let Expr::List(items) = &field.value
         {
             return items

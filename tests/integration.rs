@@ -360,6 +360,52 @@ fn dependency_change_propagates_to_plan() {
 }
 
 #[test]
+fn after_does_not_propagate_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_a = dir.path().join("a.txt");
+    let out_b = dir.path().join("b.txt");
+
+    // Apply both blocks — b runs after a but is not content-coupled
+    let input_v1 = format!(
+        concat!(
+            "a = exec {{\n  command = \"echo v1 > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo ok > {}\"\n  output = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
+        ),
+        out_a.display(),
+        out_a.display(),
+        out_b.display(),
+        out_b.display(),
+    );
+    let store = MemoryStore::new();
+    run_apply(&input_v1, &store);
+
+    // Change a's command
+    let input_v2 = format!(
+        concat!(
+            "a = exec {{\n  command = \"echo v2 > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo ok > {}\"\n  output = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
+        ),
+        out_a.display(),
+        out_a.display(),
+        out_b.display(),
+        out_b.display(),
+    );
+
+    // Plan should show a as Update but b as None (after is ordering-only)
+    let plans = run_plan(&input_v2, &store);
+    assert_eq!(
+        plans[0].plan.action,
+        bit::provider::PlanAction::Update,
+        "a should need update"
+    );
+    assert_eq!(
+        plans[1].plan.action,
+        bit::provider::PlanAction::None,
+        "b should not be affected by a (after is ordering-only)"
+    );
+}
+
+#[test]
 fn doc_comments_preserved() {
     let input = concat!(
         "# The server\n",
