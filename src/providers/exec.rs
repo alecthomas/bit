@@ -216,6 +216,56 @@ impl Resource for ExecResource {
     }
 }
 
+/// Parse stdout into a CTRF report, optionally applying a jq transform first.
+/// Falls back to a synthesized report from exit code if stdout isn't CTRF.
+fn parse_ctrf_output(
+    stdout: &str,
+    transform: &Option<String>,
+    command: &str,
+    passed: bool,
+) -> Result<crate::ctrf::Report, BoxError> {
+    use crate::ctrf::{self, Report, Results, Summary, Test, Tool};
+
+    if let Some(expr) = transform {
+        let ctrf_json = crate::jq::transform(expr, stdout)?;
+        return Report::from_json(&ctrf_json).map_err(|e| format!("failed to parse CTRF JSON: {e}").into());
+    }
+
+    if let Ok(report) = Report::from_json(stdout.trim()) {
+        return Ok(report);
+    }
+
+    // Synthesize from exit code
+    let status = if passed {
+        ctrf::Status::Passed
+    } else {
+        ctrf::Status::Failed
+    };
+    let tests = vec![Test {
+        name: command.to_owned(),
+        status,
+        duration: 0,
+        suite: None,
+        message: None,
+        trace: None,
+        file_path: None,
+        flaky: None,
+    }];
+    Ok(Report {
+        report_format: "CTRF".into(),
+        spec_version: "0.0.1".into(),
+        results: Results {
+            tool: Tool {
+                name: command.to_owned(),
+                version: None,
+            },
+            summary: Summary::from_tests(&tests),
+            tests,
+            environment: None,
+        },
+    })
+}
+
 // --- exec.test resource ---
 
 /// Typed inputs for an exec.test block.
@@ -227,15 +277,22 @@ pub struct ExecTestInputs {
     #[serde(default)]
     pub output: Vec<String>,
     /// Optional jq expression to transform stdout into CTRF JSON.
+    /// Only used when `format = "ctrf"`.
     #[serde(default)]
     pub transform: Option<String>,
+    /// Output format. If "ctrf", stdout is parsed as CTRF JSON (or
+    /// transformed via `transform` first). If omitted, stdout/stderr
+    /// are displayed normally and pass/fail is determined by exit code.
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 /// Outputs from an exec.test block.
 #[derive(Debug, Serialize)]
 pub struct ExecTestOutputs {
     pub passed: bool,
-    pub report: crate::ctrf::Report,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<crate::ctrf::Report>,
 }
 
 /// State for an exec.test block.
@@ -298,6 +355,8 @@ impl Resource for ExecTestResource {
         _prior_state: Option<&ExecTestState>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
+        let use_ctrf = inputs.format.as_deref() == Some("ctrf");
+
         let mut child = Command::new("sh")
             .arg("-c")
             .arg(&inputs.command)
@@ -306,76 +365,55 @@ impl Resource for ExecTestResource {
             .spawn()
             .map_err(|e| format!("failed to execute command: {e}"))?;
 
-        // Capture stdout, pipe stderr to user
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
 
+        // In CTRF mode, capture stdout for parsing. Otherwise pipe both to user.
         let mut stdout_buf = String::new();
         std::thread::scope(|s| {
-            let stdout_thread = stdout_handle.map(|out| {
-                s.spawn(|| {
-                    let mut buf = String::new();
-                    let mut reader = BufReader::new(out);
-                    loop {
-                        let mut line = String::new();
-                        match reader.read_line(&mut line) {
-                            Ok(0) | Err(_) => break,
-                            Ok(_) => buf.push_str(&line),
+            if use_ctrf {
+                let stdout_thread = stdout_handle.map(|out| {
+                    s.spawn(|| {
+                        let mut buf = String::new();
+                        let mut reader = BufReader::new(out);
+                        loop {
+                            let mut line = String::new();
+                            match reader.read_line(&mut line) {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => buf.push_str(&line),
+                            }
                         }
-                    }
-                    buf
-                })
-            });
-            if let Some(err) = stderr_handle {
-                s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
-            }
-            if let Some(handle) = stdout_thread {
-                stdout_buf = handle.join().unwrap_or_default();
+                        buf
+                    })
+                });
+                if let Some(err) = stderr_handle {
+                    s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
+                }
+                if let Some(handle) = stdout_thread {
+                    stdout_buf = handle.join().unwrap_or_default();
+                }
+            } else {
+                if let Some(out) = stdout_handle {
+                    s.spawn(|| writer.pipe_stdout(BufReader::new(out)));
+                }
+                if let Some(err) = stderr_handle {
+                    s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
+                }
             }
         });
 
         let status = child.wait().map_err(|e| format!("failed to wait for command: {e}"))?;
         let passed = status.success();
 
-        use crate::ctrf::{self, Report, Results, Summary, Test, Tool};
-
-        let report = if let Some(expr) = &inputs.transform {
-            // Transform stdout with jq, result must be valid CTRF
-            let ctrf_json = crate::jq::transform(expr, &stdout_buf)?;
-            Report::from_json(&ctrf_json).map_err(|e| format!("failed to parse CTRF JSON: {e}"))?
-        } else if let Ok(report) = Report::from_json(stdout_buf.trim()) {
-            // Stdout is valid CTRF
-            report
+        let report = if use_ctrf {
+            Some(parse_ctrf_output(
+                &stdout_buf,
+                &inputs.transform,
+                &inputs.command,
+                passed,
+            )?)
         } else {
-            // No CTRF output — synthesize from exit code
-            let status = if passed {
-                ctrf::Status::Passed
-            } else {
-                ctrf::Status::Failed
-            };
-            let tests = vec![Test {
-                name: inputs.command.clone(),
-                status,
-                duration: 0,
-                suite: None,
-                message: None,
-                trace: None,
-                file_path: None,
-                flaky: None,
-            }];
-            Report {
-                report_format: "CTRF".into(),
-                spec_version: "0.0.1".into(),
-                results: Results {
-                    tool: Tool {
-                        name: inputs.command.clone(),
-                        version: None,
-                    },
-                    summary: Summary::from_tests(&tests),
-                    tests,
-                    environment: None,
-                },
-            }
+            None
         };
 
         Ok(ApplyResult {
@@ -391,33 +429,10 @@ impl Resource for ExecTestResource {
     }
 
     fn refresh(&self, prior_state: &ExecTestState) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
-        use crate::ctrf::{Report, Results, Summary, Tool};
-
         Ok(ApplyResult {
             outputs: ExecTestOutputs {
                 passed: true,
-                report: Report {
-                    report_format: "CTRF".into(),
-                    spec_version: "0.0.1".into(),
-                    results: Results {
-                        tool: Tool {
-                            name: prior_state.command.clone(),
-                            version: None,
-                        },
-                        summary: Summary {
-                            tests: 0,
-                            passed: 0,
-                            failed: 0,
-                            skipped: 0,
-                            pending: None,
-                            other: None,
-                            start: None,
-                            stop: None,
-                        },
-                        tests: vec![],
-                        environment: None,
-                    },
-                },
+                report: None,
             },
             state: Some(prior_state.clone()),
         })
@@ -581,12 +596,14 @@ mod tests {
             inputs: vec![],
             output: vec![],
             transform: None,
+            format: None,
         };
         let resource = ExecTestResource;
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
         assert!(result.outputs.passed);
+        assert!(result.outputs.report.is_none());
     }
 
     #[test]
@@ -596,11 +613,11 @@ mod tests {
             inputs: vec![],
             output: vec![],
             transform: None,
+            format: None,
         };
         let resource = ExecTestResource;
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        // apply should succeed (not error), but passed = false
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
         assert!(!result.outputs.passed);
     }
@@ -613,23 +630,25 @@ mod tests {
             inputs: vec![],
             output: vec![],
             transform: None,
+            format: Some("ctrf".into()),
         };
         let resource = ExecTestResource;
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
         assert!(result.outputs.passed);
-        assert_eq!(result.outputs.report.results.summary.tests, 1);
-        assert_eq!(result.outputs.report.results.tests[0].name, "it_works");
+        let report = result.outputs.report.unwrap();
+        assert_eq!(report.results.summary.tests, 1);
+        assert_eq!(report.results.tests[0].name, "it_works");
     }
 
     #[test]
     fn test_resource_applies_jq_transform() {
-        // Command outputs custom JSON, transform converts to CTRF
         let inputs = ExecTestInputs {
             command: r#"echo '{"ok": true, "count": 2}'"#.into(),
             inputs: vec![],
             output: vec![],
+            format: Some("ctrf".into()),
             transform: Some(
                 r#"
                 {
@@ -650,8 +669,9 @@ mod tests {
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
         assert!(result.outputs.passed);
-        assert_eq!(result.outputs.report.results.tool.name, "custom");
-        assert_eq!(result.outputs.report.results.summary.tests, 2);
+        let report = result.outputs.report.unwrap();
+        assert_eq!(report.results.tool.name, "custom");
+        assert_eq!(report.results.summary.tests, 2);
     }
 
     #[test]

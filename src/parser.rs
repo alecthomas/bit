@@ -33,15 +33,31 @@ fn ws(input: &mut &str) -> ModalResult<()> {
 /// Collect adjacent `# ...` comment lines as a doc string.
 /// Only consumes comment lines — leaves other whitespace to `ws`/`lex`.
 fn doc_comments(input: &mut &str) -> ModalResult<Option<String>> {
+    // Skip leading whitespace/blank lines
+    take_while(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n').parse_next(input)?;
+
     let mut lines = Vec::new();
     loop {
-        // Skip blank lines between/before comments
-        take_while(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n').parse_next(input)?;
         if input.starts_with('#') {
             let _: char = any.parse_next(input)?;
             opt(' ').parse_next(input)?;
             let text: &str = take_while(0.., |c: char| c != '\n').parse_next(input)?;
             lines.push(text.to_owned());
+            // Consume the newline after this comment line
+            opt('\n').parse_next(input)?;
+            // If next line is blank (not a comment), this doc comment block is done
+            let rest = input.trim_start_matches([' ', '\t', '\r']);
+            if !rest.starts_with('#') {
+                // Check if there's a blank line before the next content
+                // If so, discard accumulated comments (they were a commented-out block)
+                if rest.starts_with('\n') && !lines.is_empty() {
+                    // Blank line after comments — reset and skip to next group
+                    lines.clear();
+                    take_while(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n').parse_next(input)?;
+                    continue;
+                }
+                break;
+            }
         } else {
             break;
         }
@@ -932,6 +948,25 @@ mod tests {
         match &result.statements[0] {
             Statement::Target(t) => {
                 assert_eq!(t.doc, None);
+            }
+            _ => panic!("expected Target"),
+        }
+    }
+
+    #[test]
+    fn parse_commented_out_block_not_doc_comment() {
+        let input = concat!(
+            "# image = docker.image {\n",
+            "#   tag = \"bit:latest\"\n",
+            "# }\n",
+            "\n",
+            "# Build debug binary only\n",
+            "target debug = [debug]\n",
+        );
+        let result = parse(input).unwrap();
+        match &result.statements[0] {
+            Statement::Target(t) => {
+                assert_eq!(t.doc, Some("Build debug binary only".into()));
             }
             _ => panic!("expected Target"),
         }
