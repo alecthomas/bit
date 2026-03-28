@@ -272,7 +272,7 @@ The engine persists a wrapped state containing the provider's state, the block's
 
 After apply, the engine re-resolves files (since outputs now exist) and recomputes the content hash for persistence.
 
-**Test blocks** (`kind = "test"`) — apply runs the tests and returns normal outputs including `passed` (bool) and `report` (path to JUnit XML). If `passed` is false, the runtime stops downstream blocks. This is distinct from an error return, which indicates the test execution itself failed (e.g. the test binary crashed).
+**Test blocks** (`kind = "test"`) — apply runs the tests and returns `passed` (bool) and `report` (CTRF JSON). By default, test providers capture CTRF JSON from the command's stdout. If `passed` is false, the runtime stops downstream blocks. This is distinct from an error return, which indicates the test execution itself failed (e.g. the test binary crashed).
 
 ### 6.5 Destroy
 
@@ -338,14 +338,12 @@ server = exec {
 
 The `exec()` call in `inputs` runs during input evaluation, before the block's `command` runs. Its output is split into lines and merged with the static globs. All entries are treated as globs — expanded to concrete files for hashing, watched for changes.
 
-For test blocks, set `kind = "test"` and produce JUnit XML:
+Test blocks use a separate resource type, `exec.test`. A non-zero exit code means the test failed (`passed = false`), not an error:
 
 ```
-linting = exec {
-  kind    = "test"
-  command = "golangci-lint run --out-format junit-xml > ${output}/report.xml"
+linting = exec.test {
+  command = "go test -json -race ./..."
   inputs  = ["**/*.go", "go.mod", "go.sum"]
-  output  = "lint-results/"
 }
 ```
 
@@ -386,9 +384,11 @@ Changes propagate through the DAG automatically:
 
 Tests are blocks whose resource has `kind = "test"`. No `test` keyword in the language.
 
-Providers output test results as **JUnit XML** — the de facto standard understood by every CI system, IDE, and reporting tool. Providers convert from their native format (go test JSON, TAP, etc.) to JUnit XML. The runtime parses it for summary display and failure propagation.
+Providers output test results as **CTRF** (Common Test Results Format) JSON — a simple, structured format for test results. Providers convert from their native format (go test JSON, TAP, JUnit XML, etc.) to CTRF. The runtime parses it for summary display and failure propagation.
 
-Test blocks expose two outputs: `report` (path to the JUnit XML file) and `passed` (bool). `passed = false` stops all downstream blocks.
+By default, test providers capture CTRF JSON from stdout. The command's stderr is displayed to the user as normal. This keeps the common case simple — pipe your test runner's output through a converter and write it to stdout.
+
+Test blocks expose two outputs: `report` (the parsed CTRF JSON) and `passed` (bool). `passed = false` stops all downstream blocks.
 
 ## 10. State
 
