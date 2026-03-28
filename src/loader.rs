@@ -292,6 +292,14 @@ deploy = exec {
     }
 
     #[test]
+    fn load_target_unknown_block() {
+        let input = "target build = [nonexistent]\n";
+        let module = parser::parse(input).unwrap();
+        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore);
+        assert!(matches!(result, Err(LoadError::Dag(DagError::UnknownTargetBlock(..)))));
+    }
+
+    #[test]
     fn load_target_doc() {
         let input = r#"
 server = exec {

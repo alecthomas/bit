@@ -24,6 +24,8 @@ pub enum DagError {
     UnknownBlock(String),
     #[error("dependency cycle detected")]
     Cycle,
+    #[error("target '{0}' references unknown block '{1}'")]
+    UnknownTargetBlock(String, String),
 }
 
 /// A node in the dependency graph.
@@ -101,9 +103,17 @@ impl Dag {
         self.targets.insert(name, DagTarget { blocks, doc });
     }
 
-    /// Validate the graph has no cycles.
+    /// Validate the graph: no cycles, all target references are valid.
     pub fn validate(&self) -> Result<(), DagError> {
         toposort(&self.graph, None).map_err(|_| DagError::Cycle)?;
+        for (name, target) in &self.targets {
+            for block in &target.blocks {
+                let block_name = block.split('.').next().unwrap_or(block);
+                if !self.indices.contains_key(block_name) {
+                    return Err(DagError::UnknownTargetBlock(name.clone(), block_name.to_owned()));
+                }
+            }
+        }
         Ok(())
     }
 
