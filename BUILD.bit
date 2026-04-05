@@ -19,10 +19,10 @@ test = exec.test {
   inputs = inputs
 }
 
-# image = docker.image {
-#   tag = "bit:latest"
-#   after = [release]
-# }
+#image = docker.image {
+#  tag = "bit:latest"
+#  after = [release]
+#}
 
 # Build debug binary only
 target debug = [debug]
@@ -30,8 +30,5 @@ target debug = [debug]
 # Build release binary only
 target release = [release]
 
-# Build Docker image
-target image = [image]
-
-# Build all
-target all = [release, image]
+# Run tests
+target test = [test]

@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::SystemTime;
+
 use sha2::{Digest, Sha256};
 
 use crate::dag::{Dag, DagError};
@@ -35,6 +39,16 @@ pub struct BlockPlan {
     pub plan: PlanResult,
 }
 
+/// File modification time as nanoseconds since UNIX epoch, stored as a string
+/// because the value exceeds JSON's safe integer range (2^53).
+type FileTimestamp = String;
+
+/// Read a `SystemTime` into our string-of-nanos representation.
+fn timestamp_from_system_time(t: SystemTime) -> FileTimestamp {
+    let d = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    d.as_nanos().to_string()
+}
+
 /// Wrapped state persisted by the engine. Contains the provider's own state,
 /// outputs, and a combined hash of all inputs (resolved files + parent states).
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -42,27 +56,157 @@ struct WrappedState {
     state: serde_json::Value,
     outputs: Map,
     content_hash: String,
+    /// Modification timestamps of input/output files at last apply.
+    /// Keyed by file path string for portable serialization.
+    #[serde(default)]
+    file_timestamps: HashMap<String, FileTimestamp>,
+    /// Content hashes of parent blocks at last apply, keyed by block name.
+    #[serde(default)]
+    dep_hashes: HashMap<String, String>,
+}
+
+/// Extracted prior state fields returned by `unwrap_state`.
+struct PriorState {
+    provider_state: Option<serde_json::Value>,
+    outputs: Map,
+    content_hash: String,
+    file_timestamps: HashMap<String, FileTimestamp>,
+    dep_hashes: HashMap<String, String>,
 }
 
 /// Extract the provider state, outputs, and stored content hash from persisted state.
-fn unwrap_state(stored: &serde_json::Value) -> (Option<serde_json::Value>, Map, String) {
+fn unwrap_state(stored: &serde_json::Value) -> PriorState {
     let wrapped: WrappedState =
         serde_json::from_value(stored.clone()).expect("corrupted state: not a valid WrappedState");
-    (Some(wrapped.state), wrapped.outputs, wrapped.content_hash)
+    PriorState {
+        provider_state: Some(wrapped.state),
+        outputs: wrapped.outputs,
+        content_hash: wrapped.content_hash,
+        file_timestamps: wrapped.file_timestamps,
+        dep_hashes: wrapped.dep_hashes,
+    }
+}
+
+fn default_prior() -> PriorState {
+    PriorState {
+        provider_state: None,
+        outputs: Map::new(),
+        content_hash: String::new(),
+        file_timestamps: HashMap::new(),
+        dep_hashes: HashMap::new(),
+    }
 }
 
 /// Cache of file path -> content hash, shared across all blocks in a run.
-type HashCache = std::collections::HashMap<std::path::PathBuf, String>;
+type HashCache = HashMap<PathBuf, String>;
+
+/// Cache of file path -> mtime, shared across all blocks in a run.
+type MtimeCache = HashMap<PathBuf, FileTimestamp>;
+
+/// Return the modification time of a file, using the shared cache.
+fn cached_mtime(path: &std::path::Path, cache: &mut MtimeCache) -> Option<FileTimestamp> {
+    if let Some(ts) = cache.get(path) {
+        return Some(ts.clone());
+    }
+    let ts = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(timestamp_from_system_time)?;
+    cache.insert(path.to_path_buf(), ts.clone());
+    Some(ts)
+}
+
+/// Check whether all file timestamps and dep hashes match the stored values.
+/// Returns `true` when the stored content hash can be reused (fast path).
+fn timestamps_unchanged(
+    files: &[PathBuf],
+    stored_timestamps: &HashMap<String, FileTimestamp>,
+    dag: &Dag,
+    block_name: &str,
+    store: &dyn StateStore,
+    stored_dep_hashes: &HashMap<String, String>,
+    mtime_cache: &mut MtimeCache,
+) -> bool {
+    // File set must be identical in size.
+    if files.len() != stored_timestamps.len() {
+        return false;
+    }
+
+    // Every file must exist in stored set with matching mtime.
+    for file in files {
+        let key = file.to_string_lossy();
+        let Some(stored) = stored_timestamps.get(key.as_ref()) else {
+            return false;
+        };
+        let Some(current) = cached_mtime(file, mtime_cache) else {
+            return false;
+        };
+        if current != *stored {
+            return false;
+        }
+    }
+
+    // Parent dep content hashes must also be unchanged.
+    let deps = dag.content_deps(block_name);
+    if deps.len() != stored_dep_hashes.len() {
+        return false;
+    }
+    for dep in &deps {
+        let Some(stored_hash) = stored_dep_hashes.get(dep) else {
+            return false;
+        };
+        let Ok(Some(parent_state)) = store.load(dep) else {
+            return false;
+        };
+        let parent = unwrap_state(&parent_state);
+        if parent.content_hash != *stored_hash {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Result of content hash computation, including metadata for fast-path caching.
+struct ContentHashResult {
+    hash: String,
+    file_timestamps: HashMap<String, FileTimestamp>,
+    dep_hashes: HashMap<String, String>,
+}
 
 /// Compute a combined hash of files and parent block states.
+/// If stored timestamps indicate nothing changed, returns the stored hash (fast path).
 fn compute_content_hash(
-    files: &[std::path::PathBuf],
+    files: &[PathBuf],
     dag: &Dag,
     block_name: &str,
     store: &dyn StateStore,
     cache: &mut HashCache,
-) -> String {
+    mtime_cache: &mut MtimeCache,
+    prior: &PriorState,
+) -> ContentHashResult {
+    // Fast path: if all timestamps and dep hashes match, reuse stored hash.
+    if !prior.content_hash.is_empty()
+        && timestamps_unchanged(
+            files,
+            &prior.file_timestamps,
+            dag,
+            block_name,
+            store,
+            &prior.dep_hashes,
+            mtime_cache,
+        )
+    {
+        return ContentHashResult {
+            hash: prior.content_hash.clone(),
+            file_timestamps: prior.file_timestamps.clone(),
+            dep_hashes: prior.dep_hashes.clone(),
+        };
+    }
+
+    // Slow path: full content hash.
     let mut hasher = Sha256::new();
+    let mut new_timestamps = HashMap::with_capacity(files.len());
 
     // Hash files (sorted for determinism)
     let mut sorted = files.to_vec();
@@ -75,19 +219,29 @@ fn compute_content_hash(
             hasher.update(file.to_string_lossy().as_bytes());
             hasher.update(hash.as_bytes());
         }
+        if let Some(ts) = cached_mtime(file, mtime_cache) {
+            new_timestamps.insert(file.to_string_lossy().into_owned(), ts);
+        }
     }
 
     // Hash parent block states (content-coupled deps only)
     let mut deps = dag.content_deps(block_name);
     deps.sort();
+    let mut new_dep_hashes = HashMap::with_capacity(deps.len());
     for dep in &deps {
         if let Ok(Some(state)) = store.load(dep) {
+            let parent = unwrap_state(&state);
+            new_dep_hashes.insert(dep.clone(), parent.content_hash.clone());
             hasher.update(dep.as_bytes());
             hasher.update(state.to_string().as_bytes());
         }
     }
 
-    format!("sha256:{:x}", hasher.finalize())
+    ContentHashResult {
+        hash: format!("sha256:{:x}", hasher.finalize()),
+        file_timestamps: new_timestamps,
+        dep_hashes: new_dep_hashes,
+    }
 }
 
 /// Expand resolved file entries into concrete file paths.
@@ -140,6 +294,7 @@ pub fn plan(
     let mut plans = Vec::new();
     let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut hash_cache = HashCache::new();
+    let mut mtime_cache = MtimeCache::new();
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
@@ -150,9 +305,9 @@ pub fn plan(
             source: e,
         })?;
 
-        let (provider_state, stored_outputs, stored_content_hash) = match &node.prior_state {
+        let prior = match &node.prior_state {
             Some(s) => unwrap_state(s),
-            None => (None, Map::new(), String::new()),
+            None => default_prior(),
         };
 
         // Resolve files
@@ -165,19 +320,22 @@ pub fn plan(
         // Hash inputs + existing outputs + parent states to detect changes
         let all_files = expand_resolved(&resolved);
         let has_dirty_dep = dag.content_deps(name).iter().any(|d| dirty.contains(d));
-        let current_content_hash = compute_content_hash(&all_files, dag, name, store, &mut hash_cache);
-        let inputs_changed = has_dirty_dep || current_content_hash != stored_content_hash;
+        let hash_result = compute_content_hash(
+            &all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior,
+        );
+        let inputs_changed =
+            has_dirty_dep || hash_result.hash != prior.content_hash;
 
         let mut result = node
             .resource
-            .plan(&inputs, provider_state.as_ref())
+            .plan(&inputs, prior.provider_state.as_ref())
             .map_err(|e| EngineError::Provider {
                 block: name.clone(),
                 phase: "plan",
                 source: e,
             })?;
 
-        if result.action == PlanAction::None && inputs_changed && provider_state.is_some() {
+        if result.action == PlanAction::None && inputs_changed && prior.provider_state.is_some() {
             result.action = PlanAction::Update;
         }
 
@@ -199,7 +357,7 @@ pub fn plan(
         writer.event(plan_action_to_event(&result.action), &result.description);
 
         // Use stored outputs so downstream blocks can reference them
-        scope.set(name, Value::Map(stored_outputs));
+        scope.set(name, Value::Map(prior.outputs));
 
         plans.push(BlockPlan {
             name: name.clone(),
@@ -247,6 +405,7 @@ fn apply_order(
     let mut scope = base.scope.clone();
     let mut results = Vec::new();
     let mut hash_cache = HashCache::new();
+    let mut mtime_cache = MtimeCache::new();
 
     for name in order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
@@ -257,9 +416,9 @@ fn apply_order(
             source: e,
         })?;
 
-        let (provider_state, stored_outputs, stored_content_hash) = match &node.prior_state {
+        let prior = match &node.prior_state {
             Some(s) => unwrap_state(s),
-            None => (None, Map::new(), String::new()),
+            None => default_prior(),
         };
 
         // Resolve files and compute combined hash
@@ -269,16 +428,18 @@ fn apply_order(
             source: e,
         })?;
         let all_files = expand_resolved(&resolved);
-        let current_content_hash = compute_content_hash(&all_files, dag, name, store, &mut hash_cache);
-        let inputs_changed = current_content_hash != stored_content_hash;
+        let hash_result = compute_content_hash(
+            &all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior,
+        );
+        let inputs_changed = hash_result.hash != prior.content_hash;
 
         // Never skip previously failed test blocks
         let previously_failed = node.resource.kind() == ResourceKind::Test
-            && stored_outputs.get("passed").and_then(|v| v.as_bool()) == Some(false);
+            && prior.outputs.get("passed").and_then(|v| v.as_bool()) == Some(false);
 
         let mut plan_result =
             node.resource
-                .plan(&inputs, provider_state.as_ref())
+                .plan(&inputs, prior.provider_state.as_ref())
                 .map_err(|e| EngineError::Provider {
                     block: name.clone(),
                     phase: "plan",
@@ -286,9 +447,12 @@ fn apply_order(
                 })?;
 
         // Engine forces update if inputs changed or test previously failed
-        if plan_result.action == PlanAction::None && (inputs_changed || previously_failed) && provider_state.is_some() {
+        if plan_result.action == PlanAction::None
+            && (inputs_changed || previously_failed)
+            && prior.provider_state.is_some()
+        {
             plan_result.action = PlanAction::Update;
-        };
+        }
 
         if node.protected && matches!(plan_result.action, PlanAction::Replace | PlanAction::Destroy) {
             return Err(EngineError::Protected(
@@ -303,7 +467,7 @@ fn apply_order(
 
         if plan_result.action == PlanAction::None {
             writer.event(Event::Skipped, "no changes");
-            scope.set(name, Value::Map(stored_outputs));
+            scope.set(name, Value::Map(prior.outputs));
             results.push(BlockPlan {
                 name: name.clone(),
                 plan: plan_result,
@@ -315,7 +479,7 @@ fn apply_order(
 
         let apply_result = node
             .resource
-            .apply(&inputs, provider_state.as_ref(), &writer)
+            .apply(&inputs, prior.provider_state.as_ref(), &writer)
             .map_err(|e| {
                 writer.event(Event::Failed, &e.to_string());
                 EngineError::Provider {
@@ -328,20 +492,26 @@ fn apply_order(
         // Persist wrapped state (provider state + outputs + content hash).
         // Re-resolve after apply so output files are included in the hash.
         // Invalidate cache for output files since apply may have changed them.
-        if let Some(provider_state) = &apply_result.state {
+        if let Some(new_state) = &apply_result.state {
             let post_entries = node.resource.resolve(&inputs).unwrap_or_default();
-            // Invalidate cache for output files since apply may have changed them
             for entry in &post_entries {
                 if let ResolvedFile::Output(p) = entry {
                     hash_cache.remove(p);
+                    mtime_cache.remove(p);
                 }
             }
             let post_files = expand_resolved(&post_entries);
-            let content_hash = compute_content_hash(&post_files, dag, name, store, &mut hash_cache);
+            // Force full hash on post-apply (no fast path — files just changed).
+            let post_prior = default_prior();
+            let post_hash = compute_content_hash(
+                &post_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &post_prior,
+            );
             let wrapped = WrappedState {
-                state: provider_state.clone(),
+                state: new_state.clone(),
                 outputs: apply_result.outputs.clone(),
-                content_hash,
+                content_hash: post_hash.hash,
+                file_timestamps: post_hash.file_timestamps,
+                dep_hashes: post_hash.dep_hashes,
             };
             store.save(name, &serde_json::to_value(&wrapped).unwrap())?;
         }
@@ -396,8 +566,8 @@ pub fn destroy(
             continue;
         };
 
-        let (provider_state, _, _) = unwrap_state(stored);
-        let Some(provider_state) = provider_state else {
+        let prior = unwrap_state(stored);
+        let Some(provider_state) = prior.provider_state else {
             writer.event(Event::Skipped, "no state");
             continue;
         };
@@ -603,5 +773,67 @@ mod tests {
         assert_eq!(results[0].name, "a");
         assert!(out_a.exists());
         assert!(!out_b.exists());
+    }
+
+    #[test]
+    fn timestamp_fast_path_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out.txt");
+        let input = format!(
+            "build = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            output.display(),
+            output.display(),
+        );
+        let module = parser::parse(&input).unwrap();
+        let store = MemoryStore::new();
+
+        // First apply creates the block
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let out = Output::new(&[]);
+        apply(&mut dag, &base, &store, &out, None).unwrap();
+
+        // Verify persisted state has timestamps
+        let stored = store.load("build").unwrap().unwrap();
+        let wrapped: WrappedState = serde_json::from_value(stored).unwrap();
+        assert!(!wrapped.content_hash.is_empty());
+        assert!(!wrapped.file_timestamps.is_empty());
+
+        // Second apply should be a no-op (timestamp fast path)
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].plan.action, PlanAction::None);
+    }
+
+    #[test]
+    fn timestamp_detects_file_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_file = dir.path().join("src.txt");
+        let output_file = dir.path().join("out.txt");
+        std::fs::write(&input_file, "v1").unwrap();
+
+        let input = format!(
+            "build = exec {{\n  command = \"cp {} {}\"\n  output = \"{}\"\n  inputs = [\"{}\"]\n}}\n",
+            input_file.display(),
+            output_file.display(),
+            output_file.display(),
+            input_file.display(),
+        );
+        let module = parser::parse(&input).unwrap();
+        let store = MemoryStore::new();
+        let out = Output::new(&[]);
+
+        // First apply
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        apply(&mut dag, &base, &store, &out, None).unwrap();
+
+        // Modify input file (touch with new content to change both mtime and hash)
+        std::fs::write(&input_file, "v2").unwrap();
+
+        // Second apply should detect the change
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].plan.action, PlanAction::Update);
     }
 }

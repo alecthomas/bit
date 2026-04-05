@@ -1,5 +1,5 @@
 {
-  "title": "Bit - Build It",
+  "title": "BIT - Build It",
   "tasks": [
     {
       "text": "Project setup: Cargo.toml dependencies, module structure, lib.rs",
@@ -134,7 +134,8 @@
     {
       "text": "Add proper legacy state migration instead of silent fallback in unwrap_state",
       "priority": "medium",
-      "creation": 1774689110
+      "creation": 1774689110,
+      "completion": 1774693089
     },
     {
       "text": "Docker image plan() should not run subprocesses — move image existence check elsewhere",
@@ -144,7 +145,8 @@
     {
       "text": "Error on unknown block names in target definitions",
       "priority": "medium",
-      "creation": 1774689111
+      "creation": 1774689111,
+      "completion": 1774691579
     },
     {
       "text": "Error on string literals in depends_on/after instead of silent ignore",
@@ -164,7 +166,8 @@
     {
       "text": "Validate target block references at load time",
       "priority": "low",
-      "creation": 1774689119
+      "creation": 1774689119,
+      "completion": 1774690791
     },
     {
       "text": "ProviderRegistry::get_resource allocates all resources to find one",
@@ -175,6 +178,12 @@
       "text": "Engine should not override provider plan() after the fact — pass content-changed signal into plan or check before calling it",
       "priority": "high",
       "creation": 1774689212
+    },
+    {
+      "text": "Add persistent mtime+size hash cache (.bit/hash_cache) to avoid re-reading unchanged files on every plan/apply",
+      "priority": "high",
+      "creation": 1774691702,
+      "completion": 1775396835
     }
   ]
 }
