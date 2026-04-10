@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 
-use crate::dag::{Dag, DagError};
+use crate::dag::{self, Dag, DagError};
 use crate::expr::{self, EvalError, Scope};
 use crate::loader::BaseScope;
 use crate::output::{Event, Output};
@@ -588,6 +588,96 @@ pub fn destroy(
     }
 
     Ok(())
+}
+
+/// Dump evaluated inputs and stored outputs for all blocks (or a target subset).
+pub fn dump(
+    dag: &mut Dag,
+    base: &BaseScope,
+    target: Option<&str>,
+) -> Result<(), EngineError> {
+    let order = match target {
+        Some(t) => dag.target_order(t)?,
+        None => dag.topo_order()?,
+    };
+
+    let mut scope = base.scope.clone();
+
+    for (i, name) in order.iter().enumerate() {
+        let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
+
+        // Evaluate inputs, but replace depends_on/after with block names
+        let mut inputs = eval_fields(&node.fields, &scope).map_err(|e| EngineError::Eval {
+            block: name.clone(),
+            source: e,
+        })?;
+        let depends_on = dag::collect_depends_on(&node.fields);
+        if !depends_on.is_empty() {
+            inputs.insert(
+                "depends_on".into(),
+                Value::List(depends_on.into_iter().map(Value::Str).collect()),
+            );
+        }
+        let after = dag::collect_after(&node.fields);
+        if !after.is_empty() {
+            inputs.insert(
+                "after".into(),
+                Value::List(after.into_iter().map(Value::Str).collect()),
+            );
+        }
+
+        let prior = match &node.prior_state {
+            Some(s) => unwrap_state(s),
+            None => default_prior(),
+        };
+
+        // Populate scope with stored outputs for downstream refs
+        scope.set(name, Value::Map(prior.outputs.clone()));
+
+        if i > 0 {
+            println!();
+        }
+        println!("{name}:");
+        if !inputs.is_empty() {
+            println!("  inputs:");
+            let mut keys: Vec<&String> = inputs.keys().collect();
+            keys.sort();
+            for key in keys {
+                print_value(key, &inputs[key], 4);
+            }
+        }
+        if !prior.outputs.is_empty() {
+            println!("  outputs:");
+            let mut keys: Vec<&String> = prior.outputs.keys().collect();
+            keys.sort();
+            for key in keys {
+                print_value(key, &prior.outputs[key], 4);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_value(key: &str, value: &Value, indent: usize) {
+    let pad = " ".repeat(indent);
+    match value {
+        Value::Map(map) => {
+            println!("{pad}{key}:");
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                print_value(k, &map[k], indent + 2);
+            }
+        }
+        Value::List(items) => {
+            println!("{pad}{key}:");
+            for item in items {
+                println!("{pad}  - {item}");
+            }
+        }
+        _ => println!("{pad}{key}: {value}"),
+    }
 }
 
 fn eval_fields(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalError> {

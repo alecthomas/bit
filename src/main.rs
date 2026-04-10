@@ -44,6 +44,11 @@ enum Command {
     Test,
     /// List top-level targets
     List,
+    /// Dump evaluated inputs and stored outputs
+    Dump {
+        /// Target to dump (default: all blocks)
+        target: Option<String>,
+    },
     /// Show the dependency graph
     Graph {
         /// Target to show (default: all blocks)
@@ -135,6 +140,16 @@ fn main() {
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
             match engine::destroy(&mut dag, store.as_ref(), &output, target.as_deref()) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("{} {e}", "error:".red().bold());
+                    process::exit(1);
+                }
+            }
+        }
+        Command::Dump { target } => {
+            let (mut dag, base, _store) = load_module(&registry);
+            match engine::dump(&mut dag, &base, target.as_deref()) {
                 Ok(()) => {}
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());

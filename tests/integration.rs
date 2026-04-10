@@ -56,6 +56,12 @@ fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     engine::plan(&mut dag, &base, store, &Output::new(&[]), None).expect("plan failed")
 }
 
+fn run_dump(input: &str, store: &MemoryStore, target: Option<&str>) {
+    let module = parser::parse(input).expect("parse failed");
+    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store).expect("load failed");
+    engine::dump(&mut dag, &base, target).expect("dump failed");
+}
+
 fn run_destroy(input: &str, store: &MemoryStore) {
     let module = parser::parse(input).expect("parse failed");
     let (mut dag, _base) = loader::load(&module, &Map::new(), &registry(), store).expect("load failed");
@@ -420,4 +426,55 @@ fn doc_comments_preserved() {
     assert_eq!(node.fields.len(), 3);
     let targets = dag.targets();
     assert_eq!(targets["build"].doc.as_deref(), Some("Build everything"));
+}
+
+#[test]
+fn dump_before_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.txt");
+    let input = format!(
+        "build = exec {{\n  command = \"echo hi > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        out.display(),
+        out.display(),
+    );
+    let store = MemoryStore::new();
+    // Dump should succeed even with no prior state
+    run_dump(&input, &store, None);
+}
+
+#[test]
+fn dump_after_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.txt");
+    let input = format!(
+        "build = exec {{\n  command = \"echo hi > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        out.display(),
+        out.display(),
+    );
+    let store = MemoryStore::new();
+    run_apply(&input, &store);
+    // Dump should show both inputs and stored outputs
+    run_dump(&input, &store, None);
+}
+
+#[test]
+fn dump_with_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_a = dir.path().join("a.txt");
+    let out_b = dir.path().join("b.txt");
+    let input = format!(
+        concat!(
+            "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "target just_a = [a]\n",
+        ),
+        out_a.display(),
+        out_a.display(),
+        out_b.display(),
+        out_b.display(),
+    );
+    let store = MemoryStore::new();
+    run_apply(&input, &store);
+    // Dump filtered to target should succeed
+    run_dump(&input, &store, Some("just_a"));
 }

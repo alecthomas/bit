@@ -22,12 +22,32 @@ pub struct ExecInputs {
 }
 
 /// Typed outputs for an exec block, serialized into the scope for downstream blocks.
+///
+/// Single-output blocks get `path`; multi-output blocks get `paths`.
 #[derive(Debug, Serialize)]
 pub struct ExecOutputs {
-    /// First output path (convenience for single-output blocks).
-    pub path: String,
-    /// All output paths.
-    pub paths: Vec<String>,
+    /// First output path (present for single-output blocks).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// All output paths (present only for multi-output blocks).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
+}
+
+impl ExecOutputs {
+    fn from_paths(output: &[String]) -> Self {
+        if output.len() == 1 {
+            Self {
+                path: Some(output[0].clone()),
+                paths: None,
+            }
+        } else {
+            Self {
+                path: None,
+                paths: Some(output.to_vec()),
+            }
+        }
+    }
 }
 
 /// State persisted between runs for an exec block.
@@ -180,10 +200,7 @@ impl Resource for ExecResource {
         }
 
         Ok(ApplyResult {
-            outputs: ExecOutputs {
-                path: inputs.output.first().cloned().unwrap_or_default(),
-                paths: inputs.output.clone(),
-            },
+            outputs: ExecOutputs::from_paths(&inputs.output),
             state: Some(ExecState {
                 command: inputs.command.clone(),
                 output: inputs.output.clone(),
@@ -207,10 +224,7 @@ impl Resource for ExecResource {
 
     fn refresh(&self, prior_state: &ExecState) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
         Ok(ApplyResult {
-            outputs: ExecOutputs {
-                path: prior_state.output.first().cloned().unwrap_or_default(),
-                paths: prior_state.output.clone(),
-            },
+            outputs: ExecOutputs::from_paths(&prior_state.output),
             state: Some(prior_state.clone()),
         })
     }
