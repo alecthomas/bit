@@ -118,25 +118,46 @@ impl Output {
             output: self.clone(),
             name: name.to_owned(),
             color: color_for_name(name),
+            indent: None,
         }
     }
 
-    fn print_line(&self, name: &str, color: Color, content: &str) {
-        let inner = self.inner.lock().unwrap();
-        let prefix = format!("{:>width$} │", name, width = inner.max_name_len);
+    /// Create a writer for a specific block with left-aligned indentation.
+    pub fn writer_indented(&self, name: &str, indent: usize) -> BlockWriter {
+        BlockWriter {
+            output: self.clone(),
+            name: name.to_owned(),
+            color: color_for_name(name),
+            indent: Some(indent),
+        }
+    }
+
+    fn prefix(&self, name: &str, sep: &str, indent: Option<usize>) -> String {
+        match indent {
+            Some(n) => {
+                let pad = "  ".repeat(n);
+                format!("{pad}{name} {sep}")
+            }
+            None => {
+                let inner = self.inner.lock().unwrap();
+                format!("{:>width$} {sep}", name, width = inner.max_name_len)
+            }
+        }
+    }
+
+    fn print_line(&self, name: &str, color: Color, indent: Option<usize>, content: &str) {
+        let prefix = self.prefix(name, "│", indent);
         println!("{} {content}", prefix.paint(color));
     }
 
-    fn print_stderr_line(&self, name: &str, color: Color, content: &str) {
-        let inner = self.inner.lock().unwrap();
-        let prefix = format!("{:>width$} │", name, width = inner.max_name_len);
+    fn print_stderr_line(&self, name: &str, color: Color, indent: Option<usize>, content: &str) {
+        let prefix = self.prefix(name, "│", indent);
         println!("{} {}", prefix.paint(color), content.dim().italic());
     }
 
-    fn print_event(&self, name: &str, event: Event, message: &str) {
-        let inner = self.inner.lock().unwrap();
+    fn print_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str) {
         let color = color_for_name(name);
-        let prefix = format!("{:>width$} {}", name, event.symbol(), width = inner.max_name_len);
+        let prefix = self.prefix(name, event.symbol(), indent);
         let dim = event.is_dim();
         if message.is_empty() {
             let text = format!("{event:?}").to_lowercase();
@@ -154,7 +175,7 @@ impl Output {
                     first.paint(event.color()).dim_if(dim)
                 );
             }
-            let cont_prefix = format!("{:>width$} ┆", name, width = inner.max_name_len);
+            let cont_prefix = self.prefix(name, "┆", indent);
             for line in lines {
                 println!(
                     "{} {}",
@@ -166,16 +187,15 @@ impl Output {
     }
 
     /// Like `print_event` but the message is pre-formatted and not re-painted.
-    fn print_event_raw(&self, name: &str, event: Event, message: &str) {
-        let inner = self.inner.lock().unwrap();
+    fn print_event_raw(&self, name: &str, event: Event, indent: Option<usize>, message: &str) {
         let color = color_for_name(name);
         let dim = event.is_dim();
-        let prefix = format!("{:>width$} {}", name, event.symbol(), width = inner.max_name_len);
+        let prefix = self.prefix(name, event.symbol(), indent);
         let mut lines = message.lines();
         if let Some(first) = lines.next() {
             println!("{} {first}", prefix.paint(color).dim_if(dim));
         }
-        let cont_prefix = format!("{:>width$} ┆", name, width = inner.max_name_len);
+        let cont_prefix = self.prefix(name, "┆", indent);
         for line in lines {
             println!("{} {line}", cont_prefix.paint(color).dim_if(dim));
         }
@@ -187,25 +207,27 @@ pub struct BlockWriter {
     output: Output,
     name: String,
     color: Color,
+    /// `None` = right-aligned (apply mode), `Some(n)` = left-aligned with indent (plan mode).
+    indent: Option<usize>,
 }
 
 impl BlockWriter {
     pub fn event(&self, event: Event, message: &str) {
-        self.output.print_event(&self.name, event, message);
+        self.output.print_event(&self.name, event, self.indent, message);
     }
 
     /// Like `event`, but the message is pre-formatted with ANSI codes
     /// and will not be re-painted by the output layer.
     pub fn event_raw(&self, event: Event, message: &str) {
-        self.output.print_event_raw(&self.name, event, message);
+        self.output.print_event_raw(&self.name, event, self.indent, message);
     }
 
     pub fn line(&self, content: &str) {
-        self.output.print_line(&self.name, self.color, content);
+        self.output.print_line(&self.name, self.color, self.indent, content);
     }
 
     pub fn stderr_line(&self, content: &str) {
-        self.output.print_stderr_line(&self.name, self.color, content);
+        self.output.print_stderr_line(&self.name, self.color, self.indent, content);
     }
 
     /// Write all lines from a reader, prefixed with the block name.

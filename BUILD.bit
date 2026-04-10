@@ -24,18 +24,6 @@ container = docker.container {
   healthcheck = "bit plan"
 }
 
-# Build debug binary only
-target debug = [debug]
-
-# Build release binary only
-target release = [release]
-
-# Run tests
-target test = [test, integration-test]
-
-# Run Docker container
-target docker = [container]
-
 # Tests
 test = exec.test {
   depends_on = [debug]
@@ -47,6 +35,18 @@ integration-test = exec.test {
   depends_on = [debug]
   command  = <<-EOF
   ${debug.path} --version
-  ${debug.path} graph
+  ${debug.path} plan
   EOF
 }
+
+# Build debug binary only
+target debug = [debug]
+
+# Build release binary only
+target release = [release]
+
+# Run tests
+target test = [test, integration-test]
+
+# Run Docker container
+target docker = [container]

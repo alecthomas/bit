@@ -49,11 +49,6 @@ enum Command {
         /// Target to dump (default: all blocks)
         target: Option<String>,
     },
-    /// Show the dependency graph
-    Graph {
-        /// Target to show (default: all blocks)
-        target: Option<String>,
-    },
 }
 
 fn default_registry() -> ProviderRegistry {
@@ -172,29 +167,6 @@ fn main() {
                         None => println!("  {}", name.bold()),
                     }
                 }
-            }
-        }
-        Command::Graph { target } => {
-            let (dag, _base, _store) = load_module(&registry);
-            let order = match target.as_deref() {
-                Some(t) => match dag.target_order(t) {
-                    Ok(o) => o,
-                    Err(e) => {
-                        eprintln!("{} {e}", "error:".red().bold());
-                        process::exit(1);
-                    }
-                },
-                None => match dag.topo_order() {
-                    Ok(o) => o,
-                    Err(e) => {
-                        eprintln!("{} {e}", "error:".red().bold());
-                        process::exit(1);
-                    }
-                },
-            };
-            for name in &order {
-                let indent = "  ".repeat(dag.depth(name));
-                println!("{indent}{}", name.bold());
             }
         }
     }

@@ -126,14 +126,17 @@ impl Dag {
     /// Return block names for a target in topological order.
     /// Includes all transitive dependencies.
     pub fn target_order(&self, target: &str) -> Result<Vec<String>, DagError> {
-        let t = self
-            .targets
-            .get(target)
-            .ok_or_else(|| DagError::UnknownBlock(format!("target '{target}'")))?;
-        let block_names = &t.blocks;
+        // Try as a named target first, then fall back to a block name.
+        let block_names: Vec<String> = if let Some(t) = self.targets.get(target) {
+            t.blocks.clone()
+        } else if self.indices.contains_key(target) {
+            vec![target.to_owned()]
+        } else {
+            return Err(DagError::UnknownBlock(target.into()));
+        };
 
         let mut needed = HashSet::new();
-        for name in block_names {
+        for name in &block_names {
             let block_name = name.split('.').next().unwrap_or(name);
             if let Some(&idx) = self.indices.get(block_name) {
                 collect_transitive_deps(&self.graph, idx, &mut needed);

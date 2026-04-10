@@ -373,7 +373,7 @@ pub fn plan(
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
-        let writer = output.writer(name);
+        let writer = output.writer_indented(name, dag.depth(name));
 
         let inputs = eval_fields_lenient(&node.fields, &scope).map_err(|e| EngineError::Eval {
             block: name.clone(),
