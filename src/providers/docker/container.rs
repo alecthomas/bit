@@ -222,15 +222,14 @@ fn container_running(name: &str) -> bool {
 }
 
 /// Remove a container by name (forced).
-fn remove_container(name: &str, writer: &BlockWriter) -> Result<(), BoxError> {
-    writer.line(&format!("docker rm -f {name}"));
+fn remove_container(name: &str) -> Result<(), BoxError> {
     let output = Command::new("docker")
         .args(["rm", "-f", name])
         .output()
         .map_err(|e| format!("docker rm failed: {e}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        writer.stderr_line(stderr.trim());
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(stderr.into());
     }
     Ok(())
 }
@@ -336,8 +335,9 @@ impl Resource for ContainerResource {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ContainerState, ContainerOutputs>, BoxError> {
         // Remove any existing container with this name (running, stopped, or
-        // leftover from a previous run whose state was lost).
-        remove_container(&inputs.name, writer)?;
+        // leftover from a previous run whose state was lost). Ignore errors
+        // since the container may not exist.
+        let _ = remove_container(&inputs.name);
 
         let mut cmd = Command::new("docker");
         cmd.arg("run").arg("-d").arg("--name").arg(&inputs.name);
@@ -401,9 +401,12 @@ impl Resource for ContainerResource {
             return Err(format!("docker run exited with {status}").into());
         }
 
-        // Wait for healthcheck to pass if configured
-        if let Some(hc) = &inputs.healthcheck {
-            wait_healthy(&inputs.name, hc, writer)?;
+        // Wait for healthcheck to pass if configured; clean up on failure
+        if let Some(hc) = &inputs.healthcheck
+            && let Err(e) = wait_healthy(&inputs.name, hc, writer)
+        {
+            let _ = remove_container(&inputs.name);
+            return Err(e);
         }
 
         // Get container ID
@@ -428,7 +431,9 @@ impl Resource for ContainerResource {
     }
 
     fn destroy(&self, prior_state: &ContainerState, writer: &BlockWriter) -> Result<(), BoxError> {
-        remove_container(&prior_state.name, writer)
+        use crate::output::Event;
+        writer.event(Event::Starting, &format!("docker rm -f {}", prior_state.name));
+        remove_container(&prior_state.name)
     }
 
     fn refresh(
@@ -482,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn PlanCreateWhenNoState() {
+    fn plan_create_when_no_state() {
         let inputs = test_inputs();
         let result = Resource::plan(&ContainerResource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -490,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn PlanReplaceWhenConfigChanged() {
+    fn plan_replace_when_config_changed() {
         let inputs = test_inputs();
         let prior = ContainerState {
             name: "test-nginx".into(),
@@ -502,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn PlanCreateWhenContainerMissing() {
+    fn plan_create_when_container_missing() {
         let inputs = test_inputs();
         let prior = ContainerState {
             name: "nonexistent-container-bit-test".into(),
@@ -514,13 +519,13 @@ mod tests {
     }
 
     #[test]
-    fn ConfigHashDeterministic() {
+    fn config_hash_deterministic() {
         let inputs = test_inputs();
         assert_eq!(config_hash(&inputs), config_hash(&inputs));
     }
 
     #[test]
-    fn ConfigHashChangesWithImage() {
+    fn config_hash_changes_with_image() {
         let mut a = test_inputs();
         let mut b = test_inputs();
         a.image = "nginx:1".into();
@@ -529,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn ConfigHashChangesWithEnv() {
+    fn config_hash_changes_with_env() {
         let mut a = test_inputs();
         let b = test_inputs();
         a.environment.insert("FOO".into(), "bar".into());
@@ -537,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn ConfigHashChangesWithHealthcheck() {
+    fn config_hash_changes_with_healthcheck() {
         let mut a = test_inputs();
         let b = test_inputs();
         a.healthcheck = Some(Healthcheck::Command("curl localhost".into()));
@@ -545,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn ParseDuration() {
+    fn parse_duration_values() {
         assert_eq!(parse_duration("10s"), Duration::from_secs(10));
         assert_eq!(parse_duration("2m"), Duration::from_secs(120));
         assert_eq!(parse_duration("500ms"), Duration::from_millis(500));
@@ -553,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn HealthcheckCommandDefaults() {
+    fn healthcheck_command_defaults() {
         let hc = Healthcheck::Command("curl localhost".into());
         assert_eq!(hc.test(), "curl localhost");
         assert_eq!(hc.interval(), "5s");
@@ -563,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn ConfigHashEnvOrderIndependent() {
+    fn config_hash_env_order_independent() {
         let mut a = test_inputs();
         let mut b = test_inputs();
         a.environment.insert("A".into(), "1".into());

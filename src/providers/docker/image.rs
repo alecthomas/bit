@@ -304,15 +304,16 @@ impl Resource for ImageResource {
     }
 
     fn destroy(&self, prior_state: &ImageState, writer: &BlockWriter) -> Result<(), BoxError> {
-        writer.line(&format!("docker rmi {}", prior_state.image_id));
+        use crate::output::Event;
+        writer.event(Event::Starting, &format!("docker rmi -f {}", prior_state.image_id));
         let output = Command::new("docker")
-            .args(["rmi", &prior_state.image_id])
+            .args(["rmi", "-f", &prior_state.image_id])
             .output()
             .map_err(|e| format!("docker rmi failed: {e}"))?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            writer.stderr_line(stderr.trim());
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(stderr.into());
         }
         Ok(())
     }

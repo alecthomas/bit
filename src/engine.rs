@@ -525,7 +525,7 @@ fn apply_order(
             return Err(EngineError::TestFailed(name.clone()));
         }
 
-        writer.event(Event::Done, "");
+        writer.event(Event::Ok, "");
 
         // Inject outputs into scope for downstream blocks
         scope.set(name, Value::Map(apply_result.outputs));
@@ -572,8 +572,6 @@ pub fn destroy(
             continue;
         };
 
-        writer.event(Event::Starting, "destroying");
-
         node.resource.destroy(&provider_state, &writer).map_err(|e| {
             writer.event(Event::Failed, &e.to_string());
             EngineError::Provider {
@@ -584,7 +582,7 @@ pub fn destroy(
         })?;
 
         store.remove(name)?;
-        writer.event(Event::Done, "");
+        writer.event(Event::Ok, "");
     }
 
     Ok(())

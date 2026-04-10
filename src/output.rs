@@ -20,7 +20,7 @@ impl<T> DimIf for Painted<T> {
 pub enum Event {
     Starting,
     Skipped,
-    Done,
+    Ok,
     Failed,
     Create,
     Update,
@@ -34,7 +34,7 @@ impl Event {
         match self {
             Event::Starting => "▶",
             Event::Skipped => "·",
-            Event::Done => "✔",
+            Event::Ok => "✔",
             Event::Failed => "✘",
             Event::Create => "+",
             Event::Update => "~",
@@ -52,7 +52,7 @@ impl Event {
         match self {
             Event::Starting => Color::Cyan,
             Event::Skipped => Color::Primary,
-            Event::Done => Color::Green,
+            Event::Ok => Color::Green,
             Event::Failed => Color::Red,
             Event::Create => Color::Green,
             Event::Update => Color::Yellow,

@@ -209,13 +209,14 @@ impl Resource for ExecResource {
     }
 
     fn destroy(&self, prior_state: &ExecState, writer: &BlockWriter) -> Result<(), BoxError> {
+        use crate::output::Event;
         for output in &prior_state.output {
             let path = Path::new(output);
             if path.is_dir() {
-                writer.line(&format!("rm -rf {output}"));
+                writer.event(Event::Starting, &format!("rm -rf {output}"));
                 fs::remove_dir_all(path).ok();
             } else if path.is_file() {
-                writer.line(&format!("rm {output}"));
+                writer.event(Event::Starting, &format!("rm {output}"));
                 fs::remove_file(path).ok();
             }
         }
