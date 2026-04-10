@@ -46,48 +46,73 @@ fn format_parse_error(input: &str, filename: &str, position: usize, err: &Contex
 
 // ── Whitespace & Comments ──
 
+/// Skip whitespace only (no comments). Used by `lex`.
 fn ws(input: &mut &str) -> ModalResult<()> {
     take_while(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n')
         .void()
         .parse_next(input)
 }
 
-/// Collect adjacent `# ...` comment lines as a doc string.
-/// Only consumes comment lines — leaves other whitespace to `ws`/`lex`.
-fn doc_comments(input: &mut &str) -> ModalResult<Option<String>> {
-    // Skip leading whitespace/blank lines
-    take_while(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n').parse_next(input)?;
-
-    let mut lines = Vec::new();
+/// Skip whitespace and comment lines.
+fn ws_and_comments(input: &mut &str) -> ModalResult<()> {
     loop {
+        ws(input)?;
         if input.starts_with('#') {
-            let _: char = any.parse_next(input)?;
-            opt(' ').parse_next(input)?;
-            let text: &str = take_while(0.., |c: char| c != '\n').parse_next(input)?;
-            lines.push(text.to_owned());
-            // Consume the newline after this comment line
+            take_while(0.., |c: char| c != '\n').void().parse_next(input)?;
             opt('\n').parse_next(input)?;
-            // If next line is blank (not a comment), this doc comment block is done
-            let rest = input.trim_start_matches([' ', '\t', '\r']);
-            if !rest.starts_with('#') {
-                // Check if there's a blank line before the next content
-                // If so, discard accumulated comments (they were a commented-out block)
-                if rest.starts_with('\n') && !lines.is_empty() {
-                    // Blank line after comments — reset and skip to next group
-                    lines.clear();
-                    take_while(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n').parse_next(input)?;
-                    continue;
-                }
-                break;
-            }
         } else {
             break;
         }
     }
-    if lines.is_empty() {
-        Ok(None)
+    Ok(())
+}
+
+/// Skip whitespace and comments, capturing the last contiguous block of
+/// `# ...` lines as a doc string. A blank line between comment blocks
+/// resets the capture (only the final adjacent block is kept).
+fn ws_capturing_doc(input: &mut &str) -> Option<String> {
+    let mut doc_lines: Vec<String> = Vec::new();
+    let mut had_blank_line = false;
+    loop {
+        // Skip whitespace, tracking blank lines
+        let before = *input;
+        let _ = take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| {
+            c == ' ' || c == '\t' || c == '\r' || c == '\n'
+        })
+        .parse_next(input);
+        if before != *input {
+            let skipped = &before[..before.len() - input.len()];
+            // A newline in whitespace between comments means a blank line
+            // (the newline at the end of the previous comment was already consumed)
+            if skipped.contains('\n') {
+                had_blank_line = true;
+            }
+        }
+
+        if input.starts_with('#') {
+            // Blank line before this comment block — reset accumulated doc
+            if had_blank_line {
+                doc_lines.clear();
+            }
+            had_blank_line = false;
+            // Consume `#`, optional space, then the rest of the line
+            *input = &input[1..];
+            if input.starts_with(' ') {
+                *input = &input[1..];
+            }
+            let line: &str = take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| c != '\n')
+                .parse_next(input)
+                .unwrap_or_default();
+            doc_lines.push(line.to_owned());
+            let _ = opt::<_, _, ErrMode<ContextError>, _>('\n').parse_next(input);
+        } else {
+            break;
+        }
+    }
+    if doc_lines.is_empty() {
+        None
     } else {
-        Ok(Some(lines.join("\n")))
+        Some(doc_lines.join("\n"))
     }
 }
 
@@ -562,21 +587,24 @@ fn field(input: &mut &str) -> ModalResult<Field> {
 // ── Statements ──
 
 fn module(input: &mut &str) -> ModalResult<Module> {
-    let statements = repeat(0.., doc_statement).parse_next(input)?;
+    let mut statements = Vec::new();
+    loop {
+        let doc = ws_capturing_doc(input);
+        if input.is_empty() {
+            break;
+        }
+        let stmt = alt((
+            let_stmt.map(Statement::Let),
+            param_stmt.map(Statement::Param),
+            |input: &mut &str| target_stmt(doc.clone(), input).map(Statement::Target),
+            output_stmt.map(Statement::Output),
+            |input: &mut &str| block_stmt(doc.clone(), input).map(Statement::Block),
+        ))
+        .context(StrContext::Label("statement"))
+        .parse_next(input)?;
+        statements.push(stmt);
+    }
     Ok(Module { statements })
-}
-
-fn doc_statement(input: &mut &str) -> ModalResult<Statement> {
-    let doc = doc_comments(input)?;
-    alt((
-        let_stmt.map(Statement::Let),
-        param_stmt.map(Statement::Param),
-        |input: &mut &str| target_stmt(doc.clone(), input).map(Statement::Target),
-        output_stmt.map(Statement::Output),
-        |input: &mut &str| block_stmt(doc.clone(), input).map(Statement::Block),
-    ))
-    .context(StrContext::Label("statement"))
-    .parse_next(input)
 }
 
 fn let_stmt(input: &mut &str) -> ModalResult<Let> {
@@ -655,8 +683,11 @@ fn output_stmt(input: &mut &str) -> ModalResult<Output> {
 fn block_field(input: &mut &str) -> ModalResult<Field> {
     let f = field(input)?;
     opt(lex(',')).parse_next(input)?;
+    // Skip any comments after this field (before the next field or closing brace)
+    ws_and_comments(input)?;
     Ok(f)
 }
+
 
 fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
     let protected = opt(keyword("protected")).map(|o| o.is_some()).parse_next(input)?;
@@ -679,6 +710,7 @@ fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
     };
 
     cut_err(lex('{')).context(StrContext::Label("'{'")).parse_next(input)?;
+    ws_and_comments(input)?;
     let fields: Vec<Field> = repeat(0.., block_field).parse_next(input)?;
     cut_err(lex('}')).context(StrContext::Label("'}'")).parse_next(input)?;
 
