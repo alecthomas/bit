@@ -741,7 +741,7 @@ mod tests {
     }
 
     fn load_and_apply(input: &str) -> Result<Vec<BlockPlan>, EngineError> {
-        let module = parser::parse(input).expect("parse failed");
+        let module = parser::parse(input, "<test>").expect("parse failed");
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).expect("load failed");
         let output = Output::new(&[]);
@@ -790,7 +790,7 @@ mod tests {
             "build = exec {{\n  command = \"echo hi\"\n  output = \"{}\"\n  inputs = []\n}}\n",
             output.display(),
         );
-        let module = parser::parse(&input).unwrap();
+        let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
         let out = Output::new(&[]);
@@ -808,7 +808,7 @@ mod tests {
             output.display(),
             output.display(),
         );
-        let module = parser::parse(&input).unwrap();
+        let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
         // Apply first
@@ -832,7 +832,7 @@ mod tests {
             output.display(),
             output.display(),
         );
-        let module = parser::parse(&input).unwrap();
+        let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
@@ -861,7 +861,7 @@ mod tests {
             out_b.display(),
             out_b.display(),
         );
-        let module = parser::parse(&input).unwrap();
+        let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
         let out = Output::new(&[]);
@@ -881,7 +881,7 @@ mod tests {
             output.display(),
             output.display(),
         );
-        let module = parser::parse(&input).unwrap();
+        let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
         // First apply creates the block
@@ -916,7 +916,7 @@ mod tests {
             output_file.display(),
             input_file.display(),
         );
-        let module = parser::parse(&input).unwrap();
+        let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
         let out = Output::new(&[]);
 

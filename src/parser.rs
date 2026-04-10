@@ -8,18 +8,40 @@ use crate::ast::*;
 use crate::value::Type;
 
 #[derive(Debug, thiserror::Error)]
-#[error("parse error at position {position}: {message}")]
+#[error("{message}")]
 pub struct ParseError {
-    pub position: usize,
     pub message: String,
 }
 
-pub fn parse(input: &str) -> Result<Module, ParseError> {
-    let input_len = input.len();
-    module.parse(input).map_err(|e| ParseError {
-        position: input_len - e.offset(),
-        message: e.inner().to_string(),
+pub fn parse(input: &str, filename: &str) -> Result<Module, ParseError> {
+    module.parse(input).map_err(|e| {
+        let message = format_parse_error(input, filename, e.offset(), e.inner());
+        ParseError { message }
     })
+}
+
+fn format_parse_error(input: &str, filename: &str, position: usize, err: &ContextError) -> String {
+    let prefix = &input[..position];
+    let line = prefix.chars().filter(|&c| c == '\n').count() + 1;
+    let col = prefix.len() - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0) + 1;
+
+    let source_line = input[prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)..]
+        .lines()
+        .next()
+        .unwrap_or("");
+
+    let context = err.to_string();
+    // Take the last (most specific) context line
+    let detail = context
+        .lines()
+        .last()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unexpected token");
+    let mut msg = format!("{filename}:{line}:{col}: {detail}");
+    msg.push('\n');
+    msg.push_str(&format!("  {source_line}\n"));
+    msg.push_str(&format!("  {:>width$}", "^", width = col));
+    msg
 }
 
 // ── Whitespace & Comments ──
@@ -87,7 +109,7 @@ fn ident_start(c: char) -> bool {
 }
 
 fn ident_cont(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
 fn ident<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
@@ -206,6 +228,7 @@ fn cmp_expr(input: &mut &str) -> ModalResult<Expr> {
 fn primary(input: &mut &str) -> ModalResult<Expr> {
     alt((
         string_expr,
+        heredoc_expr,
         int_expr,
         bool_expr,
         null_expr,
@@ -359,6 +382,170 @@ fn string_literal(input: &mut &str) -> ModalResult<StringPart> {
     Ok(StringPart::Literal(result))
 }
 
+// ── Heredoc Parsing ──
+
+fn heredoc_expr(input: &mut &str) -> ModalResult<Expr> {
+    "<<".parse_next(input)?;
+    let strip = opt('-').parse_next(input)?.is_some();
+    let label: &str = cut_err(take_while(1.., |c: char| c.is_ascii_alphanumeric() || c == '_'))
+        .context(StrContext::Label("heredoc label"))
+        .parse_next(input)?;
+    let label = label.to_owned();
+    cut_err('\n')
+        .context(StrContext::Label("newline after heredoc label"))
+        .parse_next(input)?;
+
+    let mut parts: Vec<StringPart> = Vec::new();
+    loop {
+        // Check if this line is the terminator
+        let line_start = *input;
+        let leading: &str = take_while(0.., |c: char| c == ' ' || c == '\t').parse_next(input)?;
+        if input.starts_with(label.as_str()) {
+            let rest_after_label = &input[label.len()..];
+            // Label must be followed by newline, EOF, or only whitespace
+            if rest_after_label.is_empty()
+                || rest_after_label.starts_with('\n')
+                || rest_after_label.starts_with('\r')
+            {
+                *input = &input[label.len()..];
+                // Consume trailing newline if present
+                opt('\n').parse_next(input)?;
+                ws(input)?;
+                break;
+            }
+        }
+        // Not the terminator — restore and parse this line as content
+        *input = line_start;
+        heredoc_line(&mut parts, input)?;
+        if !leading.is_empty() && !strip {
+            // Leading whitespace was consumed by our check; it's already
+            // re-parsed by heredoc_line since we reset input above
+        }
+    }
+
+    // Strip common leading indentation if <<- was used
+    if strip {
+        strip_indent(&mut parts);
+        parts.retain(|p| !matches!(p, StringPart::Literal(s) if s.is_empty()));
+    }
+
+    // Remove trailing newline if present
+    if let Some(StringPart::Literal(s)) = parts.last() {
+        if s == "\n" {
+            parts.pop();
+        } else if s.ends_with('\n') {
+            let trimmed = s[..s.len() - 1].to_owned();
+            *parts.last_mut().expect("non-empty") = StringPart::Literal(trimmed);
+        }
+    }
+
+    Ok(Expr::Str(parts))
+}
+
+/// Parse one line of heredoc content (up to and including the newline),
+/// handling `${}` interpolation.
+fn heredoc_line(parts: &mut Vec<StringPart>, input: &mut &str) -> ModalResult<()> {
+    loop {
+        let chunk: &str =
+            take_while(0.., |c: char| c != '\n' && c != '$').parse_next(input)?;
+        if !chunk.is_empty() {
+            push_literal(parts, chunk);
+        }
+
+        if input.is_empty() {
+            break;
+        }
+        if input.starts_with('\n') {
+            let _: char = any.parse_next(input)?;
+            push_literal(parts, "\n");
+            break;
+        }
+        if input.starts_with("${") {
+            "${".parse_next(input)?;
+            let e = cut_err(expr)
+                .context(StrContext::Label("heredoc interpolation"))
+                .parse_next(input)?;
+            cut_err('}')
+                .context(StrContext::Label("closing '}'"))
+                .parse_next(input)?;
+            parts.push(StringPart::Interpolation(e));
+            continue;
+        }
+        if input.starts_with('$') {
+            let _: char = any.parse_next(input)?;
+            push_literal(parts, "$");
+            continue;
+        }
+        break;
+    }
+    Ok(())
+}
+
+/// Append to the last literal part if possible, otherwise push a new one.
+fn push_literal(parts: &mut Vec<StringPart>, s: &str) {
+    if let Some(StringPart::Literal(last)) = parts.last_mut() {
+        last.push_str(s);
+    } else {
+        parts.push(StringPart::Literal(s.to_owned()));
+    }
+}
+
+/// Strip the common leading whitespace from all lines in the heredoc.
+///
+/// A "line start" is either the very first part or the content immediately
+/// after a `\n` in a literal. We only measure/strip indentation at those
+/// positions — not in the middle of a line that happens to be split across
+/// literal and interpolation parts.
+fn strip_indent(parts: &mut [StringPart]) {
+    // Pass 1: find minimum indentation at line starts
+    let mut min_indent = usize::MAX;
+    let mut at_line_start = true;
+    for part in parts.iter() {
+        if let StringPart::Literal(s) = part {
+            for (i, segment) in s.split('\n').enumerate() {
+                if i > 0 {
+                    at_line_start = true;
+                }
+                if at_line_start && !segment.is_empty() {
+                    let indent = segment.len() - segment.trim_start().len();
+                    min_indent = min_indent.min(indent);
+                    at_line_start = false;
+                }
+            }
+        } else {
+            at_line_start = false;
+        }
+    }
+    if min_indent == 0 || min_indent == usize::MAX {
+        return;
+    }
+
+    // Pass 2: strip min_indent chars from the start of each line
+    at_line_start = true;
+    for part in parts.iter_mut() {
+        if let StringPart::Literal(s) = part {
+            let mut result = String::new();
+            for (i, segment) in s.split('\n').enumerate() {
+                if i > 0 {
+                    result.push('\n');
+                    at_line_start = true;
+                }
+                if at_line_start && segment.len() >= min_indent {
+                    result.push_str(&segment[min_indent..]);
+                } else {
+                    result.push_str(segment);
+                }
+                if !segment.is_empty() {
+                    at_line_start = false;
+                }
+            }
+            *s = result;
+        } else {
+            at_line_start = false;
+        }
+    }
+}
+
 // ── Fields ──
 
 fn field(input: &mut &str) -> ModalResult<Field> {
@@ -474,8 +661,13 @@ fn block_field(input: &mut &str) -> ModalResult<Field> {
 fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
     let protected = opt(keyword("protected")).map(|o| o.is_some()).parse_next(input)?;
     let name = ident_string.parse_next(input)?;
-    lex('=').parse_next(input)?;
-    let provider = ident_string.parse_next(input)?;
+    // Once we see `name =`, this must be a block statement — commit to it
+    cut_err(lex('='))
+        .context(StrContext::Expected(winnow::error::StrContextValue::Description("'='")))
+        .parse_next(input)?;
+    let provider = cut_err(ident_string)
+        .context(StrContext::Label("provider name"))
+        .parse_next(input)?;
 
     // provider.resource or bare provider (like "exec")
     let resource = if opt(lex('.')).parse_next(input)?.is_some() {
@@ -512,7 +704,7 @@ mod tests {
 
     #[test]
     fn parse_string_literal() {
-        let result = parse(r#"let x = "hello""#).unwrap();
+        let result = parse(r#"let x = "hello""#, "<test>").unwrap();
         assert_eq!(result.statements.len(), 1);
         match &result.statements[0] {
             Statement::Let(l) => {
@@ -525,7 +717,7 @@ mod tests {
 
     #[test]
     fn parse_string_interpolation() {
-        let result = parse(r#"let x = "hello ${name}""#).unwrap();
+        let result = parse(r#"let x = "hello ${name}""#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Str(parts) => {
@@ -541,7 +733,7 @@ mod tests {
 
     #[test]
     fn parse_interpolation_with_pipe() {
-        let result = parse(r#"let x = "${exec("cmd") | trim}""#).unwrap();
+        let result = parse(r#"let x = "${exec("cmd") | trim}""#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Str(parts) => {
@@ -562,7 +754,7 @@ mod tests {
 
     #[test]
     fn parse_int() {
-        let result = parse("let x = 42").unwrap();
+        let result = parse("let x = 42", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => assert_eq!(l.value, Expr::Int(42)),
             _ => panic!("expected Let"),
@@ -571,7 +763,7 @@ mod tests {
 
     #[test]
     fn parse_bool() {
-        let result = parse("let x = true").unwrap();
+        let result = parse("let x = true", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => assert_eq!(l.value, Expr::Bool(true)),
             _ => panic!("expected Let"),
@@ -580,7 +772,7 @@ mod tests {
 
     #[test]
     fn parse_list() {
-        let result = parse(r#"let x = ["a", "b"]"#).unwrap();
+        let result = parse(r#"let x = ["a", "b"]"#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::List(items) => assert_eq!(items.len(), 2),
@@ -592,7 +784,7 @@ mod tests {
 
     #[test]
     fn parse_map() {
-        let result = parse(r#"let x = { a = 1, b = 2 }"#).unwrap();
+        let result = parse(r#"let x = { a = 1, b = 2 }"#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Map(fields) => {
@@ -608,7 +800,7 @@ mod tests {
 
     #[test]
     fn parse_function_call() {
-        let result = parse(r#"let x = exec("git rev-parse HEAD")"#).unwrap();
+        let result = parse(r#"let x = exec("git rev-parse HEAD")"#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Call(name, args) => {
@@ -623,7 +815,7 @@ mod tests {
 
     #[test]
     fn parse_pipe_chain() {
-        let result = parse(r#"let x = exec("cmd") | trim | lines | uniq"#).unwrap();
+        let result = parse(r#"let x = exec("cmd") | trim | lines | uniq"#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Pipe(inner, name, _) => {
@@ -641,7 +833,7 @@ mod tests {
 
     #[test]
     fn parse_pipe_with_args() {
-        let result = parse(r#"let x = "a:b:c" | split(":")"#).unwrap();
+        let result = parse(r#"let x = "a:b:c" | split(":")"#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Pipe(_, name, args) => {
@@ -656,7 +848,7 @@ mod tests {
 
     #[test]
     fn parse_if_expr() {
-        let result = parse(r#"let x = if env == "prod" then 3 else 1"#).unwrap();
+        let result = parse(r#"let x = if env == "prod" then 3 else 1"#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::If(cond, then_val, else_val) => {
@@ -672,7 +864,7 @@ mod tests {
 
     #[test]
     fn parse_list_concat() {
-        let result = parse(r#"let x = ["a"] + ["b"]"#).unwrap();
+        let result = parse(r#"let x = ["a"] + ["b"]"#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => {
                 assert!(matches!(l.value, Expr::Add(..)));
@@ -683,7 +875,7 @@ mod tests {
 
     #[test]
     fn parse_dotted_ref() {
-        let result = parse("let x = server.path").unwrap();
+        let result = parse("let x = server.path", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Ref(parts) => {
@@ -697,7 +889,7 @@ mod tests {
 
     #[test]
     fn parse_param() {
-        let result = parse("param environment : string").unwrap();
+        let result = parse("param environment : string", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Param(p) => {
                 assert_eq!(p.name, "environment");
@@ -710,7 +902,7 @@ mod tests {
 
     #[test]
     fn parse_param_with_default() {
-        let result = parse("param replicas : int = 1").unwrap();
+        let result = parse("param replicas : int = 1", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Param(p) => {
                 assert_eq!(p.name, "replicas");
@@ -723,7 +915,7 @@ mod tests {
 
     #[test]
     fn parse_target() {
-        let result = parse("target build = [server, image]").unwrap();
+        let result = parse("target build = [server, image]", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Target(t) => {
                 assert_eq!(t.name, "build");
@@ -735,7 +927,7 @@ mod tests {
 
     #[test]
     fn parse_target_dotted() {
-        let result = parse("target deploy = [staging.deploy]").unwrap();
+        let result = parse("target deploy = [staging.deploy]", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Target(t) => {
                 assert_eq!(t.blocks, vec!["staging.deploy"]);
@@ -746,7 +938,7 @@ mod tests {
 
     #[test]
     fn parse_output() {
-        let result = parse("output endpoint = app.endpoint").unwrap();
+        let result = parse("output endpoint = app.endpoint", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Output(o) => {
                 assert_eq!(o.name, "endpoint");
@@ -758,7 +950,7 @@ mod tests {
 
     #[test]
     fn parse_simple_block() {
-        let result = parse(r#"server = go.binary { main = "./cmd/server" }"#).unwrap();
+        let result = parse(r#"server = go.binary { main = "./cmd/server" }"#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Block(b) => {
                 assert_eq!(b.name, "server");
@@ -774,7 +966,7 @@ mod tests {
 
     #[test]
     fn parse_protected_block() {
-        let result = parse(r#"protected db = aws.aurora { cluster = "prod" }"#).unwrap();
+        let result = parse(r#"protected db = aws.aurora { cluster = "prod" }"#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Block(b) => {
                 assert!(b.protected);
@@ -789,7 +981,7 @@ mod tests {
     fn parse_bare_provider_block() {
         let input =
             "docs = exec {\n  command = \"mdbook build\"\n  inputs  = [\"docs/**/*.md\"]\n  output  = \"book/\"\n}";
-        let result = parse(input).unwrap();
+        let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Block(b) => {
                 assert_eq!(b.provider, "exec");
@@ -803,13 +995,13 @@ mod tests {
     #[test]
     fn parse_comments() {
         let input = "# This is a comment\nlet x = 42  # inline comment\n# Another comment\nlet y = 10\n";
-        let result = parse(input).unwrap();
+        let result = parse(input, "<test>").unwrap();
         assert_eq!(result.statements.len(), 2);
     }
 
     #[test]
     fn parse_escape_sequences() {
-        let result = parse(r#"let x = "hello\nworld""#).unwrap();
+        let result = parse(r#"let x = "hello\nworld""#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => {
                 assert_eq!(l.value, Expr::Str(vec![StringPart::Literal("hello\nworld".into())]));
@@ -828,7 +1020,7 @@ mod tests {
             "  output  = \"server\"\n",
             "}",
         );
-        let result = parse(input).unwrap();
+        let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Block(b) => {
                 assert_eq!(b.name, "server");
@@ -863,13 +1055,13 @@ mod tests {
             "\n",
             "target build = [server, image]\n",
         );
-        let result = parse(input).unwrap();
+        let result = parse(input, "<test>").unwrap();
         assert_eq!(result.statements.len(), 7);
     }
 
     #[test]
     fn parse_string_preserves_leading_whitespace() {
-        let result = parse(r#"let x = "  hello  ""#).unwrap();
+        let result = parse(r#"let x = "  hello  ""#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => {
                 assert_eq!(l.value, Expr::Str(vec![StringPart::Literal("  hello  ".into())]));
@@ -880,7 +1072,7 @@ mod tests {
 
     #[test]
     fn parse_output_as_variable_name() {
-        let result = parse("let x = output").unwrap();
+        let result = parse("let x = output", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => {
                 assert_eq!(l.value, Expr::Ref(vec!["output".into()]));
@@ -892,7 +1084,7 @@ mod tests {
     #[test]
     fn parse_block_fields_with_commas() {
         let input = r#"a = exec { command = "echo hi", output = "out" }"#;
-        let result = parse(input).unwrap();
+        let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Block(b) => {
                 assert_eq!(b.fields.len(), 2);
@@ -906,7 +1098,7 @@ mod tests {
     #[test]
     fn parse_doc_comment_on_target() {
         let input = "# Build everything\ntarget build = [server]\n";
-        let result = parse(input).unwrap();
+        let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Target(t) => {
                 assert_eq!(t.name, "build");
@@ -919,7 +1111,7 @@ mod tests {
     #[test]
     fn parse_doc_comment_on_block() {
         let input = "# The main server binary\nserver = go.binary { main = \"./cmd/server\" }\n";
-        let result = parse(input).unwrap();
+        let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Block(b) => {
                 assert_eq!(b.name, "server");
@@ -932,7 +1124,7 @@ mod tests {
     #[test]
     fn parse_multiline_doc_comment() {
         let input = "# Build and push\n# the Docker image\ntarget deploy = [image]\n";
-        let result = parse(input).unwrap();
+        let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Target(t) => {
                 assert_eq!(t.doc, Some("Build and push\nthe Docker image".into()));
@@ -944,7 +1136,7 @@ mod tests {
     #[test]
     fn parse_no_doc_comment() {
         let input = "target build = [server]\n";
-        let result = parse(input).unwrap();
+        let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Target(t) => {
                 assert_eq!(t.doc, None);
@@ -963,12 +1155,97 @@ mod tests {
             "# Build debug binary only\n",
             "target debug = [debug]\n",
         );
-        let result = parse(input).unwrap();
+        let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Target(t) => {
                 assert_eq!(t.doc, Some("Build debug binary only".into()));
             }
             _ => panic!("expected Target"),
+        }
+    }
+
+    #[test]
+    fn parse_heredoc() {
+        let input = "let x = <<EOF\nhello\nworld\nEOF\n";
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => match &l.value {
+                Expr::Str(parts) => {
+                    assert_eq!(parts.len(), 1);
+                    assert_eq!(parts[0], StringPart::Literal("hello\nworld".into()));
+                }
+                _ => panic!("expected Str"),
+            },
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_heredoc_strip_indent() {
+        let input = "let x = <<-EOF\n    hello\n    world\n  EOF\n";
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => match &l.value {
+                Expr::Str(parts) => {
+                    assert_eq!(parts.len(), 1);
+                    assert_eq!(parts[0], StringPart::Literal("hello\nworld".into()));
+                }
+                _ => panic!("expected Str"),
+            },
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_heredoc_interpolation_preserves_spaces() {
+        let input = "let x = <<EOF\n${name} --version\nEOF\n";
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => match &l.value {
+                Expr::Str(parts) => {
+                    assert_eq!(parts.len(), 2);
+                    assert!(matches!(&parts[0], StringPart::Interpolation(_)));
+                    assert_eq!(parts[1], StringPart::Literal(" --version".into()));
+                }
+                _ => panic!("expected Str"),
+            },
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_heredoc_strip_indent_with_interpolation() {
+        let input = "let x = <<-EOF\n  ${name} --version\n  ${name} graph\n  EOF\n";
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => match &l.value {
+                Expr::Str(parts) => {
+                    assert_eq!(parts.len(), 4);
+                    assert!(matches!(&parts[0], StringPart::Interpolation(_)));
+                    assert_eq!(parts[1], StringPart::Literal(" --version\n".into()));
+                    assert!(matches!(&parts[2], StringPart::Interpolation(_)));
+                    assert_eq!(parts[3], StringPart::Literal(" graph".into()));
+                }
+                _ => panic!("expected Str"),
+            },
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_heredoc_with_interpolation() {
+        let input = "let x = <<EOF\nhello ${name}\nEOF\n";
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => match &l.value {
+                Expr::Str(parts) => {
+                    assert_eq!(parts.len(), 2);
+                    assert_eq!(parts[0], StringPart::Literal("hello ".into()));
+                    assert!(matches!(&parts[1], StringPart::Interpolation(Expr::Ref(r)) if r == &["name"]));
+                }
+                _ => panic!("expected Str"),
+            },
+            _ => panic!("expected Let"),
         }
     }
 }

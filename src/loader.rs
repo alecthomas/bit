@@ -159,7 +159,7 @@ server = exec {
   output = "server"
 }
 "#;
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
         let node = dag.get_node("server").unwrap();
         assert_eq!(node.provider, "exec");
@@ -176,7 +176,7 @@ server = exec {
   output = "out"
 }
 "#;
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let (dag, scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
         assert!(dag.get_node("server").is_some());
         assert_eq!(scope.scope.get("name").unwrap().as_str(), Some("hello"));
@@ -191,7 +191,7 @@ server = exec {
   output = "out"
 }
 "#;
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let mut params = Map::new();
         params.insert("env".into(), Value::Str("prod".into()));
         let (_dag, scope) = load(&module, &params, &test_registry(), &EmptyStore).unwrap();
@@ -201,7 +201,7 @@ server = exec {
     #[test]
     fn load_missing_param() {
         let input = "param env : string\n";
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let result = load(&module, &Map::new(), &test_registry(), &EmptyStore);
         assert!(matches!(result, Err(LoadError::MissingParam(_))));
     }
@@ -218,7 +218,7 @@ b = exec {
   output = "b"
 }
 "#;
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
         let order = dag.topo_order().unwrap();
         let ai = order.iter().position(|n| n == "a").unwrap();
@@ -235,7 +235,7 @@ server = exec {
 }
 target build = [server]
 "#;
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
         let order = dag.target_order("build").unwrap();
         assert_eq!(order, vec!["server"]);
@@ -253,7 +253,7 @@ b = exec {
   output = "b"
 }
 "#;
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let result = load(&module, &Map::new(), &test_registry(), &EmptyStore);
         assert!(matches!(result, Err(LoadError::Dag(DagError::Cycle))));
     }
@@ -265,7 +265,7 @@ server = go.binary {
   main = "./cmd/server"
 }
 "#;
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let result = load(&module, &Map::new(), &test_registry(), &EmptyStore);
         assert!(matches!(result, Err(LoadError::UnknownResource(..))));
     }
@@ -283,7 +283,7 @@ deploy = exec {
   depends_on = [migrations]
 }
 "#;
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
         let order = dag.topo_order().unwrap();
         let mi = order.iter().position(|n| n == "migrations").unwrap();
@@ -294,7 +294,7 @@ deploy = exec {
     #[test]
     fn load_target_unknown_block() {
         let input = "target build = [nonexistent]\n";
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let result = load(&module, &Map::new(), &test_registry(), &EmptyStore);
         assert!(matches!(result, Err(LoadError::Dag(DagError::UnknownTargetBlock(..)))));
     }
@@ -309,7 +309,7 @@ server = exec {
 # Build the server
 target build = [server]
 "#;
-        let module = parser::parse(input).unwrap();
+        let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore).unwrap();
         let targets = dag.targets();
         assert_eq!(targets["build"].doc.as_deref(), Some("Build the server"));

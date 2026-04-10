@@ -15,7 +15,7 @@ use bit::state;
 use bit::value::Map;
 
 #[derive(Parser)]
-#[command(name = "bit", about = "bit — Build It")]
+#[command(name = "bit", about = "bit — Build It", version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -73,7 +73,7 @@ fn load_module(registry: &ProviderRegistry) -> (bit::dag::Dag, loader::BaseScope
             process::exit(1);
         }
     };
-    let module = match bit::parser::parse(&source) {
+    let module = match bit::parser::parse(&source, "BUILD.bit") {
         Ok(m) => m,
         Err(e) => {
             eprintln!("{} {e}", "error:".red().bold());

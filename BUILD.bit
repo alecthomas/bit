@@ -13,11 +13,6 @@ release = exec {
   depends_on = [test]
 }
 
-test = exec.test {
-  command = "cargo test --quiet"
-  inputs = inputs
-}
-
 image = docker.image {
   tag = "bit:latest"
   after = [release]
@@ -36,7 +31,22 @@ target debug = [debug]
 target release = [release]
 
 # Run tests
-target test = [test]
+target test = [test, integration-test]
 
 # Run Docker container
 target docker = [container]
+
+# Tests
+test = exec.test {
+  depends_on = [debug]
+  command = "cargo test --quiet"
+  inputs = inputs
+}
+
+integration-test = exec.test {
+  depends_on = [debug]
+  command  = <<-EOF
+  ${debug.path} --version
+  ${debug.path} graph
+  EOF
+}
