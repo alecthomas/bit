@@ -3,7 +3,18 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 
-use yansi::{Color, Paint};
+use yansi::{Color, Paint, Painted};
+
+/// Extension trait for conditionally dimming styled output.
+trait DimIf {
+    fn dim_if(self, condition: bool) -> Self;
+}
+
+impl<T> DimIf for Painted<T> {
+    fn dim_if(self, condition: bool) -> Self {
+        if condition { self.dim() } else { self }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
@@ -31,6 +42,10 @@ impl Event {
             Event::Destroy => "-",
             Event::NoChange => "·",
         }
+    }
+
+    fn is_dim(&self) -> bool {
+        matches!(self, Event::Skipped | Event::NoChange)
     }
 
     fn color(&self) -> Color {
@@ -122,14 +137,20 @@ impl Output {
         let inner = self.inner.lock().unwrap();
         let color = color_for_name(name);
         let prefix = format!("{:>width$} {}", name, event.symbol(), width = inner.max_name_len);
+        let dim = event.is_dim();
         if message.is_empty() {
+            let text = format!("{event:?}").to_lowercase();
             println!(
                 "{} {}",
-                prefix.paint(color),
-                format!("{event:?}").to_lowercase().paint(event.color())
+                prefix.paint(color).dim_if(dim),
+                text.paint(event.color()).dim_if(dim)
             );
         } else {
-            println!("{} {}", prefix.paint(color), message.paint(event.color()));
+            println!(
+                "{} {}",
+                prefix.paint(color).dim_if(dim),
+                message.paint(event.color()).dim_if(dim)
+            );
         }
     }
 }
