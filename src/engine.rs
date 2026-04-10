@@ -174,6 +174,81 @@ struct ContentHashResult {
     dep_hashes: HashMap<String, String>,
 }
 
+/// Describe why a block's content hash changed compared to its prior state.
+fn change_reason(
+    resolved: &[ResolvedFile],
+    prior: &PriorState,
+    dag: &Dag,
+    block_name: &str,
+    dirty_deps: &std::collections::HashSet<String>,
+    mtime_cache: &mut MtimeCache,
+) -> Option<String> {
+    // Check for dirty dependency blocks
+    let mut dirty: Vec<_> = dag
+        .content_deps(block_name)
+        .into_iter()
+        .filter(|d| dirty_deps.contains(d))
+        .collect();
+    dirty.dedup();
+    if !dirty.is_empty() {
+        let quoted: Vec<_> = dirty.iter().map(|d| format!("'{d}'")).collect();
+        return Some(quoted.join(", ") + " changed");
+    }
+
+    // Check for changed files, classifying as input vs output
+    let mut changed_inputs = Vec::new();
+    let mut changed_outputs = Vec::new();
+    for entry in resolved {
+        let (path, is_output) = match entry {
+            ResolvedFile::Input(p) => (p, false),
+            ResolvedFile::Output(p) => (p, true),
+            ResolvedFile::InputGlob(pattern) => {
+                if let Ok(paths) = glob::glob(pattern) {
+                    for p in paths.flatten().filter(|p| p.is_file()) {
+                        let key = p.to_string_lossy();
+                        let stored = prior.file_timestamps.get(key.as_ref());
+                        let current = cached_mtime(&p, mtime_cache);
+                        if stored.map(String::as_str) != current.as_deref() {
+                            changed_inputs.push(p.to_string_lossy().into_owned());
+                        }
+                    }
+                }
+                continue;
+            }
+        };
+        let key = path.to_string_lossy();
+        let stored = prior.file_timestamps.get(key.as_ref());
+        let current = cached_mtime(path, mtime_cache);
+        if stored.map(String::as_str) != current.as_deref() {
+            if is_output {
+                changed_outputs.push(key.into_owned());
+            } else {
+                changed_inputs.push(key.into_owned());
+            }
+        }
+    }
+
+    if !changed_inputs.is_empty() {
+        let count = changed_inputs.len();
+        if count <= 3 {
+            let quoted: Vec<_> = changed_inputs.iter().map(|f| format!("'{f}'")).collect();
+            return Some(quoted.join(", ") + " changed");
+        }
+        return Some(format!("{count} files changed"));
+    }
+    if !changed_outputs.is_empty() {
+        let quoted: Vec<_> = changed_outputs.iter().map(|p| format!("'{p}'")).collect();
+        return Some(format!("output {} modified externally", quoted.join(", ")));
+    }
+
+    // New files or removed files
+    if prior.file_timestamps.len() != resolved.len() {
+        return Some("file set changed".into());
+    }
+
+    None
+}
+
 /// Compute a combined hash of files and parent block states.
 /// If stored timestamps indicate nothing changed, returns the stored hash (fast path).
 fn compute_content_hash(
@@ -337,6 +412,11 @@ pub fn plan(
 
         if result.action == PlanAction::None && inputs_changed && prior.provider_state.is_some() {
             result.action = PlanAction::Update;
+            if result.reason.is_none() {
+                result.reason = change_reason(
+                    &resolved, &prior, dag, name, &dirty, &mut mtime_cache,
+                );
+            }
         }
 
         if result.action != PlanAction::None {
@@ -354,7 +434,8 @@ pub fn plan(
             ));
         }
 
-        writer.event(plan_action_to_event(&result.action), &result.description);
+        let event = plan_action_to_event(&result.action);
+        emit_event(&writer, event, &result.description, result.reason.as_deref());
 
         // Use stored outputs so downstream blocks can reference them
         scope.set(name, Value::Map(prior.outputs));
@@ -452,6 +533,16 @@ fn apply_order(
             && prior.provider_state.is_some()
         {
             plan_result.action = PlanAction::Update;
+            if plan_result.reason.is_none() {
+                plan_result.reason = if previously_failed {
+                    Some("previously failed".into())
+                } else {
+                    change_reason(
+                        &resolved, &prior, dag, name,
+                        &std::collections::HashSet::new(), &mut mtime_cache,
+                    )
+                };
+            }
         }
 
         if node.protected && matches!(plan_result.action, PlanAction::Replace | PlanAction::Destroy) {
@@ -475,7 +566,7 @@ fn apply_order(
             continue;
         }
 
-        writer.event(Event::Starting, &plan_result.description);
+        emit_event(&writer, Event::Starting, &plan_result.description, plan_result.reason.as_deref());
 
         let apply_result = node
             .resource
@@ -675,6 +766,36 @@ fn print_value(key: &str, value: &Value, indent: usize) {
             }
         }
         _ => println!("{pad}{key}: {value}"),
+    }
+}
+
+/// Emit an event, appending a dimmed reason to the first line if present.
+fn emit_event(writer: &crate::output::BlockWriter, event: Event, description: &str, reason: Option<&str>) {
+    use yansi::Paint;
+    match reason {
+        Some(reason) => {
+            let mut lines = description.lines();
+            let first = lines.next().unwrap_or("");
+            let styled_first = format!(
+                "{} {}",
+                first.paint(event.color()),
+                format!("({reason})").dim()
+            );
+            let rest: Vec<_> = lines
+                .map(|l| format!("{}", l.paint(event.color())))
+                .collect();
+            if rest.is_empty() {
+                writer.event_raw(event, &styled_first);
+            } else {
+                let styled_rest: Vec<&str> = rest.iter().map(|s| s.as_str()).collect();
+                let full = std::iter::once(styled_first.as_str())
+                    .chain(styled_rest)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                writer.event_raw(event, &full);
+            }
+        }
+        None => writer.event(event, description),
     }
 }
 

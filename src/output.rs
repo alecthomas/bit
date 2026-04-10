@@ -48,7 +48,7 @@ impl Event {
         matches!(self, Event::Skipped | Event::NoChange)
     }
 
-    fn color(&self) -> Color {
+    pub fn color(&self) -> Color {
         match self {
             Event::Starting => Color::Cyan,
             Event::Skipped => Color::Primary,
@@ -146,11 +146,38 @@ impl Output {
                 text.paint(event.color()).dim_if(dim)
             );
         } else {
-            println!(
-                "{} {}",
-                prefix.paint(color).dim_if(dim),
-                message.paint(event.color()).dim_if(dim)
-            );
+            let mut lines = message.lines();
+            if let Some(first) = lines.next() {
+                println!(
+                    "{} {}",
+                    prefix.paint(color).dim_if(dim),
+                    first.paint(event.color()).dim_if(dim)
+                );
+            }
+            let cont_prefix = format!("{:>width$} ┆", name, width = inner.max_name_len);
+            for line in lines {
+                println!(
+                    "{} {}",
+                    cont_prefix.paint(color).dim_if(dim),
+                    line.paint(event.color()).dim_if(dim)
+                );
+            }
+        }
+    }
+
+    /// Like `print_event` but the message is pre-formatted and not re-painted.
+    fn print_event_raw(&self, name: &str, event: Event, message: &str) {
+        let inner = self.inner.lock().unwrap();
+        let color = color_for_name(name);
+        let dim = event.is_dim();
+        let prefix = format!("{:>width$} {}", name, event.symbol(), width = inner.max_name_len);
+        let mut lines = message.lines();
+        if let Some(first) = lines.next() {
+            println!("{} {first}", prefix.paint(color).dim_if(dim));
+        }
+        let cont_prefix = format!("{:>width$} ┆", name, width = inner.max_name_len);
+        for line in lines {
+            println!("{} {line}", cont_prefix.paint(color).dim_if(dim));
         }
     }
 }
@@ -165,6 +192,12 @@ pub struct BlockWriter {
 impl BlockWriter {
     pub fn event(&self, event: Event, message: &str) {
         self.output.print_event(&self.name, event, message);
+    }
+
+    /// Like `event`, but the message is pre-formatted with ANSI codes
+    /// and will not be re-painted by the output layer.
+    pub fn event_raw(&self, event: Event, message: &str) {
+        self.output.print_event_raw(&self.name, event, message);
     }
 
     pub fn line(&self, content: &str) {

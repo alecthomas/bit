@@ -211,13 +211,17 @@ impl Resource for ImageResource {
             return Ok(PlanResult {
                 action: PlanAction::Create,
                 description: format!("docker build -t {}", inputs.tag),
+                reason: None,
             });
         };
+
+        let desc = format!("docker build -t {}", inputs.tag);
 
         if prior.tag != inputs.tag {
             return Ok(PlanResult {
                 action: PlanAction::Update,
-                description: format!("docker build -t {}", inputs.tag),
+                description: desc.clone(),
+                reason: Some("tag changed".into()),
             });
         }
 
@@ -233,13 +237,15 @@ impl Resource for ImageResource {
         if !exists {
             return Ok(PlanResult {
                 action: PlanAction::Create,
-                description: format!("docker build -t {}", inputs.tag),
+                description: desc,
+                reason: Some("image deleted".into()),
             });
         }
 
         Ok(PlanResult {
             action: PlanAction::None,
             description: format!("docker build -t {}", inputs.tag),
+                reason: None,
         })
     }
 

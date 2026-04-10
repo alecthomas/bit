@@ -304,6 +304,7 @@ impl Resource for ContainerResource {
             return Ok(PlanResult {
                 action: PlanAction::Create,
                 description: desc,
+                reason: None,
             });
         };
 
@@ -312,6 +313,7 @@ impl Resource for ContainerResource {
             return Ok(PlanResult {
                 action: PlanAction::Replace,
                 description: desc,
+                reason: Some("config changed".into()),
             });
         }
 
@@ -319,12 +321,14 @@ impl Resource for ContainerResource {
             return Ok(PlanResult {
                 action: PlanAction::Create,
                 description: desc,
+                reason: Some("container not running".into()),
             });
         }
 
         Ok(PlanResult {
             action: PlanAction::None,
             description: desc,
+                reason: None,
         })
     }
 

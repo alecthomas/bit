@@ -142,6 +142,7 @@ impl Resource for ExecResource {
             return Ok(PlanResult {
                 action: PlanAction::Create,
                 description: inputs.command.clone(),
+                reason: None,
             });
         };
 
@@ -154,6 +155,7 @@ impl Resource for ExecResource {
         Ok(PlanResult {
             action,
             description: inputs.command.clone(),
+                reason: None,
         })
     }
 
@@ -349,6 +351,7 @@ impl Resource for ExecTestResource {
             return Ok(PlanResult {
                 action: PlanAction::Create,
                 description: inputs.command.clone(),
+                reason: None,
             });
         };
 
@@ -361,6 +364,7 @@ impl Resource for ExecTestResource {
         Ok(PlanResult {
             action,
             description: inputs.command.clone(),
+                reason: None,
         })
     }
 

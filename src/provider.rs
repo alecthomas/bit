@@ -38,6 +38,8 @@ pub enum PlanAction {
 pub struct PlanResult {
     pub action: PlanAction,
     pub description: String,
+    /// Optional reason for the action (displayed dimmed).
+    pub reason: Option<String>,
 }
 
 /// Result of the apply phase, with typed state and outputs.
@@ -282,6 +284,7 @@ mod tests {
             Ok(PlanResult {
                 action,
                 description: "stub plan".into(),
+                reason: None,
             })
         }
 
