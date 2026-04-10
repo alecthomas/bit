@@ -300,7 +300,7 @@ pub fn plan(
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
         let writer = output.writer(name);
 
-        let inputs = eval_fields(&node.fields, &scope).map_err(|e| EngineError::Eval {
+        let inputs = eval_fields_lenient(&node.fields, &scope).map_err(|e| EngineError::Eval {
             block: name.clone(),
             source: e,
         })?;
@@ -607,7 +607,7 @@ pub fn dump(
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
 
         // Evaluate inputs, but replace depends_on/after with block names
-        let mut inputs = eval_fields(&node.fields, &scope).map_err(|e| EngineError::Eval {
+        let mut inputs = eval_fields_lenient(&node.fields, &scope).map_err(|e| EngineError::Eval {
             block: name.clone(),
             source: e,
         })?;
@@ -684,6 +684,15 @@ fn eval_fields(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalE
     let mut inputs = Map::new();
     for field in fields {
         let value = expr::eval(&field.value, scope)?;
+        inputs.insert(field.name.clone(), value);
+    }
+    Ok(inputs)
+}
+
+fn eval_fields_lenient(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalError> {
+    let mut inputs = Map::new();
+    for field in fields {
+        let value = expr::eval_lenient(&field.value, scope)?;
         inputs.insert(field.name.clone(), value);
     }
     Ok(inputs)

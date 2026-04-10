@@ -1,3 +1,4 @@
+pub mod container;
 pub mod image;
 
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
@@ -11,7 +12,10 @@ impl Provider for DockerProvider {
     }
 
     fn resources(&self) -> Vec<Box<dyn DynResource>> {
-        vec![Box::new(image::ImageResource)]
+        vec![
+            Box::new(image::ImageResource),
+            Box::new(container::ContainerResource),
+        ]
     }
 
     fn functions(&self) -> Vec<FuncSignature> {

@@ -23,6 +23,12 @@ image = docker.image {
   after = [release]
 }
 
+container = docker.container {
+  image = image.ref
+  name = "bit"
+  healthcheck = "bit plan"
+}
+
 # Build debug binary only
 target debug = [debug]
 
@@ -31,3 +37,6 @@ target release = [release]
 
 # Run tests
 target test = [test]
+
+# Run Docker container
+target docker = [container]

@@ -8,6 +8,8 @@ use crate::value::{Map, Value};
 pub enum EvalError {
     #[error("undefined variable: {0}")]
     UndefinedVar(String),
+    #[error("undefined field: {0}")]
+    UndefinedField(String),
     #[error("unknown function: {0}")]
     UnknownFunc(String),
     #[error("type error: {0}")]
@@ -46,50 +48,69 @@ impl Default for Scope {
     }
 }
 
+/// Controls how eval handles missing map fields.
+#[derive(Clone, Copy, PartialEq)]
+pub enum EvalMode {
+    /// Strict: missing fields are errors.
+    Strict,
+    /// Lenient: missing fields produce `${ref}` placeholder strings.
+    Lenient,
+}
+
 /// Evaluate an expression within a scope.
 pub fn eval(expr: &Expr, scope: &Scope) -> Result<Value, EvalError> {
+    eval_inner(expr, scope, EvalMode::Strict)
+}
+
+/// Evaluate an expression in lenient mode — unresolved field references
+/// produce `${block.field}` placeholder strings instead of errors.
+pub fn eval_lenient(expr: &Expr, scope: &Scope) -> Result<Value, EvalError> {
+    eval_inner(expr, scope, EvalMode::Lenient)
+}
+
+fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalError> {
     match expr {
-        Expr::Str(parts) => eval_string(parts, scope),
+        Expr::Str(parts) => eval_string(parts, scope, mode),
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Null => Ok(Value::Null),
         Expr::List(items) => {
-            let values: Result<Vec<_>, _> = items.iter().map(|e| eval(e, scope)).collect();
+            let values: Result<Vec<_>, _> = items.iter().map(|e| eval_inner(e, scope, mode)).collect();
             Ok(Value::List(values?))
         }
-        Expr::Map(fields) => eval_map(fields, scope),
-        Expr::Ref(parts) => eval_ref(parts, scope),
+        Expr::Map(fields) => eval_map(fields, scope, mode),
+        Expr::Ref(parts) => eval_ref(parts, scope, mode),
         Expr::Call(name, args) => {
-            let values: Result<Vec<_>, _> = args.iter().map(|e| eval(e, scope)).collect();
+            let values: Result<Vec<_>, _> = args.iter().map(|e| eval_inner(e, scope, mode)).collect();
             call_builtin(name, &values?)
         }
         Expr::Pipe(inner, name, args) => {
-            let lhs = eval(inner, scope)?;
+            let lhs = eval_inner(inner, scope, mode)?;
             let mut all_args = vec![lhs];
             for arg in args {
-                all_args.push(eval(arg, scope)?);
+                all_args.push(eval_inner(arg, scope, mode)?);
             }
             call_builtin(name, &all_args)
         }
         Expr::If(cond, then_val, else_val) => {
-            let cond = eval(cond, scope)?;
+            let cond = eval_inner(cond, scope, mode)?;
             match cond {
-                Value::Bool(true) => eval(then_val, scope),
-                Value::Bool(false) => eval(else_val, scope),
+                Value::Bool(true) => eval_inner(then_val, scope, mode),
+                Value::Bool(false) => eval_inner(else_val, scope, mode),
                 _ => Err(EvalError::Type("if condition must be bool".into())),
             }
         }
         Expr::BinOp(lhs, op, rhs) => {
-            let l = eval(lhs, scope)?;
-            let r = eval(rhs, scope)?;
+            let l = eval_inner(lhs, scope, mode)?;
+            let r = eval_inner(rhs, scope, mode)?;
             match op {
                 BinOp::Eq => Ok(Value::Bool(l == r)),
                 BinOp::Ne => Ok(Value::Bool(l != r)),
             }
         }
         Expr::Add(lhs, rhs) => {
-            let l = eval(lhs, scope)?;
-            let r = eval(rhs, scope)?;
+            let l = eval_inner(lhs, scope, mode)?;
+            let r = eval_inner(rhs, scope, mode)?;
             match (l, r) {
                 (Value::List(mut a), Value::List(b)) => {
                     a.extend(b);
@@ -101,13 +122,13 @@ pub fn eval(expr: &Expr, scope: &Scope) -> Result<Value, EvalError> {
     }
 }
 
-fn eval_string(parts: &[StringPart], scope: &Scope) -> Result<Value, EvalError> {
+fn eval_string(parts: &[StringPart], scope: &Scope, mode: EvalMode) -> Result<Value, EvalError> {
     let mut result = String::new();
     for part in parts {
         match part {
             StringPart::Literal(s) => result.push_str(s),
             StringPart::Interpolation(expr) => {
-                let val = eval(expr, scope)?;
+                let val = eval_inner(expr, scope, mode)?;
                 result.push_str(&val.to_string());
             }
         }
@@ -115,15 +136,15 @@ fn eval_string(parts: &[StringPart], scope: &Scope) -> Result<Value, EvalError> 
     Ok(Value::Str(result))
 }
 
-fn eval_map(fields: &[Field], scope: &Scope) -> Result<Value, EvalError> {
+fn eval_map(fields: &[Field], scope: &Scope, mode: EvalMode) -> Result<Value, EvalError> {
     let mut map = Map::new();
     for field in fields {
-        map.insert(field.name.clone(), eval(&field.value, scope)?);
+        map.insert(field.name.clone(), eval_inner(&field.value, scope, mode)?);
     }
     Ok(Value::Map(map))
 }
 
-fn eval_ref(parts: &[String], scope: &Scope) -> Result<Value, EvalError> {
+fn eval_ref(parts: &[String], scope: &Scope, mode: EvalMode) -> Result<Value, EvalError> {
     let first = &parts[0];
     let root = scope.get(first).ok_or_else(|| EvalError::UndefinedVar(first.clone()))?;
 
@@ -132,10 +153,15 @@ fn eval_ref(parts: &[String], scope: &Scope) -> Result<Value, EvalError> {
     for part in &parts[1..] {
         match current {
             Value::Map(map) => {
-                current = map
-                    .get(part)
-                    .cloned()
-                    .ok_or_else(|| EvalError::UndefinedVar(parts.join(".")))?;
+                match map.get(part).cloned() {
+                    Some(val) => current = val,
+                    None if mode == EvalMode::Lenient => {
+                        return Ok(Value::Str(format!("${{{}}}", parts.join("."))));
+                    }
+                    None => {
+                        return Err(EvalError::UndefinedField(parts.join(".")));
+                    }
+                }
             }
             _ => {
                 return Err(EvalError::Type(format!(
@@ -366,6 +392,40 @@ mod tests {
         scope.set("server", Value::Map(inner));
         let expr = Expr::Ref(vec!["server".into(), "path".into()]);
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("/bin/server".into()));
+    }
+
+    #[test]
+    fn eval_missing_field_strict_errors() {
+        let mut scope = Scope::new();
+        scope.set("image", Value::Map(Map::new()));
+        let expr = Expr::Ref(vec!["image".into(), "ref".into()]);
+        let err = eval(&expr, &scope).unwrap_err();
+        assert!(matches!(err, EvalError::UndefinedField(ref s) if s == "image.ref"));
+    }
+
+    #[test]
+    fn eval_missing_field_lenient_placeholder() {
+        let mut scope = Scope::new();
+        scope.set("image", Value::Map(Map::new()));
+        let expr = Expr::Ref(vec!["image".into(), "ref".into()]);
+        assert_eq!(
+            eval_lenient(&expr, &scope).unwrap(),
+            Value::Str("${image.ref}".into())
+        );
+    }
+
+    #[test]
+    fn eval_missing_field_lenient_in_string() {
+        let mut scope = Scope::new();
+        scope.set("image", Value::Map(Map::new()));
+        let expr = Expr::Str(vec![
+            StringPart::Literal("docker run ".into()),
+            StringPart::Interpolation(Expr::Ref(vec!["image".into(), "ref".into()])),
+        ]);
+        assert_eq!(
+            eval_lenient(&expr, &scope).unwrap(),
+            Value::Str("docker run ${image.ref}".into())
+        );
     }
 
     #[test]
