@@ -21,7 +21,7 @@ image = docker.image {
 container = docker.container {
   image = image.ref
   name = "bit"
-#  healthcheck = "bit plan"
+  healthcheck = "bit plan"
 }
 
 # Tests

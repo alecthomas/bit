@@ -11,6 +11,7 @@ use bit::output::Output;
 use bit::provider::ProviderRegistry;
 use bit::providers::docker::DockerProvider;
 use bit::providers::exec::ExecProvider;
+use bit::providers::go::GoProvider;
 use bit::state;
 use bit::value::Map;
 
@@ -59,6 +60,7 @@ fn default_registry() -> ProviderRegistry {
     let mut reg = ProviderRegistry::new();
     reg.register(Box::new(ExecProvider));
     reg.register(Box::new(DockerProvider));
+    reg.register(Box::new(GoProvider));
     reg
 }
 

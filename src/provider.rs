@@ -150,7 +150,8 @@ impl<R: Resource + Send + Sync> DynResource for R {
 
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
-        let state = prior_state.map(|v| serde_json::from_value(v.clone())).transpose()?;
+        // Discard prior state if it can't be deserialized (e.g. resource type changed).
+        let state = prior_state.and_then(|v| serde_json::from_value(v.clone()).ok());
         Resource::plan(self, &typed, state.as_ref())
     }
 
@@ -161,7 +162,8 @@ impl<R: Resource + Send + Sync> DynResource for R {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
-        let state = prior_state.map(|v| serde_json::from_value(v.clone())).transpose()?;
+        // Discard prior state if it can't be deserialized (e.g. resource type changed).
+        let state = prior_state.and_then(|v| serde_json::from_value(v.clone()).ok());
         let result = Resource::apply(self, &typed, state.as_ref(), writer)?;
         Ok(ApplyResult {
             outputs: serialize_outputs(&result.outputs)?,
