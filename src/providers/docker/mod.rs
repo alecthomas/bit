@@ -1,5 +1,6 @@
 pub mod container;
 pub mod image;
+pub mod parse;
 
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
 use crate::value::Value;
