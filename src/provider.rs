@@ -105,7 +105,7 @@ pub trait Resource {
 
 /// Object-safe resource trait used by the registry. Converts between
 /// `Map` and typed structs via serde at the boundary.
-pub trait DynResource {
+pub trait DynResource: Send + Sync {
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
     fn resolve(&self, inputs: &Map) -> Result<Vec<ResolvedFile>, BoxError>;
@@ -134,7 +134,7 @@ fn serialize_outputs<T: Serialize>(outputs: &T) -> Result<Map, BoxError> {
 
 /// Blanket impl: any `Resource` automatically becomes a `DynResource`
 /// by serializing/deserializing at the boundary.
-impl<R: Resource> DynResource for R {
+impl<R: Resource + Send + Sync> DynResource for R {
     fn name(&self) -> &str {
         Resource::name(self)
     }

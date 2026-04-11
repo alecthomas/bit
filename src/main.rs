@@ -17,6 +17,10 @@ use bit::value::Map;
 #[derive(Parser)]
 #[command(name = "bit", about = "bit — Build It", version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
+    /// Number of parallel jobs (default: number of CPUs)
+    #[arg(short = 'j', long = "jobs", global = true)]
+    jobs: Option<usize>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -88,6 +92,9 @@ fn load_module(registry: &ProviderRegistry) -> (bit::dag::Dag, loader::BaseScope
 fn main() {
     let cli = Cli::parse();
     let registry = default_registry();
+    let jobs = cli
+        .jobs
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
 
     match cli.command {
         Command::Plan { target } => {
@@ -108,7 +115,7 @@ fn main() {
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
-            match engine::apply(&mut dag, &base, store.as_ref(), &output, target.as_deref()) {
+            match engine::apply(&mut dag, &base, store.as_ref(), &output, target.as_deref(), jobs) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
@@ -121,7 +128,7 @@ fn main() {
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
-            match engine::test(&mut dag, &base, store.as_ref(), &output) {
+            match engine::test(&mut dag, &base, store.as_ref(), &output, jobs) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());

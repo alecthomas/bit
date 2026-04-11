@@ -16,38 +16,38 @@ fn registry() -> ProviderRegistry {
 }
 
 struct MemoryStore {
-    data: std::cell::RefCell<std::collections::HashMap<String, serde_json::Value>>,
+    data: std::sync::RwLock<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 impl MemoryStore {
     fn new() -> Self {
         Self {
-            data: std::cell::RefCell::new(std::collections::HashMap::new()),
+            data: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 }
 
 impl StateStore for MemoryStore {
     fn load(&self, block: &str) -> Result<Option<serde_json::Value>, StateError> {
-        Ok(self.data.borrow().get(block).cloned())
+        Ok(self.data.read().unwrap().get(block).cloned())
     }
     fn save(&self, block: &str, state: &serde_json::Value) -> Result<(), StateError> {
-        self.data.borrow_mut().insert(block.into(), state.clone());
+        self.data.write().unwrap().insert(block.into(), state.clone());
         Ok(())
     }
     fn remove(&self, block: &str) -> Result<(), StateError> {
-        self.data.borrow_mut().remove(block);
+        self.data.write().unwrap().remove(block);
         Ok(())
     }
     fn list(&self) -> Result<Vec<String>, StateError> {
-        Ok(self.data.borrow().keys().cloned().collect())
+        Ok(self.data.read().unwrap().keys().cloned().collect())
     }
 }
 
 fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store).expect("load failed");
-    engine::apply(&mut dag, &base, store, &Output::new(&[]), None).expect("apply failed")
+    engine::apply(&mut dag, &base, store, &Output::new(&[]), None, 1).expect("apply failed")
 }
 
 fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
@@ -196,7 +196,7 @@ fn target_filters_execution() {
     let store = MemoryStore::new();
     let module = parser::parse(&input, "<test>").unwrap();
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), &store).unwrap();
-    let results = engine::apply(&mut dag, &base, &store, &Output::new(&[]), Some("just_a")).unwrap();
+    let results = engine::apply(&mut dag, &base, &store, &Output::new(&[]), Some("just_a"), 1).unwrap();
     assert_eq!(results.len(), 1);
     assert!(out_a.exists());
     assert!(!out_b.exists());

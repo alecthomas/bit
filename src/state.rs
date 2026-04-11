@@ -14,7 +14,7 @@ pub enum StateError {
 }
 
 /// Persists block state between runs. State is always JSON.
-pub trait StateStore {
+pub trait StateStore: Send + Sync {
     fn load(&self, block: &str) -> Result<Option<Value>, StateError>;
     fn save(&self, block: &str, state: &Value) -> Result<(), StateError>;
     fn remove(&self, block: &str) -> Result<(), StateError>;

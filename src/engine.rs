@@ -456,12 +456,17 @@ pub fn apply(
     store: &dyn StateStore,
     output: &Output,
     target: Option<&str>,
+    jobs: usize,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = match target {
         Some(t) => dag.target_order(t)?,
         None => dag.topo_order()?,
     };
-    apply_order(dag, base, store, output, &order)
+    if jobs <= 1 {
+        apply_order(dag, base, store, output, &order)
+    } else {
+        apply_order_parallel(dag, base, store, output, &order, jobs)
+    }
 }
 
 /// Apply only test blocks and their transitive dependencies.
@@ -470,9 +475,14 @@ pub fn test(
     base: &BaseScope,
     store: &dyn StateStore,
     output: &Output,
+    jobs: usize,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = dag.test_order()?;
-    apply_order(dag, base, store, output, &order)
+    if jobs <= 1 {
+        apply_order(dag, base, store, output, &order)
+    } else {
+        apply_order_parallel(dag, base, store, output, &order, jobs)
+    }
 }
 
 /// Apply blocks in the given order.
@@ -628,6 +638,279 @@ fn apply_order(
     }
 
     Ok(results)
+}
+
+/// Result sent back from a worker thread after executing a block.
+struct BlockResult {
+    name: String,
+    plan: PlanResult,
+    outputs: Map,
+    /// The wrapped state to persist, if the block was applied.
+    wrapped_state: Option<serde_json::Value>,
+    /// Whether this was a failed test (passed == false).
+    test_failed: bool,
+}
+
+/// Apply blocks in parallel using a ready-queue scheduler.
+fn apply_order_parallel(
+    dag: &Dag,
+    base: &BaseScope,
+    store: &dyn StateStore,
+    output: &Output,
+    order: &[String],
+    jobs: usize,
+) -> Result<Vec<BlockPlan>, EngineError> {
+    use std::collections::{HashSet, VecDeque};
+    use std::sync::mpsc;
+
+    let order_set: HashSet<&str> = order.iter().map(|s| s.as_str()).collect();
+
+    // Compute initial dep counts (only counting deps within the execution order)
+    let mut remaining_deps: HashMap<String, usize> = HashMap::new();
+    for name in order {
+        let count = dag
+            .deps(name)
+            .iter()
+            .filter(|d| order_set.contains(d.as_str()))
+            .count();
+        remaining_deps.insert(name.clone(), count);
+    }
+
+    let mut ready: VecDeque<String> = VecDeque::new();
+    for name in order {
+        if remaining_deps[name] == 0 {
+            ready.push_back(name.clone());
+        }
+    }
+
+    let mut scope = base.scope.clone();
+    let mut results: Vec<BlockPlan> = Vec::new();
+    let mut completed = 0;
+    let total = order.len();
+
+    std::thread::scope(|s| {
+        let (result_tx, result_rx) = mpsc::channel::<Result<BlockResult, EngineError>>();
+        let mut in_flight = 0;
+        let mut failed: Option<EngineError> = None;
+
+        loop {
+            // Dispatch ready blocks up to the job limit
+            while in_flight < jobs && !ready.is_empty() && failed.is_none() {
+                let name = ready.pop_front().expect("ready is non-empty");
+                let node = dag.get_node(&name).expect("block in order");
+                let writer = output.writer(&name);
+                let scope_snapshot = scope.clone();
+                let tx = result_tx.clone();
+
+                s.spawn(move || {
+                    let result = execute_block(&name, node, dag, store, &scope_snapshot, &writer);
+                    let _ = tx.send(result);
+                });
+                in_flight += 1;
+            }
+
+            if in_flight == 0 {
+                break;
+            }
+
+            // Wait for a result
+            let result = result_rx.recv().expect("channel open");
+            in_flight -= 1;
+
+            match result {
+                Ok(block_result) => {
+                    let name = &block_result.name;
+
+                    // Persist state
+                    if let Some(state) = &block_result.wrapped_state
+                        && let Err(e) = store.save(name, state)
+                    {
+                        failed = Some(e.into());
+                        continue;
+                    }
+
+                    // Merge outputs into scope
+                    scope.set(name, Value::Map(block_result.outputs.clone()));
+
+                    // Check test failure
+                    if block_result.test_failed {
+                        failed = Some(EngineError::TestFailed(name.clone()));
+                    }
+
+                    results.push(BlockPlan {
+                        name: name.clone(),
+                        plan: block_result.plan,
+                    });
+                    completed += 1;
+
+                    // Unblock dependents
+                    if failed.is_none() {
+                        for dep in dag.dependents(name) {
+                            if let Some(count) = remaining_deps.get_mut(&dep) {
+                                *count -= 1;
+                                if *count == 0 {
+                                    ready.push_back(dep);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if failed.is_none() {
+                        failed = Some(e);
+                    }
+                    completed += 1;
+                }
+            }
+
+            // All done or draining after failure
+            if completed >= total {
+                break;
+            }
+        }
+
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(results),
+        }
+    })
+}
+
+/// Execute a single block: evaluate fields, plan, apply if needed, compute post-apply hash.
+fn execute_block(
+    name: &str,
+    node: &crate::dag::DagNode,
+    dag: &Dag,
+    store: &dyn StateStore,
+    scope: &Scope,
+    writer: &crate::output::BlockWriter,
+) -> Result<BlockResult, EngineError> {
+    let inputs = eval_fields(&node.fields, scope).map_err(|e| EngineError::Eval {
+        block: name.to_owned(),
+        source: e,
+    })?;
+
+    let prior = match &node.prior_state {
+        Some(s) => unwrap_state(s),
+        None => default_prior(),
+    };
+
+    let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+        block: name.to_owned(),
+        phase: "resolve",
+        source: e,
+    })?;
+    let all_files = expand_resolved(&resolved);
+    let mut hash_cache = HashCache::new();
+    let mut mtime_cache = MtimeCache::new();
+    let hash_result = compute_content_hash(
+        &all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior,
+    );
+    let inputs_changed = hash_result.hash != prior.content_hash;
+
+    let previously_failed = node.resource.kind() == ResourceKind::Test
+        && prior.outputs.get("passed").and_then(|v| v.as_bool()) == Some(false);
+
+    let mut plan_result = node
+        .resource
+        .plan(&inputs, prior.provider_state.as_ref())
+        .map_err(|e| EngineError::Provider {
+            block: name.to_owned(),
+            phase: "plan",
+            source: e,
+        })?;
+
+    if plan_result.action == PlanAction::None
+        && (inputs_changed || previously_failed)
+        && prior.provider_state.is_some()
+    {
+        plan_result.action = PlanAction::Update;
+        if plan_result.reason.is_none() {
+            plan_result.reason = if previously_failed {
+                Some("previously failed".into())
+            } else {
+                change_reason(
+                    &resolved, &prior, dag, name,
+                    &std::collections::HashSet::new(), &mut mtime_cache,
+                )
+            };
+        }
+    }
+
+    if node.protected && matches!(plan_result.action, PlanAction::Replace | PlanAction::Destroy) {
+        return Err(EngineError::Protected(
+            name.to_owned(),
+            match plan_result.action {
+                PlanAction::Replace => "replaced",
+                PlanAction::Destroy => "destroyed",
+                _ => unreachable!(),
+            },
+        ));
+    }
+
+    if plan_result.action == PlanAction::None {
+        writer.event(Event::Skipped, "no changes");
+        return Ok(BlockResult {
+            name: name.to_owned(),
+            plan: plan_result,
+            outputs: prior.outputs,
+            wrapped_state: None,
+            test_failed: false,
+        });
+    }
+
+    emit_event(writer, Event::Starting, &plan_result.description, plan_result.reason.as_deref());
+
+    let apply_result = node
+        .resource
+        .apply(&inputs, prior.provider_state.as_ref(), writer)
+        .map_err(|e| {
+            writer.event(Event::Failed, &e.to_string());
+            EngineError::Provider {
+                block: name.to_owned(),
+                phase: "apply",
+                source: e,
+            }
+        })?;
+
+    // Compute post-apply hash
+    let wrapped_state = if let Some(new_state) = &apply_result.state {
+        let post_entries = node.resource.resolve(&inputs).unwrap_or_default();
+        let post_files = expand_resolved(&post_entries);
+        let mut post_hash_cache = HashCache::new();
+        let mut post_mtime_cache = MtimeCache::new();
+        let post_prior = default_prior();
+        let post_hash = compute_content_hash(
+            &post_files, dag, name, store, &mut post_hash_cache, &mut post_mtime_cache, &post_prior,
+        );
+        let wrapped = WrappedState {
+            state: new_state.clone(),
+            outputs: apply_result.outputs.clone(),
+            content_hash: post_hash.hash,
+            file_timestamps: post_hash.file_timestamps,
+            dep_hashes: post_hash.dep_hashes,
+        };
+        Some(serde_json::to_value(&wrapped).expect("serialize wrapped state"))
+    } else {
+        None
+    };
+
+    let test_failed = node.resource.kind() == ResourceKind::Test
+        && apply_result.outputs.get("passed").and_then(|v| v.as_bool()) == Some(false);
+
+    if test_failed {
+        writer.event(Event::Failed, "tests failed");
+    } else {
+        writer.event(Event::Ok, "");
+    }
+
+    Ok(BlockResult {
+        name: name.to_owned(),
+        plan: plan_result,
+        outputs: apply_result.outputs,
+        wrapped_state,
+        test_failed,
+    })
 }
 
 /// Destroy blocks in reverse dependency order.
@@ -833,31 +1116,31 @@ mod tests {
     }
 
     struct MemoryStore {
-        data: std::cell::RefCell<std::collections::HashMap<String, serde_json::Value>>,
+        data: std::sync::RwLock<std::collections::HashMap<String, serde_json::Value>>,
     }
 
     impl MemoryStore {
         fn new() -> Self {
             Self {
-                data: std::cell::RefCell::new(std::collections::HashMap::new()),
+                data: std::sync::RwLock::new(std::collections::HashMap::new()),
             }
         }
     }
 
     impl StateStore for MemoryStore {
         fn load(&self, block: &str) -> Result<Option<serde_json::Value>, StateError> {
-            Ok(self.data.borrow().get(block).cloned())
+            Ok(self.data.read().unwrap().get(block).cloned())
         }
         fn save(&self, block: &str, state: &serde_json::Value) -> Result<(), StateError> {
-            self.data.borrow_mut().insert(block.into(), state.clone());
+            self.data.write().unwrap().insert(block.into(), state.clone());
             Ok(())
         }
         fn remove(&self, block: &str) -> Result<(), StateError> {
-            self.data.borrow_mut().remove(block);
+            self.data.write().unwrap().remove(block);
             Ok(())
         }
         fn list(&self) -> Result<Vec<String>, StateError> {
-            Ok(self.data.borrow().keys().cloned().collect())
+            Ok(self.data.read().unwrap().keys().cloned().collect())
         }
     }
 
@@ -866,7 +1149,7 @@ mod tests {
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).expect("load failed");
         let output = Output::new(&[]);
-        apply(&mut dag, &base, &store, &output, None)
+        apply(&mut dag, &base, &store, &output, None, 1)
     }
 
     #[test]
@@ -935,7 +1218,7 @@ mod tests {
         // Apply first
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, None).unwrap();
+        apply(&mut dag, &base, &store, &out, None, 1).unwrap();
         assert!(!store.list().unwrap().is_empty());
 
         // Reload with state, then destroy
@@ -958,7 +1241,7 @@ mod tests {
 
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, None).unwrap();
+        apply(&mut dag, &base, &store, &out, None, 1).unwrap();
 
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
         destroy(&mut dag, &store, &out, None).unwrap();
@@ -986,7 +1269,7 @@ mod tests {
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
         let out = Output::new(&[]);
-        let results = apply(&mut dag, &base, &store, &out, Some("just_a")).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, Some("just_a"), 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "a");
         assert!(out_a.exists());
@@ -1008,7 +1291,7 @@ mod tests {
         // First apply creates the block
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, None).unwrap();
+        apply(&mut dag, &base, &store, &out, None, 1).unwrap();
 
         // Verify persisted state has timestamps
         let stored = store.load("build").unwrap().unwrap();
@@ -1018,7 +1301,7 @@ mod tests {
 
         // Second apply should be a no-op (timestamp fast path)
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        let results = apply(&mut dag, &base, &store, &out, None).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, None, 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::None);
     }
@@ -1043,14 +1326,14 @@ mod tests {
 
         // First apply
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        apply(&mut dag, &base, &store, &out, None).unwrap();
+        apply(&mut dag, &base, &store, &out, None, 1).unwrap();
 
         // Modify input file (touch with new content to change both mtime and hash)
         std::fs::write(&input_file, "v2").unwrap();
 
         // Second apply should detect the change
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
-        let results = apply(&mut dag, &base, &store, &out, None).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, None, 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::Update);
     }

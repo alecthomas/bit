@@ -211,6 +211,17 @@ impl Dag {
         result
     }
 
+    /// Get all child block names (blocks that depend on this one).
+    pub fn dependents(&self, name: &str) -> Vec<String> {
+        let Some(&idx) = self.indices.get(name) else {
+            return vec![];
+        };
+        self.graph
+            .neighbors_directed(idx, petgraph::Direction::Outgoing)
+            .map(|n| self.graph[n].name.clone())
+            .collect()
+    }
+
     /// Get the depth of a node (longest path from a root).
     pub fn depth(&self, name: &str) -> usize {
         let Some(&idx) = self.indices.get(name) else {
