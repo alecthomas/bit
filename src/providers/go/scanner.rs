@@ -80,8 +80,7 @@ fn scan_package_dir(cache: &mut ModuleCache, pkg_dir: &Path) -> Result<(), BoxEr
         }
 
         let path = entry.path();
-        let source =
-            fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+        let source = fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
 
         if name_str.ends_with("_test.go") {
             test_files.insert(path);
@@ -114,12 +113,15 @@ fn scan_package_dir(cache: &mut ModuleCache, pkg_dir: &Path) -> Result<(), BoxEr
         }
     }
 
-    cache.packages.insert(canonical, PackageScan {
-        go_files,
-        test_files,
-        embed_files,
-        local_import_dirs,
-    });
+    cache.packages.insert(
+        canonical,
+        PackageScan {
+            go_files,
+            test_files,
+            embed_files,
+            local_import_dirs,
+        },
+    );
 
     Ok(())
 }
@@ -315,11 +317,7 @@ fn expand_embeds(pkg_dir: &Path, patterns: &[String]) -> Vec<PathBuf> {
 }
 
 /// Resolve a package pattern to a list of package directories.
-fn resolve_package_dirs(
-    module_root: &Path,
-    module_path: &str,
-    pattern: &str,
-) -> Result<Vec<PathBuf>, BoxError> {
+fn resolve_package_dirs(module_root: &Path, module_path: &str, pattern: &str) -> Result<Vec<PathBuf>, BoxError> {
     if let Some(base) = pattern.strip_suffix("/...") {
         let base_dir = if base == "." {
             module_root.to_path_buf()
@@ -489,10 +487,7 @@ import (
 	"github.com/foo/bar" // external
 )
 "#;
-        assert_eq!(
-            parse_imports(source),
-            vec!["fmt", "github.com/foo/bar"]
-        );
+        assert_eq!(parse_imports(source), vec!["fmt", "github.com/foo/bar"]);
     }
 
     #[test]
@@ -562,9 +557,7 @@ var content embed.FS
         fs::write(pkg_dir.join("cache.go"), "package cache").unwrap();
         fs::write(dir.path().join("go.mod"), "module example.com/test\n").unwrap();
 
-        let dirs =
-            resolve_package_dirs(dir.path(), "example.com/test", "example.com/test/internal/cache")
-                .unwrap();
+        let dirs = resolve_package_dirs(dir.path(), "example.com/test", "example.com/test/internal/cache").unwrap();
         assert_eq!(dirs, vec![pkg_dir]);
     }
 
@@ -612,7 +605,11 @@ var content embed.FS
         })
     }
 
-    fn scan_from_cached_count(root: &Path, pattern: &str, include_tests: bool) -> Result<(HashSet<PathBuf>, usize), BoxError> {
+    fn scan_from_cached_count(
+        root: &Path,
+        pattern: &str,
+        include_tests: bool,
+    ) -> Result<(HashSet<PathBuf>, usize), BoxError> {
         with_cache(root, |cache| {
             let pkg_dirs = resolve_package_dirs(&cache.module_root, &cache.module_path, pattern)?;
             let mut all_files = HashSet::new();
@@ -718,11 +715,7 @@ func Hello() { fmt.Println("hello") }
         fs::write(root.join("main.go"), "package main\n").unwrap();
 
         fs::create_dir_all(root.join("vendor/github.com/foo")).unwrap();
-        fs::write(
-            root.join("vendor/github.com/foo/bar.go"),
-            "package foo\n",
-        )
-        .unwrap();
+        fs::write(root.join("vendor/github.com/foo/bar.go"), "package foo\n").unwrap();
 
         fs::create_dir_all(root.join("testdata")).unwrap();
         fs::write(root.join("testdata/fixture.go"), "package testdata\n").unwrap();

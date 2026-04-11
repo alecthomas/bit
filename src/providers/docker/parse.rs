@@ -55,10 +55,8 @@ pub fn dockerfile_sources(
     context: &Path,
     build_args: &HashMap<String, String>,
 ) -> Result<Vec<PathBuf>, BoxError> {
-    let contents = std::fs::read_to_string(dockerfile)
-        .map_err(|e| format!("reading {}: {e}", dockerfile.display()))?;
-    let parsed = parse_dockerfile::parse(&contents)
-        .map_err(|e| format!("parsing {}: {e}", dockerfile.display()))?;
+    let contents = std::fs::read_to_string(dockerfile).map_err(|e| format!("reading {}: {e}", dockerfile.display()))?;
+    let parsed = parse_dockerfile::parse(&contents).map_err(|e| format!("parsing {}: {e}", dockerfile.display()))?;
 
     let mut vars = builtin_args();
     for instruction in &parsed.instructions {
@@ -178,14 +176,17 @@ impl DockerIgnore {
             }
         }
 
-        Some(Self { context: context.to_path_buf(), ignore, negate })
+        Some(Self {
+            context: context.to_path_buf(),
+            ignore,
+            negate,
+        })
     }
 
     /// Returns true if a path should be excluded by .dockerignore rules.
     pub fn is_ignored(&self, path: &Path) -> bool {
         let rel = path.strip_prefix(&self.context).unwrap_or(path);
-        self.ignore.iter().any(|p| p.matches_path(rel))
-            && !self.negate.iter().any(|p| p.matches_path(rel))
+        self.ignore.iter().any(|p| p.matches_path(rel)) && !self.negate.iter().any(|p| p.matches_path(rel))
     }
 }
 
@@ -193,9 +194,7 @@ impl DockerIgnore {
 /// filtering out paths matched by .dockerignore.
 pub fn expand_path(path: &Path, dockerignore: &Option<DockerIgnore>) -> Vec<PathBuf> {
     let pattern = path.to_string_lossy();
-    let filter = |e: &PathBuf| -> bool {
-        e.is_file() && !dockerignore.as_ref().is_some_and(|di| di.is_ignored(e))
-    };
+    let filter = |e: &PathBuf| -> bool { e.is_file() && !dockerignore.as_ref().is_some_and(|di| di.is_ignored(e)) };
 
     if path.is_dir() {
         let glob_pattern = format!("{}/**/*", pattern);

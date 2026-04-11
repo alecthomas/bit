@@ -227,7 +227,8 @@ impl BlockWriter {
     }
 
     pub fn stderr_line(&self, content: &str) {
-        self.output.print_stderr_line(&self.name, self.color, self.indent, content);
+        self.output
+            .print_stderr_line(&self.name, self.color, self.indent, content);
     }
 
     /// Write all lines from a reader, prefixed with the block name.

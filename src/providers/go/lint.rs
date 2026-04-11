@@ -4,9 +4,7 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind,
-};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 /// Inputs for a `go.lint` block.
 #[derive(Debug, Deserialize)]
@@ -56,12 +54,7 @@ impl Resource for GoLintResource {
 
         let mut files = super::resolve_go_inputs(&inputs.package, false)?;
         // Include golangci-lint config if present.
-        for name in [
-            ".golangci.yml",
-            ".golangci.yaml",
-            ".golangci.toml",
-            ".golangci.json",
-        ] {
+        for name in [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"] {
             let path = Path::new(name);
             if path.exists() {
                 files.push(ResolvedFile::Input(path.to_path_buf()));
@@ -70,11 +63,7 @@ impl Resource for GoLintResource {
         Ok(files)
     }
 
-    fn plan(
-        &self,
-        inputs: &GoLintInputs,
-        prior_state: Option<&GoLintState>,
-    ) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &GoLintInputs, prior_state: Option<&GoLintState>) -> Result<PlanResult, BoxError> {
         let description = format!("golangci-lint run {}", inputs.package);
 
         let Some(prior) = prior_state else {
@@ -144,10 +133,7 @@ impl Resource for GoLintResource {
         Ok(())
     }
 
-    fn refresh(
-        &self,
-        prior_state: &GoLintState,
-    ) -> Result<ApplyResult<GoLintState, GoLintOutputs>, BoxError> {
+    fn refresh(&self, prior_state: &GoLintState) -> Result<ApplyResult<GoLintState, GoLintOutputs>, BoxError> {
         Ok(ApplyResult {
             outputs: GoLintOutputs { passed: true },
             state: Some(prior_state.clone()),

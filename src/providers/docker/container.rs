@@ -263,11 +263,7 @@ fn wait_healthy(name: &str, hc: &Healthcheck, writer: &BlockWriter) -> Result<()
             }
             _ => {
                 if start.elapsed() > deadline {
-                    return Err(format!(
-                        "container healthcheck timed out after {}s",
-                        deadline.as_secs()
-                    )
-                    .into());
+                    return Err(format!("container healthcheck timed out after {}s", deadline.as_secs()).into());
                 }
             }
         }
@@ -293,11 +289,7 @@ impl Resource for ContainerResource {
         Ok(vec![])
     }
 
-    fn plan(
-        &self,
-        inputs: &ContainerInputs,
-        prior_state: Option<&ContainerState>,
-    ) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &ContainerInputs, prior_state: Option<&ContainerState>) -> Result<PlanResult, BoxError> {
         let desc = format!("docker run {}", inputs.image);
 
         let Some(prior) = prior_state else {
@@ -328,7 +320,7 @@ impl Resource for ContainerResource {
         Ok(PlanResult {
             action: PlanAction::None,
             description: desc,
-                reason: None,
+            reason: None,
         })
     }
 
@@ -440,10 +432,7 @@ impl Resource for ContainerResource {
         remove_container(&prior_state.name)
     }
 
-    fn refresh(
-        &self,
-        prior_state: &ContainerState,
-    ) -> Result<ApplyResult<ContainerState, ContainerOutputs>, BoxError> {
+    fn refresh(&self, prior_state: &ContainerState) -> Result<ApplyResult<ContainerState, ContainerOutputs>, BoxError> {
         if !container_running(&prior_state.name) {
             return Err(format!("container {} is not running", prior_state.name).into());
         }

@@ -152,17 +152,15 @@ fn eval_ref(parts: &[String], scope: &Scope, mode: EvalMode) -> Result<Value, Ev
     let mut current = root.clone();
     for part in &parts[1..] {
         match current {
-            Value::Map(map) => {
-                match map.get(part).cloned() {
-                    Some(val) => current = val,
-                    None if mode == EvalMode::Lenient => {
-                        return Ok(Value::Str(format!("${{{}}}", parts.join("."))));
-                    }
-                    None => {
-                        return Err(EvalError::UndefinedField(parts.join(".")));
-                    }
+            Value::Map(map) => match map.get(part).cloned() {
+                Some(val) => current = val,
+                None if mode == EvalMode::Lenient => {
+                    return Ok(Value::Str(format!("${{{}}}", parts.join("."))));
                 }
-            }
+                None => {
+                    return Err(EvalError::UndefinedField(parts.join(".")));
+                }
+            },
             _ => {
                 return Err(EvalError::Type(format!(
                     "cannot access field '{part}' on non-map value"
@@ -408,10 +406,7 @@ mod tests {
         let mut scope = Scope::new();
         scope.set("image", Value::Map(Map::new()));
         let expr = Expr::Ref(vec!["image".into(), "ref".into()]);
-        assert_eq!(
-            eval_lenient(&expr, &scope).unwrap(),
-            Value::Str("${image.ref}".into())
-        );
+        assert_eq!(eval_lenient(&expr, &scope).unwrap(), Value::Str("${image.ref}".into()));
     }
 
     #[test]

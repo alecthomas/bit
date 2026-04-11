@@ -155,7 +155,7 @@ impl Resource for ExecResource {
         Ok(PlanResult {
             action,
             description: inputs.command.clone(),
-                reason: None,
+            reason: None,
         })
     }
 
@@ -364,7 +364,7 @@ impl Resource for ExecTestResource {
         Ok(PlanResult {
             action,
             description: inputs.command.clone(),
-                reason: None,
+            reason: None,
         })
     }
 

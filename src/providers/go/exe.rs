@@ -6,9 +6,7 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind,
-};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 use super::GoEnv;
 
@@ -49,11 +47,7 @@ pub struct GoExeResource;
 impl GoExeResource {
     fn output_path(inputs: &GoExeInputs) -> String {
         inputs.output.clone().unwrap_or_else(|| {
-            let base = inputs
-                .package
-                .rsplit('/')
-                .next()
-                .unwrap_or(&inputs.package);
+            let base = inputs.package.rsplit('/').next().unwrap_or(&inputs.package);
             base.to_owned()
         })
     }
@@ -79,11 +73,7 @@ impl Resource for GoExeResource {
         Ok(files)
     }
 
-    fn plan(
-        &self,
-        inputs: &GoExeInputs,
-        prior_state: Option<&GoExeState>,
-    ) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &GoExeInputs, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {
         let output = GoExeResource::output_path(inputs);
         let description = format!("go build -o {output} {}", inputs.package);
 
@@ -131,14 +121,10 @@ impl Resource for GoExeResource {
         args.push(inputs.package.clone());
 
         let mut cmd = Command::new("go");
-        cmd.args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
         inputs.env.apply_to(&mut cmd);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("failed to execute `go build`: {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| format!("failed to execute `go build`: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -159,9 +145,7 @@ impl Resource for GoExeResource {
         }
 
         Ok(ApplyResult {
-            outputs: GoExeOutputs {
-                path: output.clone(),
-            },
+            outputs: GoExeOutputs { path: output.clone() },
             state: Some(GoExeState {
                 package: inputs.package.clone(),
                 output,
@@ -181,10 +165,7 @@ impl Resource for GoExeResource {
         Ok(())
     }
 
-    fn refresh(
-        &self,
-        prior_state: &GoExeState,
-    ) -> Result<ApplyResult<GoExeState, GoExeOutputs>, BoxError> {
+    fn refresh(&self, prior_state: &GoExeState) -> Result<ApplyResult<GoExeState, GoExeOutputs>, BoxError> {
         Ok(ApplyResult {
             outputs: GoExeOutputs {
                 path: prior_state.output.clone(),

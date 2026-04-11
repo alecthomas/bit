@@ -76,10 +76,9 @@ fn ws_capturing_doc(input: &mut &str) -> Option<String> {
     loop {
         // Skip whitespace, tracking blank lines
         let before = *input;
-        let _ = take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| {
-            c == ' ' || c == '\t' || c == '\r' || c == '\n'
-        })
-        .parse_next(input);
+        let _ =
+            take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n')
+                .parse_next(input);
         if before != *input {
             let skipped = &before[..before.len() - input.len()];
             // A newline in whitespace between comments means a blank line
@@ -428,10 +427,7 @@ fn heredoc_expr(input: &mut &str) -> ModalResult<Expr> {
         if input.starts_with(label.as_str()) {
             let rest_after_label = &input[label.len()..];
             // Label must be followed by newline, EOF, or only whitespace
-            if rest_after_label.is_empty()
-                || rest_after_label.starts_with('\n')
-                || rest_after_label.starts_with('\r')
-            {
+            if rest_after_label.is_empty() || rest_after_label.starts_with('\n') || rest_after_label.starts_with('\r') {
                 *input = &input[label.len()..];
                 // Consume trailing newline if present
                 opt('\n').parse_next(input)?;
@@ -471,8 +467,7 @@ fn heredoc_expr(input: &mut &str) -> ModalResult<Expr> {
 /// handling `${}` interpolation.
 fn heredoc_line(parts: &mut Vec<StringPart>, input: &mut &str) -> ModalResult<()> {
     loop {
-        let chunk: &str =
-            take_while(0.., |c: char| c != '\n' && c != '$').parse_next(input)?;
+        let chunk: &str = take_while(0.., |c: char| c != '\n' && c != '$').parse_next(input)?;
         if !chunk.is_empty() {
             push_literal(parts, chunk);
         }
@@ -687,7 +682,6 @@ fn block_field(input: &mut &str) -> ModalResult<Field> {
     ws_and_comments(input)?;
     Ok(f)
 }
-
 
 fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
     let protected = opt(keyword("protected")).map(|o| o.is_some()).parse_next(input)?;

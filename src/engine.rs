@@ -395,11 +395,8 @@ pub fn plan(
         // Hash inputs + existing outputs + parent states to detect changes
         let all_files = expand_resolved(&resolved);
         let has_dirty_dep = dag.content_deps(name).iter().any(|d| dirty.contains(d));
-        let hash_result = compute_content_hash(
-            &all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior,
-        );
-        let inputs_changed =
-            has_dirty_dep || hash_result.hash != prior.content_hash;
+        let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
+        let inputs_changed = has_dirty_dep || hash_result.hash != prior.content_hash;
 
         let mut result = node
             .resource
@@ -413,9 +410,7 @@ pub fn plan(
         if result.action == PlanAction::None && inputs_changed && prior.provider_state.is_some() {
             result.action = PlanAction::Update;
             if result.reason.is_none() {
-                result.reason = change_reason(
-                    &resolved, &prior, dag, name, &dirty, &mut mtime_cache,
-                );
+                result.reason = change_reason(&resolved, &prior, dag, name, &dirty, &mut mtime_cache);
             }
         }
 
@@ -519,23 +514,21 @@ fn apply_order(
             source: e,
         })?;
         let all_files = expand_resolved(&resolved);
-        let hash_result = compute_content_hash(
-            &all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior,
-        );
+        let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
         let inputs_changed = hash_result.hash != prior.content_hash;
 
         // Never skip previously failed test blocks
         let previously_failed = node.resource.kind() == ResourceKind::Test
             && prior.outputs.get("passed").and_then(|v| v.as_bool()) == Some(false);
 
-        let mut plan_result =
-            node.resource
-                .plan(&inputs, prior.provider_state.as_ref())
-                .map_err(|e| EngineError::Provider {
-                    block: name.clone(),
-                    phase: "plan",
-                    source: e,
-                })?;
+        let mut plan_result = node
+            .resource
+            .plan(&inputs, prior.provider_state.as_ref())
+            .map_err(|e| EngineError::Provider {
+                block: name.clone(),
+                phase: "plan",
+                source: e,
+            })?;
 
         // Engine forces update if inputs changed or test previously failed
         if plan_result.action == PlanAction::None
@@ -548,8 +541,12 @@ fn apply_order(
                     Some("previously failed".into())
                 } else {
                     change_reason(
-                        &resolved, &prior, dag, name,
-                        &std::collections::HashSet::new(), &mut mtime_cache,
+                        &resolved,
+                        &prior,
+                        dag,
+                        name,
+                        &std::collections::HashSet::new(),
+                        &mut mtime_cache,
                     )
                 };
             }
@@ -576,7 +573,12 @@ fn apply_order(
             continue;
         }
 
-        emit_event(&writer, Event::Starting, &plan_result.description, plan_result.reason.as_deref());
+        emit_event(
+            &writer,
+            Event::Starting,
+            &plan_result.description,
+            plan_result.reason.as_deref(),
+        );
 
         let apply_result = node
             .resource
@@ -605,7 +607,13 @@ fn apply_order(
             // Force full hash on post-apply (no fast path — files just changed).
             let post_prior = default_prior();
             let post_hash = compute_content_hash(
-                &post_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &post_prior,
+                &post_files,
+                dag,
+                name,
+                store,
+                &mut hash_cache,
+                &mut mtime_cache,
+                &post_prior,
             );
             let wrapped = WrappedState {
                 state: new_state.clone(),
@@ -668,11 +676,7 @@ fn apply_order_parallel(
     // Compute initial dep counts (only counting deps within the execution order)
     let mut remaining_deps: HashMap<String, usize> = HashMap::new();
     for name in order {
-        let count = dag
-            .deps(name)
-            .iter()
-            .filter(|d| order_set.contains(d.as_str()))
-            .count();
+        let count = dag.deps(name).iter().filter(|d| order_set.contains(d.as_str())).count();
         remaining_deps.insert(name.clone(), count);
     }
 
@@ -803,9 +807,7 @@ fn execute_block(
     let all_files = expand_resolved(&resolved);
     let mut hash_cache = HashCache::new();
     let mut mtime_cache = MtimeCache::new();
-    let hash_result = compute_content_hash(
-        &all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior,
-    );
+    let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
     let inputs_changed = hash_result.hash != prior.content_hash;
 
     let previously_failed = node.resource.kind() == ResourceKind::Test
@@ -820,9 +822,7 @@ fn execute_block(
             source: e,
         })?;
 
-    if plan_result.action == PlanAction::None
-        && (inputs_changed || previously_failed)
-        && prior.provider_state.is_some()
+    if plan_result.action == PlanAction::None && (inputs_changed || previously_failed) && prior.provider_state.is_some()
     {
         plan_result.action = PlanAction::Update;
         if plan_result.reason.is_none() {
@@ -830,8 +830,12 @@ fn execute_block(
                 Some("previously failed".into())
             } else {
                 change_reason(
-                    &resolved, &prior, dag, name,
-                    &std::collections::HashSet::new(), &mut mtime_cache,
+                    &resolved,
+                    &prior,
+                    dag,
+                    name,
+                    &std::collections::HashSet::new(),
+                    &mut mtime_cache,
                 )
             };
         }
@@ -859,7 +863,12 @@ fn execute_block(
         });
     }
 
-    emit_event(writer, Event::Starting, &plan_result.description, plan_result.reason.as_deref());
+    emit_event(
+        writer,
+        Event::Starting,
+        &plan_result.description,
+        plan_result.reason.as_deref(),
+    );
 
     let apply_result = node
         .resource
@@ -881,7 +890,13 @@ fn execute_block(
         let mut post_mtime_cache = MtimeCache::new();
         let post_prior = default_prior();
         let post_hash = compute_content_hash(
-            &post_files, dag, name, store, &mut post_hash_cache, &mut post_mtime_cache, &post_prior,
+            &post_files,
+            dag,
+            name,
+            store,
+            &mut post_hash_cache,
+            &mut post_mtime_cache,
+            &post_prior,
         );
         let wrapped = WrappedState {
             state: new_state.clone(),
@@ -963,11 +978,7 @@ pub fn destroy(
 }
 
 /// Dump evaluated inputs and stored outputs for all blocks (or a target subset).
-pub fn dump(
-    dag: &mut Dag,
-    base: &BaseScope,
-    target: Option<&str>,
-) -> Result<(), EngineError> {
+pub fn dump(dag: &mut Dag, base: &BaseScope, target: Option<&str>) -> Result<(), EngineError> {
     let order = match target {
         Some(t) => dag.target_order(t)?,
         None => dag.topo_order()?,
@@ -992,10 +1003,7 @@ pub fn dump(
         }
         let after = dag::collect_after(&node.fields);
         if !after.is_empty() {
-            inputs.insert(
-                "after".into(),
-                Value::List(after.into_iter().map(Value::Str).collect()),
-            );
+            inputs.insert("after".into(), Value::List(after.into_iter().map(Value::Str).collect()));
         }
 
         let prior = match &node.prior_state {
@@ -1059,14 +1067,8 @@ fn emit_event(writer: &crate::output::BlockWriter, event: Event, description: &s
         Some(reason) => {
             let mut lines = description.lines();
             let first = lines.next().unwrap_or("");
-            let styled_first = format!(
-                "{} {}",
-                first.paint(event.color()),
-                format!("({reason})").dim()
-            );
-            let rest: Vec<_> = lines
-                .map(|l| format!("{}", l.paint(event.color())))
-                .collect();
+            let styled_first = format!("{} {}", first.paint(event.color()), format!("({reason})").dim());
+            let rest: Vec<_> = lines.map(|l| format!("{}", l.paint(event.color()))).collect();
             if rest.is_empty() {
                 writer.event_raw(event, &styled_first);
             } else {

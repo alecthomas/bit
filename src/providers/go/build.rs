@@ -4,9 +4,7 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind,
-};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 use super::GoEnv;
 
@@ -54,11 +52,7 @@ impl Resource for GoBuildResource {
         super::resolve_go_inputs(&inputs.package, false)
     }
 
-    fn plan(
-        &self,
-        inputs: &GoBuildInputs,
-        prior_state: Option<&GoBuildState>,
-    ) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &GoBuildInputs, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
         let description = format!("go build {}", inputs.package);
 
         let Some(prior) = prior_state else {
@@ -69,10 +63,7 @@ impl Resource for GoBuildResource {
             });
         };
 
-        let action = if prior.package != inputs.package
-            || prior.flags != inputs.flags
-            || prior.env != inputs.env
-        {
+        let action = if prior.package != inputs.package || prior.flags != inputs.flags || prior.env != inputs.env {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -96,14 +87,10 @@ impl Resource for GoBuildResource {
         args.push(inputs.package.clone());
 
         let mut cmd = Command::new("go");
-        cmd.args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
         inputs.env.apply_to(&mut cmd);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("failed to execute `go build`: {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| format!("failed to execute `go build`: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -137,10 +124,7 @@ impl Resource for GoBuildResource {
         Ok(())
     }
 
-    fn refresh(
-        &self,
-        prior_state: &GoBuildState,
-    ) -> Result<ApplyResult<GoBuildState, GoBuildOutputs>, BoxError> {
+    fn refresh(&self, prior_state: &GoBuildState) -> Result<ApplyResult<GoBuildState, GoBuildOutputs>, BoxError> {
         Ok(ApplyResult {
             outputs: GoBuildOutputs {},
             state: Some(prior_state.clone()),

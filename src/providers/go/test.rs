@@ -4,9 +4,7 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind,
-};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 use super::GoEnv;
 
@@ -56,11 +54,7 @@ impl Resource for GoTestResource {
         super::resolve_go_inputs(&inputs.package, true)
     }
 
-    fn plan(
-        &self,
-        inputs: &GoTestInputs,
-        prior_state: Option<&GoTestState>,
-    ) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
         let description = format!("go test {}", inputs.package);
 
         let Some(prior) = prior_state else {
@@ -71,10 +65,7 @@ impl Resource for GoTestResource {
             });
         };
 
-        let action = if prior.package != inputs.package
-            || prior.flags != inputs.flags
-            || prior.env != inputs.env
-        {
+        let action = if prior.package != inputs.package || prior.flags != inputs.flags || prior.env != inputs.env {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -98,14 +89,10 @@ impl Resource for GoTestResource {
         args.push(inputs.package.clone());
 
         let mut cmd = Command::new("go");
-        cmd.args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
         inputs.env.apply_to(&mut cmd);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("failed to execute `go test`: {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| format!("failed to execute `go test`: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -118,9 +105,7 @@ impl Resource for GoTestResource {
             }
         });
 
-        let status = child
-            .wait()
-            .map_err(|e| format!("failed to wait for `go test`: {e}"))?;
+        let status = child.wait().map_err(|e| format!("failed to wait for `go test`: {e}"))?;
         let passed = status.success();
 
         Ok(ApplyResult {
@@ -137,10 +122,7 @@ impl Resource for GoTestResource {
         Ok(())
     }
 
-    fn refresh(
-        &self,
-        prior_state: &GoTestState,
-    ) -> Result<ApplyResult<GoTestState, GoTestOutputs>, BoxError> {
+    fn refresh(&self, prior_state: &GoTestState) -> Result<ApplyResult<GoTestState, GoTestOutputs>, BoxError> {
         Ok(ApplyResult {
             outputs: GoTestOutputs { passed: true },
             state: Some(prior_state.clone()),
