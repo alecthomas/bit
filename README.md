@@ -4,6 +4,8 @@ A declarative build tool with dependency tracking, content-based caching, and pa
 
 bit reads a `BUILD.bit` file, resolves dependencies between blocks, detects what changed, and only rebuilds what's needed. Language-aware providers (e.g. Go, Docker) automatically discover inputs from source files, so in most cases you don't need to specify them manually.
 
+Like Terraform, bit tracks the state of each block between runs. It detects drift (e.g. a deleted Docker image or stopped container), determines what actions are needed (create, update, replace, destroy), and applies only the minimum changes. `bit plan` shows what would change; `bit apply` makes it so; `bit destroy` tears it down.
+
 ## Install
 
 ```sh
@@ -19,22 +21,45 @@ cargo install --path .
 ## Quick Start
 
 ```bit
-let inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
-
-app = exec {
-  command = "cargo build --release"
-  output = "target/release/app"
-  inputs = inputs
+# Go inputs are auto-detected from source files
+server = go.exe {
+  package = "./cmd/server"
+  output = "dist/server"
 }
 
-test = exec.test {
-  command = "cargo test"
-  inputs = inputs
-  depends_on = [app]
+server-linux = go.exe {
+  package = "./cmd/server"
+  output = "dist/server-linux-arm64"
+  cgo = false
+  goos = "linux"
+  goarch = "arm64"
 }
 
-target build = [app]
-target test = [test]
+test = go.test {
+  package = "./..."
+  flags = ["-race"]
+}
+
+lint = go.lint {}
+
+# Docker auto-detects COPY/ADD sources and expands ARG/ENV vars
+image = docker.image {
+  tag = "myapp:latest"
+  dockerfile = "docker/Dockerfile"
+  depends_on = [server-linux]
+}
+
+# bit tracks container state like Terraform — detects drift, replaces on config change
+app = docker.container {
+  image = image.ref
+  name = "myapp"
+  ports = ["8080:8080"]
+  healthcheck = "curl -sf http://localhost:8080/health"
+}
+
+target build = [server]
+target test = [test, lint]
+target deploy = [app]
 ```
 
 ```sh
