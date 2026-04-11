@@ -22,7 +22,7 @@ struct Cli {
     jobs: Option<usize>,
 
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -96,7 +96,8 @@ fn main() {
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
 
-    match cli.command {
+    let command = cli.command.unwrap_or(Command::Apply { target: None });
+    match command {
         Command::Plan { target } => {
             let (mut dag, base, store) = load_module(&registry);
             let names = dag.block_names();
