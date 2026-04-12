@@ -22,6 +22,10 @@ struct Cli {
     #[arg(short = 'j', long = "jobs", global = true)]
     jobs: Option<usize>,
 
+    /// Set a parameter value (e.g. -p verbose=true)
+    #[arg(short = 'p', long = "param", global = true, value_name = "KEY=VALUE")]
+    params: Vec<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -64,7 +68,34 @@ fn default_registry() -> ProviderRegistry {
     reg
 }
 
-fn load_module(registry: &ProviderRegistry) -> (bit::dag::Dag, loader::BaseScope, Box<dyn bit::state::StateStore>) {
+/// Parse "key=value" strings into a typed Value Map.
+///
+/// Values are inferred as bool, int, or string.
+fn parse_params(raw: &[String]) -> Map {
+    let mut params = Map::new();
+    for item in raw {
+        let Some((key, val)) = item.split_once('=') else {
+            eprintln!("{} invalid param (expected key=value): {item}", "error:".red().bold());
+            process::exit(1);
+        };
+        let value = if val == "true" {
+            bit::value::Value::Bool(true)
+        } else if val == "false" {
+            bit::value::Value::Bool(false)
+        } else if let Ok(n) = val.parse::<i64>() {
+            bit::value::Value::Int(n)
+        } else {
+            bit::value::Value::Str(val.to_owned())
+        };
+        params.insert(key.to_owned(), value);
+    }
+    params
+}
+
+fn load_module(
+    registry: &ProviderRegistry,
+    params: &Map,
+) -> (bit::dag::Dag, loader::BaseScope, Box<dyn bit::state::StateStore>) {
     let root = Path::new(".");
     let store = Box::new(state::default_store(root));
     let source = match fs::read_to_string("BUILD.bit") {
@@ -81,7 +112,7 @@ fn load_module(registry: &ProviderRegistry) -> (bit::dag::Dag, loader::BaseScope
             process::exit(1);
         }
     };
-    let (dag, base) = match loader::load(&module, &Map::new(), registry, store.as_ref()) {
+    let (dag, base) = match loader::load(&module, params, registry, store.as_ref()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{} {e}", "error:".red().bold());
@@ -94,6 +125,7 @@ fn load_module(registry: &ProviderRegistry) -> (bit::dag::Dag, loader::BaseScope
 fn main() {
     let cli = Cli::parse();
     let registry = default_registry();
+    let params = parse_params(&cli.params);
     let jobs = cli
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
@@ -101,7 +133,7 @@ fn main() {
     let command = cli.command.unwrap_or(Command::Apply { target: None });
     match command {
         Command::Plan { target } => {
-            let (mut dag, base, store) = load_module(&registry);
+            let (mut dag, base, store) = load_module(&registry, &params);
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
@@ -114,7 +146,7 @@ fn main() {
             }
         }
         Command::Apply { target } => {
-            let (mut dag, base, store) = load_module(&registry);
+            let (mut dag, base, store) = load_module(&registry, &params);
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
@@ -127,7 +159,7 @@ fn main() {
             }
         }
         Command::Test => {
-            let (mut dag, base, store) = load_module(&registry);
+            let (mut dag, base, store) = load_module(&registry, &params);
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
@@ -140,7 +172,7 @@ fn main() {
             }
         }
         Command::Destroy { target } => {
-            let (mut dag, _base, store) = load_module(&registry);
+            let (mut dag, _base, store) = load_module(&registry, &params);
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
@@ -153,7 +185,7 @@ fn main() {
             }
         }
         Command::Dump { target } => {
-            let (mut dag, base, _store) = load_module(&registry);
+            let (mut dag, base, _store) = load_module(&registry, &params);
             match engine::dump(&mut dag, &base, target.as_deref()) {
                 Ok(()) => {}
                 Err(e) => {
@@ -163,7 +195,7 @@ fn main() {
             }
         }
         Command::List => {
-            let (dag, _base, _store) = load_module(&registry);
+            let (dag, _base, _store) = load_module(&registry, &params);
             let targets = dag.targets();
             if targets.is_empty() {
                 println!("No targets defined.");
