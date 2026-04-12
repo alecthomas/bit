@@ -241,6 +241,100 @@ impl BlockWriter {
         }
     }
 
+    /// Emit a passing test suite summary.
+    pub fn test_suite_passed(&self, suite: &str, duration: std::time::Duration, passed: usize, skipped: usize) {
+        let ms = duration.as_millis();
+        let detail = if skipped > 0 {
+            format!("({ms}ms, {passed} passed, {skipped} skipped)")
+        } else {
+            format!("({ms}ms, {passed} passed)")
+        };
+        let msg = format!(
+            "{} {} {}",
+            "PASS".paint(Color::Green).bold(),
+            suite.bold(),
+            detail.dim()
+        );
+        self.output.print_event_raw(&self.name, Event::Ok, self.indent, &msg);
+    }
+
+    /// Emit a failing test suite summary with individual failures.
+    pub fn test_suite_failed(
+        &self,
+        suite: &str,
+        duration: std::time::Duration,
+        passed: usize,
+        failed: usize,
+        failures: &[(String, std::time::Duration, String)],
+    ) {
+        let ms = duration.as_millis();
+        let mut msg = format!(
+            "{} {} {}",
+            "FAIL".paint(Color::Red).bold(),
+            suite.bold(),
+            format!("({ms}ms, {passed} passed, {failed} failed)").dim(),
+        );
+        for (name, dur, output) in failures {
+            let fms = dur.as_millis();
+            msg.push_str(&format!(
+                "\n  {} {}",
+                name.paint(Color::Red),
+                format!("({fms}ms)").dim()
+            ));
+            for line in output.lines() {
+                msg.push_str(&format!("\n    {}", line.dim()));
+            }
+        }
+        self.output
+            .print_event_raw(&self.name, Event::Failed, self.indent, &msg);
+    }
+
+    /// Emit a skipped test suite.
+    pub fn test_suite_skipped(&self, suite: &str) {
+        let msg = format!("{} {}", "SKIP".paint(Color::Yellow).bold(), suite.dim());
+        self.output
+            .print_event_raw(&self.name, Event::Skipped, self.indent, &msg);
+    }
+
+    /// Emit a single passing test (verbose mode).
+    pub fn test_passed(&self, suite: &str, name: &str, duration: std::time::Duration) {
+        let ms = duration.as_millis();
+        let msg = format!(
+            "{} {} {}",
+            "PASS".paint(Color::Green).bold(),
+            format!("{suite}/{name}").bold(),
+            format!("({ms}ms)").dim(),
+        );
+        self.output.print_event_raw(&self.name, Event::Ok, self.indent, &msg);
+    }
+
+    /// Emit a single failing test with output (verbose mode).
+    pub fn test_failed(&self, suite: &str, name: &str, duration: std::time::Duration, output: &str) {
+        let ms = duration.as_millis();
+        let mut msg = format!(
+            "{} {} {}",
+            "FAIL".paint(Color::Red).bold(),
+            format!("{suite}/{name}").bold(),
+            format!("({ms}ms)").dim(),
+        );
+        for line in output.lines() {
+            msg.push_str(&format!("\n  {}", line.dim()));
+        }
+        self.output
+            .print_event_raw(&self.name, Event::Failed, self.indent, &msg);
+    }
+
+    /// Emit a single skipped test (verbose mode).
+    pub fn test_skipped(&self, suite: &str, name: &str) {
+        let msg = format!(
+            "{} {}",
+            "SKIP".paint(Color::Yellow).bold(),
+            format!("{suite}/{name}").dim(),
+        );
+        self.output
+            .print_event_raw(&self.name, Event::Skipped, self.indent, &msg);
+    }
+
     /// Write all lines from a reader as stderr output.
     pub fn pipe_stderr(&self, reader: impl BufRead) {
         for line in reader.lines() {
