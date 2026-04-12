@@ -590,9 +590,9 @@ fn module(input: &mut &str) -> ModalResult<Module> {
         }
         let stmt = alt((
             let_stmt.map(Statement::Let),
-            param_stmt.map(Statement::Param),
+            |input: &mut &str| param_stmt(doc.clone(), input).map(Statement::Param),
             |input: &mut &str| target_stmt(doc.clone(), input).map(Statement::Target),
-            output_stmt.map(Statement::Output),
+            |input: &mut &str| output_stmt(doc.clone(), input).map(Statement::Output),
             |input: &mut &str| block_stmt(doc.clone(), input).map(Statement::Block),
         ))
         .context(StrContext::Label("statement"))
@@ -616,7 +616,7 @@ fn let_stmt(input: &mut &str) -> ModalResult<Let> {
     Ok(Let { name, value })
 }
 
-fn param_stmt(input: &mut &str) -> ModalResult<Param> {
+fn param_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Param> {
     keyword("param").parse_next(input)?;
     let name = cut_err(ident_string)
         .context(StrContext::Label("param name"))
@@ -628,7 +628,7 @@ fn param_stmt(input: &mut &str) -> ModalResult<Param> {
         .context(StrContext::Label("param type"))
         .parse_next(input)?;
     let default = opt(preceded(lex('='), expr)).parse_next(input)?;
-    Ok(Param { name, typ: t, default })
+    Ok(Param { name, doc, typ: t, default })
 }
 
 fn target_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Target> {
@@ -660,7 +660,7 @@ fn dotted_ident(input: &mut &str) -> ModalResult<String> {
     }
 }
 
-fn output_stmt(input: &mut &str) -> ModalResult<Output> {
+fn output_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Output> {
     keyword("output").parse_next(input)?;
     let name = cut_err(ident_string)
         .context(StrContext::Label("output name"))
@@ -671,7 +671,7 @@ fn output_stmt(input: &mut &str) -> ModalResult<Output> {
     let value = cut_err(expr)
         .context(StrContext::Label("output value"))
         .parse_next(input)?;
-    Ok(Output { name, value })
+    Ok(Output { name, doc, value })
 }
 
 /// A field inside a block body, with optional trailing comma.

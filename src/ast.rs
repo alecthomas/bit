@@ -44,6 +44,7 @@ pub struct Let {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
+    pub doc: Option<String>,
     pub typ: Type,
     pub default: Option<Expr>,
 }
@@ -60,7 +61,49 @@ pub struct Target {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Output {
     pub name: String,
+    pub doc: Option<String>,
     pub value: Expr,
+}
+
+impl std::fmt::Display for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::Str(parts) => {
+                for part in parts {
+                    match part {
+                        StringPart::Literal(s) => write!(f, "{s}")?,
+                        StringPart::Interpolation(e) => write!(f, "${{{e}}}")?,
+                    }
+                }
+                Ok(())
+            }
+            Expr::Int(n) => write!(f, "{n}"),
+            Expr::Bool(b) => write!(f, "{b}"),
+            Expr::Null => write!(f, "null"),
+            Expr::List(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
+            Expr::Ref(parts) => write!(f, "{}", parts.join(".")),
+            Expr::Call(name, args) => {
+                write!(f, "{name}(")?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{arg}")?;
+                }
+                write!(f, ")")
+            }
+            _ => write!(f, "..."),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,6 +231,7 @@ mod tests {
             statements: vec![
                 Statement::Param(Param {
                     name: "env".into(),
+                    doc: None,
                     typ: Type::String,
                     default: None,
                 }),

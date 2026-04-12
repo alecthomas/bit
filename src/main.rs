@@ -51,8 +51,9 @@ enum Command {
     },
     /// Run test blocks and their dependencies
     Test,
-    /// List top-level targets
-    List,
+    /// Show parameters, targets, and outputs
+    #[command(alias = "list")]
+    Info,
     /// Dump evaluated inputs and stored outputs
     Dump {
         /// Target to dump (default: all blocks)
@@ -95,7 +96,7 @@ fn parse_params(raw: &[String]) -> Map {
 fn load_module(
     registry: &ProviderRegistry,
     params: &Map,
-) -> (bit::dag::Dag, loader::BaseScope, Box<dyn bit::state::StateStore>) {
+) -> (bit::ast::Module, bit::dag::Dag, loader::BaseScope, Box<dyn bit::state::StateStore>) {
     let root = Path::new(".");
     let store = Box::new(state::default_store(root));
     let source = match fs::read_to_string("BUILD.bit") {
@@ -119,7 +120,7 @@ fn load_module(
             process::exit(1);
         }
     };
-    (dag, base, store)
+    (module, dag, base, store)
 }
 
 fn main() {
@@ -133,7 +134,7 @@ fn main() {
     let command = cli.command.unwrap_or(Command::Apply { target: None });
     match command {
         Command::Plan { target } => {
-            let (mut dag, base, store) = load_module(&registry, &params);
+            let (_module, mut dag, base, store) = load_module(&registry, &params);
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
@@ -146,7 +147,7 @@ fn main() {
             }
         }
         Command::Apply { target } => {
-            let (mut dag, base, store) = load_module(&registry, &params);
+            let (_module, mut dag, base, store) = load_module(&registry, &params);
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
@@ -159,7 +160,7 @@ fn main() {
             }
         }
         Command::Test => {
-            let (mut dag, base, store) = load_module(&registry, &params);
+            let (_module, mut dag, base, store) = load_module(&registry, &params);
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
@@ -172,7 +173,7 @@ fn main() {
             }
         }
         Command::Destroy { target } => {
-            let (mut dag, _base, store) = load_module(&registry, &params);
+            let (_module, mut dag, _base, store) = load_module(&registry, &params);
             let names = dag.block_names();
             let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let output = Output::new(&name_refs);
@@ -185,7 +186,7 @@ fn main() {
             }
         }
         Command::Dump { target } => {
-            let (mut dag, base, _store) = load_module(&registry, &params);
+            let (_module, mut dag, base, _store) = load_module(&registry, &params);
             match engine::dump(&mut dag, &base, target.as_deref()) {
                 Ok(()) => {}
                 Err(e) => {
@@ -194,21 +195,79 @@ fn main() {
                 }
             }
         }
-        Command::List => {
-            let (dag, _base, _store) = load_module(&registry, &params);
-            let targets = dag.targets();
-            if targets.is_empty() {
-                println!("No targets defined.");
-            } else {
-                let mut names: Vec<_> = targets.keys().collect();
-                names.sort();
-                for name in names {
-                    let target = &targets[name];
-                    match &target.doc {
-                        Some(doc) => println!("  {} — {}", name.bold(), doc.dim()),
-                        None => println!("  {}", name.bold()),
+        Command::Info => {
+            use bit::ast::Statement;
+
+            let source = match fs::read_to_string("BUILD.bit") {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{} cannot read BUILD.bit: {e}", "error:".red().bold());
+                    process::exit(1);
+                }
+            };
+            let module = match bit::parser::parse(&source, "BUILD.bit") {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("{} {e}", "error:".red().bold());
+                    process::exit(1);
+                }
+            };
+
+            let module_params: Vec<_> = module.statements.iter().filter_map(|s| match s {
+                Statement::Param(p) => Some(p),
+                _ => None,
+            }).collect();
+            let targets: Vec<_> = module.statements.iter().filter_map(|s| match s {
+                Statement::Target(t) => Some(t),
+                _ => None,
+            }).collect();
+            let outputs: Vec<_> = module.statements.iter().filter_map(|s| match s {
+                Statement::Output(o) => Some(o),
+                _ => None,
+            }).collect();
+
+            if !module_params.is_empty() {
+                println!("{}:", "Parameters".bold());
+                for p in &module_params {
+                    let typ = format!("{:?}", p.typ).to_lowercase();
+                    let default = p
+                        .default
+                        .as_ref()
+                        .map(|d| format!(" = {d}"))
+                        .unwrap_or_default();
+                    let sig = format!("{typ}{default}");
+                    match &p.doc {
+                        Some(doc) => println!("  {} ({}) — {}", p.name.bold(), sig.dim(), doc.dim()),
+                        None => println!("  {} ({})", p.name.bold(), sig.dim()),
                     }
                 }
+                println!();
+            }
+
+            if !targets.is_empty() {
+                println!("{}:", "Targets".bold());
+                for t in &targets {
+                    match &t.doc {
+                        Some(doc) => println!("  {} — {}", t.name.bold(), doc.dim()),
+                        None => println!("  {}", t.name.bold()),
+                    }
+                }
+                println!();
+            }
+
+            if !outputs.is_empty() {
+                println!("{}:", "Outputs".bold());
+                for o in &outputs {
+                    match &o.doc {
+                        Some(doc) => println!("  {} — {}", o.name.bold(), doc.dim()),
+                        None => println!("  {}", o.name.bold()),
+                    }
+                }
+                println!();
+            }
+
+            if module_params.is_empty() && targets.is_empty() && outputs.is_empty() {
+                println!("No parameters, targets, or outputs defined.");
             }
         }
     }
