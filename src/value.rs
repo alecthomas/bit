@@ -115,6 +115,41 @@ pub enum Type {
     Secret,
 }
 
+/// Check that a value matches a declared type, recursively.
+///
+/// Returns a human-readable error message on mismatch.
+pub fn validate_type(value: &Value, typ: &Type) -> Result<(), String> {
+    match (typ, value) {
+        (Type::String | Type::Path | Type::Secret, Value::Str(_)) => Ok(()),
+        (Type::Number, Value::Number(_)) => Ok(()),
+        (Type::Bool, Value::Bool(_)) => Ok(()),
+        (Type::List(inner), Value::List(items)) => {
+            for (i, item) in items.iter().enumerate() {
+                validate_type(item, inner).map_err(|e| format!("[{i}]: {e}"))?;
+            }
+            Ok(())
+        }
+        (Type::Map(val_type), Value::Map(map)) => {
+            for (k, v) in map {
+                validate_type(v, val_type).map_err(|e| format!(".{k}: {e}"))?;
+            }
+            Ok(())
+        }
+        _ => Err(format!("expected {typ}, got {}", type_name(value))),
+    }
+}
+
+fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::Str(_) => "string",
+        Value::List(_) => "list",
+        Value::Map(_) => "map",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +198,71 @@ mod tests {
         assert!(Value::Number(1.into()).as_list().is_none());
         assert!(Value::Number(1.into()).as_map().is_none());
         assert!(!Value::Number(1.into()).is_null());
+    }
+
+    #[test]
+    fn validate_scalar_types() {
+        assert!(validate_type(&Value::Str("hi".into()), &Type::String).is_ok());
+        assert!(validate_type(&Value::Number(1.into()), &Type::Number).is_ok());
+        assert!(validate_type(&Value::Bool(true), &Type::Bool).is_ok());
+        assert!(validate_type(&Value::Str("/tmp".into()), &Type::Path).is_ok());
+        assert!(validate_type(&Value::Str("s3cr3t".into()), &Type::Secret).is_ok());
+    }
+
+    #[test]
+    fn validate_scalar_mismatch() {
+        assert!(validate_type(&Value::Str("hi".into()), &Type::Number).is_err());
+        assert!(validate_type(&Value::Number(1.into()), &Type::String).is_err());
+        assert!(validate_type(&Value::Bool(true), &Type::Number).is_err());
+    }
+
+    #[test]
+    fn validate_list() {
+        let val = Value::List(vec![Value::Str("a".into()), Value::Str("b".into())]);
+        assert!(validate_type(&val, &Type::List(Box::new(Type::String))).is_ok());
+    }
+
+    #[test]
+    fn validate_list_element_mismatch() {
+        let val = Value::List(vec![Value::Str("a".into()), Value::Number(1.into())]);
+        let err = validate_type(&val, &Type::List(Box::new(Type::String))).unwrap_err();
+        assert!(err.contains("[1]"), "error should reference index: {err}");
+    }
+
+    #[test]
+    fn validate_map() {
+        let mut m = Map::new();
+        m.insert("a".into(), Value::Number(1.into()));
+        m.insert("b".into(), Value::Number(2.into()));
+        assert!(validate_type(&Value::Map(m), &Type::Map(Box::new(Type::Number))).is_ok());
+    }
+
+    #[test]
+    fn validate_map_value_mismatch() {
+        let mut m = Map::new();
+        m.insert("a".into(), Value::Number(1.into()));
+        m.insert("b".into(), Value::Str("oops".into()));
+        let err = validate_type(&Value::Map(m), &Type::Map(Box::new(Type::Number))).unwrap_err();
+        assert!(err.contains(".b"), "error should reference key: {err}");
+    }
+
+    #[test]
+    fn validate_nested() {
+        let val = Value::List(vec![
+            Value::List(vec![Value::Number(1.into())]),
+            Value::List(vec![Value::Number(2.into())]),
+        ]);
+        let typ = Type::List(Box::new(Type::List(Box::new(Type::Number))));
+        assert!(validate_type(&val, &typ).is_ok());
+    }
+
+    #[test]
+    fn validate_empty_list_ok() {
+        assert!(validate_type(&Value::List(vec![]), &Type::List(Box::new(Type::String))).is_ok());
+    }
+
+    #[test]
+    fn validate_empty_map_ok() {
+        assert!(validate_type(&Value::Map(Map::new()), &Type::Map(Box::new(Type::String))).is_ok());
     }
 }

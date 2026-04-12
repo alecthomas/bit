@@ -3,7 +3,7 @@ use crate::dag::{Dag, DagError, DagNode, collect_after, collect_block_refs, coll
 use crate::expr::{self, EvalError, Scope};
 use crate::provider::ProviderRegistry;
 use crate::state::{StateError, StateStore};
-use crate::value::{Map, Value};
+use crate::value::{Map, Value, validate_type};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -17,6 +17,8 @@ pub enum LoadError {
     MissingParam(String),
     #[error("unknown provider/resource: {0}.{1}")]
     UnknownResource(String, String),
+    #[error("{name}: {message}")]
+    TypeError { name: String, message: String },
 }
 
 /// The base scope of evaluated params and let bindings, shared with the engine
@@ -55,10 +57,20 @@ pub fn load(
                 } else {
                     return Err(LoadError::MissingParam(p.name.clone()));
                 };
+                validate_type(&value, &p.typ).map_err(|message| LoadError::TypeError {
+                    name: p.name.clone(),
+                    message,
+                })?;
                 scope.set(&p.name, value);
             }
             Statement::Let(l) => {
                 let value = expr::eval(&l.value, &scope)?;
+                if let Some(typ) = &l.typ {
+                    validate_type(&value, typ).map_err(|message| LoadError::TypeError {
+                        name: l.name.clone(),
+                        message,
+                    })?;
+                }
                 scope.set(&l.name, value);
             }
             Statement::Block(b) => {
