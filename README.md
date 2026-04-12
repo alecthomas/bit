@@ -9,7 +9,7 @@ Like Terraform, bit tracks the state of each block between runs. It detects drif
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/alecthomas/bit/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/alecthomas/bit/refs/heads/master/install.sh | sh
 ```
 
 Or from source:
