@@ -1,3 +1,5 @@
+use bigdecimal::BigDecimal;
+
 use crate::value::Type;
 
 /// A parsed `.bit` file.
@@ -33,10 +35,11 @@ pub struct Field {
     pub value: Expr,
 }
 
-/// `let name = expr`
+/// `let name = expr` or `let name : type = expr`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Let {
     pub name: String,
+    pub typ: Option<Type>,
     pub value: Expr,
 }
 
@@ -77,7 +80,7 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::Int(n) => write!(f, "{n}"),
+            Expr::Number(n) => write!(f, "{n}"),
             Expr::Bool(b) => write!(f, "{b}"),
             Expr::Null => write!(f, "null"),
             Expr::List(items) => {
@@ -110,7 +113,7 @@ impl std::fmt::Display for Expr {
 pub enum Expr {
     /// String literal, possibly with interpolated expressions.
     Str(Vec<StringPart>),
-    Int(i64),
+    Number(BigDecimal),
     Bool(bool),
     Null,
     /// `[a, b, c]`
@@ -214,8 +217,8 @@ mod tests {
                 BinOp::Eq,
                 Box::new(Expr::Str(vec![StringPart::Literal("prod".into())])),
             )),
-            Box::new(Expr::Int(3)),
-            Box::new(Expr::Int(1)),
+            Box::new(Expr::Number(3.into())),
+            Box::new(Expr::Number(1.into())),
         );
         match &expr {
             Expr::If(cond, _, _) => {
@@ -237,6 +240,7 @@ mod tests {
                 }),
                 Statement::Let(Let {
                     name: "sha".into(),
+                    typ: None,
                     value: Expr::Call(
                         "exec".into(),
                         vec![Expr::Str(vec![StringPart::Literal("git rev-parse HEAD".into())])],

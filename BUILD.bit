@@ -1,3 +1,4 @@
+param foo : number = 1
 let inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
 
 debug = exec {

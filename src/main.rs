@@ -83,8 +83,8 @@ fn parse_params(raw: &[String]) -> Map {
             bit::value::Value::Bool(true)
         } else if val == "false" {
             bit::value::Value::Bool(false)
-        } else if let Ok(n) = val.parse::<i64>() {
-            bit::value::Value::Int(n)
+        } else if let Ok(n) = val.parse::<bigdecimal::BigDecimal>() {
+            bit::value::Value::Number(n)
         } else {
             bit::value::Value::Str(val.to_owned())
         };
@@ -96,7 +96,12 @@ fn parse_params(raw: &[String]) -> Map {
 fn load_module(
     registry: &ProviderRegistry,
     params: &Map,
-) -> (bit::ast::Module, bit::dag::Dag, loader::BaseScope, Box<dyn bit::state::StateStore>) {
+) -> (
+    bit::ast::Module,
+    bit::dag::Dag,
+    loader::BaseScope,
+    Box<dyn bit::state::StateStore>,
+) {
     let root = Path::new(".");
     let store = Box::new(state::default_store(root));
     let source = match fs::read_to_string("BUILD.bit") {
@@ -213,28 +218,36 @@ fn main() {
                 }
             };
 
-            let module_params: Vec<_> = module.statements.iter().filter_map(|s| match s {
-                Statement::Param(p) => Some(p),
-                _ => None,
-            }).collect();
-            let targets: Vec<_> = module.statements.iter().filter_map(|s| match s {
-                Statement::Target(t) => Some(t),
-                _ => None,
-            }).collect();
-            let outputs: Vec<_> = module.statements.iter().filter_map(|s| match s {
-                Statement::Output(o) => Some(o),
-                _ => None,
-            }).collect();
+            let module_params: Vec<_> = module
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    Statement::Param(p) => Some(p),
+                    _ => None,
+                })
+                .collect();
+            let targets: Vec<_> = module
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    Statement::Target(t) => Some(t),
+                    _ => None,
+                })
+                .collect();
+            let outputs: Vec<_> = module
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    Statement::Output(o) => Some(o),
+                    _ => None,
+                })
+                .collect();
 
             if !module_params.is_empty() {
                 println!("{}:", "Parameters".bold());
                 for p in &module_params {
-                    let typ = format!("{:?}", p.typ).to_lowercase();
-                    let default = p
-                        .default
-                        .as_ref()
-                        .map(|d| format!(" = {d}"))
-                        .unwrap_or_default();
+                    let typ = p.typ.to_string();
+                    let default = p.default.as_ref().map(|d| format!(" = {d}")).unwrap_or_default();
                     let sig = format!("{typ}{default}");
                     match &p.doc {
                         Some(doc) => println!("  {} ({}) — {}", p.name.bold(), sig.dim(), doc.dim()),

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use bigdecimal::BigDecimal;
 use serde::{Deserialize, Serialize};
 
 pub type Map = HashMap<String, Value>;
@@ -10,7 +11,7 @@ pub type Map = HashMap<String, Value>;
 pub enum Value {
     Null,
     Bool(bool),
-    Int(i64),
+    Number(BigDecimal),
     Str(String),
     List(Vec<Value>),
     Map(Map),
@@ -20,7 +21,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Str(s) => write!(f, "{s}"),
-            Value::Int(n) => write!(f, "{n}"),
+            Value::Number(n) => write!(f, "{n}"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::List(items) => {
                 write!(f, "[")?;
@@ -55,9 +56,9 @@ impl Value {
         }
     }
 
-    pub fn as_int(&self) -> Option<i64> {
+    pub fn as_number(&self) -> Option<&BigDecimal> {
         match self {
-            Value::Int(n) => Some(*n),
+            Value::Number(n) => Some(n),
             _ => None,
         }
     }
@@ -88,14 +89,28 @@ impl Value {
     }
 }
 
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::String => write!(f, "string"),
+            Type::Number => write!(f, "number"),
+            Type::Bool => write!(f, "bool"),
+            Type::List(inner) => write!(f, "[{inner}]"),
+            Type::Map(inner) => write!(f, "{{string = {inner}}}"),
+            Type::Path => write!(f, "path"),
+            Type::Secret => write!(f, "secret"),
+        }
+    }
+}
+
 /// Types used in the .bit language for param declarations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     String,
-    Int,
+    Number,
     Bool,
     List(Box<Type>),
-    Map,
+    Map(Box<Type>),
     Path,
     Secret,
 }
@@ -110,8 +125,8 @@ mod tests {
     }
 
     #[test]
-    fn display_int() {
-        assert_eq!(Value::Int(42).to_string(), "42");
+    fn display_number() {
+        assert_eq!(Value::Number(42.into()).to_string(), "42");
     }
 
     #[test]
@@ -121,7 +136,7 @@ mod tests {
 
     #[test]
     fn display_list() {
-        let list = Value::List(vec![Value::Int(1), Value::Int(2)]);
+        let list = Value::List(vec![Value::Number(1.into()), Value::Number(2.into())]);
         assert_eq!(list.to_string(), "[1, 2]");
     }
 
@@ -133,7 +148,7 @@ mod tests {
     #[test]
     fn accessors() {
         assert_eq!(Value::Str("hi".into()).as_str(), Some("hi"));
-        assert_eq!(Value::Int(5).as_int(), Some(5));
+        assert_eq!(Value::Number(5.into()).as_number(), Some(&BigDecimal::from(5)));
         assert_eq!(Value::Bool(false).as_bool(), Some(false));
         assert!(Value::List(vec![]).as_list().is_some());
         assert!(Value::Map(Map::new()).as_map().is_some());
@@ -142,11 +157,11 @@ mod tests {
 
     #[test]
     fn accessor_wrong_type_returns_none() {
-        assert_eq!(Value::Int(1).as_str(), None);
-        assert_eq!(Value::Str("x".into()).as_int(), None);
+        assert_eq!(Value::Number(1.into()).as_str(), None);
+        assert_eq!(Value::Str("x".into()).as_number(), None);
         assert_eq!(Value::Null.as_bool(), None);
-        assert!(Value::Int(1).as_list().is_none());
-        assert!(Value::Int(1).as_map().is_none());
-        assert!(!Value::Int(1).is_null());
+        assert!(Value::Number(1.into()).as_list().is_none());
+        assert!(Value::Number(1.into()).as_map().is_none());
+        assert!(!Value::Number(1.into()).is_null());
     }
 }

@@ -71,7 +71,7 @@ pub fn eval_lenient(expr: &Expr, scope: &Scope) -> Result<Value, EvalError> {
 fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalError> {
     match expr {
         Expr::Str(parts) => eval_string(parts, scope, mode),
-        Expr::Int(n) => Ok(Value::Int(*n)),
+        Expr::Number(n) => Ok(Value::Number(n.clone())),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Null => Ok(Value::Null),
         Expr::List(items) => {
@@ -336,7 +336,10 @@ mod tests {
     #[test]
     fn eval_int() {
         let scope = Scope::new();
-        assert_eq!(eval(&Expr::Int(42), &scope).unwrap(), Value::Int(42));
+        assert_eq!(
+            eval(&Expr::Number(42.into()), &scope).unwrap(),
+            Value::Number(42.into())
+        );
     }
 
     #[test]
@@ -372,8 +375,11 @@ mod tests {
     #[test]
     fn eval_variable_ref() {
         let mut scope = Scope::new();
-        scope.set("x", Value::Int(10));
-        assert_eq!(eval(&Expr::Ref(vec!["x".into()]), &scope).unwrap(), Value::Int(10));
+        scope.set("x", Value::Number(10.into()));
+        assert_eq!(
+            eval(&Expr::Ref(vec!["x".into()]), &scope).unwrap(),
+            Value::Number(10.into())
+        );
     }
 
     #[test]
@@ -426,10 +432,10 @@ mod tests {
     #[test]
     fn eval_list() {
         let scope = Scope::new();
-        let expr = Expr::List(vec![Expr::Int(1), Expr::Int(2)]);
+        let expr = Expr::List(vec![Expr::Number(1.into()), Expr::Number(2.into())]);
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![Value::Int(1), Value::Int(2)])
+            Value::List(vec![Value::Number(1.into()), Value::Number(2.into())])
         );
     }
 
@@ -438,11 +444,11 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Map(vec![Field {
             name: "a".into(),
-            value: Expr::Int(1),
+            value: Expr::Number(1.into()),
         }]);
         let result = eval(&expr, &scope).unwrap();
         match result {
-            Value::Map(m) => assert_eq!(m.get("a"), Some(&Value::Int(1))),
+            Value::Map(m) => assert_eq!(m.get("a"), Some(&Value::Number(1.into()))),
             _ => panic!("expected Map"),
         }
     }
@@ -452,10 +458,10 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::If(
             Box::new(Expr::Bool(true)),
-            Box::new(Expr::Int(1)),
-            Box::new(Expr::Int(2)),
+            Box::new(Expr::Number(1.into())),
+            Box::new(Expr::Number(2.into())),
         );
-        assert_eq!(eval(&expr, &scope).unwrap(), Value::Int(1));
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Number(1.into()));
     }
 
     #[test]
@@ -463,23 +469,31 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::If(
             Box::new(Expr::Bool(false)),
-            Box::new(Expr::Int(1)),
-            Box::new(Expr::Int(2)),
+            Box::new(Expr::Number(1.into())),
+            Box::new(Expr::Number(2.into())),
         );
-        assert_eq!(eval(&expr, &scope).unwrap(), Value::Int(2));
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Number(2.into()));
     }
 
     #[test]
     fn eval_eq() {
         let scope = Scope::new();
-        let expr = Expr::BinOp(Box::new(Expr::Int(1)), BinOp::Eq, Box::new(Expr::Int(1)));
+        let expr = Expr::BinOp(
+            Box::new(Expr::Number(1.into())),
+            BinOp::Eq,
+            Box::new(Expr::Number(1.into())),
+        );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Bool(true));
     }
 
     #[test]
     fn eval_ne() {
         let scope = Scope::new();
-        let expr = Expr::BinOp(Box::new(Expr::Int(1)), BinOp::Ne, Box::new(Expr::Int(2)));
+        let expr = Expr::BinOp(
+            Box::new(Expr::Number(1.into())),
+            BinOp::Ne,
+            Box::new(Expr::Number(2.into())),
+        );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Bool(true));
     }
 
@@ -487,12 +501,12 @@ mod tests {
     fn eval_list_add() {
         let scope = Scope::new();
         let expr = Expr::Add(
-            Box::new(Expr::List(vec![Expr::Int(1)])),
-            Box::new(Expr::List(vec![Expr::Int(2)])),
+            Box::new(Expr::List(vec![Expr::Number(1.into())])),
+            Box::new(Expr::List(vec![Expr::Number(2.into())])),
         );
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![Value::Int(1), Value::Int(2)])
+            Value::List(vec![Value::Number(1.into()), Value::Number(2.into())])
         );
     }
 

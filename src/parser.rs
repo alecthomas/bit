@@ -163,18 +163,37 @@ fn keyword<'i>(kw: &'static str) -> impl FnMut(&mut &'i str) -> ModalResult<()> 
 // ── Types ──
 
 fn typ(input: &mut &str) -> ModalResult<Type> {
+    alt((typ_list, typ_map, typ_scalar))
+        .context(StrContext::Label("type"))
+        .parse_next(input)
+}
+
+/// `[type]`
+fn typ_list(input: &mut &str) -> ModalResult<Type> {
+    let inner = delimited(lex('['), cut_err(typ), cut_err(lex(']'))).parse_next(input)?;
+    Ok(Type::List(Box::new(inner)))
+}
+
+/// `{string: type}`
+fn typ_map(input: &mut &str) -> ModalResult<Type> {
+    lex('{').parse_next(input)?;
+    cut_err(keyword("string")).parse_next(input)?;
+    cut_err(lex('=')).parse_next(input)?;
+    let inner = cut_err(typ).parse_next(input)?;
+    cut_err(lex('}')).parse_next(input)?;
+    Ok(Type::Map(Box::new(inner)))
+}
+
+fn typ_scalar(input: &mut &str) -> ModalResult<Type> {
     lex(ident)
         .verify_map(|s| match s {
             "string" => Some(Type::String),
-            "int" => Some(Type::Int),
+            "number" => Some(Type::Number),
             "bool" => Some(Type::Bool),
-            "list" => Some(Type::List(Box::new(Type::String))),
-            "map" => Some(Type::Map),
             "path" => Some(Type::Path),
             "secret" => Some(Type::Secret),
             _ => None,
         })
-        .context(StrContext::Label("type"))
         .parse_next(input)
 }
 
@@ -253,7 +272,7 @@ fn primary(input: &mut &str) -> ModalResult<Expr> {
     alt((
         string_expr,
         heredoc_expr,
-        int_expr,
+        number_expr,
         bool_expr,
         null_expr,
         list_expr,
@@ -264,11 +283,19 @@ fn primary(input: &mut &str) -> ModalResult<Expr> {
     .parse_next(input)
 }
 
-fn int_expr(input: &mut &str) -> ModalResult<Expr> {
-    lex(take_while(1.., |c: char| c.is_ascii_digit()))
-        .parse_to::<i64>()
-        .map(Expr::Int)
-        .parse_next(input)
+fn number_expr(input: &mut &str) -> ModalResult<Expr> {
+    use bigdecimal::BigDecimal;
+    use std::str::FromStr;
+
+    let digits = lex(take_while(1.., |c: char| c.is_ascii_digit())).parse_next(input)?;
+    // Optional decimal part.
+    let frac = opt(('.', take_while(1.., |c: char| c.is_ascii_digit()))).parse_next(input)?;
+    let s = match frac {
+        Some((_, f)) => format!("{digits}.{f}"),
+        None => digits.to_owned(),
+    };
+    let n = BigDecimal::from_str(&s).map_err(|_| ErrMode::Backtrack(ContextError::new()))?;
+    Ok(Expr::Number(n))
 }
 
 fn bool_expr(input: &mut &str) -> ModalResult<Expr> {
@@ -303,9 +330,21 @@ fn list_expr(input: &mut &str) -> ModalResult<Expr> {
 }
 
 fn map_expr(input: &mut &str) -> ModalResult<Expr> {
-    delimited(lex('{'), separated(0.., field, lex(',')), lex('}'))
+    delimited(lex('{'), separated(0.., map_entry, lex(',')), lex('}'))
         .map(Expr::Map)
         .parse_next(input)
+}
+
+/// `"key" = value` or `key = value`
+fn map_entry(input: &mut &str) -> ModalResult<Field> {
+    let name = alt((lex(plain_string), ident_string)).parse_next(input)?;
+    cut_err(lex('='))
+        .context(StrContext::Label("'=' in map entry"))
+        .parse_next(input)?;
+    let value = cut_err(expr)
+        .context(StrContext::Label("map entry value"))
+        .parse_next(input)?;
+    Ok(Field { name, value })
 }
 
 fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
@@ -339,6 +378,18 @@ fn arg_list(input: &mut &str) -> ModalResult<Vec<Expr>> {
 }
 
 // ── String Parsing ──
+
+/// Parse a plain double-quoted string with no interpolation, returning just the content.
+fn plain_string(input: &mut &str) -> ModalResult<String> {
+    '"'.parse_next(input)?;
+    let content: String = take_while(0.., |c: char| c != '"' && c != '\n')
+        .parse_next(input)?
+        .to_owned();
+    cut_err('"')
+        .context(StrContext::Label("closing '\"'"))
+        .parse_next(input)?;
+    Ok(content)
+}
 
 fn string_expr(input: &mut &str) -> ModalResult<Expr> {
     '"'.parse_next(input)?;
@@ -607,13 +658,14 @@ fn let_stmt(input: &mut &str) -> ModalResult<Let> {
     let name = cut_err(ident_string)
         .context(StrContext::Label("let binding name"))
         .parse_next(input)?;
+    let typ = opt(preceded(lex(':'), typ)).parse_next(input)?;
     cut_err(lex('='))
         .context(StrContext::Label("'=' in let"))
         .parse_next(input)?;
     let value = cut_err(expr)
         .context(StrContext::Label("let value"))
         .parse_next(input)?;
-    Ok(Let { name, value })
+    Ok(Let { name, typ, value })
 }
 
 fn param_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Param> {
@@ -621,14 +673,52 @@ fn param_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Param> {
     let name = cut_err(ident_string)
         .context(StrContext::Label("param name"))
         .parse_next(input)?;
-    cut_err(lex(':'))
-        .context(StrContext::Label("':' after param name"))
-        .parse_next(input)?;
-    let t = cut_err(typ)
-        .context(StrContext::Label("param type"))
-        .parse_next(input)?;
+
+    // Type annotation is optional if a default value is provided.
+    let explicit_type = opt(preceded(lex(':'), typ)).parse_next(input)?;
     let default = opt(preceded(lex('='), expr)).parse_next(input)?;
-    Ok(Param { name, doc, typ: t, default })
+
+    let t = match (explicit_type, &default) {
+        (Some(t), _) => t,
+        (None, Some(d)) => match infer_type(d) {
+            Some(t) => t,
+            None => {
+                return cut_err(winnow::combinator::fail::<_, Param, _>)
+                    .context(StrContext::Label("cannot infer type for param; add explicit : type"))
+                    .parse_next(input);
+            }
+        },
+        (None, None) => {
+            return cut_err(winnow::combinator::fail::<_, Param, _>)
+                .context(StrContext::Label("param requires a type or default value"))
+                .parse_next(input);
+        }
+    };
+
+    Ok(Param {
+        name,
+        doc,
+        typ: t,
+        default,
+    })
+}
+
+/// Infer the type of a parameter from its default expression.
+fn infer_type(expr: &Expr) -> Option<Type> {
+    match expr {
+        Expr::Str(_) => Some(Type::String),
+        Expr::Number(_) => Some(Type::Number),
+        Expr::Bool(_) => Some(Type::Bool),
+        Expr::List(items) => {
+            let elem = infer_type(items.first()?)?;
+            Some(Type::List(Box::new(elem)))
+        }
+        Expr::Map(fields) => {
+            let val_type = infer_type(&fields.first()?.value)?;
+            Some(Type::Map(Box::new(val_type)))
+        }
+        _ => None,
+    }
 }
 
 fn target_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Target> {
@@ -782,7 +872,7 @@ mod tests {
     fn parse_int() {
         let result = parse("let x = 42", "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Let(l) => assert_eq!(l.value, Expr::Int(42)),
+            Statement::Let(l) => assert_eq!(l.value, Expr::Number(42.into())),
             _ => panic!("expected Let"),
         }
     }
@@ -879,8 +969,8 @@ mod tests {
             Statement::Let(l) => match &l.value {
                 Expr::If(cond, then_val, else_val) => {
                     assert!(matches!(cond.as_ref(), Expr::BinOp(_, BinOp::Eq, _)));
-                    assert_eq!(**then_val, Expr::Int(3));
-                    assert_eq!(**else_val, Expr::Int(1));
+                    assert_eq!(**then_val, Expr::Number(3.into()));
+                    assert_eq!(**else_val, Expr::Number(1.into()));
                 }
                 _ => panic!("expected If"),
             },
@@ -928,12 +1018,99 @@ mod tests {
 
     #[test]
     fn parse_param_with_default() {
-        let result = parse("param replicas : int = 1", "<test>").unwrap();
+        let result = parse("param replicas : number = 1", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Param(p) => {
                 assert_eq!(p.name, "replicas");
-                assert_eq!(p.typ, Type::Int);
-                assert_eq!(p.default, Some(Expr::Int(1)));
+                assert_eq!(p.typ, Type::Number);
+                assert_eq!(p.default, Some(Expr::Number(1.into())));
+            }
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_param_inferred_type() {
+        let result = parse("param verbose = false", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => {
+                assert_eq!(p.name, "verbose");
+                assert_eq!(p.typ, Type::Bool);
+                assert_eq!(p.default, Some(Expr::Bool(false)));
+            }
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_param_inferred_list() {
+        let result = parse(r#"param tags = ["a", "b"]"#, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => {
+                assert_eq!(p.typ, Type::List(Box::new(Type::String)));
+            }
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_param_inferred_int_list() {
+        let result = parse("param ids = [1, 2]", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => {
+                assert_eq!(p.typ, Type::List(Box::new(Type::Number)));
+            }
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_param_empty_list_fails() {
+        assert!(parse("param items = []", "<test>").is_err());
+    }
+
+    #[test]
+    fn parse_param_explicit_list_type() {
+        let result = parse("param tags : [string]", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => {
+                assert_eq!(p.typ, Type::List(Box::new(Type::String)));
+                assert_eq!(p.default, None);
+            }
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_param_explicit_map_type() {
+        let result = parse("param config : {string = number}", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => {
+                assert_eq!(p.typ, Type::Map(Box::new(Type::Number)));
+                assert_eq!(p.default, None);
+            }
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_param_nested_list_type() {
+        let result = parse("param matrix : [[number]]", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => {
+                assert_eq!(p.typ, Type::List(Box::new(Type::List(Box::new(Type::Number)))));
+            }
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_param_inferred_string() {
+        let result = parse(r#"param name = "world""#, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => {
+                assert_eq!(p.name, "name");
+                assert_eq!(p.typ, Type::String);
             }
             _ => panic!("expected Param"),
         }
@@ -1067,7 +1244,7 @@ mod tests {
     fn parse_multistatement_module() {
         let input = concat!(
             "param environment : string\n",
-            "param replicas    : int = 1\n",
+            "param replicas    : number = 1\n",
             "\n",
             "let git_sha = exec(\"git rev-parse --short HEAD\") | trim\n",
             "\n",
