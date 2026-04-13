@@ -95,9 +95,16 @@ fn build_args(inputs: &ImageInputs) -> Vec<String> {
         "-f".into(),
         inputs.dockerfile.clone(),
     ];
-    if !inputs.platform.is_empty() {
+    if inputs.platform.len() > 1 {
         args.push("--platform".into());
         args.push(inputs.platform.join(","));
+        args.push("--push".into());
+    } else {
+        if inputs.platform.len() == 1 {
+            args.push("--platform".into());
+            args.push(inputs.platform[0].clone());
+        }
+        args.push("--load".into());
     }
     for (key, val) in &inputs.build_args {
         args.push("--build-arg".into());
@@ -204,6 +211,13 @@ impl Resource for ImageResource {
     }
 
     fn plan(&self, inputs: &ImageInputs, prior_state: Option<&ImageState>) -> Result<PlanResult, BoxError> {
+        if inputs.platform.len() > 1 && !inputs.tag.contains('/') {
+            return Err(format!(
+                "multi-platform builds require a registry-qualified tag (e.g. \"registry.example.com/app:latest\"), got \"{}\"",
+                inputs.tag
+            ).into());
+        }
+
         let args = build_args(inputs);
         let desc = format!("docker {}", args.join(" "));
 
