@@ -361,6 +361,30 @@ fn plan_action_to_event(action: &PlanAction) -> Event {
     }
 }
 
+/// Validate that active blocks don't reference missing (unresolved) params.
+fn validate_active_params(dag: &Dag, order: &[String], base: &BaseScope) -> Result<(), EngineError> {
+    if base.missing_params.is_empty() {
+        return Ok(());
+    }
+    for name in order {
+        let Some(node) = dag.get_node(name) else {
+            continue;
+        };
+        for r in dag::collect_all_refs(&node.fields) {
+            if base.missing_params.contains(&r) {
+                return Err(EngineError::Eval {
+                    pos: node.pos.clone(),
+                    block: name.clone(),
+                    source: crate::expr::EvalError::UndefinedVar(format!(
+                        "missing required param '{r}' (use -p {r}=VALUE)"
+                    )),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the block execution order for a given target.
 /// - `None` → use `default` target if defined, else all blocks
 /// - `Some("...")` → all blocks
@@ -388,6 +412,7 @@ pub fn plan(
     target: Option<&str>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = resolve_order(dag, target)?;
+    validate_active_params(dag, &order, base)?;
 
     let mut scope = base.scope.clone();
     let mut plans = Vec::new();
@@ -485,6 +510,7 @@ pub fn apply(
     jobs: usize,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = resolve_order(dag, target)?;
+    validate_active_params(dag, &order, base)?;
     if jobs <= 1 {
         apply_order(dag, base, store, output, &order)
     } else {

@@ -53,6 +53,9 @@ pub enum LoadError {
 /// for deferred field evaluation.
 pub struct BaseScope {
     pub scope: Scope,
+    /// Params that were declared without defaults and not provided via -p.
+    /// Active blocks referencing these will produce errors at execution time.
+    pub missing_params: std::collections::HashSet<String>,
 }
 
 /// Parse a module and build a fully wired DAG.
@@ -77,43 +80,53 @@ pub fn load(
     let mut block_names = Vec::new();
     let mut matrix_blocks: HashMap<String, Vec<String>> = HashMap::new();
     let mut deferred_matrix: Vec<crate::ast::Block> = Vec::new();
+    let mut missing_params: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for stmt in &module.statements {
         match stmt {
             Statement::Param(p) => {
                 let value = if let Some(v) = params.get(&p.name) {
-                    v.clone()
+                    Some(v.clone())
                 } else if let Some(default) = &p.default {
-                    expr::eval(default, &scope).map_err(|source| LoadError::Eval {
-                        pos: p.pos.clone(),
-                        source,
-                    })?
+                    match expr::eval(default, &scope) {
+                        Ok(v) => Some(v),
+                        Err(_) => {
+                            // Default depends on a missing param — defer
+                            missing_params.insert(p.name.clone());
+                            None
+                        }
+                    }
                 } else {
-                    return Err(LoadError::MissingParam {
+                    // Required param not provided — defer, don't error
+                    missing_params.insert(p.name.clone());
+                    None
+                };
+                if let Some(value) = value {
+                    validate_type(&value, &p.typ).map_err(|message| LoadError::TypeError {
                         pos: p.pos.clone(),
                         name: p.name.clone(),
-                    });
-                };
-                validate_type(&value, &p.typ).map_err(|message| LoadError::TypeError {
-                    pos: p.pos.clone(),
-                    name: p.name.clone(),
-                    message,
-                })?;
-                scope.set(&p.name, value);
-            }
-            Statement::Let(l) => {
-                let value = expr::eval(&l.value, &scope).map_err(|source| LoadError::Eval {
-                    pos: l.pos.clone(),
-                    source,
-                })?;
-                if let Some(typ) = &l.typ {
-                    validate_type(&value, typ).map_err(|message| LoadError::TypeError {
-                        pos: l.pos.clone(),
-                        name: l.name.clone(),
                         message,
                     })?;
+                    scope.set(&p.name, value);
                 }
-                scope.set(&l.name, value);
+            }
+            Statement::Let(l) => {
+                match expr::eval(&l.value, &scope) {
+                    Ok(value) => {
+                        if let Some(typ) = &l.typ {
+                            validate_type(&value, typ).map_err(|message| LoadError::TypeError {
+                                pos: l.pos.clone(),
+                                name: l.name.clone(),
+                                message,
+                            })?;
+                        }
+                        scope.set(&l.name, value);
+                    }
+                    Err(_) => {
+                        // Let depends on a missing param — defer
+                        missing_params.insert(l.name.clone());
+                    }
+                }
             }
             Statement::Block(b) => {
                 if !b.matrix_keys.is_empty() {
@@ -236,7 +249,11 @@ pub fn load(
                 continue; // matrix blocks are rewritten, refs validated during expansion
             }
             for name in collect_all_refs(&b.fields) {
-                if scope.get(&name).is_none() && !dag.has_block(&name) && !matrix_blocks.contains_key(&name) {
+                if scope.get(&name).is_none()
+                    && !dag.has_block(&name)
+                    && !matrix_blocks.contains_key(&name)
+                    && !missing_params.contains(&name)
+                {
                     return Err(LoadError::UnknownBlock {
                         pos: b.pos.clone(),
                         name,
@@ -249,7 +266,7 @@ pub fn load(
 
     dag.validate()?;
 
-    Ok((dag, BaseScope { scope }))
+    Ok((dag, BaseScope { scope, missing_params }))
 }
 
 /// Resolve a dependency name to actual DAG node names.
@@ -346,11 +363,12 @@ server = exec {
     }
 
     #[test]
-    fn load_missing_param() {
+    fn load_missing_param_deferred() {
+        // Missing params don't error at load time — they're deferred
         let input = "param env : string\n";
         let module = parser::parse(input, "<test>").unwrap();
-        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new("."));
-        assert!(matches!(result, Err(LoadError::MissingParam { .. })));
+        let (_dag, base) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        assert!(base.missing_params.contains("env"));
     }
 
     #[test]
