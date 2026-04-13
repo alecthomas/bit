@@ -182,15 +182,21 @@ impl Resource for ImageResource {
     }
 
     fn plan(&self, inputs: &ImageInputs, prior_state: Option<&ImageState>) -> Result<PlanResult, BoxError> {
+        let platform_flag = if inputs.platform.is_empty() {
+            String::new()
+        } else {
+            format!(" --platform {}", inputs.platform.join(","))
+        };
+
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
                 action: PlanAction::Create,
-                description: format!("docker buildx build -t {}", inputs.tag),
+                description: format!("docker buildx build -t {}{platform_flag}", inputs.tag),
                 reason: None,
             });
         };
 
-        let desc = format!("docker buildx build -t {}", inputs.tag);
+        let desc = format!("docker buildx build -t {}{platform_flag}", inputs.tag);
 
         if prior.tag != inputs.tag {
             return Ok(PlanResult {
