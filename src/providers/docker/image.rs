@@ -22,6 +22,8 @@ pub struct ImageInputs {
     pub dockerfile: String,
     #[serde(default)]
     pub build_args: HashMap<String, String>,
+    #[serde(default, deserialize_with = "string_or_vec")]
+    pub platform: Vec<String>,
 }
 
 fn default_context() -> String {
@@ -30,6 +32,42 @@ fn default_context() -> String {
 
 fn default_dockerfile() -> String {
     "Dockerfile".into()
+}
+
+/// Deserialize a field that can be either a single string or a list of strings.
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrVec;
+
+    impl<'de> de::Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or list of strings")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(vec![v.to_owned()])
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+            let mut vec = Vec::new();
+            while let Some(s) = seq.next_element()? {
+                vec.push(s);
+            }
+            Ok(vec)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Vec<String>, E> {
+            Ok(Vec::new())
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +81,8 @@ pub struct ImageOutputs {
 pub struct ImageState {
     pub tag: String,
     pub image_id: String,
+    #[serde(default)]
+    pub platform: Vec<String>,
 }
 
 pub struct ImageResource;
@@ -93,6 +133,13 @@ impl Resource for ImageResource {
                     default: None,
                     description: Some("Docker build arguments".into()),
                 },
+                FieldSchema {
+                    name: "platform".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    default: None,
+                    description: Some("Target platform(s) (e.g. \"linux/amd64\")".into()),
+                },
             ],
             outputs: vec![
                 FieldSchema {
@@ -138,18 +185,26 @@ impl Resource for ImageResource {
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
                 action: PlanAction::Create,
-                description: format!("docker build -t {}", inputs.tag),
+                description: format!("docker buildx build -t {}", inputs.tag),
                 reason: None,
             });
         };
 
-        let desc = format!("docker build -t {}", inputs.tag);
+        let desc = format!("docker buildx build -t {}", inputs.tag);
 
         if prior.tag != inputs.tag {
             return Ok(PlanResult {
                 action: PlanAction::Update,
                 description: desc,
                 reason: Some("tag changed".into()),
+            });
+        }
+
+        if prior.platform != inputs.platform {
+            return Ok(PlanResult {
+                action: PlanAction::Update,
+                description: desc,
+                reason: Some("platform changed".into()),
             });
         }
 
@@ -183,7 +238,7 @@ impl Resource for ImageResource {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ImageState, ImageOutputs>, BoxError> {
         let mut cmd = Command::new("docker");
-        cmd.arg("build")
+        cmd.args(["buildx", "build"])
             .arg("-t")
             .arg(&inputs.tag)
             .arg("-f")
@@ -191,13 +246,19 @@ impl Resource for ImageResource {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        if !inputs.platform.is_empty() {
+            cmd.arg("--platform").arg(inputs.platform.join(","));
+        }
+
         for (key, val) in &inputs.build_args {
             cmd.arg("--build-arg").arg(format!("{key}={val}"));
         }
 
         cmd.arg(&inputs.context);
 
-        let mut child = cmd.spawn().map_err(|e| format!("failed to run docker build: {e}"))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to run docker buildx build: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -211,9 +272,9 @@ impl Resource for ImageResource {
             }
         });
 
-        let status = child.wait().map_err(|e| format!("docker build failed: {e}"))?;
+        let status = child.wait().map_err(|e| format!("docker buildx build failed: {e}"))?;
         if !status.success() {
-            return Err(format!("docker build exited with {status}").into());
+            return Err(format!("docker buildx build exited with {status}").into());
         }
 
         let digest_output = Command::new("docker")
@@ -227,6 +288,7 @@ impl Resource for ImageResource {
             state: Some(ImageState {
                 tag: inputs.tag.clone(),
                 image_id: image_id.clone(),
+                platform: inputs.platform.clone(),
             }),
             outputs: ImageOutputs {
                 image_ref: inputs.tag.clone(),
@@ -270,6 +332,7 @@ impl Resource for ImageResource {
             state: Some(ImageState {
                 tag: prior_state.tag.clone(),
                 image_id,
+                platform: prior_state.platform.clone(),
             }),
         })
     }
@@ -287,6 +350,7 @@ mod tests {
             context: ".".into(),
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
+            platform: vec![],
         };
         let result = Resource::plan(&ImageResource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -300,10 +364,12 @@ mod tests {
             context: ".".into(),
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
+            platform: vec![],
         };
         let prior = ImageState {
             tag: "myapp:latest".into(),
             image_id: "sha256:nonexistent".into(),
+            platform: vec![],
         };
         let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -316,10 +382,30 @@ mod tests {
             context: ".".into(),
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
+            platform: vec![],
         };
         let prior = ImageState {
             tag: "myapp:v1".into(),
             image_id: "sha256:abc".into(),
+            platform: vec![],
+        };
+        let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
+        assert_eq!(result.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn plan_update_when_platform_changed() {
+        let inputs = ImageInputs {
+            tag: "myapp:latest".into(),
+            context: ".".into(),
+            dockerfile: "Dockerfile".into(),
+            build_args: HashMap::new(),
+            platform: vec!["linux/arm64".into()],
+        };
+        let prior = ImageState {
+            tag: "myapp:latest".into(),
+            image_id: "sha256:abc".into(),
+            platform: vec!["linux/amd64".into()],
         };
         let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
@@ -338,6 +424,7 @@ mod tests {
             context: dir.path().to_string_lossy().into_owned(),
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
+            platform: vec![],
         };
         let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
         assert_eq!(resolved.len(), 2);
@@ -360,6 +447,7 @@ mod tests {
             context: dir.path().to_string_lossy().into_owned(),
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
+            platform: vec![],
         };
         let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
         assert_eq!(resolved.len(), 3); // Dockerfile + main.rs + test.log

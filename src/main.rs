@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::Path;
 use std::process;
 
 use clap::{Parser, Subcommand};
@@ -98,6 +97,33 @@ fn parse_params(raw: &[String]) -> Map {
     params
 }
 
+/// Search for BUILD.bit in the current directory and parent directories.
+/// Changes to that directory so all relative paths resolve correctly.
+/// Exits with an error if not found.
+fn find_and_chdir_project_root() {
+    let mut dir = std::env::current_dir().unwrap_or_else(|e| {
+        eprintln!("{} cannot determine current directory: {e}", "error:".red().bold());
+        process::exit(1);
+    });
+    loop {
+        if dir.join("BUILD.bit").is_file() {
+            std::env::set_current_dir(&dir).unwrap_or_else(|e| {
+                eprintln!("{} cannot chdir to {}: {e}", "error:".red().bold(), dir.display());
+                process::exit(1);
+            });
+            return;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    eprintln!(
+        "{} cannot find BUILD.bit in current or parent directories",
+        "error:".red().bold()
+    );
+    process::exit(1);
+}
+
 fn load_module(
     registry: &ProviderRegistry,
     params: &Map,
@@ -107,7 +133,7 @@ fn load_module(
     loader::BaseScope,
     Box<dyn bit::state::StateStore>,
 ) {
-    let root = Path::new(".");
+    let root = std::path::Path::new(".");
     let store = Box::new(state::default_store(root));
     let source = match fs::read_to_string("BUILD.bit") {
         Ok(s) => s,
@@ -135,6 +161,7 @@ fn load_module(
 
 fn main() {
     let cli = Cli::parse();
+    find_and_chdir_project_root();
     let registry = default_registry();
     let params = parse_params(&cli.params);
     let jobs = cli
