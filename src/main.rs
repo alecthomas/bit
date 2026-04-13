@@ -59,6 +59,11 @@ enum Command {
         /// Target to dump (default: all blocks)
         target: Option<String>,
     },
+    /// Show provider/resource schema
+    Schema {
+        /// Provider or provider.resource (e.g. "go", "go.exe", "docker.image")
+        filter: Option<String>,
+    },
 }
 
 fn default_registry() -> ProviderRegistry {
@@ -283,5 +288,186 @@ fn main() {
                 println!("No parameters, targets, or outputs defined.");
             }
         }
+        Command::Schema { filter } => {
+            print_schema(&registry, filter.as_deref());
+        }
     }
+}
+
+fn print_schema(registry: &ProviderRegistry, filter: Option<&str>) {
+    // Also scan .bit/modules/ for module providers
+    let root = std::path::Path::new(".");
+    let module_schemas = scan_module_schemas(root);
+
+    // Collect all matching (display_name, schema) pairs
+    let mut entries: Vec<(String, bit::provider::ResourceSchema)> = Vec::new();
+
+    let filter_parts = filter.map(|f| match f.split_once('.') {
+        Some((p, r)) => (p, Some(r)),
+        None => (f, None),
+    });
+
+    // Native providers
+    for provider_name in registry.provider_names() {
+        if let Some((fp, _)) = filter_parts
+            && fp != provider_name
+        {
+            continue;
+        }
+        for res in registry.provider_resources(provider_name) {
+            if let Some((_, Some(fr))) = filter_parts
+                && fr != res.name()
+            {
+                continue;
+            }
+            let display = if res.name() == provider_name {
+                provider_name.to_owned()
+            } else {
+                format!("{provider_name}.{}", res.name())
+            };
+            entries.push((display, res.schema()));
+        }
+    }
+
+    // Module providers
+    for (display_name, mod_resource, schema) in &module_schemas {
+        let mod_provider = display_name.split('.').next().unwrap_or(display_name);
+        if let Some((fp, _)) = filter_parts
+            && fp != mod_provider
+        {
+            continue;
+        }
+        if let Some((_, Some(fr))) = filter_parts
+            && fr != mod_resource.as_str()
+        {
+            continue;
+        }
+        entries.push((display_name.clone(), schema.clone()));
+    }
+
+    if entries.is_empty()
+        && let Some(f) = filter
+    {
+        eprintln!("{} unknown provider/resource: {f}", "error:".red().bold());
+        process::exit(1);
+    }
+
+    for (i, (name, schema)) in entries.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        print_resource_schema(name, schema);
+    }
+}
+
+fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {
+    use bit::provider::ResourceKind;
+
+    let kind_label = match schema.kind {
+        ResourceKind::Build => "build",
+        ResourceKind::Test => "test",
+    };
+
+    println!("{} ({}) — {}", name.bold(), kind_label.dim(), schema.description);
+
+    if !schema.inputs.is_empty() {
+        println!("  {}:", "Inputs".bold());
+        for f in &schema.inputs {
+            let req = if f.required { "" } else { "?" };
+            match &f.description {
+                Some(desc) => println!("    {}{} ({}) — {}", f.name, req, f.typ.to_string().dim(), desc.dim()),
+                None => println!("    {}{} ({})", f.name, req, f.typ.to_string().dim()),
+            }
+        }
+    }
+
+    if !schema.outputs.is_empty() {
+        println!("  {}:", "Outputs".bold());
+        for f in &schema.outputs {
+            match &f.description {
+                Some(desc) => println!("    {} ({}) — {}", f.name, f.typ.to_string().dim(), desc.dim()),
+                None => println!("    {} ({})", f.name, f.typ.to_string().dim()),
+            }
+        }
+    }
+}
+
+/// Scan .bit/modules/ for module files and derive their schemas.
+fn scan_module_schemas(root: &std::path::Path) -> Vec<(String, String, bit::provider::ResourceSchema)> {
+    use bit::provider::{FieldSchema, ResourceKind, ResourceSchema};
+
+    let modules_dir = root.join(".bit/modules");
+    let Ok(providers) = std::fs::read_dir(&modules_dir) else {
+        return vec![];
+    };
+
+    let mut results = Vec::new();
+    for provider_entry in providers.flatten() {
+        if !provider_entry.path().is_dir() {
+            continue;
+        }
+        let provider_name = provider_entry.file_name().to_string_lossy().into_owned();
+        let Ok(resources) = std::fs::read_dir(provider_entry.path()) else {
+            continue;
+        };
+        for res_entry in resources.flatten() {
+            let path = res_entry.path();
+            let Some(ext) = path.extension() else {
+                continue;
+            };
+            if ext != "bit" {
+                continue;
+            }
+            let resource_name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(module) = bit::parser::parse(&source, &path.display().to_string()) else {
+                continue;
+            };
+
+            let mut inputs = Vec::new();
+            let mut outputs = Vec::new();
+            for stmt in &module.statements {
+                match stmt {
+                    bit::ast::Statement::Param(p) => {
+                        inputs.push(FieldSchema {
+                            name: p.name.clone(),
+                            typ: p.typ.clone(),
+                            required: p.default.is_none(),
+                            description: p.doc.clone(),
+                        });
+                    }
+                    bit::ast::Statement::Output(o) => {
+                        outputs.push(FieldSchema {
+                            name: o.name.clone(),
+                            typ: bit::value::Type::String,
+                            required: true,
+                            description: o.doc.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            let display_name = if resource_name == provider_name {
+                provider_name.clone()
+            } else {
+                format!("{provider_name}.{resource_name}")
+            };
+
+            results.push((
+                display_name,
+                resource_name,
+                ResourceSchema {
+                    description: module.doc.unwrap_or_else(|| format!("Module from {}", path.display())),
+                    kind: ResourceKind::Build,
+                    inputs,
+                    outputs,
+                },
+            ));
+        }
+    }
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
 }

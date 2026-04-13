@@ -6,7 +6,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema,
+};
+use crate::value::Type;
 
 use super::GoEnv;
 
@@ -186,6 +189,57 @@ impl Resource for GoTestResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        ResourceSchema {
+            description: "Run Go tests".into(),
+            kind: ResourceKind::Test,
+            inputs: vec![
+                FieldSchema {
+                    name: "package".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Go package pattern (e.g. \"./...\")".into()),
+                },
+                FieldSchema {
+                    name: "flags".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Extra flags passed to go test".into()),
+                },
+                FieldSchema {
+                    name: "verbose".into(),
+                    typ: Type::Bool,
+                    required: false,
+                    description: Some("Show individual test results".into()),
+                },
+                FieldSchema {
+                    name: "goos".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Target OS".into()),
+                },
+                FieldSchema {
+                    name: "goarch".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Target architecture".into()),
+                },
+                FieldSchema {
+                    name: "cgo".into(),
+                    typ: Type::Bool,
+                    required: false,
+                    description: Some("Enable cgo".into()),
+                },
+            ],
+            outputs: vec![FieldSchema {
+                name: "passed".into(),
+                typ: Type::Bool,
+                required: true,
+                description: Some("Whether all tests passed".into()),
+            }],
+        }
     }
 
     fn resolve(&self, inputs: &GoTestInputs) -> Result<Vec<ResolvedFile>, BoxError> {

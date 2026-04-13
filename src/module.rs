@@ -7,8 +7,8 @@ use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult as ProviderApplyResult, BoxError, DynResource, PlanAction, PlanResult, ProviderRegistry, ResolvedFile,
-    ResourceKind,
+    ApplyResult as ProviderApplyResult, BoxError, DynResource, FieldSchema, PlanAction, PlanResult, ProviderRegistry,
+    ResolvedFile, ResourceKind, ResourceSchema,
 };
 use crate::state::StateStore;
 use crate::value::{Map, Value, validate_type};
@@ -20,7 +20,9 @@ use crate::value::{Map, Value, validate_type};
 /// reference namespaced inner blocks). The engine evaluates those fields
 /// and this resource passes them through as outputs, making them available
 /// to downstream blocks as `instance.output_name`.
-pub struct ModuleResource;
+pub struct ModuleResource {
+    pub resource_schema: ResourceSchema,
+}
 
 impl DynResource for ModuleResource {
     fn name(&self) -> &str {
@@ -29,6 +31,10 @@ impl DynResource for ModuleResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        self.resource_schema.clone()
     }
 
     fn resolve(&self, _inputs: &Map) -> Result<Vec<ResolvedFile>, BoxError> {
@@ -335,6 +341,37 @@ pub fn expand_module(
         })
         .collect();
 
+    // Build schema from the module's declared params and outputs
+    let schema_inputs: Vec<FieldSchema> = iface
+        .params
+        .iter()
+        .map(|p| FieldSchema {
+            name: p.name.clone(),
+            typ: p.typ.clone(),
+            required: p.default.is_none(),
+            description: p.doc.clone(),
+        })
+        .collect();
+    let schema_outputs: Vec<FieldSchema> = iface
+        .outputs
+        .iter()
+        .map(|o| FieldSchema {
+            name: o.name.clone(),
+            typ: crate::value::Type::String, // outputs are untyped; default to string
+            required: true,
+            description: o.doc.clone(),
+        })
+        .collect();
+    let resource_schema = ResourceSchema {
+        description: module_ast
+            .doc
+            .clone()
+            .unwrap_or_else(|| format!("Module from {}", module_path.display())),
+        kind: ResourceKind::Build,
+        inputs: schema_inputs,
+        outputs: schema_outputs,
+    };
+
     let prior_state = ctx.store.load(instance_name)?;
     ctx.dag.add_node(DagNode {
         name: instance_name.to_owned(),
@@ -342,7 +379,7 @@ pub fn expand_module(
         resource_name: "module".into(),
         protected: false,
         fields: output_fields,
-        resource: Box::new(ModuleResource),
+        resource: Box::new(ModuleResource { resource_schema }),
         prior_state,
     })?;
 

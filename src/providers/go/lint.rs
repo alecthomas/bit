@@ -4,7 +4,10 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema,
+};
+use crate::value::Type;
 
 /// Inputs for a `go.lint` block.
 #[derive(Debug, Deserialize)]
@@ -47,6 +50,33 @@ impl Resource for GoLintResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        ResourceSchema {
+            description: "Run golangci-lint".into(),
+            kind: ResourceKind::Test,
+            inputs: vec![
+                FieldSchema {
+                    name: "package".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Go package pattern (default \"./...\")".into()),
+                },
+                FieldSchema {
+                    name: "flags".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Extra flags passed to golangci-lint run".into()),
+                },
+            ],
+            outputs: vec![FieldSchema {
+                name: "passed".into(),
+                typ: Type::Bool,
+                required: true,
+                description: Some("Whether linting passed".into()),
+            }],
+        }
     }
 
     fn resolve(&self, inputs: &GoLintInputs) -> Result<Vec<ResolvedFile>, BoxError> {

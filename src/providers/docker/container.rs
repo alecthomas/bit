@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, Resource, ResourceKind, ResourceSchema,
+};
+use crate::value::Type;
 
 /// Healthcheck config — either a bare command string or a full object
 /// with interval/timeout/retries/start_period.
@@ -283,6 +286,95 @@ impl Resource for ContainerResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        ResourceSchema {
+            description: "Run a Docker container (tracks state like Terraform)".into(),
+            kind: ResourceKind::Build,
+            inputs: vec![
+                FieldSchema {
+                    name: "image".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Docker image reference".into()),
+                },
+                FieldSchema {
+                    name: "name".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Container name".into()),
+                },
+                FieldSchema {
+                    name: "ports".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Port mappings (e.g. \"8080:80\")".into()),
+                },
+                FieldSchema {
+                    name: "volumes".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Volume mounts".into()),
+                },
+                FieldSchema {
+                    name: "environment".into(),
+                    typ: Type::Map(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Environment variables".into()),
+                },
+                FieldSchema {
+                    name: "command".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Override CMD".into()),
+                },
+                FieldSchema {
+                    name: "entrypoint".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Override ENTRYPOINT".into()),
+                },
+                FieldSchema {
+                    name: "restart".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Restart policy (default \"no\")".into()),
+                },
+                FieldSchema {
+                    name: "network".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Docker network".into()),
+                },
+                FieldSchema {
+                    name: "working_dir".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Working directory".into()),
+                },
+                FieldSchema {
+                    name: "healthcheck".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Health check command or config".into()),
+                },
+            ],
+            outputs: vec![
+                FieldSchema {
+                    name: "container_id".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Docker container ID".into()),
+                },
+                FieldSchema {
+                    name: "name".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Container name".into()),
+                },
+            ],
+        }
     }
 
     fn resolve(&self, _inputs: &ContainerInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {

@@ -6,7 +6,10 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema,
+};
+use crate::value::Type;
 
 use super::GoEnv;
 
@@ -64,6 +67,57 @@ impl Resource for GoExeResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        ResourceSchema {
+            description: "Build a Go binary".into(),
+            kind: ResourceKind::Build,
+            inputs: vec![
+                FieldSchema {
+                    name: "package".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Go package to build (e.g. \"./cmd/myapp\")".into()),
+                },
+                FieldSchema {
+                    name: "output".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Output binary path (defaults to package base name)".into()),
+                },
+                FieldSchema {
+                    name: "flags".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Extra flags passed to go build".into()),
+                },
+                FieldSchema {
+                    name: "goos".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Target OS (e.g. \"linux\")".into()),
+                },
+                FieldSchema {
+                    name: "goarch".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Target architecture (e.g. \"arm64\")".into()),
+                },
+                FieldSchema {
+                    name: "cgo".into(),
+                    typ: Type::Bool,
+                    required: false,
+                    description: Some("Enable cgo".into()),
+                },
+            ],
+            outputs: vec![FieldSchema {
+                name: "path".into(),
+                typ: Type::String,
+                required: true,
+                description: Some("Path to the built binary".into()),
+            }],
+        }
     }
 
     fn resolve(&self, inputs: &GoExeInputs) -> Result<Vec<ResolvedFile>, BoxError> {

@@ -53,15 +53,27 @@ pub struct ApplyResult<S, O> {
 #[derive(Debug, Clone)]
 pub struct FuncSignature {
     pub name: String,
-    pub params: Vec<FuncParam>,
+    pub params: Vec<FieldSchema>,
     pub returns: crate::value::Type,
 }
 
-/// A parameter in a function signature.
+/// Describes a named, typed field — used for function params, resource
+/// inputs, and resource outputs.
 #[derive(Debug, Clone)]
-pub struct FuncParam {
+pub struct FieldSchema {
     pub name: String,
     pub typ: crate::value::Type,
+    pub required: bool,
+    pub description: Option<String>,
+}
+
+/// Schema describing a resource's interface.
+#[derive(Debug, Clone)]
+pub struct ResourceSchema {
+    pub description: String,
+    pub kind: ResourceKind,
+    pub inputs: Vec<FieldSchema>,
+    pub outputs: Vec<FieldSchema>,
 }
 
 /// Whether a resource produces build artifacts or test results.
@@ -90,6 +102,7 @@ pub trait Resource {
 
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
+    fn schema(&self) -> ResourceSchema;
     /// Return the input files, input globs, and output files for this block.
     fn resolve(&self, inputs: &Self::Inputs) -> Result<Vec<ResolvedFile>, BoxError>;
     fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
@@ -108,6 +121,7 @@ pub trait Resource {
 pub trait DynResource: Send + Sync {
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
+    fn schema(&self) -> ResourceSchema;
     fn resolve(&self, inputs: &Map) -> Result<Vec<ResolvedFile>, BoxError>;
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError>;
     fn apply(
@@ -141,6 +155,10 @@ impl<R: Resource + Send + Sync> DynResource for R {
 
     fn kind(&self) -> ResourceKind {
         Resource::kind(self)
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        Resource::schema(self)
     }
 
     fn resolve(&self, inputs: &Map) -> Result<Vec<ResolvedFile>, BoxError> {
@@ -214,6 +232,18 @@ impl ProviderRegistry {
             .ok_or_else(|| format!("unknown provider: {provider}"))?;
         p.call_function(name, args)
     }
+
+    /// List all registered provider names.
+    pub fn provider_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.providers.keys().map(|s| s.as_str()).collect();
+        names.sort();
+        names
+    }
+
+    /// List all resources for a provider.
+    pub fn provider_resources(&self, provider: &str) -> Vec<Box<dyn DynResource>> {
+        self.providers.get(provider).map(|p| p.resources()).unwrap_or_default()
+    }
 }
 
 impl Default for ProviderRegistry {
@@ -271,6 +301,15 @@ mod tests {
 
         fn kind(&self) -> ResourceKind {
             ResourceKind::Build
+        }
+
+        fn schema(&self) -> ResourceSchema {
+            ResourceSchema {
+                description: "A stub resource for testing".into(),
+                kind: ResourceKind::Build,
+                inputs: vec![],
+                outputs: vec![],
+            }
         }
 
         fn resolve(&self, _inputs: &StubInputs) -> Result<Vec<ResolvedFile>, BoxError> {

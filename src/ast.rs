@@ -5,6 +5,8 @@ use crate::value::Type;
 /// A parsed `.bit` file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
+    /// Leading doc comment at the top of the file (before any statement).
+    pub doc: Option<String>,
     pub statements: Vec<Statement>,
 }
 
@@ -231,6 +233,7 @@ mod tests {
     #[test]
     fn build_module() {
         let module = Module {
+            doc: None,
             statements: vec![
                 Statement::Param(Param {
                     name: "env".into(),

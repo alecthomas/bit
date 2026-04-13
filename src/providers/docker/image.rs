@@ -6,7 +6,10 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, Resource, ResourceKind, ResourceSchema,
+};
+use crate::value::Type;
 
 use super::parse;
 
@@ -55,6 +58,53 @@ impl Resource for ImageResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        ResourceSchema {
+            description: "Build a Docker image (auto-detects inputs from Dockerfile)".into(),
+            kind: ResourceKind::Build,
+            inputs: vec![
+                FieldSchema {
+                    name: "tag".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Image tag".into()),
+                },
+                FieldSchema {
+                    name: "context".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Build context directory (default \".\")".into()),
+                },
+                FieldSchema {
+                    name: "dockerfile".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Dockerfile path (default \"Dockerfile\")".into()),
+                },
+                FieldSchema {
+                    name: "build_args".into(),
+                    typ: Type::Map(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Docker build arguments".into()),
+                },
+            ],
+            outputs: vec![
+                FieldSchema {
+                    name: "ref".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Image tag/reference".into()),
+                },
+                FieldSchema {
+                    name: "image_id".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Docker image ID".into()),
+                },
+            ],
+        }
     }
 
     fn resolve(&self, inputs: &ImageInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {

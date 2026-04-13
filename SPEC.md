@@ -453,15 +453,24 @@ pub enum Type {
     Secret,
 }
 
-pub struct FuncParam {
+pub struct FieldSchema {
     pub name: String,
     pub typ: Type,
+    pub required: bool,
+    pub description: Option<String>,
 }
 
 pub struct FuncSignature {
     pub name: String,
-    pub params: Vec<FuncParam>,
+    pub params: Vec<FieldSchema>,
     pub returns: Type,
+}
+
+pub struct ResourceSchema {
+    pub description: String,
+    pub kind: ResourceKind,
+    pub inputs: Vec<FieldSchema>,
+    pub outputs: Vec<FieldSchema>,
 }
 
 pub enum ResourceKind {

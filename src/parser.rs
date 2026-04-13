@@ -633,6 +633,12 @@ fn field(input: &mut &str) -> ModalResult<Field> {
 // ── Statements ──
 
 fn module(input: &mut &str) -> ModalResult<Module> {
+    // Capture the leading comment block at the top of the file.
+    // If it's separated from the first statement by a blank line,
+    // it's the module's description. Otherwise it attaches to the
+    // first statement as its doc comment (via ws_capturing_doc).
+    let module_doc = leading_module_doc(input);
+
     let mut statements = Vec::new();
     loop {
         let doc = ws_capturing_doc(input);
@@ -650,7 +656,62 @@ fn module(input: &mut &str) -> ModalResult<Module> {
         .parse_next(input)?;
         statements.push(stmt);
     }
-    Ok(Module { statements })
+    Ok(Module {
+        doc: module_doc,
+        statements,
+    })
+}
+
+/// Extract the leading comment block if it's followed by a blank line
+/// (making it "unattached" to any statement). Consumes the comment and
+/// trailing blank line(s). If the comment runs directly into a statement
+/// without a blank line separator, nothing is consumed and None is returned
+/// (ws_capturing_doc will pick it up for the first statement instead).
+fn leading_module_doc(input: &mut &str) -> Option<String> {
+    // Skip leading whitespace (but not comments)
+    let _ = take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n')
+        .parse_next(input);
+
+    if !input.starts_with('#') {
+        return None;
+    }
+
+    // Save position — we'll only commit if we find a blank line after
+    let saved = *input;
+
+    // Collect comment lines
+    let mut doc_lines: Vec<String> = Vec::new();
+    loop {
+        if !input.starts_with('#') {
+            break;
+        }
+        *input = &input[1..];
+        if input.starts_with(' ') {
+            *input = &input[1..];
+        }
+        let line: &str = take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| c != '\n')
+            .parse_next(input)
+            .unwrap_or_default();
+        doc_lines.push(line.to_owned());
+        let _ = opt::<_, _, ErrMode<ContextError>, _>('\n').parse_next(input);
+    }
+
+    // Check if there's a blank line (or EOF) separating this block from what follows
+    let _ =
+        take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| c == ' ' || c == '\t' || c == '\r').parse_next(input);
+    let has_blank = input.is_empty() || input.starts_with('\n');
+
+    if has_blank {
+        // Unattached comment — consume and return as module doc
+        if !doc_lines.is_empty() {
+            return Some(doc_lines.join("\n"));
+        }
+        None
+    } else {
+        // Comment is directly attached to a statement — rewind
+        *input = saved;
+        None
+    }
 }
 
 fn let_stmt(input: &mut &str) -> ModalResult<Let> {
@@ -1450,5 +1511,50 @@ mod tests {
             },
             _ => panic!("expected Let"),
         }
+    }
+
+    #[test]
+    fn module_doc_from_leading_comment() {
+        let input = "# This is the module description\n\nparam x : string\n";
+        let result = parse(input, "<test>").unwrap();
+        assert_eq!(result.doc.as_deref(), Some("This is the module description"));
+        assert_eq!(result.statements.len(), 1);
+    }
+
+    #[test]
+    fn module_doc_multiline() {
+        let input = "# Line one\n# Line two\n\nlet x = 1\n";
+        let result = parse(input, "<test>").unwrap();
+        assert_eq!(result.doc.as_deref(), Some("Line one\nLine two"));
+    }
+
+    #[test]
+    fn no_module_doc_when_attached() {
+        // Comment directly before a param (no blank line) attaches to the param
+        let input = "# Param doc\nparam x : string\n";
+        let result = parse(input, "<test>").unwrap();
+        assert_eq!(result.doc, None);
+        match &result.statements[0] {
+            Statement::Param(p) => assert_eq!(p.doc.as_deref(), Some("Param doc")),
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn module_doc_with_attached_param_doc() {
+        let input = "# Module desc\n\n# Param doc\nparam x : string\n";
+        let result = parse(input, "<test>").unwrap();
+        assert_eq!(result.doc.as_deref(), Some("Module desc"));
+        match &result.statements[0] {
+            Statement::Param(p) => assert_eq!(p.doc.as_deref(), Some("Param doc")),
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn no_module_doc_when_empty() {
+        let input = "let x = 1\n";
+        let result = parse(input, "<test>").unwrap();
+        assert_eq!(result.doc, None);
     }
 }

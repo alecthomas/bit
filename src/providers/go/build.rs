@@ -4,7 +4,10 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema,
+};
+use crate::value::Type;
 
 use super::GoEnv;
 
@@ -46,6 +49,46 @@ impl Resource for GoBuildResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        ResourceSchema {
+            description: "Compile Go packages without producing a binary".into(),
+            kind: ResourceKind::Build,
+            inputs: vec![
+                FieldSchema {
+                    name: "package".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Go package pattern (e.g. \"./...\")".into()),
+                },
+                FieldSchema {
+                    name: "flags".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Extra flags passed to go build".into()),
+                },
+                FieldSchema {
+                    name: "goos".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Target OS".into()),
+                },
+                FieldSchema {
+                    name: "goarch".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Target architecture".into()),
+                },
+                FieldSchema {
+                    name: "cgo".into(),
+                    typ: Type::Bool,
+                    required: false,
+                    description: Some("Enable cgo".into()),
+                },
+            ],
+            outputs: vec![],
+        }
     }
 
     fn resolve(&self, inputs: &GoBuildInputs) -> Result<Vec<ResolvedFile>, BoxError> {

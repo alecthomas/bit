@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, DynResource, FuncSignature, PlanAction, PlanResult, Provider, Resource, ResourceKind,
+    ApplyResult, BoxError, DynResource, FieldSchema, FuncSignature, PlanAction, PlanResult, Provider, Resource,
+    ResourceKind, ResourceSchema,
 };
+use crate::value::Type;
 use crate::value::Value;
 
 /// Typed inputs for an exec block, deserialized from the block's fields.
@@ -122,6 +124,47 @@ impl Resource for ExecResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        ResourceSchema {
+            description: "Run a shell command, track inputs and outputs".into(),
+            kind: ResourceKind::Build,
+            inputs: vec![
+                FieldSchema {
+                    name: "command".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Shell command to execute".into()),
+                },
+                FieldSchema {
+                    name: "output".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: true,
+                    description: Some("Output file or list of output files".into()),
+                },
+                FieldSchema {
+                    name: "inputs".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Input file glob patterns".into()),
+                },
+            ],
+            outputs: vec![
+                FieldSchema {
+                    name: "path".into(),
+                    typ: Type::String,
+                    required: false,
+                    description: Some("Output path (single-output blocks)".into()),
+                },
+                FieldSchema {
+                    name: "paths".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Output paths (multi-output blocks)".into()),
+                },
+            ],
+        }
     }
 
     fn resolve(&self, inputs: &ExecInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
@@ -270,6 +313,33 @@ impl Resource for ExecTestResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        ResourceSchema {
+            description: "Run a command as a test (pass/fail by exit code)".into(),
+            kind: ResourceKind::Test,
+            inputs: vec![
+                FieldSchema {
+                    name: "command".into(),
+                    typ: Type::String,
+                    required: true,
+                    description: Some("Shell command to execute".into()),
+                },
+                FieldSchema {
+                    name: "inputs".into(),
+                    typ: Type::List(Box::new(Type::String)),
+                    required: false,
+                    description: Some("Input file glob patterns".into()),
+                },
+            ],
+            outputs: vec![FieldSchema {
+                name: "passed".into(),
+                typ: Type::Bool,
+                required: true,
+                description: Some("Whether the test passed".into()),
+            }],
+        }
     }
 
     fn resolve(&self, inputs: &ExecTestInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
