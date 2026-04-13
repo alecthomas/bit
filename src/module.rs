@@ -187,7 +187,7 @@ pub fn expand_module(
                     message,
                 })?;
                 eval_scope.set(&param.name, value.clone());
-                substitutions.insert(param.name.clone(), value_to_expr(&value));
+                substitutions.insert(param.name.clone(), value.to_expr());
             }
             Err(_) => {
                 // Deferred: references outer block outputs not yet available.
@@ -209,7 +209,7 @@ pub fn expand_module(
                     })?;
                 }
                 eval_scope.set(&let_binding.name, value.clone());
-                substitutions.insert(let_binding.name.clone(), value_to_expr(&value));
+                substitutions.insert(let_binding.name.clone(), value.to_expr());
             }
             Err(_) => {
                 substitutions.insert(let_binding.name.clone(), rewritten);
@@ -504,25 +504,6 @@ fn rewrite_expr(
     }
 }
 
-/// Convert a runtime Value back into an AST Expr for substitution.
-fn value_to_expr(value: &Value) -> Expr {
-    match value {
-        Value::Str(s) => Expr::Str(vec![StringPart::Literal(s.clone())]),
-        Value::Number(n) => Expr::Number(n.clone()),
-        Value::Bool(b) => Expr::Bool(*b),
-        Value::Null => Expr::Null,
-        Value::List(items) => Expr::List(items.iter().map(value_to_expr).collect()),
-        Value::Map(map) => Expr::Map(
-            map.iter()
-                .map(|(k, v)| Field {
-                    name: k.clone(),
-                    value: value_to_expr(v),
-                })
-                .collect(),
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,20 +565,17 @@ mod tests {
     #[test]
     fn value_to_expr_roundtrip() {
         let val = Value::Str("hello".into());
-        assert_eq!(
-            value_to_expr(&val),
-            Expr::Str(vec![StringPart::Literal("hello".into())])
-        );
+        assert_eq!(val.to_expr(), Expr::Str(vec![StringPart::Literal("hello".into())]));
 
         let val = Value::Number(42.into());
-        assert_eq!(value_to_expr(&val), Expr::Number(42.into()));
+        assert_eq!(val.to_expr(), Expr::Number(42.into()));
 
         let val = Value::Bool(true);
-        assert_eq!(value_to_expr(&val), Expr::Bool(true));
+        assert_eq!(val.to_expr(), Expr::Bool(true));
 
         let val = Value::List(vec![Value::Str("a".into())]);
         assert_eq!(
-            value_to_expr(&val),
+            val.to_expr(),
             Expr::List(vec![Expr::Str(vec![StringPart::Literal("a".into())])])
         );
     }

@@ -74,13 +74,25 @@ impl std::fmt::Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Expr::Str(parts) => {
+                write!(f, "\"")?;
                 for part in parts {
                     match part {
-                        StringPart::Literal(s) => write!(f, "{s}")?,
+                        StringPart::Literal(s) => {
+                            for c in s.chars() {
+                                match c {
+                                    '"' => write!(f, "\\\"")?,
+                                    '\\' => write!(f, "\\\\")?,
+                                    '\n' => write!(f, "\\n")?,
+                                    '\t' => write!(f, "\\t")?,
+                                    '\r' => write!(f, "\\r")?,
+                                    c => write!(f, "{c}")?,
+                                }
+                            }
+                        }
                         StringPart::Interpolation(e) => write!(f, "${{{e}}}")?,
                     }
                 }
-                Ok(())
+                write!(f, "\"")
             }
             Expr::Number(n) => write!(f, "{n}"),
             Expr::Bool(b) => write!(f, "{b}"),

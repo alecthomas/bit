@@ -51,19 +51,26 @@ impl fmt::Display for Value {
 impl Value {
     /// Format as a `.bit` literal (strings are quoted).
     pub fn to_literal(&self) -> String {
+        self.to_expr().to_string()
+    }
+
+    /// Convert a runtime Value into an AST Expr.
+    pub fn to_expr(&self) -> crate::ast::Expr {
+        use crate::ast::{Expr, Field, StringPart};
         match self {
-            Value::Str(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "null".into(),
-            Value::List(items) => {
-                let inner: Vec<String> = items.iter().map(|v| v.to_literal()).collect();
-                format!("[{}]", inner.join(", "))
-            }
-            Value::Map(map) => {
-                let inner: Vec<String> = map.iter().map(|(k, v)| format!("{k} = {}", v.to_literal())).collect();
-                format!("{{{}}}", inner.join(", "))
-            }
+            Value::Str(s) => Expr::Str(vec![StringPart::Literal(s.clone())]),
+            Value::Number(n) => Expr::Number(n.clone()),
+            Value::Bool(b) => Expr::Bool(*b),
+            Value::Null => Expr::Null,
+            Value::List(items) => Expr::List(items.iter().map(|v| v.to_expr()).collect()),
+            Value::Map(map) => Expr::Map(
+                map.iter()
+                    .map(|(k, v)| Field {
+                        name: k.clone(),
+                        value: v.to_expr(),
+                    })
+                    .collect(),
+            ),
         }
     }
 
