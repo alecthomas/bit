@@ -374,9 +374,21 @@ fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {
         println!("  {}:", "Inputs".bold());
         for f in &schema.inputs {
             let req = if f.required { "" } else { "?" };
+            let def = f
+                .default
+                .as_ref()
+                .map(|v| format!(" = {}", v.to_literal()))
+                .unwrap_or_default();
             match &f.description {
-                Some(desc) => println!("    {}{} ({}) — {}", f.name, req, f.typ.to_string().dim(), desc.dim()),
-                None => println!("    {}{} ({})", f.name, req, f.typ.to_string().dim()),
+                Some(desc) => println!(
+                    "    {}{} ({}{}) — {}",
+                    f.name,
+                    req,
+                    f.typ.to_string().dim(),
+                    def.dim(),
+                    desc.dim()
+                ),
+                None => println!("    {}{} ({}{})", f.name, req, f.typ.to_string().dim(), def.dim()),
             }
         }
     }
@@ -431,10 +443,15 @@ fn scan_module_schemas(root: &std::path::Path) -> Vec<(String, String, bit::prov
             for stmt in &module.statements {
                 match stmt {
                     bit::ast::Statement::Param(p) => {
+                        let default = p
+                            .default
+                            .as_ref()
+                            .and_then(|d| bit::expr::eval(d, &bit::expr::Scope::new()).ok());
                         inputs.push(FieldSchema {
                             name: p.name.clone(),
                             typ: p.typ.clone(),
                             required: p.default.is_none(),
+                            default,
                             description: p.doc.clone(),
                         });
                     }
@@ -443,6 +460,7 @@ fn scan_module_schemas(root: &std::path::Path) -> Vec<(String, String, bit::prov
                             name: o.name.clone(),
                             typ: bit::value::Type::String,
                             required: true,
+                            default: None,
                             description: o.doc.clone(),
                         });
                     }

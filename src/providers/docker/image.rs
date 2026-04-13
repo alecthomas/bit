@@ -9,7 +9,7 @@ use crate::output::BlockWriter;
 use crate::provider::{
     ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, Resource, ResourceKind, ResourceSchema,
 };
-use crate::value::Type;
+use crate::value::{Type, Value};
 
 use super::parse;
 
@@ -69,24 +69,28 @@ impl Resource for ImageResource {
                     name: "tag".into(),
                     typ: Type::String,
                     required: true,
+                    default: None,
                     description: Some("Image tag".into()),
                 },
                 FieldSchema {
                     name: "context".into(),
                     typ: Type::String,
                     required: false,
-                    description: Some("Build context directory (default \".\")".into()),
+                    default: Some(Value::Str(".".into())),
+                    description: Some("Build context directory".into()),
                 },
                 FieldSchema {
                     name: "dockerfile".into(),
                     typ: Type::String,
                     required: false,
-                    description: Some("Dockerfile path (default \"Dockerfile\")".into()),
+                    default: Some(Value::Str("Dockerfile".into())),
+                    description: Some("Dockerfile path".into()),
                 },
                 FieldSchema {
                     name: "build_args".into(),
                     typ: Type::Map(Box::new(Type::String)),
                     required: false,
+                    default: None,
                     description: Some("Docker build arguments".into()),
                 },
             ],
@@ -95,12 +99,14 @@ impl Resource for ImageResource {
                     name: "ref".into(),
                     typ: Type::String,
                     required: true,
+                    default: None,
                     description: Some("Image tag/reference".into()),
                 },
                 FieldSchema {
                     name: "image_id".into(),
                     typ: Type::String,
                     required: true,
+                    default: None,
                     description: Some("Docker image ID".into()),
                 },
             ],

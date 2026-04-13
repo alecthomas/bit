@@ -349,6 +349,7 @@ pub fn expand_module(
             name: p.name.clone(),
             typ: p.typ.clone(),
             required: p.default.is_none(),
+            default: p.default.as_ref().and_then(|d| expr::eval(d, &eval_scope).ok()),
             description: p.doc.clone(),
         })
         .collect();
@@ -359,6 +360,7 @@ pub fn expand_module(
             name: o.name.clone(),
             typ: crate::value::Type::String, // outputs are untyped; default to string
             required: true,
+            default: None,
             description: o.doc.clone(),
         })
         .collect();

@@ -64,6 +64,7 @@ pub struct FieldSchema {
     pub name: String,
     pub typ: crate::value::Type,
     pub required: bool,
+    pub default: Option<crate::value::Value>,
     pub description: Option<String>,
 }
 

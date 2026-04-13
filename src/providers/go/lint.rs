@@ -7,7 +7,7 @@ use crate::output::BlockWriter;
 use crate::provider::{
     ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema,
 };
-use crate::value::Type;
+use crate::value::{Type, Value};
 
 /// Inputs for a `go.lint` block.
 #[derive(Debug, Deserialize)]
@@ -61,12 +61,14 @@ impl Resource for GoLintResource {
                     name: "package".into(),
                     typ: Type::String,
                     required: false,
-                    description: Some("Go package pattern (default \"./...\")".into()),
+                    default: Some(Value::Str("./...".into())),
+                    description: Some("Go package pattern".into()),
                 },
                 FieldSchema {
                     name: "flags".into(),
                     typ: Type::List(Box::new(Type::String)),
                     required: false,
+                    default: None,
                     description: Some("Extra flags passed to golangci-lint run".into()),
                 },
             ],
@@ -74,6 +76,7 @@ impl Resource for GoLintResource {
                 name: "passed".into(),
                 typ: Type::Bool,
                 required: true,
+                default: None,
                 description: Some("Whether linting passed".into()),
             }],
         }

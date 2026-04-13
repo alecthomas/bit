@@ -49,6 +49,24 @@ impl fmt::Display for Value {
 }
 
 impl Value {
+    /// Format as a `.bit` literal (strings are quoted).
+    pub fn to_literal(&self) -> String {
+        match self {
+            Value::Str(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null => "null".into(),
+            Value::List(items) => {
+                let inner: Vec<String> = items.iter().map(|v| v.to_literal()).collect();
+                format!("[{}]", inner.join(", "))
+            }
+            Value::Map(map) => {
+                let inner: Vec<String> = map.iter().map(|(k, v)| format!("{k} = {}", v.to_literal())).collect();
+                format!("{{{}}}", inner.join(", "))
+            }
+        }
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::Str(s) => Some(s),

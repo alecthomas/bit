@@ -10,7 +10,7 @@ use crate::output::BlockWriter;
 use crate::provider::{
     ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, Resource, ResourceKind, ResourceSchema,
 };
-use crate::value::Type;
+use crate::value::{Type, Value};
 
 /// Healthcheck config — either a bare command string or a full object
 /// with interval/timeout/retries/start_period.
@@ -297,66 +297,77 @@ impl Resource for ContainerResource {
                     name: "image".into(),
                     typ: Type::String,
                     required: true,
+                    default: None,
                     description: Some("Docker image reference".into()),
                 },
                 FieldSchema {
                     name: "name".into(),
                     typ: Type::String,
                     required: true,
+                    default: None,
                     description: Some("Container name".into()),
                 },
                 FieldSchema {
                     name: "ports".into(),
                     typ: Type::List(Box::new(Type::String)),
                     required: false,
+                    default: None,
                     description: Some("Port mappings (e.g. \"8080:80\")".into()),
                 },
                 FieldSchema {
                     name: "volumes".into(),
                     typ: Type::List(Box::new(Type::String)),
                     required: false,
+                    default: None,
                     description: Some("Volume mounts".into()),
                 },
                 FieldSchema {
                     name: "environment".into(),
                     typ: Type::Map(Box::new(Type::String)),
                     required: false,
+                    default: None,
                     description: Some("Environment variables".into()),
                 },
                 FieldSchema {
                     name: "command".into(),
                     typ: Type::String,
                     required: false,
+                    default: None,
                     description: Some("Override CMD".into()),
                 },
                 FieldSchema {
                     name: "entrypoint".into(),
                     typ: Type::String,
                     required: false,
+                    default: None,
                     description: Some("Override ENTRYPOINT".into()),
                 },
                 FieldSchema {
                     name: "restart".into(),
                     typ: Type::String,
                     required: false,
-                    description: Some("Restart policy (default \"no\")".into()),
+                    default: Some(Value::Str("no".into())),
+                    description: Some("Restart policy".into()),
                 },
                 FieldSchema {
                     name: "network".into(),
                     typ: Type::String,
                     required: false,
+                    default: None,
                     description: Some("Docker network".into()),
                 },
                 FieldSchema {
                     name: "working_dir".into(),
                     typ: Type::String,
                     required: false,
+                    default: None,
                     description: Some("Working directory".into()),
                 },
                 FieldSchema {
                     name: "healthcheck".into(),
                     typ: Type::String,
                     required: false,
+                    default: None,
                     description: Some("Health check command or config".into()),
                 },
             ],
@@ -365,12 +376,14 @@ impl Resource for ContainerResource {
                     name: "container_id".into(),
                     typ: Type::String,
                     required: true,
+                    default: None,
                     description: Some("Docker container ID".into()),
                 },
                 FieldSchema {
                     name: "name".into(),
                     typ: Type::String,
                     required: true,
+                    default: None,
                     description: Some("Container name".into()),
                 },
             ],
