@@ -361,6 +361,24 @@ fn plan_action_to_event(action: &PlanAction) -> Event {
     }
 }
 
+/// Resolve the block execution order for a given target.
+/// - `None` → use `default` target if defined, else all blocks
+/// - `Some("...")` → all blocks
+/// - `Some(name)` → named target or block
+fn resolve_order(dag: &Dag, target: Option<&str>) -> Result<Vec<String>, EngineError> {
+    match target {
+        Some("...") => Ok(dag.topo_order()?),
+        Some(t) => Ok(dag.target_order(t)?),
+        None => {
+            if dag.targets().contains_key("default") {
+                Ok(dag.target_order("default")?)
+            } else {
+                Ok(dag.topo_order()?)
+            }
+        }
+    }
+}
+
 /// Plan all blocks in the DAG (or a target subset), returning what would change.
 pub fn plan(
     dag: &mut Dag,
@@ -369,10 +387,7 @@ pub fn plan(
     output: &Output,
     target: Option<&str>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
-    let order = match target {
-        Some(t) => dag.target_order(t)?,
-        None => dag.topo_order()?,
-    };
+    let order = resolve_order(dag, target)?;
 
     let mut scope = base.scope.clone();
     let mut plans = Vec::new();
@@ -459,6 +474,8 @@ pub fn plan(
 }
 
 /// Apply all blocks in the DAG (or a target subset).
+/// With no target: runs the `default` target if defined, else all blocks.
+/// With `...`: runs all blocks.
 pub fn apply(
     dag: &mut Dag,
     base: &BaseScope,
@@ -467,10 +484,7 @@ pub fn apply(
     target: Option<&str>,
     jobs: usize,
 ) -> Result<Vec<BlockPlan>, EngineError> {
-    let order = match target {
-        Some(t) => dag.target_order(t)?,
-        None => dag.topo_order()?,
-    };
+    let order = resolve_order(dag, target)?;
     if jobs <= 1 {
         apply_order(dag, base, store, output, &order)
     } else {
@@ -970,10 +984,7 @@ pub fn destroy(
     output: &Output,
     target: Option<&str>,
 ) -> Result<(), EngineError> {
-    let mut order = match target {
-        Some(t) => dag.target_order(t)?,
-        None => dag.topo_order()?,
-    };
+    let mut order = resolve_order(dag, target)?;
     order.reverse();
 
     for name in &order {
@@ -1015,10 +1026,7 @@ pub fn destroy(
 
 /// Dump evaluated inputs and stored outputs for all blocks (or a target subset).
 pub fn dump(dag: &mut Dag, base: &BaseScope, target: Option<&str>) -> Result<(), EngineError> {
-    let order = match target {
-        Some(t) => dag.target_order(t)?,
-        None => dag.topo_order()?,
-    };
+    let order = resolve_order(dag, target)?;
 
     let mut scope = base.scope.clone();
 

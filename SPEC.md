@@ -591,7 +591,7 @@ Commands map to lifecycle phases:
 |---------|--------|-------------|
 | `bit list` | — | List top-level targets |
 | `bit plan [target]` | resolve → plan | Show what would change without applying |
-| `bit apply [target]` | resolve → plan → apply | Apply all blocks |
+| `bit apply [target]` | resolve → plan → apply | Apply blocks (`default` target if defined, else all; `...` for all) |
 | `bit test [target]` | resolve → plan → apply | Apply test blocks and their dependencies |
 | `bit destroy [target]` | destroy | Destroy blocks in reverse dependency order |
 | `bit refresh [target]` | refresh | Query real state of blocks, update stored state |

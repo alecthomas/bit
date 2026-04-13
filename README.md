@@ -103,6 +103,12 @@ Prefix with `protected` to prevent replacement/destruction:
 protected db = docker.container { ... }
 ```
 
+If a `default` target is defined, `bit apply` with no arguments runs only that target. Use `bit apply ...` to run all blocks.
+
+```bit
+target default = [server, test]
+```
+
 ### Matrix Expansion
 
 Expand a block over list values with `name[key]`:

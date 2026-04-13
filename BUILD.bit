@@ -18,12 +18,6 @@ image = docker.image {
   after = [release]
 }
 
-container = docker.container {
-  image = image.ref
-  name = "bit"
-  healthcheck = "bit plan"
-}
-
 # Tests
 test = exec.test {
   depends_on = [debug]
@@ -38,15 +32,3 @@ integration-test = exec.test {
   ${debug.path} plan
   EOF
 }
-
-# Build debug binary only
-target debug = [debug]
-
-# Build release binary only
-target release = [release]
-
-# Run tests
-target test = [test, integration-test]
-
-# Run Docker container
-target docker = [container]
