@@ -118,7 +118,7 @@ fn load_module(
             process::exit(1);
         }
     };
-    let (dag, base) = match loader::load(&module, params, registry, store.as_ref()) {
+    let (dag, base) = match loader::load(&module, params, registry, store.as_ref(), root) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{} {e}", "error:".red().bold());

@@ -137,7 +137,55 @@ block.field             # block output references
 | `lines(string)` | Split into lines |
 | `split(string, sep)` | Split by separator |
 | `uniq(list)` | Deduplicate list |
+| `basename(path)` | Extract file name from path |
+| `dirname(path)` | Extract directory from path |
 | `secret(name)` | Access secret |
+
+### Modules
+
+A `.bit` file in `.bit/modules/` becomes a reusable provider. Each directory is a provider namespace, each file a resource. For example `.bit/modules/app/app.bit` maps to `app`:
+
+```bit
+# .bit/modules/app/app.bit
+param environment : string
+param replicas    : int = 1
+
+server = go.exe { package = "./cmd/server" }
+
+image = docker.image {
+  tag = "myapp:${environment}"
+  depends_on = [server]
+}
+
+deploy = docker.container {
+  image    = image.ref
+  replicas = replicas
+}
+
+output endpoint = deploy.endpoint
+
+target deploy = [deploy]
+```
+
+Use it like any other provider:
+
+```bit
+staging = app {
+  environment = "staging"
+  replicas    = 2
+}
+
+production = app {
+  environment = "production"
+  replicas    = 10
+  depends_on  = [staging]
+}
+
+# Access outputs: staging.endpoint, production.endpoint
+# Inner blocks are private: staging.server, staging.image are not accessible
+```
+
+Two instances of the same module produce independent subgraphs. Modules nest arbitrarily.
 
 ### Targets and Outputs
 
@@ -235,6 +283,7 @@ app = docker.container {
 ## How It Works
 
 1. Parse `BUILD.bit` and build a dependency DAG
+   - Module blocks (from `.bit/modules/`) are expanded into namespaced inner blocks
 2. For each block in topological order:
    - Evaluate field expressions (with upstream outputs in scope)
    - Resolve input files via the provider

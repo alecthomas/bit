@@ -1149,7 +1149,14 @@ mod tests {
     fn load_and_apply(input: &str) -> Result<Vec<BlockPlan>, EngineError> {
         let module = parser::parse(input, "<test>").expect("parse failed");
         let store = MemoryStore::new();
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).expect("load failed");
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .expect("load failed");
         let output = Output::new(&[]);
         apply(&mut dag, &base, &store, &output, None, 1)
     }
@@ -1198,7 +1205,14 @@ mod tests {
         );
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
         let out = Output::new(&[]);
         let plans = plan(&mut dag, &base, &store, &out, None).unwrap();
         assert_eq!(plans.len(), 1);
@@ -1218,13 +1232,27 @@ mod tests {
         let store = MemoryStore::new();
 
         // Apply first
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &out, None, 1).unwrap();
         assert!(!store.list().unwrap().is_empty());
 
         // Reload with state, then destroy
-        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let (mut dag, _base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
         destroy(&mut dag, &store, &out, None).unwrap();
         assert!(store.list().unwrap().is_empty());
     }
@@ -1241,11 +1269,25 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &out, None, 1).unwrap();
 
-        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let (mut dag, _base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
         destroy(&mut dag, &store, &out, None).unwrap();
         // State should still exist — destroy was skipped
         assert!(!store.list().unwrap().is_empty());
@@ -1269,7 +1311,14 @@ mod tests {
         );
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
         let out = Output::new(&[]);
         let results = apply(&mut dag, &base, &store, &out, Some("just_a"), 1).unwrap();
         assert_eq!(results.len(), 1);
@@ -1291,7 +1340,14 @@ mod tests {
         let store = MemoryStore::new();
 
         // First apply creates the block
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &out, None, 1).unwrap();
 
@@ -1302,7 +1358,14 @@ mod tests {
         assert!(!wrapped.file_timestamps.is_empty());
 
         // Second apply should be a no-op (timestamp fast path)
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
         let results = apply(&mut dag, &base, &store, &out, None, 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::None);
@@ -1327,14 +1390,28 @@ mod tests {
         let out = Output::new(&[]);
 
         // First apply
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
         apply(&mut dag, &base, &store, &out, None, 1).unwrap();
 
         // Modify input file (touch with new content to change both mtime and hash)
         std::fs::write(&input_file, "v2").unwrap();
 
         // Second apply should detect the change
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store).unwrap();
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
         let results = apply(&mut dag, &base, &store, &out, None, 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::Update);

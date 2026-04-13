@@ -192,6 +192,8 @@ fn call_builtin(name: &str, args: &[Value]) -> Result<Value, EvalError> {
         "lines" => builtin_lines(args),
         "split" => builtin_split(args),
         "uniq" => builtin_uniq(args),
+        "basename" => builtin_basename(args),
+        "dirname" => builtin_dirname(args),
         _ => Err(EvalError::UnknownFunc(name.into())),
     }
 }
@@ -326,6 +328,68 @@ fn builtin_uniq(args: &[Value]) -> Result<Value, EvalError> {
         }
     }
     Ok(Value::List(seen))
+}
+
+/// `basename(path)` — extract the file name from a path, or map over a list
+fn builtin_basename(args: &[Value]) -> Result<Value, EvalError> {
+    check_arity("basename", args, 1)?;
+    match &args[0] {
+        Value::Str(s) => {
+            let name = std::path::Path::new(s)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok(Value::Str(name))
+        }
+        Value::List(items) => {
+            let mapped = items
+                .iter()
+                .map(|v| match v {
+                    Value::Str(s) => {
+                        let name = std::path::Path::new(s)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        Ok(Value::Str(name))
+                    }
+                    _ => Err(EvalError::Type("basename on list requires string elements".into())),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::List(mapped))
+        }
+        _ => Err(EvalError::Type("basename() requires a string or list".into())),
+    }
+}
+
+/// `dirname(path)` — extract the directory from a path, or map over a list
+fn builtin_dirname(args: &[Value]) -> Result<Value, EvalError> {
+    check_arity("dirname", args, 1)?;
+    match &args[0] {
+        Value::Str(s) => {
+            let dir = std::path::Path::new(s)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok(Value::Str(dir))
+        }
+        Value::List(items) => {
+            let mapped = items
+                .iter()
+                .map(|v| match v {
+                    Value::Str(s) => {
+                        let dir = std::path::Path::new(s)
+                            .parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        Ok(Value::Str(dir))
+                    }
+                    _ => Err(EvalError::Type("dirname on list requires string elements".into())),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::List(mapped))
+        }
+        _ => Err(EvalError::Type("dirname() requires a string or list".into())),
+    }
 }
 
 #[cfg(test)]
@@ -629,5 +693,61 @@ mod tests {
             vec![],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("hello".into()));
+    }
+
+    #[test]
+    fn eval_basename_string() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::Str(vec![StringPart::Literal("/usr/bin/test".into())])),
+            "basename".into(),
+            vec![],
+        );
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("test".into()));
+    }
+
+    #[test]
+    fn eval_basename_list() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::List(vec![
+                Expr::Str(vec![StringPart::Literal("/a/b.txt".into())]),
+                Expr::Str(vec![StringPart::Literal("/c/d.go".into())]),
+            ])),
+            "basename".into(),
+            vec![],
+        );
+        assert_eq!(
+            eval(&expr, &scope).unwrap(),
+            Value::List(vec![Value::Str("b.txt".into()), Value::Str("d.go".into()),])
+        );
+    }
+
+    #[test]
+    fn eval_dirname_string() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::Str(vec![StringPart::Literal("/usr/bin/test".into())])),
+            "dirname".into(),
+            vec![],
+        );
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("/usr/bin".into()));
+    }
+
+    #[test]
+    fn eval_dirname_list() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::List(vec![
+                Expr::Str(vec![StringPart::Literal("/a/b.txt".into())]),
+                Expr::Str(vec![StringPart::Literal("/c/d.go".into())]),
+            ])),
+            "dirname".into(),
+            vec![],
+        );
+        assert_eq!(
+            eval(&expr, &scope).unwrap(),
+            Value::List(vec![Value::Str("/a".into()), Value::Str("/c".into()),])
+        );
     }
 }

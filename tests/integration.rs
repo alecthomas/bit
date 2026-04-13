@@ -46,25 +46,29 @@ impl StateStore for MemoryStore {
 
 fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store).expect("load failed");
+    let (mut dag, base) =
+        loader::load(&module, &Map::new(), &registry(), store, std::path::Path::new(".")).expect("load failed");
     engine::apply(&mut dag, &base, store, &Output::new(&[]), None, 1).expect("apply failed")
 }
 
 fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store).expect("load failed");
+    let (mut dag, base) =
+        loader::load(&module, &Map::new(), &registry(), store, std::path::Path::new(".")).expect("load failed");
     engine::plan(&mut dag, &base, store, &Output::new(&[]), None).expect("plan failed")
 }
 
 fn run_dump(input: &str, store: &MemoryStore, target: Option<&str>) {
     let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store).expect("load failed");
+    let (mut dag, base) =
+        loader::load(&module, &Map::new(), &registry(), store, std::path::Path::new(".")).expect("load failed");
     engine::dump(&mut dag, &base, target).expect("dump failed");
 }
 
 fn run_destroy(input: &str, store: &MemoryStore) {
     let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, _base) = loader::load(&module, &Map::new(), &registry(), store).expect("load failed");
+    let (mut dag, _base) =
+        loader::load(&module, &Map::new(), &registry(), store, std::path::Path::new(".")).expect("load failed");
     engine::destroy(&mut dag, store, &Output::new(&[]), None).expect("destroy failed");
 }
 
@@ -195,7 +199,7 @@ fn target_filters_execution() {
     );
     let store = MemoryStore::new();
     let module = parser::parse(&input, "<test>").unwrap();
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), &store).unwrap();
+    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), &store, std::path::Path::new(".")).unwrap();
     let results = engine::apply(&mut dag, &base, &store, &Output::new(&[]), Some("just_a"), 1).unwrap();
     assert_eq!(results.len(), 1);
     assert!(out_a.exists());
@@ -421,7 +425,7 @@ fn doc_comments_preserved() {
     );
     let module = parser::parse(input, "<test>").unwrap();
     let store = MemoryStore::new();
-    let (dag, _base) = loader::load(&module, &Map::new(), &registry(), &store).unwrap();
+    let (dag, _base) = loader::load(&module, &Map::new(), &registry(), &store, std::path::Path::new(".")).unwrap();
     let node = dag.get_node("server").unwrap();
     assert_eq!(node.fields.len(), 3);
     let targets = dag.targets();
@@ -477,4 +481,137 @@ fn dump_with_target() {
     run_apply(&input, &store);
     // Dump filtered to target should succeed
     run_dump(&input, &store, Some("just_a"));
+}
+
+/// Helper to set up a module file in .bit/modules/{provider}/{resource}.bit
+fn write_module(dir: &std::path::Path, provider: &str, resource: &str, content: &str) {
+    let module_dir = dir.join(".bit/modules").join(provider);
+    fs::create_dir_all(&module_dir).unwrap();
+    fs::write(module_dir.join(format!("{resource}.bit")), content).unwrap();
+}
+
+fn run_apply_in_dir(dir: &std::path::Path, input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
+    let module = parser::parse(input, "<test>").expect("parse failed");
+    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store, dir).expect("load failed");
+    engine::apply(&mut dag, &base, store, &Output::new(&[]), None, 1).expect("apply failed")
+}
+
+#[test]
+fn module_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_inner = dir.path().join("inner_out.txt");
+
+    write_module(
+        dir.path(),
+        "mymod",
+        "mymod",
+        &format!(
+            concat!(
+                "param msg : string\n",
+                "inner = exec {{\n",
+                "  command = \"echo ${{msg}} > {}\"\n",
+                "  output = \"{}\"\n",
+                "  inputs = []\n",
+                "}}\n",
+                "output result = inner.path\n",
+            ),
+            out_inner.display(),
+            out_inner.display(),
+        ),
+    );
+
+    let input = r#"
+inst = mymod {
+  msg = "hello from module"
+}
+"#;
+    let store = MemoryStore::new();
+    let results = run_apply_in_dir(dir.path(), input, &store);
+
+    // Should have 2 blocks: inst.inner (exec) and inst (module outputs)
+    assert_eq!(results.len(), 2);
+    assert!(out_inner.exists());
+    assert_eq!(fs::read_to_string(&out_inner).unwrap().trim(), "hello from module");
+}
+
+#[test]
+fn module_output_forwarding() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_inner = dir.path().join("mod_out.txt");
+    let out_consumer = dir.path().join("consumer_out.txt");
+
+    write_module(
+        dir.path(),
+        "mymod",
+        "mymod",
+        &format!(
+            concat!(
+                "param msg : string\n",
+                "inner = exec {{\n",
+                "  command = \"echo ${{msg}} > {}\"\n",
+                "  output = \"{}\"\n",
+                "  inputs = []\n",
+                "}}\n",
+                "output result = inner.path\n",
+            ),
+            out_inner.display(),
+            out_inner.display(),
+        ),
+    );
+
+    let input = format!(
+        concat!(
+            "inst = mymod {{\n",
+            "  msg = \"from module\"\n",
+            "}}\n",
+            "consumer = exec {{\n",
+            "  command = \"cp ${{inst.result}} {}\"\n",
+            "  output = \"{}\"\n",
+            "  inputs = []\n",
+            "}}\n",
+        ),
+        out_consumer.display(),
+        out_consumer.display(),
+    );
+    let store = MemoryStore::new();
+    let results = run_apply_in_dir(dir.path(), &input, &store);
+
+    // 3 blocks: inst.inner, inst, consumer
+    assert_eq!(results.len(), 3);
+    assert!(out_consumer.exists());
+    assert_eq!(
+        fs::read_to_string(&out_consumer).unwrap().trim(),
+        fs::read_to_string(&out_inner).unwrap().trim(),
+    );
+}
+
+#[test]
+fn module_multiple_instances() {
+    let dir = tempfile::tempdir().unwrap();
+    let out1 = dir.path().join("out1.txt");
+    let out2 = dir.path().join("out2.txt");
+
+    write_module(
+        dir.path(),
+        "mymod",
+        "mymod",
+        "param msg : string\nparam outfile : string\n\
+         inner = exec {\n  command = \"echo ${msg} > ${outfile}\"\n  output = outfile\n  inputs = []\n}\n\
+         output result = inner.path\n",
+    );
+
+    let input = format!(
+        concat!(
+            "a = mymod {{\n  msg = \"alpha\"\n  outfile = \"{}\"\n}}\n",
+            "b = mymod {{\n  msg = \"beta\"\n  outfile = \"{}\"\n}}\n",
+        ),
+        out1.display(),
+        out2.display(),
+    );
+    let store = MemoryStore::new();
+    let results = run_apply_in_dir(dir.path(), &input, &store);
+
+    assert_eq!(results.len(), 4); // a.inner, a, b.inner, b
+    assert_eq!(fs::read_to_string(&out1).unwrap().trim(), "alpha");
+    assert_eq!(fs::read_to_string(&out2).unwrap().trim(), "beta");
 }

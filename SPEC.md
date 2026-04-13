@@ -59,10 +59,12 @@ deploy = kubernetes.deployment {
 
 ## 2. Modules
 
-A `.bit` file is itself a provider. It declares parameters, contains blocks, and exposes outputs and targets. Only declared outputs and targets are accessible from outside the module — inner blocks are private.
+A `.bit` file is itself a provider, if placed in `.bit/modules`. It declares parameters, contains blocks, and exposes outputs and targets. Only declared outputs and targets are accessible from outside the module — inner blocks are private.
+
+Each directory in `.bit/modules/` is a provider, and each file under those directories is a resource. For example the module `.bit/modules/docker/image.bit` would map to `docker.image`. A `.bit` file with the same name as its parent directory is the "default" resource, eg. `.bit/modules/docker/docker.bit` can be used directly as `docker`.
 
 ```
-# app.bit
+# .bit/modules/app/app.bit
 param environment : string
 param replicas    : int
 param registry    : string
@@ -86,10 +88,10 @@ target deploy = [app]
 ```
 
 ```
-# prod.bit
+# BUILD.bit
 let git_sha = exec("git rev-parse --short HEAD") | trim
 
-app = ./app.bit {
+app = app {
   environment = "production"
   replicas    = 5
   registry    = "registry.example.com"
@@ -143,6 +145,8 @@ let packages = exec("go list -deps -f '{{.Dir}}/*.go' ./cmd/server/...")
 | `trim` | Strip whitespace (on string, or each element of list) |
 | `split(sep)` | Split string into list on separator |
 | `uniq` | Deduplicate a list |
+| `basename` | Extract file name from path (on string, or each element of list) |
+| `dirname` | Extract directory from path (on string, or each element of list) |
 
 Pipes chain left to right: `exec("...") | trim | lines | uniq`
 
@@ -569,7 +573,7 @@ path = [".bit/providers", "~/.bit/providers"]
 ## 15. Example: Source to Production
 
 ```
-# ── tests/smoke.bit ──
+# ── .bit/modules/smoke/smoke.bit ──
 
 param base_url : string
 
@@ -590,7 +594,7 @@ target all = [health, e2e]
 ```
 
 ```
-# ── deploy.bit — reusable rollout with canary analysis ──
+# ── .bit/modules/deploy/deploy.bit — reusable rollout with canary analysis ──
 
 param environment : string
 param image       : string
@@ -665,7 +669,7 @@ target deploy = [app]
 ```
 
 ```
-# ── main.bit ──
+# ── BUILD.bit ──
 
 let git_sha  = exec("git rev-parse --short HEAD") | trim
 let registry = "registry.example.com"
@@ -697,7 +701,7 @@ test_app = docker.container {
   ports = ["8080:8080"]
 }
 
-local_tests = ./tests/smoke.bit {
+local_tests = smoke {
   base_url = "http://${test_app.host}:8080"
 }
 
@@ -710,7 +714,7 @@ staging_db = kubernetes.postgres {
   storage   = "20Gi"
 }
 
-staging = ./deploy.bit {
+staging = deploy {
   environment = "staging"
   image       = image.ref
   registry    = registry
@@ -730,7 +734,7 @@ protected prod_db = aws.aurora {
   region     = "us-east-1"
 }
 
-production = ./deploy.bit {
+production = deploy {
   environment = "production"
   image       = image.ref
   registry    = registry
