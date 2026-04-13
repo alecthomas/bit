@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use crate::ast::{BinOp, Expr, Field, StringPart};
-use crate::value::{Map, Value};
+use crate::value::{Map, Type, Value};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
@@ -182,20 +182,102 @@ fn check_arity(name: &str, args: &[Value], expected: usize) -> Result<(), EvalEr
     Ok(())
 }
 
+/// Definition of a built-in function/pipe.
+struct BuiltinDef {
+    func: fn(&[Value]) -> Result<Value, EvalError>,
+    return_type: Type,
+}
+
+/// Static registry of all built-in functions and pipes.
+fn builtins() -> &'static HashMap<&'static str, BuiltinDef> {
+    use std::sync::OnceLock;
+    static BUILTINS: OnceLock<HashMap<&str, BuiltinDef>> = OnceLock::new();
+    BUILTINS.get_or_init(|| {
+        HashMap::from([
+            (
+                "env",
+                BuiltinDef {
+                    func: builtin_env,
+                    return_type: Type::String,
+                },
+            ),
+            (
+                "exec",
+                BuiltinDef {
+                    func: builtin_exec,
+                    return_type: Type::String,
+                },
+            ),
+            (
+                "glob",
+                BuiltinDef {
+                    func: builtin_glob,
+                    return_type: Type::List(Box::new(Type::String)),
+                },
+            ),
+            (
+                "secret",
+                BuiltinDef {
+                    func: builtin_secret,
+                    return_type: Type::String,
+                },
+            ),
+            (
+                "trim",
+                BuiltinDef {
+                    func: builtin_trim,
+                    return_type: Type::String,
+                },
+            ),
+            (
+                "lines",
+                BuiltinDef {
+                    func: builtin_lines,
+                    return_type: Type::List(Box::new(Type::String)),
+                },
+            ),
+            (
+                "split",
+                BuiltinDef {
+                    func: builtin_split,
+                    return_type: Type::List(Box::new(Type::String)),
+                },
+            ),
+            (
+                "uniq",
+                BuiltinDef {
+                    func: builtin_uniq,
+                    return_type: Type::List(Box::new(Type::String)),
+                },
+            ),
+            (
+                "basename",
+                BuiltinDef {
+                    func: builtin_basename,
+                    return_type: Type::String,
+                },
+            ),
+            (
+                "dirname",
+                BuiltinDef {
+                    func: builtin_dirname,
+                    return_type: Type::String,
+                },
+            ),
+        ])
+    })
+}
+
+/// Look up the return type of a built-in function or pipe.
+pub fn builtin_return_type(name: &str) -> Option<Type> {
+    builtins().get(name).map(|b| b.return_type.clone())
+}
+
 fn call_builtin(name: &str, args: &[Value]) -> Result<Value, EvalError> {
-    match name {
-        "env" => builtin_env(args),
-        "exec" => builtin_exec(args),
-        "glob" => builtin_glob(args),
-        "secret" => builtin_secret(args),
-        "trim" => builtin_trim(args),
-        "lines" => builtin_lines(args),
-        "split" => builtin_split(args),
-        "uniq" => builtin_uniq(args),
-        "basename" => builtin_basename(args),
-        "dirname" => builtin_dirname(args),
-        _ => Err(EvalError::UnknownFunc(name.into())),
-    }
+    let def = builtins()
+        .get(name)
+        .ok_or_else(|| EvalError::UnknownFunc(name.into()))?;
+    (def.func)(args)
 }
 
 /// `env(name)` or `env(name, default)`

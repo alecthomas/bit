@@ -271,6 +271,7 @@ fn cmp_expr(input: &mut &str) -> ModalResult<Expr> {
 fn primary(input: &mut &str) -> ModalResult<Expr> {
     alt((
         string_expr,
+        raw_string_expr,
         heredoc_expr,
         number_expr,
         bool_expr,
@@ -335,9 +336,9 @@ fn map_expr(input: &mut &str) -> ModalResult<Expr> {
         .parse_next(input)
 }
 
-/// `"key" = value` or `key = value`
+/// `"key" = value` or `'key' = value` or `key = value`
 fn map_entry(input: &mut &str) -> ModalResult<Field> {
-    let name = alt((lex(plain_string), ident_string)).parse_next(input)?;
+    let name = alt((lex(plain_string), lex(plain_raw_string), ident_string)).parse_next(input)?;
     cut_err(lex('='))
         .context(StrContext::Label("'=' in map entry"))
         .parse_next(input)?;
@@ -387,6 +388,28 @@ fn plain_string(input: &mut &str) -> ModalResult<String> {
         .to_owned();
     cut_err('"')
         .context(StrContext::Label("closing '\"'"))
+        .parse_next(input)?;
+    Ok(content)
+}
+
+/// Single-quoted raw string: no escapes, no interpolation.
+/// Content is taken verbatim until the closing `'`.
+fn raw_string_expr(input: &mut &str) -> ModalResult<Expr> {
+    '\''.parse_next(input)?;
+    let content: &str = take_while(0.., |c: char| c != '\'').parse_next(input)?;
+    cut_err('\'')
+        .context(StrContext::Label("closing '\\''"))
+        .parse_next(input)?;
+    ws(input)?;
+    Ok(Expr::Str(vec![StringPart::Literal(content.to_owned())]))
+}
+
+/// Parse a plain single-quoted string, returning just the content.
+fn plain_raw_string(input: &mut &str) -> ModalResult<String> {
+    '\''.parse_next(input)?;
+    let content: String = take_while(0.., |c: char| c != '\'').parse_next(input)?.to_owned();
+    cut_err('\'')
+        .context(StrContext::Label("closing '\\''"))
         .parse_next(input)?;
     Ok(content)
 }
@@ -778,6 +801,10 @@ fn infer_type(expr: &Expr) -> Option<Type> {
             let val_type = infer_type(&fields.first()?.value)?;
             Some(Type::Map(Box::new(val_type)))
         }
+        Expr::Call(name, _) => crate::expr::builtin_return_type(name),
+        Expr::Pipe(_, name, _) => crate::expr::builtin_return_type(name),
+        Expr::If(_, then_val, _) => infer_type(then_val),
+        Expr::Add(lhs, _) => infer_type(lhs),
         _ => None,
     }
 }
@@ -1556,5 +1583,97 @@ mod tests {
         let input = "let x = 1\n";
         let result = parse(input, "<test>").unwrap();
         assert_eq!(result.doc, None);
+    }
+
+    #[test]
+    fn parse_raw_string() {
+        let result = parse("let x = 'hello'", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => {
+                assert_eq!(l.value, Expr::Str(vec![StringPart::Literal("hello".into())]));
+            }
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn raw_string_no_escapes() {
+        let result = parse(r"let x = 'hello\nworld'", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => {
+                assert_eq!(l.value, Expr::Str(vec![StringPart::Literal("hello\\nworld".into())]));
+            }
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn raw_string_no_interpolation() {
+        let result = parse("let x = '${name}'", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => {
+                assert_eq!(l.value, Expr::Str(vec![StringPart::Literal("${name}".into())]));
+            }
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn raw_string_with_double_quotes() {
+        let result = parse(r#"let x = 'say "hello"'"#, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => {
+                assert_eq!(l.value, Expr::Str(vec![StringPart::Literal("say \"hello\"".into())]));
+            }
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn raw_string_as_map_key() {
+        let result = parse("let x = {'key' = 1}", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => match &l.value {
+                Expr::Map(fields) => assert_eq!(fields[0].name, "key"),
+                _ => panic!("expected Map"),
+            },
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn infer_type_from_exec_call() {
+        let result = parse("param x = exec('git rev-parse HEAD')", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => assert_eq!(p.typ, Type::String),
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn infer_type_from_pipe() {
+        let result = parse("param x = exec('cmd') | lines", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => assert_eq!(p.typ, Type::List(Box::new(Type::String))),
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn infer_type_from_pipe_chain() {
+        let result = parse("param x = exec('cmd') | trim", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => assert_eq!(p.typ, Type::String),
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn infer_type_from_glob() {
+        let result = parse("param x = glob('*.rs')", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => assert_eq!(p.typ, Type::List(Box::new(Type::String))),
+            _ => panic!("expected Param"),
+        }
     }
 }

@@ -105,10 +105,11 @@ protected db = docker.container { ... }
 
 ### Strings
 
-Double-quoted with `${expr}` interpolation and heredocs:
+Double-quoted with `${expr}` interpolation, single-quoted raw strings, and heredocs:
 
 ```bit
 greeting = "hello ${name}"
+pattern = 'no \escapes or ${interpolation}'
 script = <<-EOF
   echo ${app.path}
   echo "done"
