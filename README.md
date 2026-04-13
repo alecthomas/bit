@@ -103,6 +103,26 @@ Prefix with `protected` to prevent replacement/destruction:
 protected db = docker.container { ... }
 ```
 
+### Matrix Expansion
+
+Expand a block over list values with `name[key]`:
+
+```bit
+let arch = ["amd64", "arm64"]
+
+binary[arch] = go.exe {
+  package = "./cmd/server"
+  goarch  = arch             # scalar within each expansion
+}
+
+container[arch] = docker.container {
+  image = image.ref          # resolves to matching arch slice
+  name  = "app-${arch}"
+}
+```
+
+Creates `binary[amd64]`, `binary[arm64]`, etc. Multiple keys produce a cartesian product. Non-matrix blocks depending on a matrix block wait for all slices.
+
 ### Strings
 
 Double-quoted with `${expr}` interpolation, single-quoted raw strings, and heredocs:

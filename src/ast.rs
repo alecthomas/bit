@@ -21,11 +21,14 @@ pub enum Statement {
 
 /// `name = provider.resource { fields... }`
 /// or `protected name = provider.resource { fields... }`
+/// or `name[key1, key2] = provider.resource { fields... }` (matrix expansion)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub name: String,
     pub doc: Option<String>,
     pub protected: bool,
+    /// Matrix expansion keys — list params to expand over.
+    pub matrix_keys: Vec<String>,
     pub provider: String,
     pub resource: String,
     pub fields: Vec<Field>,
@@ -170,6 +173,7 @@ mod tests {
             name: "server".into(),
             doc: None,
             protected: false,
+            matrix_keys: vec![],
             provider: "go".into(),
             resource: "binary".into(),
             fields: vec![Field {

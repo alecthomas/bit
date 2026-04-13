@@ -874,6 +874,18 @@ fn block_field(input: &mut &str) -> ModalResult<Field> {
 fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
     let protected = opt(keyword("protected")).map(|o| o.is_some()).parse_next(input)?;
     let name = ident_string.parse_next(input)?;
+
+    // Optional matrix keys: name[key1, key2]
+    let matrix_keys = if opt(lex('[')).parse_next(input)?.is_some() {
+        let keys: Vec<String> = separated(1.., ident_string, lex(',')).parse_next(input)?;
+        cut_err(lex(']'))
+            .context(StrContext::Label("closing ']' in matrix keys"))
+            .parse_next(input)?;
+        keys
+    } else {
+        vec![]
+    };
+
     // Once we see `name =`, this must be a block statement — commit to it
     cut_err(lex('='))
         .context(StrContext::Expected(winnow::error::StrContextValue::Description("'='")))
@@ -906,6 +918,7 @@ fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
         name,
         doc,
         protected,
+        matrix_keys,
         provider,
         resource,
         fields,
@@ -1718,6 +1731,52 @@ mod tests {
         match &result.statements[0] {
             Statement::Param(p) => assert_eq!(p.typ, Type::String),
             _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_matrix_block() {
+        let input = r#"
+param arch = ["amd64", "arm64"]
+image[arch] = exec {
+  command = "build ${arch}"
+  output = "out"
+}
+"#;
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[1] {
+            Statement::Block(b) => {
+                assert_eq!(b.name, "image");
+                assert_eq!(b.matrix_keys, vec!["arch"]);
+            }
+            _ => panic!("expected Block"),
+        }
+    }
+
+    #[test]
+    fn parse_matrix_block_multi_key() {
+        let input = r#"
+image[arch, region] = exec {
+  command = "build"
+  output = "out"
+}
+"#;
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Block(b) => {
+                assert_eq!(b.matrix_keys, vec!["arch", "region"]);
+            }
+            _ => panic!("expected Block"),
+        }
+    }
+
+    #[test]
+    fn parse_block_no_matrix() {
+        let input = "a = exec {\n  command = \"build\"\n  output = \"out\"\n}\n";
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Block(b) => assert!(b.matrix_keys.is_empty()),
+            _ => panic!("expected Block"),
         }
     }
 }

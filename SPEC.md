@@ -57,6 +57,59 @@ deploy = kubernetes.deployment {
 
 `depends_on` means "I depend on this" — the parent's state is part of the child's content hash. `after` means "just run this first" — ordering only, no hash coupling. Expression refs (e.g. `image.ref`) implicitly create `depends_on` edges.
 
+### Matrix Expansion
+
+Blocks can expand over list values using `name[key]` syntax:
+
+```
+let arch = ["amd64", "arm64"]
+
+binary[arch] = go.binary {
+  main   = "./cmd/server"
+  goarch = arch
+}
+```
+
+This creates one block per list element — `binary[amd64]` and `binary[arm64]`. Inside the block, `arch` is a scalar bound to the current element.
+
+Blocks sharing the same key automatically align. References between them resolve to the matching slice:
+
+```
+image[arch] = docker.image {
+  tag      = "myapp-${arch}:latest"
+  platform = arch
+}
+
+container[arch] = docker.container {
+  image = image.ref    # resolves to the matching arch slice
+  name  = "app-${arch}"
+}
+```
+
+Multiple keys produce a cartesian product:
+
+```
+let arch = ["amd64", "arm64"]
+let region = ["us", "eu"]
+
+deploy[arch, region] = kubernetes.deployment {
+  image   = image.ref
+  cluster = "${region}-cluster"
+}
+# Creates: deploy[amd64, us], deploy[amd64, eu], deploy[arm64, us], deploy[arm64, eu]
+```
+
+Non-matrix blocks can depend on matrix blocks — the dependency applies to all slices:
+
+```
+release = exec {
+  command    = "publish"
+  depends_on = [binary]   # waits for all arch variants
+}
+```
+
+State is keyed per slice: `binary[amd64]`, `deploy[arm64, eu]`.
+
 ## 2. Modules
 
 A `.bit` file is itself a provider, if placed in `.bit/modules`. It declares parameters, contains blocks, and exposes outputs and targets. Only declared outputs and targets are accessible from outside the module — inner blocks are private.

@@ -615,3 +615,30 @@ fn module_multiple_instances() {
     assert_eq!(fs::read_to_string(&out1).unwrap().trim(), "alpha");
     assert_eq!(fs::read_to_string(&out2).unwrap().trim(), "beta");
 }
+
+#[test]
+fn matrix_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_amd64 = dir.path().join("out-amd64.txt");
+    let out_arm64 = dir.path().join("out-arm64.txt");
+
+    let input = format!(
+        concat!(
+            "let arch = [\"amd64\", \"arm64\"]\n",
+            "build[arch] = exec {{\n",
+            "  command = \"echo ${{arch}} > {dir}/out-${{arch}}.txt\"\n",
+            "  output = \"{dir}/out-${{arch}}.txt\"\n",
+            "  inputs = []\n",
+            "}}\n",
+        ),
+        dir = dir.path().display(),
+    );
+    let store = MemoryStore::new();
+    let results = run_apply(&input, &store);
+
+    assert_eq!(results.len(), 2);
+    assert!(out_amd64.exists());
+    assert!(out_arm64.exists());
+    assert_eq!(fs::read_to_string(&out_amd64).unwrap().trim(), "amd64");
+    assert_eq!(fs::read_to_string(&out_arm64).unwrap().trim(), "arm64");
+}
