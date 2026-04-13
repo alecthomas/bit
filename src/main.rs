@@ -158,6 +158,13 @@ fn load_module(
     (module, dag, base, store)
 }
 
+/// Create an Output formatter sized to the blocks that will actually run.
+fn make_output(dag: &bit::dag::Dag, target: Option<&str>) -> Output {
+    let names = engine::resolve_order(dag, target).unwrap_or_default();
+    let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    Output::new(&name_refs)
+}
+
 fn main() {
     let cli = Cli::parse();
     find_and_chdir_project_root();
@@ -171,9 +178,7 @@ fn main() {
     match command {
         Command::Plan { target } => {
             let (_module, mut dag, base, store) = load_module(&registry, &params);
-            let names = dag.block_names();
-            let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-            let output = Output::new(&name_refs);
+            let output = make_output(&dag, target.as_deref());
             match engine::plan(&mut dag, &base, store.as_ref(), &output, target.as_deref()) {
                 Ok(_) => {}
                 Err(e) => {
@@ -184,9 +189,7 @@ fn main() {
         }
         Command::Apply { target } => {
             let (_module, mut dag, base, store) = load_module(&registry, &params);
-            let names = dag.block_names();
-            let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-            let output = Output::new(&name_refs);
+            let output = make_output(&dag, target.as_deref());
             match engine::apply(&mut dag, &base, store.as_ref(), &output, target.as_deref(), jobs) {
                 Ok(_) => {}
                 Err(e) => {
@@ -197,9 +200,7 @@ fn main() {
         }
         Command::Test => {
             let (_module, mut dag, base, store) = load_module(&registry, &params);
-            let names = dag.block_names();
-            let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-            let output = Output::new(&name_refs);
+            let output = make_output(&dag, None);
             match engine::test(&mut dag, &base, store.as_ref(), &output, jobs) {
                 Ok(_) => {}
                 Err(e) => {
@@ -210,9 +211,7 @@ fn main() {
         }
         Command::Destroy { target } => {
             let (_module, mut dag, _base, store) = load_module(&registry, &params);
-            let names = dag.block_names();
-            let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-            let output = Output::new(&name_refs);
+            let output = make_output(&dag, target.as_deref());
             match engine::destroy(&mut dag, store.as_ref(), &output, target.as_deref()) {
                 Ok(()) => {}
                 Err(e) => {

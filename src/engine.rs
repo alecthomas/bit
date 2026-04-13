@@ -365,7 +365,7 @@ fn plan_action_to_event(action: &PlanAction) -> Event {
 /// - `None` → use `default` target if defined, else all blocks
 /// - `Some("...")` → all blocks
 /// - `Some(name)` → named target or block
-fn resolve_order(dag: &Dag, target: Option<&str>) -> Result<Vec<String>, EngineError> {
+pub fn resolve_order(dag: &Dag, target: Option<&str>) -> Result<Vec<String>, EngineError> {
     match target {
         Some("...") => Ok(dag.topo_order()?),
         Some(t) => Ok(dag.target_order(t)?),
