@@ -163,9 +163,19 @@ fn keyword<'i>(kw: &'static str) -> impl FnMut(&mut &'i str) -> ModalResult<()> 
 // ── Types ──
 
 fn typ(input: &mut &str) -> ModalResult<Type> {
-    alt((typ_list, typ_map, typ_scalar))
-        .context(StrContext::Label("type"))
-        .parse_next(input)
+    let first = typ_atom.context(StrContext::Label("type")).parse_next(input)?;
+    let rest: Vec<Type> = repeat(0.., preceded(lex('|'), typ_atom)).parse_next(input)?;
+    if rest.is_empty() {
+        Ok(first)
+    } else {
+        let mut variants = vec![first];
+        variants.extend(rest);
+        Ok(Type::Union(variants))
+    }
+}
+
+fn typ_atom(input: &mut &str) -> ModalResult<Type> {
+    alt((typ_list, typ_map, typ_scalar)).parse_next(input)
 }
 
 /// `[type]`
@@ -1673,6 +1683,40 @@ mod tests {
         let result = parse("param x = glob('*.rs')", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Param(p) => assert_eq!(p.typ, Type::List(Box::new(Type::String))),
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_union_type() {
+        let result = parse("param x : string | [string]", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => {
+                assert_eq!(
+                    p.typ,
+                    Type::Union(vec![Type::String, Type::List(Box::new(Type::String))])
+                );
+            }
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_union_type_three() {
+        let result = parse("param x : string | number | bool", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => {
+                assert_eq!(p.typ, Type::Union(vec![Type::String, Type::Number, Type::Bool]));
+            }
+            _ => panic!("expected Param"),
+        }
+    }
+
+    #[test]
+    fn parse_single_type_no_union() {
+        let result = parse("param x : string", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => assert_eq!(p.typ, Type::String),
             _ => panic!("expected Param"),
         }
     }

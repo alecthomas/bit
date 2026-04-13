@@ -135,7 +135,7 @@ impl Resource for ImageResource {
                 },
                 FieldSchema {
                     name: "platform".into(),
-                    typ: Type::List(Box::new(Type::String)),
+                    typ: Type::Union(vec![Type::String, Type::List(Box::new(Type::String))]),
                     required: false,
                     default: None,
                     description: Some("Target platform(s) (e.g. \"linux/amd64\")".into()),

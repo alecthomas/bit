@@ -124,6 +124,15 @@ impl std::fmt::Display for Type {
             Type::Map(inner) => write!(f, "{{string = {inner}}}"),
             Type::Path => write!(f, "path"),
             Type::Secret => write!(f, "secret"),
+            Type::Union(types) => {
+                for (i, t) in types.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
+                    write!(f, "{t}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -138,6 +147,7 @@ pub enum Type {
     Map(Box<Type>),
     Path,
     Secret,
+    Union(Vec<Type>),
 }
 
 /// Check that a value matches a declared type, recursively.
@@ -159,6 +169,15 @@ pub fn validate_type(value: &Value, typ: &Type) -> Result<(), String> {
                 validate_type(v, val_type).map_err(|e| format!(".{k}: {e}"))?;
             }
             Ok(())
+        }
+        (Type::Union(variants), _) => {
+            for variant in variants {
+                if validate_type(value, variant).is_ok() {
+                    return Ok(());
+                }
+            }
+            let names: Vec<String> = variants.iter().map(|t| t.to_string()).collect();
+            Err(format!("expected {}, got {}", names.join(" | "), type_name(value)))
         }
         _ => Err(format!("expected {typ}, got {}", type_name(value))),
     }
@@ -289,5 +308,31 @@ mod tests {
     #[test]
     fn validate_empty_map_ok() {
         assert!(validate_type(&Value::Map(Map::new()), &Type::Map(Box::new(Type::String))).is_ok());
+    }
+
+    #[test]
+    fn validate_union_string_matches() {
+        let typ = Type::Union(vec![Type::String, Type::List(Box::new(Type::String))]);
+        assert!(validate_type(&Value::Str("hello".into()), &typ).is_ok());
+    }
+
+    #[test]
+    fn validate_union_list_matches() {
+        let typ = Type::Union(vec![Type::String, Type::List(Box::new(Type::String))]);
+        let val = Value::List(vec![Value::Str("a".into())]);
+        assert!(validate_type(&val, &typ).is_ok());
+    }
+
+    #[test]
+    fn validate_union_mismatch() {
+        let typ = Type::Union(vec![Type::String, Type::Bool]);
+        let err = validate_type(&Value::Number(1.into()), &typ).unwrap_err();
+        assert!(err.contains("string | bool"), "error: {err}");
+    }
+
+    #[test]
+    fn display_union_type() {
+        let typ = Type::Union(vec![Type::String, Type::List(Box::new(Type::String))]);
+        assert_eq!(typ.to_string(), "string | [string]");
     }
 }
