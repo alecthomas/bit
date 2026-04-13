@@ -264,6 +264,20 @@ fn builtins() -> &'static HashMap<&'static str, BuiltinDef> {
                     return_type: Type::String,
                 },
             ),
+            (
+                "prefix",
+                BuiltinDef {
+                    func: builtin_prefix,
+                    return_type: Type::String,
+                },
+            ),
+            (
+                "suffix",
+                BuiltinDef {
+                    func: builtin_suffix,
+                    return_type: Type::String,
+                },
+            ),
         ])
     })
 }
@@ -471,6 +485,50 @@ fn builtin_dirname(args: &[Value]) -> Result<Value, EvalError> {
             Ok(Value::List(mapped))
         }
         _ => Err(EvalError::Type("dirname() requires a string or list".into())),
+    }
+}
+
+/// `prefix(value, prefix)` — prepend a string to a value, or each element of a list
+fn builtin_prefix(args: &[Value]) -> Result<Value, EvalError> {
+    check_arity("prefix", args, 2)?;
+    let pfx = args[1]
+        .as_str()
+        .ok_or_else(|| EvalError::Type("prefix() second argument must be a string".into()))?;
+    match &args[0] {
+        Value::Str(s) => Ok(Value::Str(format!("{pfx}{s}"))),
+        Value::List(items) => {
+            let mapped = items
+                .iter()
+                .map(|v| match v {
+                    Value::Str(s) => Ok(Value::Str(format!("{pfx}{s}"))),
+                    _ => Err(EvalError::Type("prefix on list requires string elements".into())),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::List(mapped))
+        }
+        _ => Err(EvalError::Type("prefix() requires a string or list".into())),
+    }
+}
+
+/// `suffix(value, suffix)` — append a string to a value, or each element of a list
+fn builtin_suffix(args: &[Value]) -> Result<Value, EvalError> {
+    check_arity("suffix", args, 2)?;
+    let sfx = args[1]
+        .as_str()
+        .ok_or_else(|| EvalError::Type("suffix() second argument must be a string".into()))?;
+    match &args[0] {
+        Value::Str(s) => Ok(Value::Str(format!("{s}{sfx}"))),
+        Value::List(items) => {
+            let mapped = items
+                .iter()
+                .map(|v| match v {
+                    Value::Str(s) => Ok(Value::Str(format!("{s}{sfx}"))),
+                    _ => Err(EvalError::Type("suffix on list requires string elements".into())),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::List(mapped))
+        }
+        _ => Err(EvalError::Type("suffix() requires a string or list".into())),
     }
 }
 
@@ -830,6 +888,62 @@ mod tests {
         assert_eq!(
             eval(&expr, &scope).unwrap(),
             Value::List(vec![Value::Str("/a".into()), Value::Str("/c".into()),])
+        );
+    }
+
+    #[test]
+    fn eval_prefix_string() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::Str(vec![StringPart::Literal("amd64".into())])),
+            "prefix".into(),
+            vec![Expr::Str(vec![StringPart::Literal("linux/".into())])],
+        );
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("linux/amd64".into()));
+    }
+
+    #[test]
+    fn eval_prefix_list() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::List(vec![
+                Expr::Str(vec![StringPart::Literal("amd64".into())]),
+                Expr::Str(vec![StringPart::Literal("arm64".into())]),
+            ])),
+            "prefix".into(),
+            vec![Expr::Str(vec![StringPart::Literal("linux/".into())])],
+        );
+        assert_eq!(
+            eval(&expr, &scope).unwrap(),
+            Value::List(vec![Value::Str("linux/amd64".into()), Value::Str("linux/arm64".into()),])
+        );
+    }
+
+    #[test]
+    fn eval_suffix_string() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::Str(vec![StringPart::Literal("app".into())])),
+            "suffix".into(),
+            vec![Expr::Str(vec![StringPart::Literal(".exe".into())])],
+        );
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("app.exe".into()));
+    }
+
+    #[test]
+    fn eval_suffix_list() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::List(vec![
+                Expr::Str(vec![StringPart::Literal("app".into())]),
+                Expr::Str(vec![StringPart::Literal("lib".into())]),
+            ])),
+            "suffix".into(),
+            vec![Expr::Str(vec![StringPart::Literal(".so".into())])],
+        );
+        assert_eq!(
+            eval(&expr, &scope).unwrap(),
+            Value::List(vec![Value::Str("app.so".into()), Value::Str("lib.so".into()),])
         );
     }
 }

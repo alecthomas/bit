@@ -202,6 +202,8 @@ let packages = exec("go list -deps -f '{{.Dir}}/*.go' ./cmd/server/...")
 | `uniq` | Deduplicate a list |
 | `basename` | Extract file name from path (on string, or each element of list) |
 | `dirname` | Extract directory from path (on string, or each element of list) |
+| `prefix(str)` | Prepend string (on string, or each element of list) |
+| `suffix(str)` | Append string (on string, or each element of list) |
 
 Pipes chain left to right: `exec("...") | trim | lines | uniq`
 

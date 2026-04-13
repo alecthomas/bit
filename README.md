@@ -160,6 +160,8 @@ block.field             # block output references
 | `uniq(list)` | Deduplicate list |
 | `basename(path)` | Extract file name from path |
 | `dirname(path)` | Extract directory from path |
+| `prefix(value, str)` | Prepend string to value or list elements |
+| `suffix(value, str)` | Append string to value or list elements |
 | `secret(name)` | Access secret |
 
 ### Modules
