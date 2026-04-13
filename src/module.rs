@@ -177,12 +177,16 @@ pub fn expand_module(
         } else if let Some(default) = &param.default {
             default.clone()
         } else {
-            return Err(LoadError::MissingParam(param.name.clone()));
+            return Err(LoadError::MissingParam {
+                pos: param.pos.clone(),
+                name: param.name.clone(),
+            });
         };
 
         match expr::eval(&value_expr, ctx.scope) {
             Ok(value) => {
                 validate_type(&value, &param.typ).map_err(|message| LoadError::TypeError {
+                    pos: param.pos.clone(),
                     name: param.name.clone(),
                     message,
                 })?;
@@ -204,6 +208,7 @@ pub fn expand_module(
             Ok(value) => {
                 if let Some(typ) = &let_binding.typ {
                     validate_type(&value, typ).map_err(|message| LoadError::TypeError {
+                        pos: let_binding.pos.clone(),
                         name: let_binding.name.clone(),
                         message,
                     })?;
@@ -238,7 +243,11 @@ pub fn expand_module(
         let resource = ctx
             .registry
             .get_resource(&block.provider, &block.resource)
-            .ok_or_else(|| LoadError::UnknownResource(block.provider.clone(), block.resource.clone()))?;
+            .ok_or_else(|| LoadError::UnknownResource {
+                pos: block.pos.clone(),
+                provider: block.provider.clone(),
+                resource: block.resource.clone(),
+            })?;
 
         let rewritten_fields: Vec<Field> = block
             .fields
@@ -252,6 +261,7 @@ pub fn expand_module(
         let prior_state = ctx.store.load(&qualified_name)?;
 
         ctx.dag.add_node(DagNode {
+            pos: block.pos.clone(),
             name: qualified_name.clone(),
             provider: block.provider.clone(),
             resource_name: block.resource.clone(),
@@ -376,6 +386,7 @@ pub fn expand_module(
 
     let prior_state = ctx.store.load(instance_name)?;
     ctx.dag.add_node(DagNode {
+        pos: crate::ast::Pos::default(),
         name: instance_name.to_owned(),
         provider: "module".into(),
         resource_name: "module".into(),

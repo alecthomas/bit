@@ -51,7 +51,6 @@ enum Command {
     /// Run test blocks and their dependencies
     Test,
     /// Show parameters, targets, and outputs
-    #[command(alias = "list")]
     Info,
     /// Dump evaluated inputs and stored outputs
     Dump {

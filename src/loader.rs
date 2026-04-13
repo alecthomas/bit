@@ -3,7 +3,7 @@ use std::path::Path;
 use std::collections::HashMap;
 
 use crate::ast::{Module, Statement};
-use crate::dag::{Dag, DagError, DagNode, collect_after, collect_block_refs, collect_depends_on};
+use crate::dag::{Dag, DagError, DagNode, collect_after, collect_all_refs, collect_block_refs, collect_depends_on};
 use crate::expr::{self, EvalError, Scope};
 use crate::matrix;
 use crate::module;
@@ -13,26 +13,40 @@ use crate::value::{Map, Value, validate_type};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
-    #[error("{0}")]
-    Eval(#[from] EvalError),
+    #[error("{pos}: {source}")]
+    Eval { pos: crate::ast::Pos, source: EvalError },
     #[error("{0}")]
     Dag(#[from] DagError),
     #[error("{0}")]
     State(#[from] StateError),
-    #[error("missing required param: {0}")]
-    MissingParam(String),
-    #[error("unknown provider/resource: {0}.{1}")]
-    UnknownResource(String, String),
-    #[error("{name}: {message}")]
-    TypeError { name: String, message: String },
+    #[error("{pos}: missing required param: {name}")]
+    MissingParam { pos: crate::ast::Pos, name: String },
+    #[error("{pos}: unknown provider/resource: {provider}.{resource}")]
+    UnknownResource {
+        pos: crate::ast::Pos,
+        provider: String,
+        resource: String,
+    },
+    #[error("{pos}: {name}: {message}")]
+    TypeError {
+        pos: crate::ast::Pos,
+        name: String,
+        message: String,
+    },
+    #[error("{pos}: undefined '{name}' referenced in block '{from}'")]
+    UnknownBlock {
+        pos: crate::ast::Pos,
+        name: String,
+        from: String,
+    },
     #[error("failed to load module {0}: {1}")]
     ModuleLoad(String, String),
     #[error("failed to parse module {0}: {1}")]
     ModuleParse(String, String),
-    #[error("matrix key '{0}' not found in scope")]
-    MatrixKeyNotFound(String),
-    #[error("matrix key '{0}' must be a list")]
-    MatrixKeyNotList(String),
+    #[error("{pos}: matrix key '{name}' not found in scope")]
+    MatrixKeyNotFound { pos: crate::ast::Pos, name: String },
+    #[error("{pos}: matrix key '{name}' must be a list")]
+    MatrixKeyNotList { pos: crate::ast::Pos, name: String },
 }
 
 /// The base scope of evaluated params and let bindings, shared with the engine
@@ -70,20 +84,31 @@ pub fn load(
                 let value = if let Some(v) = params.get(&p.name) {
                     v.clone()
                 } else if let Some(default) = &p.default {
-                    expr::eval(default, &scope)?
+                    expr::eval(default, &scope).map_err(|source| LoadError::Eval {
+                        pos: p.pos.clone(),
+                        source,
+                    })?
                 } else {
-                    return Err(LoadError::MissingParam(p.name.clone()));
+                    return Err(LoadError::MissingParam {
+                        pos: p.pos.clone(),
+                        name: p.name.clone(),
+                    });
                 };
                 validate_type(&value, &p.typ).map_err(|message| LoadError::TypeError {
+                    pos: p.pos.clone(),
                     name: p.name.clone(),
                     message,
                 })?;
                 scope.set(&p.name, value);
             }
             Statement::Let(l) => {
-                let value = expr::eval(&l.value, &scope)?;
+                let value = expr::eval(&l.value, &scope).map_err(|source| LoadError::Eval {
+                    pos: l.pos.clone(),
+                    source,
+                })?;
                 if let Some(typ) = &l.typ {
                     validate_type(&value, typ).map_err(|message| LoadError::TypeError {
+                        pos: l.pos.clone(),
                         name: l.name.clone(),
                         message,
                     })?;
@@ -107,13 +132,19 @@ pub fn load(
                     module::expand_module(&b.name, &module_path, &b.fields, &mut ctx)?;
                     block_names.push(b.name.clone());
                 } else {
-                    let resource = registry
-                        .get_resource(&b.provider, &b.resource)
-                        .ok_or_else(|| LoadError::UnknownResource(b.provider.clone(), b.resource.clone()))?;
+                    let resource =
+                        registry
+                            .get_resource(&b.provider, &b.resource)
+                            .ok_or_else(|| LoadError::UnknownResource {
+                                pos: b.pos.clone(),
+                                provider: b.provider.clone(),
+                                resource: b.resource.clone(),
+                            })?;
 
                     let prior_state = store.load(&b.name)?;
 
                     dag.add_node(DagNode {
+                        pos: b.pos.clone(),
                         name: b.name.clone(),
                         provider: b.provider.clone(),
                         resource_name: b.resource.clone(),
@@ -151,26 +182,66 @@ pub fn load(
             if !b.matrix_keys.is_empty() {
                 continue;
             }
+            // Implicit deps from expression refs — these may reference
+            // scope variables (not blocks), so we only create edges for
+            // names that exist in the DAG or as matrix blocks.
             let refs = collect_block_refs(&b.fields);
             for dep in &refs {
-                for resolved in resolve_dep(dep, &dag, &matrix_blocks, &scope) {
-                    if resolved != b.name {
-                        dag.add_dep_edge(&resolved, &b.name)?;
+                let resolved = resolve_dep(dep, &dag, &matrix_blocks, &scope);
+                for r in &resolved {
+                    if *r != b.name {
+                        dag.add_dep_edge(r, &b.name)?;
                     }
                 }
             }
+            // Explicit depends_on — must reference known blocks.
             for dep in collect_depends_on(&b.fields) {
-                for resolved in resolve_dep(&dep, &dag, &matrix_blocks, &scope) {
-                    if resolved != b.name {
-                        dag.add_dep_edge(&resolved, &b.name)?;
+                let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope);
+                if resolved.is_empty() {
+                    return Err(LoadError::UnknownBlock {
+                        pos: b.pos.clone(),
+                        name: dep,
+                        from: b.name.clone(),
+                    });
+                }
+                for r in &resolved {
+                    if *r != b.name {
+                        dag.add_dep_edge(r, &b.name)?;
                     }
                 }
             }
+            // Explicit after — must reference known blocks.
             for dep in collect_after(&b.fields) {
-                for resolved in resolve_dep(&dep, &dag, &matrix_blocks, &scope) {
-                    if resolved != b.name {
-                        dag.add_ordering_edge(&resolved, &b.name)?;
+                let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope);
+                if resolved.is_empty() {
+                    return Err(LoadError::UnknownBlock {
+                        pos: b.pos.clone(),
+                        name: dep,
+                        from: b.name.clone(),
+                    });
+                }
+                for r in &resolved {
+                    if *r != b.name {
+                        dag.add_ordering_edge(r, &b.name)?;
                     }
+                }
+            }
+        }
+    }
+
+    // Validate that all expression refs in block fields resolve to known names.
+    for stmt in &module.statements {
+        if let Statement::Block(b) = stmt {
+            if !b.matrix_keys.is_empty() {
+                continue; // matrix blocks are rewritten, refs validated during expansion
+            }
+            for name in collect_all_refs(&b.fields) {
+                if scope.get(&name).is_none() && !dag.has_block(&name) && !matrix_blocks.contains_key(&name) {
+                    return Err(LoadError::UnknownBlock {
+                        pos: b.pos.clone(),
+                        name,
+                        from: b.name.clone(),
+                    });
                 }
             }
         }
@@ -279,7 +350,7 @@ server = exec {
         let input = "param env : string\n";
         let module = parser::parse(input, "<test>").unwrap();
         let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new("."));
-        assert!(matches!(result, Err(LoadError::MissingParam(_))));
+        assert!(matches!(result, Err(LoadError::MissingParam { .. })));
     }
 
     #[test]
@@ -343,7 +414,7 @@ server = go.binary {
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new("."));
-        assert!(matches!(result, Err(LoadError::UnknownResource(..))));
+        assert!(matches!(result, Err(LoadError::UnknownResource { .. })));
     }
 
     #[test]
@@ -564,7 +635,7 @@ inst = mymod {}
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path());
-        assert!(matches!(result, Err(LoadError::MissingParam(_))));
+        assert!(matches!(result, Err(LoadError::MissingParam { .. })));
     }
 
     #[test]

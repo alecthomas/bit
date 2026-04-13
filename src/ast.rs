@@ -2,6 +2,20 @@ use bigdecimal::BigDecimal;
 
 use crate::value::Type;
 
+/// Source position (1-indexed line and column).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Pos {
+    pub file: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+impl std::fmt::Display for Pos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}:{}", self.file, self.line, self.col)
+    }
+}
+
 /// A parsed `.bit` file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
@@ -24,6 +38,7 @@ pub enum Statement {
 /// or `name[key1, key2] = provider.resource { fields... }` (matrix expansion)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
+    pub pos: Pos,
     pub name: String,
     pub doc: Option<String>,
     pub protected: bool,
@@ -43,6 +58,7 @@ pub struct Field {
 /// `let name = expr` or `let name : type = expr`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Let {
+    pub pos: Pos,
     pub name: String,
     pub typ: Option<Type>,
     pub value: Expr,
@@ -51,6 +67,7 @@ pub struct Let {
 /// `param name : type` or `param name : type = default`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
+    pub pos: Pos,
     pub name: String,
     pub doc: Option<String>,
     pub typ: Type,
@@ -60,6 +77,7 @@ pub struct Param {
 /// `target name = [block1, block2]`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Target {
+    pub pos: Pos,
     pub name: String,
     pub doc: Option<String>,
     pub blocks: Vec<String>,
@@ -68,6 +86,7 @@ pub struct Target {
 /// `output name = expr`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Output {
+    pub pos: Pos,
     pub name: String,
     pub doc: Option<String>,
     pub value: Expr,
@@ -170,6 +189,7 @@ mod tests {
     #[test]
     fn build_simple_block() {
         let block = Block {
+            pos: Pos::default(),
             name: "server".into(),
             doc: None,
             protected: false,
@@ -252,12 +272,14 @@ mod tests {
             doc: None,
             statements: vec![
                 Statement::Param(Param {
+                    pos: Pos::default(),
                     name: "env".into(),
                     doc: None,
                     typ: Type::String,
                     default: None,
                 }),
                 Statement::Let(Let {
+                    pos: Pos::default(),
                     name: "sha".into(),
                     typ: None,
                     value: Expr::Call(
@@ -266,6 +288,7 @@ mod tests {
                     ),
                 }),
                 Statement::Target(Target {
+                    pos: Pos::default(),
                     name: "build".into(),
                     doc: None,
                     blocks: vec!["server".into(), "image".into()],

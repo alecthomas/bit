@@ -50,10 +50,14 @@ pub fn expand_matrix(
     // Look up each key — must be a list in scope
     let mut key_lists: Vec<Vec<Value>> = Vec::new();
     for key in &block.matrix_keys {
-        let val = scope
-            .get(key)
-            .ok_or_else(|| LoadError::MatrixKeyNotFound(key.clone()))?;
-        let list = val.as_list().ok_or_else(|| LoadError::MatrixKeyNotList(key.clone()))?;
+        let val = scope.get(key).ok_or_else(|| LoadError::MatrixKeyNotFound {
+            pos: block.pos.clone(),
+            name: key.clone(),
+        })?;
+        let list = val.as_list().ok_or_else(|| LoadError::MatrixKeyNotList {
+            pos: block.pos.clone(),
+            name: key.clone(),
+        })?;
         key_lists.push(list.to_vec());
     }
 
@@ -65,7 +69,11 @@ pub fn expand_matrix(
     let resource_factory = || {
         registry
             .get_resource(&block.provider, &block.resource)
-            .ok_or_else(|| LoadError::UnknownResource(block.provider.clone(), block.resource.clone()))
+            .ok_or_else(|| LoadError::UnknownResource {
+                pos: block.pos.clone(),
+                provider: block.provider.clone(),
+                resource: block.resource.clone(),
+            })
     };
 
     // Track all expanded node names for this block
@@ -108,6 +116,7 @@ pub fn expand_matrix(
         let prior_state = store.load(&node_name)?;
 
         dag.add_node(DagNode {
+            pos: block.pos.clone(),
             name: node_name.clone(),
             provider: block.provider.clone(),
             resource_name: block.resource.clone(),

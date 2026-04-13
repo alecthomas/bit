@@ -17,20 +17,29 @@ use crate::value::{Map, Value};
 pub enum EngineError {
     #[error("{0}")]
     Dag(#[from] DagError),
-    #[error("eval error in block '{block}': {source}")]
-    Eval { block: String, source: EvalError },
-    #[error("block '{block}' {phase} failed: {source}")]
+    #[error("{pos}: eval error in block '{block}': {source}")]
+    Eval {
+        pos: crate::ast::Pos,
+        block: String,
+        source: EvalError,
+    },
+    #[error("{pos}: block '{block}' {phase} failed: {source}")]
     Provider {
+        pos: crate::ast::Pos,
         block: String,
         phase: &'static str,
         source: BoxError,
     },
     #[error("{0}")]
     State(#[from] StateError),
-    #[error("protected block '{0}' cannot be {1}")]
-    Protected(String, &'static str),
-    #[error("test block '{0}' failed")]
-    TestFailed(String),
+    #[error("{pos}: protected block '{block}' cannot be {action}")]
+    Protected {
+        pos: crate::ast::Pos,
+        block: String,
+        action: &'static str,
+    },
+    #[error("{pos}: test block '{block}' failed")]
+    TestFailed { pos: crate::ast::Pos, block: String },
 }
 
 /// Result of planning a single block.
@@ -376,6 +385,7 @@ pub fn plan(
         let writer = output.writer_indented(name, dag.depth(name));
 
         let inputs = eval_fields_lenient(&node.fields, &scope).map_err(|e| EngineError::Eval {
+            pos: node.pos.clone(),
             block: name.clone(),
             source: e,
         })?;
@@ -387,6 +397,7 @@ pub fn plan(
 
         // Resolve files
         let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+            pos: node.pos.clone(),
             block: name.clone(),
             phase: "resolve",
             source: e,
@@ -402,6 +413,7 @@ pub fn plan(
             .resource
             .plan(&inputs, prior.provider_state.as_ref())
             .map_err(|e| EngineError::Provider {
+                pos: node.pos.clone(),
                 block: name.clone(),
                 phase: "plan",
                 source: e,
@@ -419,14 +431,16 @@ pub fn plan(
         }
 
         if node.protected && matches!(result.action, PlanAction::Replace | PlanAction::Destroy) {
-            return Err(EngineError::Protected(
-                name.clone(),
-                match result.action {
-                    PlanAction::Replace => "replaced",
-                    PlanAction::Destroy => "destroyed",
-                    _ => unreachable!(),
-                },
-            ));
+            let action = match result.action {
+                PlanAction::Replace => "replaced",
+                PlanAction::Destroy => "destroyed",
+                _ => unreachable!(),
+            };
+            return Err(EngineError::Protected {
+                pos: node.pos.clone(),
+                block: name.clone(),
+                action,
+            });
         }
 
         let event = plan_action_to_event(&result.action);
@@ -498,6 +512,7 @@ fn apply_order(
         let writer = output.writer(name);
 
         let inputs = eval_fields(&node.fields, &scope).map_err(|e| EngineError::Eval {
+            pos: node.pos.clone(),
             block: name.clone(),
             source: e,
         })?;
@@ -509,6 +524,7 @@ fn apply_order(
 
         // Resolve files and compute combined hash
         let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+            pos: node.pos.clone(),
             block: name.clone(),
             phase: "resolve",
             source: e,
@@ -525,6 +541,7 @@ fn apply_order(
             .resource
             .plan(&inputs, prior.provider_state.as_ref())
             .map_err(|e| EngineError::Provider {
+                pos: node.pos.clone(),
                 block: name.clone(),
                 phase: "plan",
                 source: e,
@@ -553,14 +570,16 @@ fn apply_order(
         }
 
         if node.protected && matches!(plan_result.action, PlanAction::Replace | PlanAction::Destroy) {
-            return Err(EngineError::Protected(
-                name.clone(),
-                match plan_result.action {
-                    PlanAction::Replace => "replaced",
-                    PlanAction::Destroy => "destroyed",
-                    _ => unreachable!(),
-                },
-            ));
+            let action = match plan_result.action {
+                PlanAction::Replace => "replaced",
+                PlanAction::Destroy => "destroyed",
+                _ => unreachable!(),
+            };
+            return Err(EngineError::Protected {
+                pos: node.pos.clone(),
+                block: name.clone(),
+                action,
+            });
         }
 
         if plan_result.action == PlanAction::None {
@@ -586,6 +605,7 @@ fn apply_order(
             .map_err(|e| {
                 writer.event(Event::Failed, &e.to_string());
                 EngineError::Provider {
+                    pos: node.pos.clone(),
                     block: name.clone(),
                     phase: "apply",
                     source: e,
@@ -631,7 +651,10 @@ fn apply_order(
             && !passed
         {
             writer.event(Event::Failed, "tests failed");
-            return Err(EngineError::TestFailed(name.clone()));
+            return Err(EngineError::TestFailed {
+                pos: node.pos.clone(),
+                block: name.clone(),
+            });
         }
 
         writer.event(Event::Ok, "");
@@ -650,6 +673,7 @@ fn apply_order(
 
 /// Result sent back from a worker thread after executing a block.
 struct BlockResult {
+    pos: crate::ast::Pos,
     name: String,
     plan: PlanResult,
     outputs: Map,
@@ -738,7 +762,10 @@ fn apply_order_parallel(
 
                     // Check test failure
                     if block_result.test_failed {
-                        failed = Some(EngineError::TestFailed(name.clone()));
+                        failed = Some(EngineError::TestFailed {
+                            pos: block_result.pos.clone(),
+                            block: name.clone(),
+                        });
                     }
 
                     results.push(BlockPlan {
@@ -790,6 +817,7 @@ fn execute_block(
     writer: &crate::output::BlockWriter,
 ) -> Result<BlockResult, EngineError> {
     let inputs = eval_fields(&node.fields, scope).map_err(|e| EngineError::Eval {
+        pos: node.pos.clone(),
         block: name.to_owned(),
         source: e,
     })?;
@@ -800,6 +828,7 @@ fn execute_block(
     };
 
     let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+        pos: node.pos.clone(),
         block: name.to_owned(),
         phase: "resolve",
         source: e,
@@ -817,6 +846,7 @@ fn execute_block(
         .resource
         .plan(&inputs, prior.provider_state.as_ref())
         .map_err(|e| EngineError::Provider {
+            pos: node.pos.clone(),
             block: name.to_owned(),
             phase: "plan",
             source: e,
@@ -842,19 +872,22 @@ fn execute_block(
     }
 
     if node.protected && matches!(plan_result.action, PlanAction::Replace | PlanAction::Destroy) {
-        return Err(EngineError::Protected(
-            name.to_owned(),
-            match plan_result.action {
-                PlanAction::Replace => "replaced",
-                PlanAction::Destroy => "destroyed",
-                _ => unreachable!(),
-            },
-        ));
+        let action = match plan_result.action {
+            PlanAction::Replace => "replaced",
+            PlanAction::Destroy => "destroyed",
+            _ => unreachable!(),
+        };
+        return Err(EngineError::Protected {
+            pos: node.pos.clone(),
+            block: name.to_owned(),
+            action,
+        });
     }
 
     if plan_result.action == PlanAction::None {
         writer.event(Event::Skipped, "no changes");
         return Ok(BlockResult {
+            pos: node.pos.clone(),
             name: name.to_owned(),
             plan: plan_result,
             outputs: prior.outputs,
@@ -876,6 +909,7 @@ fn execute_block(
         .map_err(|e| {
             writer.event(Event::Failed, &e.to_string());
             EngineError::Provider {
+                pos: node.pos.clone(),
                 block: name.to_owned(),
                 phase: "apply",
                 source: e,
@@ -920,6 +954,7 @@ fn execute_block(
     }
 
     Ok(BlockResult {
+        pos: node.pos.clone(),
         name: name.to_owned(),
         plan: plan_result,
         outputs: apply_result.outputs,
@@ -964,6 +999,7 @@ pub fn destroy(
         node.resource.destroy(&provider_state, &writer).map_err(|e| {
             writer.event(Event::Failed, &e.to_string());
             EngineError::Provider {
+                pos: node.pos.clone(),
                 block: name.clone(),
                 phase: "destroy",
                 source: e,
@@ -991,6 +1027,7 @@ pub fn dump(dag: &mut Dag, base: &BaseScope, target: Option<&str>) -> Result<(),
 
         // Evaluate inputs, but replace depends_on/after with block names
         let mut inputs = eval_fields_lenient(&node.fields, &scope).map_err(|e| EngineError::Eval {
+            pos: node.pos.clone(),
             block: name.clone(),
             source: e,
         })?;

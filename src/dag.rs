@@ -30,6 +30,7 @@ pub enum DagError {
 
 /// A node in the dependency graph.
 pub struct DagNode {
+    pub pos: crate::ast::Pos,
     pub name: String,
     pub provider: String,
     pub resource_name: String,
@@ -295,6 +296,65 @@ pub fn collect_after(fields: &[Field]) -> Vec<String> {
         }
     }
     vec![]
+}
+
+/// Collect ALL variable/block root names referenced in field expressions,
+/// including single-part refs. Used for static validation.
+pub fn collect_all_refs(fields: &[Field]) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    for field in fields {
+        if field.name == "depends_on" || field.name == "after" {
+            continue; // validated separately
+        }
+        collect_all_expr_refs(&field.value, &mut refs);
+    }
+    refs
+}
+
+fn collect_all_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
+    match expr {
+        Expr::Ref(parts) => {
+            refs.insert(parts[0].clone());
+        }
+        Expr::Str(parts) => {
+            for part in parts {
+                if let StringPart::Interpolation(e) = part {
+                    collect_all_expr_refs(e, refs);
+                }
+            }
+        }
+        Expr::List(items) => {
+            for item in items {
+                collect_all_expr_refs(item, refs);
+            }
+        }
+        Expr::Map(fields) => {
+            for field in fields {
+                collect_all_expr_refs(&field.value, refs);
+            }
+        }
+        Expr::Call(_, args) => {
+            for arg in args {
+                collect_all_expr_refs(arg, refs);
+            }
+        }
+        Expr::Pipe(inner, _, args) => {
+            collect_all_expr_refs(inner, refs);
+            for arg in args {
+                collect_all_expr_refs(arg, refs);
+            }
+        }
+        Expr::If(cond, then_val, else_val) => {
+            collect_all_expr_refs(cond, refs);
+            collect_all_expr_refs(then_val, refs);
+            collect_all_expr_refs(else_val, refs);
+        }
+        Expr::BinOp(lhs, _, rhs) | Expr::Add(lhs, rhs) => {
+            collect_all_expr_refs(lhs, refs);
+            collect_all_expr_refs(rhs, refs);
+        }
+        _ => {}
+    }
 }
 
 fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {

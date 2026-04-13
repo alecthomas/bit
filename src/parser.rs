@@ -14,10 +14,28 @@ pub struct ParseError {
 }
 
 pub fn parse(input: &str, filename: &str) -> Result<Module, ParseError> {
-    module.parse(input).map_err(|e| {
+    // The inner parser captures byte offsets in Pos.line (temporarily).
+    // We fix them up to real line:col after parsing.
+    let mut m = module.parse(input).map_err(|e| {
         let message = format_parse_error(input, filename, e.offset(), e.inner());
         ParseError { message }
-    })
+    })?;
+    // Convert byte offsets to line:col and attach filename
+    for stmt in &mut m.statements {
+        let pos = match stmt {
+            Statement::Block(b) => &mut b.pos,
+            Statement::Let(l) => &mut l.pos,
+            Statement::Param(p) => &mut p.pos,
+            Statement::Target(t) => &mut t.pos,
+            Statement::Output(o) => &mut o.pos,
+        };
+        let offset = pos.line; // byte offset stored temporarily in line
+        let prefix = &input[..offset.min(input.len())];
+        pos.file = filename.to_owned();
+        pos.line = prefix.chars().filter(|&c| c == '\n').count() + 1;
+        pos.col = prefix.len() - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0) + 1;
+    }
+    Ok(m)
 }
 
 fn format_parse_error(input: &str, filename: &str, position: usize, err: &ContextError) -> String {
@@ -666,10 +684,9 @@ fn field(input: &mut &str) -> ModalResult<Field> {
 // ── Statements ──
 
 fn module(input: &mut &str) -> ModalResult<Module> {
+    let full_len = input.len();
+
     // Capture the leading comment block at the top of the file.
-    // If it's separated from the first statement by a blank line,
-    // it's the module's description. Otherwise it attaches to the
-    // first statement as its doc comment (via ws_capturing_doc).
     let module_doc = leading_module_doc(input);
 
     let mut statements = Vec::new();
@@ -678,7 +695,10 @@ fn module(input: &mut &str) -> ModalResult<Module> {
         if input.is_empty() {
             break;
         }
-        let stmt = alt((
+        // Byte offset of the statement start (stored temporarily in pos.line,
+        // converted to real line:col by parse() after parsing completes).
+        let offset = full_len - input.len();
+        let mut stmt = alt((
             let_stmt.map(Statement::Let),
             |input: &mut &str| param_stmt(doc.clone(), input).map(Statement::Param),
             |input: &mut &str| target_stmt(doc.clone(), input).map(Statement::Target),
@@ -687,6 +707,14 @@ fn module(input: &mut &str) -> ModalResult<Module> {
         ))
         .context(StrContext::Label("statement"))
         .parse_next(input)?;
+        // Stash byte offset in pos.line — parse() will fix up to real line:col
+        match &mut stmt {
+            Statement::Block(b) => b.pos.line = offset,
+            Statement::Let(l) => l.pos.line = offset,
+            Statement::Param(p) => p.pos.line = offset,
+            Statement::Target(t) => t.pos.line = offset,
+            Statement::Output(o) => o.pos.line = offset,
+        }
         statements.push(stmt);
     }
     Ok(Module {
@@ -759,7 +787,12 @@ fn let_stmt(input: &mut &str) -> ModalResult<Let> {
     let value = cut_err(expr)
         .context(StrContext::Label("let value"))
         .parse_next(input)?;
-    Ok(Let { name, typ, value })
+    Ok(Let {
+        pos: Pos::default(),
+        name,
+        typ,
+        value,
+    })
 }
 
 fn param_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Param> {
@@ -790,6 +823,7 @@ fn param_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Param> {
     };
 
     Ok(Param {
+        pos: Pos::default(),
         name,
         doc,
         typ: t,
@@ -830,7 +864,12 @@ fn target_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Target> {
     let blocks = cut_err(delimited(lex('['), separated(0.., dotted_ident, lex(',')), lex(']')))
         .context(StrContext::Label("target block list"))
         .parse_next(input)?;
-    Ok(Target { name, doc, blocks })
+    Ok(Target {
+        pos: Pos::default(),
+        name,
+        doc,
+        blocks,
+    })
 }
 
 fn dotted_ident(input: &mut &str) -> ModalResult<String> {
@@ -859,7 +898,12 @@ fn output_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Output> {
     let value = cut_err(expr)
         .context(StrContext::Label("output value"))
         .parse_next(input)?;
-    Ok(Output { name, doc, value })
+    Ok(Output {
+        pos: Pos::default(),
+        name,
+        doc,
+        value,
+    })
 }
 
 /// A field inside a block body, with optional trailing comma.
@@ -915,6 +959,7 @@ fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
     };
 
     Ok(Block {
+        pos: Pos::default(),
         name,
         doc,
         protected,
