@@ -85,6 +85,28 @@ pub struct ImageState {
     pub platform: Vec<String>,
 }
 
+/// Build the argument list for `docker buildx build`.
+fn build_args(inputs: &ImageInputs) -> Vec<String> {
+    let mut args = vec![
+        "buildx".into(),
+        "build".into(),
+        "-t".into(),
+        inputs.tag.clone(),
+        "-f".into(),
+        inputs.dockerfile.clone(),
+    ];
+    if !inputs.platform.is_empty() {
+        args.push("--platform".into());
+        args.push(inputs.platform.join(","));
+    }
+    for (key, val) in &inputs.build_args {
+        args.push("--build-arg".into());
+        args.push(format!("{key}={val}"));
+    }
+    args.push(inputs.context.clone());
+    args
+}
+
 pub struct ImageResource;
 
 impl Resource for ImageResource {
@@ -182,21 +204,16 @@ impl Resource for ImageResource {
     }
 
     fn plan(&self, inputs: &ImageInputs, prior_state: Option<&ImageState>) -> Result<PlanResult, BoxError> {
-        let platform_flag = if inputs.platform.is_empty() {
-            String::new()
-        } else {
-            format!(" --platform {}", inputs.platform.join(","))
-        };
+        let args = build_args(inputs);
+        let desc = format!("docker {}", args.join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
                 action: PlanAction::Create,
-                description: format!("docker buildx build -t {}{platform_flag}", inputs.tag),
+                description: desc,
                 reason: None,
             });
         };
-
-        let desc = format!("docker buildx build -t {}{platform_flag}", inputs.tag);
 
         if prior.tag != inputs.tag {
             return Ok(PlanResult {
@@ -243,24 +260,9 @@ impl Resource for ImageResource {
         _prior_state: Option<&ImageState>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ImageState, ImageOutputs>, BoxError> {
+        let args = build_args(inputs);
         let mut cmd = Command::new("docker");
-        cmd.args(["buildx", "build"])
-            .arg("-t")
-            .arg(&inputs.tag)
-            .arg("-f")
-            .arg(&inputs.dockerfile)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        if !inputs.platform.is_empty() {
-            cmd.arg("--platform").arg(inputs.platform.join(","));
-        }
-
-        for (key, val) in &inputs.build_args {
-            cmd.arg("--build-arg").arg(format!("{key}={val}"));
-        }
-
-        cmd.arg(&inputs.context);
+        cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd
             .spawn()
