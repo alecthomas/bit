@@ -112,11 +112,15 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
             let l = eval_inner(lhs, scope, mode)?;
             let r = eval_inner(rhs, scope, mode)?;
             match (l, r) {
+                (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
+                (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
                 (Value::List(mut a), Value::List(b)) => {
                     a.extend(b);
                     Ok(Value::List(a))
                 }
-                _ => Err(EvalError::Type("+ requires two lists".into())),
+                (l, r) => Err(EvalError::Type(format!(
+                    "+ requires matching types (two numbers, strings, or lists), got {l} and {r}",
+                ))),
             }
         }
     }
@@ -699,6 +703,33 @@ mod tests {
             Box::new(Expr::Number(2.into())),
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn eval_number_add() {
+        let scope = Scope::new();
+        let expr = Expr::Add(Box::new(Expr::Number(1.into())), Box::new(Expr::Number(2.into())));
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Number(3.into()));
+    }
+
+    #[test]
+    fn eval_string_add() {
+        let scope = Scope::new();
+        let expr = Expr::Add(
+            Box::new(Expr::Str(vec![StringPart::Literal("hello ".into())])),
+            Box::new(Expr::Str(vec![StringPart::Literal("world".into())])),
+        );
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("hello world".into()));
+    }
+
+    #[test]
+    fn eval_add_type_mismatch() {
+        let scope = Scope::new();
+        let expr = Expr::Add(
+            Box::new(Expr::Number(1.into())),
+            Box::new(Expr::Str(vec![StringPart::Literal("x".into())])),
+        );
+        assert!(eval(&expr, &scope).is_err());
     }
 
     #[test]
