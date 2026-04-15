@@ -21,6 +21,8 @@ pub struct ExecInputs {
     pub output: Vec<String>,
     #[serde(default)]
     pub inputs: Vec<String>,
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 /// Typed outputs for an exec block, serialized into the scope for downstream blocks.
@@ -57,6 +59,8 @@ impl ExecOutputs {
 pub struct ExecState {
     pub command: String,
     pub output: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 /// Deserialize a field that can be either a single string or a list of strings.
@@ -152,6 +156,13 @@ impl Resource for ExecResource {
                     default: None,
                     description: Some("Input file glob patterns".into()),
                 },
+                FieldSchema {
+                    name: "dir".into(),
+                    typ: Type::String,
+                    required: false,
+                    default: None,
+                    description: Some("Working directory for the command".into()),
+                },
             ],
             outputs: vec![
                 FieldSchema {
@@ -194,7 +205,7 @@ impl Resource for ExecResource {
             });
         };
 
-        let action = if prior.command != inputs.command {
+        let action = if prior.command != inputs.command || prior.dir != inputs.dir {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -224,13 +235,16 @@ impl Resource for ExecResource {
             }
         }
 
-        let mut child = Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(&inputs.command)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to execute command: {e}"))?;
+            .stderr(Stdio::piped());
+        if let Some(dir) = &inputs.dir {
+            cmd.current_dir(dir);
+        }
+
+        let mut child = cmd.spawn().map_err(|e| format!("failed to execute command: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -254,6 +268,7 @@ impl Resource for ExecResource {
             state: Some(ExecState {
                 command: inputs.command.clone(),
                 output: inputs.output.clone(),
+                dir: inputs.dir.clone(),
             }),
         })
     }
@@ -291,6 +306,8 @@ pub struct ExecTestInputs {
     pub inputs: Vec<String>,
     #[serde(default)]
     pub output: Vec<String>,
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 /// Outputs from an exec.test block.
@@ -303,6 +320,8 @@ pub struct ExecTestOutputs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecTestState {
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 struct ExecTestResource;
@@ -339,6 +358,13 @@ impl Resource for ExecTestResource {
                     default: None,
                     description: Some("Input file glob patterns".into()),
                 },
+                FieldSchema {
+                    name: "dir".into(),
+                    typ: Type::String,
+                    required: false,
+                    default: None,
+                    description: Some("Working directory for the command".into()),
+                },
             ],
             outputs: vec![FieldSchema {
                 name: "passed".into(),
@@ -372,7 +398,7 @@ impl Resource for ExecTestResource {
             });
         };
 
-        let action = if prior.command != inputs.command {
+        let action = if prior.command != inputs.command || prior.dir != inputs.dir {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -391,13 +417,16 @@ impl Resource for ExecTestResource {
         _prior_state: Option<&ExecTestState>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
-        let mut child = Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(&inputs.command)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to execute command: {e}"))?;
+            .stderr(Stdio::piped());
+        if let Some(dir) = &inputs.dir {
+            cmd.current_dir(dir);
+        }
+
+        let mut child = cmd.spawn().map_err(|e| format!("failed to execute command: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -418,6 +447,7 @@ impl Resource for ExecTestResource {
             outputs: ExecTestOutputs { passed },
             state: Some(ExecTestState {
                 command: inputs.command.clone(),
+                dir: inputs.dir.clone(),
             }),
         })
     }
@@ -449,6 +479,7 @@ mod tests {
             command: "echo".into(),
             output: vec!["out".into()],
             inputs: vec!["src/**/*.rs".into()],
+            dir: None,
         };
 
         let resource = ExecResource;
@@ -464,6 +495,7 @@ mod tests {
             command: "echo hi".into(),
             output: vec!["out".into()],
             inputs: vec![],
+            dir: None,
         };
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, None).unwrap();
@@ -476,10 +508,12 @@ mod tests {
             command: "echo hi".into(),
             output: vec!["out".into()],
             inputs: vec![],
+            dir: None,
         };
         let prior = ExecState {
             command: "echo hi".into(),
             output: vec!["out/".into()],
+            dir: None,
         };
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -492,10 +526,12 @@ mod tests {
             command: "echo bye".into(),
             output: vec!["out".into()],
             inputs: vec![],
+            dir: None,
         };
         let prior = ExecState {
             command: "echo hi".into(),
             output: vec!["out/".into()],
+            dir: None,
         };
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -510,6 +546,7 @@ mod tests {
             command: format!("echo hello > {}", output.display()),
             output: vec![output.to_string_lossy().into_owned()],
             inputs: vec![],
+            dir: None,
         };
         let resource = ExecResource;
         let out = crate::output::Output::new(&[]);
@@ -526,6 +563,7 @@ mod tests {
             command: "false".into(),
             output: vec!["/dev/null".into()],
             inputs: vec![],
+            dir: None,
         };
         let resource = ExecResource;
         let out = crate::output::Output::new(&[]);
@@ -543,6 +581,7 @@ mod tests {
         let state = ExecState {
             command: "echo hi".into(),
             output: vec![output.to_string_lossy().into_owned()],
+            dir: None,
         };
 
         let resource = ExecResource;
@@ -590,6 +629,7 @@ mod tests {
             command: "true".into(),
             inputs: vec![],
             output: vec![],
+            dir: None,
         };
         let resource = ExecTestResource;
         let out = crate::output::Output::new(&[]);
@@ -604,6 +644,7 @@ mod tests {
             command: "false".into(),
             inputs: vec![],
             output: vec![],
+            dir: None,
         };
         let resource = ExecTestResource;
         let out = crate::output::Output::new(&[]);
@@ -616,5 +657,83 @@ mod tests {
     fn test_resource_kind_is_test() {
         let resource = ExecTestResource;
         assert_eq!(Resource::kind(&resource), ResourceKind::Test);
+    }
+
+    #[test]
+    fn plan_update_when_dir_changed() {
+        let inputs = ExecInputs {
+            command: "echo hi".into(),
+            output: vec!["out".into()],
+            inputs: vec![],
+            dir: Some("/tmp".into()),
+        };
+        let prior = ExecState {
+            command: "echo hi".into(),
+            output: vec!["out".into()],
+            dir: None,
+        };
+        let resource = ExecResource;
+        let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
+        assert_eq!(result.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn apply_uses_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let canon = dir.path().canonicalize().unwrap();
+        let output = canon.join("result.txt");
+        let inputs = ExecInputs {
+            command: format!("pwd > {}", output.display()),
+            output: vec![output.to_string_lossy().into_owned()],
+            inputs: vec![],
+            dir: Some(canon.to_string_lossy().into_owned()),
+        };
+        let resource = ExecResource;
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        assert!(result.state.is_some());
+        let state = result.state.unwrap();
+        assert_eq!(state.dir.as_deref(), Some(canon.to_str().unwrap()));
+        let content = fs::read_to_string(&output).unwrap();
+        assert_eq!(content.trim(), canon.to_str().unwrap());
+    }
+
+    #[test]
+    fn test_resource_uses_working_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let canon = dir.path().canonicalize().unwrap();
+        let inputs = ExecTestInputs {
+            command: format!("test \"$(pwd)\" = \"{}\"", canon.display()),
+            inputs: vec![],
+            output: vec![],
+            dir: Some(canon.to_string_lossy().into_owned()),
+        };
+        let resource = ExecTestResource;
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        assert!(result.outputs.passed);
+        assert_eq!(
+            result.state.as_ref().unwrap().dir.as_deref(),
+            Some(canon.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_plan_update_when_dir_changed() {
+        let inputs = ExecTestInputs {
+            command: "true".into(),
+            inputs: vec![],
+            output: vec![],
+            dir: Some("/tmp".into()),
+        };
+        let prior = ExecTestState {
+            command: "true".into(),
+            dir: None,
+        };
+        let resource = ExecTestResource;
+        let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
+        assert_eq!(result.action, PlanAction::Update);
     }
 }
