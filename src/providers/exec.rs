@@ -8,32 +8,31 @@ use serde::{Deserialize, Serialize};
 use crate::output::BlockWriter;
 use crate::provider::{
     ApplyResult, BoxError, DynResource, FuncSignature, PlanAction, PlanResult, Provider, Resource, ResourceKind,
-    ResourceSchema, StructField, StructType,
 };
-use crate::value::Type;
 use crate::value::Value;
 
-/// Typed inputs for an exec block, deserialized from the block's fields.
-#[derive(Debug, Deserialize)]
+/// Run a shell command, track inputs and outputs
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct ExecInputs {
+    /// Shell command to execute
     pub command: String,
+    /// Output file or list of output files
     #[serde(deserialize_with = "string_or_vec")]
     pub output: Vec<String>,
+    /// Input file glob patterns
     #[serde(default)]
     pub inputs: Vec<String>,
+    /// Working directory for the command
     #[serde(default)]
     pub dir: Option<String>,
 }
 
-/// Typed outputs for an exec block, serialized into the scope for downstream blocks.
-///
-/// Single-output blocks get `path`; multi-output blocks get `paths`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct ExecOutputs {
-    /// First output path (present for single-output blocks).
+    /// Output path (single-output blocks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// All output paths (present only for multi-output blocks).
+    /// Output paths (multi-output blocks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
 }
@@ -128,70 +127,6 @@ impl Resource for ExecResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        ResourceSchema {
-            kind: ResourceKind::Build,
-            inputs: StructType {
-                description: Some("Run a shell command, track inputs and outputs".into()),
-                fields: vec![
-                    (
-                        "command".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Shell command to execute".into()),
-                        },
-                    ),
-                    (
-                        "output".into(),
-                        StructField {
-                            typ: Type::List(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Output file or list of output files".into()),
-                        },
-                    ),
-                    (
-                        "inputs".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
-                            default: None,
-                            description: Some("Input file glob patterns".into()),
-                        },
-                    ),
-                    (
-                        "dir".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Working directory for the command".into()),
-                        },
-                    ),
-                ],
-            },
-            outputs: StructType {
-                description: None,
-                fields: vec![
-                    (
-                        "path".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Output path (single-output blocks)".into()),
-                        },
-                    ),
-                    (
-                        "paths".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
-                            default: None,
-                            description: Some("Output paths (multi-output blocks)".into()),
-                        },
-                    ),
-                ],
-            },
-        }
     }
 
     fn resolve(&self, inputs: &ExecInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
@@ -309,21 +244,25 @@ impl Resource for ExecResource {
 
 // --- exec.test resource ---
 
-/// Typed inputs for an exec.test block.
-#[derive(Debug, Deserialize)]
+/// Run a command as a test (pass/fail by exit code)
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct ExecTestInputs {
+    /// Shell command to execute
     pub command: String,
+    /// Input file glob patterns
     #[serde(default)]
     pub inputs: Vec<String>,
+    /// Output files to track
     #[serde(default)]
     pub output: Vec<String>,
+    /// Working directory for the command
     #[serde(default)]
     pub dir: Option<String>,
 }
 
-/// Outputs from an exec.test block.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct ExecTestOutputs {
+    /// Whether the test passed
     pub passed: bool,
 }
 
@@ -348,52 +287,6 @@ impl Resource for ExecTestResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        ResourceSchema {
-            kind: ResourceKind::Test,
-            inputs: StructType {
-                description: Some("Run a command as a test (pass/fail by exit code)".into()),
-                fields: vec![
-                    (
-                        "command".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Shell command to execute".into()),
-                        },
-                    ),
-                    (
-                        "inputs".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
-                            default: None,
-                            description: Some("Input file glob patterns".into()),
-                        },
-                    ),
-                    (
-                        "dir".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Working directory for the command".into()),
-                        },
-                    ),
-                ],
-            },
-            outputs: StructType {
-                description: None,
-                fields: vec![(
-                    "passed".into(),
-                    StructField {
-                        typ: Type::Bool,
-                        default: None,
-                        description: Some("Whether the test passed".into()),
-                    },
-                )],
-            },
-        }
     }
 
     fn resolve(&self, inputs: &ExecTestInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {

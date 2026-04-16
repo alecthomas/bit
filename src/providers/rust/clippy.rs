@@ -1,19 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema, StructType,
-};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 use super::{CargoCommand, RustEnv, RustFeatures};
 
-/// Inputs for a `rust.clippy` block.
-#[derive(Debug, Deserialize)]
+/// Run Clippy linter
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct RustClippyInputs {
-    /// Package to lint (maps to `cargo clippy -p <package>`).
+    /// Package to lint (-p flag)
     #[serde(default)]
     pub package: Option<String>,
-    /// Extra flags passed to `cargo clippy`.
+    /// Extra flags passed to cargo clippy
     #[serde(default)]
     pub flags: Vec<String>,
     #[serde(flatten)]
@@ -23,8 +21,9 @@ pub struct RustClippyInputs {
 }
 
 /// Outputs from a `rust.clippy` block.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct RustClippyOutputs {
+    /// Whether the check passed
     pub passed: bool,
 }
 
@@ -61,23 +60,6 @@ impl Resource for RustClippyResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        let mut fields = vec![
-            super::package_field("Package to lint (-p flag)"),
-            super::flags_field("cargo clippy"),
-        ];
-        fields.extend(super::feature_fields());
-        fields.extend(super::env_fields());
-        ResourceSchema {
-            kind: ResourceKind::Test,
-            inputs: StructType {
-                description: Some("Run Clippy linter".into()),
-                fields,
-            },
-            outputs: super::passed_output(),
-        }
     }
 
     fn resolve(&self, _inputs: &RustClippyInputs) -> Result<Vec<ResolvedFile>, BoxError> {

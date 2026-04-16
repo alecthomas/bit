@@ -5,24 +5,20 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema, StructField,
-    StructType,
-};
-use crate::value::Type;
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 use super::{CargoCommand, RustEnv, RustFeatures};
 
-/// Inputs for a `rust.test` block.
-#[derive(Debug, Deserialize)]
+/// Run Rust tests
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct RustTestInputs {
-    /// Package to test (maps to `cargo test -p <package>`).
+    /// Package to test (-p flag)
     #[serde(default)]
     pub package: Option<String>,
-    /// Extra flags passed to `cargo test`.
+    /// Extra flags passed to cargo test
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Show individual test results instead of summaries.
+    /// Show individual test results
     #[serde(default)]
     pub verbose: bool,
     #[serde(flatten)]
@@ -32,8 +28,9 @@ pub struct RustTestInputs {
 }
 
 /// Outputs from a `rust.test` block.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct RustTestOutputs {
+    /// Whether the check passed
     pub passed: bool,
 }
 
@@ -311,31 +308,6 @@ impl Resource for RustTestResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        let mut fields = vec![
-            super::package_field("Package to test (-p flag)"),
-            super::flags_field("cargo test"),
-            (
-                "verbose".into(),
-                StructField {
-                    typ: Type::Optional(Box::new(Type::Bool)),
-                    default: None,
-                    description: Some("Show individual test results".into()),
-                },
-            ),
-        ];
-        fields.extend(super::feature_fields());
-        fields.extend(super::env_fields());
-        ResourceSchema {
-            kind: ResourceKind::Test,
-            inputs: StructType {
-                description: Some("Run Rust tests".into()),
-                fields,
-            },
-            outputs: super::passed_output(),
-        }
     }
 
     fn resolve(&self, _inputs: &RustTestInputs) -> Result<Vec<ResolvedFile>, BoxError> {

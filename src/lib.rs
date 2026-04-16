@@ -9,5 +9,6 @@ pub mod output;
 pub mod parser;
 pub mod provider;
 pub mod providers;
+pub mod schema;
 pub mod state;
 pub mod value;

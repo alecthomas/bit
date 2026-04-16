@@ -6,22 +6,25 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind, ResourceSchema, StructField, StructType,
-};
-use crate::value::{Type, Value};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
 
 use super::parse;
 
-#[derive(Debug, Deserialize)]
+/// Build a Docker image (auto-detects inputs from Dockerfile)
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct ImageInputs {
+    /// Image tag
     pub tag: String,
+    /// Build context directory
     #[serde(default = "default_context")]
     pub context: String,
+    /// Dockerfile path
     #[serde(default = "default_dockerfile")]
     pub dockerfile: String,
+    /// Docker build arguments
     #[serde(default)]
     pub build_args: HashMap<String, String>,
+    /// Target platform(s)
     #[serde(default, deserialize_with = "string_or_vec")]
     pub platform: Vec<String>,
 }
@@ -70,10 +73,12 @@ where
     deserializer.deserialize_any(StringOrVec)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct ImageOutputs {
+    /// Image tag/reference
     #[serde(rename = "ref")]
     pub image_ref: String,
+    /// Docker image ID
     pub image_id: String,
 }
 
@@ -127,81 +132,6 @@ impl Resource for ImageResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        ResourceSchema {
-            kind: ResourceKind::Build,
-            inputs: StructType {
-                description: Some("Build a Docker image (auto-detects inputs from Dockerfile)".into()),
-                fields: vec![
-                    (
-                        "tag".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Image tag".into()),
-                        },
-                    ),
-                    (
-                        "context".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: Some(Value::Str(".".into())),
-                            description: Some("Build context directory".into()),
-                        },
-                    ),
-                    (
-                        "dockerfile".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: Some(Value::Str("Dockerfile".into())),
-                            description: Some("Dockerfile path".into()),
-                        },
-                    ),
-                    (
-                        "build_args".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::Map(Box::new(Type::String)))),
-                            default: None,
-                            description: Some("Docker build arguments".into()),
-                        },
-                    ),
-                    (
-                        "platform".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::Union(vec![
-                                Type::String,
-                                Type::List(Box::new(Type::String)),
-                            ]))),
-                            default: None,
-                            description: Some("Target platform(s) (e.g. \"linux/amd64\")".into()),
-                        },
-                    ),
-                ],
-            },
-            outputs: StructType {
-                description: None,
-                fields: vec![
-                    (
-                        "ref".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Image tag/reference".into()),
-                        },
-                    ),
-                    (
-                        "image_id".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Docker image ID".into()),
-                        },
-                    ),
-                ],
-            },
-        }
     }
 
     fn resolve(&self, inputs: &ImageInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {

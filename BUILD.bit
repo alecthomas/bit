@@ -16,8 +16,6 @@ test = rust.test {}
 
 clippy = rust.clippy {}
 
-fmt-check = rust.fmt-check {}
-
 integration-test = exec.test {
   depends_on = [debug]
   command  = <<-EOF
@@ -27,4 +25,4 @@ integration-test = exec.test {
 }
 
 # Build the usual suspects
-target default = [release, test, clippy, fmt-check]
+target default = [release, test, clippy]

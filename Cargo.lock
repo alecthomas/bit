@@ -84,6 +84,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bigdecimal",
+ "bit-derive",
  "clap",
  "glob",
  "parse-dockerfile",
@@ -96,6 +97,15 @@ dependencies = [
  "thiserror",
  "winnow",
  "yansi",
+]
+
+[[package]]
+name = "bit-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

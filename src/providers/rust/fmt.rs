@@ -1,21 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema, StructField,
-    StructType,
-};
-use crate::value::Type;
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 use super::{CargoCommand, RustEnv};
 
-/// Inputs shared by `rust.fmt` and `rust.fmt-check`.
-#[derive(Debug, Deserialize)]
+/// Format Rust source files
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct RustFmtInputs {
-    /// Package to format (maps to `cargo fmt -p <package>`).
+    /// Package to format (-p flag)
     #[serde(default)]
     pub package: Option<String>,
-    /// Extra flags passed to `cargo fmt`.
+    /// Extra flags passed to cargo fmt
     #[serde(default)]
     pub flags: Vec<String>,
     #[serde(flatten)]
@@ -32,12 +28,13 @@ pub struct RustFmtState {
 }
 
 /// Outputs from `rust.fmt` (build, no meaningful outputs).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct RustFmtOutputs {}
 
 /// Outputs from `rust.fmt-check` (test, pass/fail).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct RustFmtCheckOutputs {
+    /// Whether the check passed
     pub passed: bool,
 }
 
@@ -65,24 +62,6 @@ fn fmt_check_command(inputs: &RustFmtInputs) -> CargoCommand {
     let mut cargo = base_fmt_command(inputs);
     cargo.arg("--check");
     cargo
-}
-
-fn schema_inputs(description: &str) -> StructType {
-    StructType {
-        description: Some(description.into()),
-        fields: vec![
-            super::package_field("Package to format (-p flag)"),
-            super::flags_field("cargo fmt"),
-            (
-                "toolchain".into(),
-                StructField {
-                    typ: Type::Optional(Box::new(Type::String)),
-                    default: None,
-                    description: Some("Rust toolchain (e.g. \"nightly\")".into()),
-                },
-            ),
-        ],
-    }
 }
 
 fn resolve(_inputs: &RustFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {
@@ -130,17 +109,6 @@ impl Resource for RustFmtResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        ResourceSchema {
-            kind: ResourceKind::Build,
-            inputs: schema_inputs("Format Rust source files"),
-            outputs: StructType {
-                description: None,
-                fields: vec![],
-            },
-        }
     }
 
     fn resolve(&self, inputs: &RustFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {
@@ -195,14 +163,6 @@ impl Resource for RustFmtCheckResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        ResourceSchema {
-            kind: ResourceKind::Test,
-            inputs: schema_inputs("Check Rust formatting"),
-            outputs: super::passed_output(),
-        }
     }
 
     fn resolve(&self, inputs: &RustFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {

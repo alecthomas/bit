@@ -13,12 +13,15 @@ use crate::provider::{BoxError, DynResource, FuncSignature, Provider, ResolvedFi
 use crate::value::Value;
 
 /// First-class Go environment variables shared across all go resources.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
 pub struct GoEnv {
+    /// Target OS
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goos: Option<String>,
+    /// Target architecture
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goarch: Option<String>,
+    /// Enable cgo
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cgo: Option<bool>,
 }

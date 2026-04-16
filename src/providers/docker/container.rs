@@ -7,10 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind, ResourceSchema, StructField, StructType,
-};
-use crate::value::{Type, Value};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
 
 /// Healthcheck config — either a bare command string or a full object
 /// with interval/timeout/retries/start_period.
@@ -125,26 +122,38 @@ fn hash_healthcheck(hasher: &mut Sha256, hc: &Healthcheck) {
     hasher.update(b"\0");
 }
 
-#[derive(Debug, Deserialize)]
+/// Run a Docker container (tracks state like Terraform)
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct ContainerInputs {
+    /// Docker image reference
     pub image: String,
+    /// Container name
     pub name: String,
+    /// Port mappings (e.g. "8080:80")
     #[serde(default)]
     pub ports: Vec<String>,
+    /// Volume mounts
     #[serde(default)]
     pub volumes: Vec<String>,
+    /// Environment variables
     #[serde(default)]
     pub environment: HashMap<String, String>,
+    /// Override CMD
     #[serde(default)]
     pub command: Option<String>,
+    /// Override ENTRYPOINT
     #[serde(default)]
     pub entrypoint: Option<String>,
+    /// Restart policy
     #[serde(default = "default_restart")]
     pub restart: String,
+    /// Docker network
     #[serde(default)]
     pub network: Option<String>,
+    /// Working directory
     #[serde(default)]
     pub working_dir: Option<String>,
+    /// Health check command or config
     #[serde(default)]
     pub healthcheck: Option<Healthcheck>,
 }
@@ -202,9 +211,11 @@ fn config_hash(inputs: &ContainerInputs) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct ContainerOutputs {
+    /// Docker container ID
     pub container_id: String,
+    /// Container name
     pub name: String,
 }
 
@@ -286,126 +297,6 @@ impl Resource for ContainerResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        ResourceSchema {
-            kind: ResourceKind::Build,
-            inputs: StructType {
-                description: Some("Run a Docker container (tracks state like Terraform)".into()),
-                fields: vec![
-                    (
-                        "image".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Docker image reference".into()),
-                        },
-                    ),
-                    (
-                        "name".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Container name".into()),
-                        },
-                    ),
-                    (
-                        "ports".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
-                            default: None,
-                            description: Some("Port mappings (e.g. \"8080:80\")".into()),
-                        },
-                    ),
-                    (
-                        "volumes".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
-                            default: None,
-                            description: Some("Volume mounts".into()),
-                        },
-                    ),
-                    (
-                        "environment".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::Map(Box::new(Type::String)))),
-                            default: None,
-                            description: Some("Environment variables".into()),
-                        },
-                    ),
-                    (
-                        "command".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Override CMD".into()),
-                        },
-                    ),
-                    (
-                        "entrypoint".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Override ENTRYPOINT".into()),
-                        },
-                    ),
-                    (
-                        "restart".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: Some(Value::Str("no".into())),
-                            description: Some("Restart policy".into()),
-                        },
-                    ),
-                    (
-                        "network".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Docker network".into()),
-                        },
-                    ),
-                    (
-                        "working_dir".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Working directory".into()),
-                        },
-                    ),
-                    (
-                        "healthcheck".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Health check command or config".into()),
-                        },
-                    ),
-                ],
-            },
-            outputs: StructType {
-                description: None,
-                fields: vec![
-                    (
-                        "container_id".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Docker container ID".into()),
-                        },
-                    ),
-                    (
-                        "name".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Container name".into()),
-                        },
-                    ),
-                ],
-            },
-        }
     }
 
     fn resolve(&self, _inputs: &ContainerInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {

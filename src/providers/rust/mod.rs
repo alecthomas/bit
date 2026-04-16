@@ -11,19 +11,19 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{BoxError, DynResource, FuncSignature, Provider, ResolvedFile, StructField, StructType};
-use crate::value::{Type, Value};
+use crate::provider::{BoxError, DynResource, FuncSignature, Provider, ResolvedFile};
+use crate::value::Value;
 
 /// Shared Rust environment/config fields flattened into all rust resources.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
 pub struct RustEnv {
-    /// Cross-compilation target triple (e.g. "x86_64-unknown-linux-musl").
+    /// Target triple (e.g. "x86_64-unknown-linux-musl")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    /// Build profile ("dev", "release", or a custom profile).
+    /// Build profile (e.g. "release")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// Rust toolchain override (e.g. "nightly", "1.79.0").
+    /// Rust toolchain (e.g. "nightly")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toolchain: Option<String>,
 }
@@ -48,105 +48,14 @@ impl RustEnv {
 }
 
 /// Shared Rust feature flags used across build/test/clippy resources.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
 pub struct RustFeatures {
-    /// List of features to enable.
+    /// Features to enable
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
-    /// Enable all features.
+    /// Enable all features
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub all_features: bool,
-}
-
-// Schema field helpers to avoid duplication across resources.
-
-fn package_field(desc: &str) -> (String, StructField) {
-    (
-        "package".into(),
-        StructField {
-            typ: Type::Optional(Box::new(Type::String)),
-            default: None,
-            description: Some(desc.into()),
-        },
-    )
-}
-
-fn flags_field(command: &str) -> (String, StructField) {
-    (
-        "flags".into(),
-        StructField {
-            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
-            default: None,
-            description: Some(format!("Extra flags passed to {command}")),
-        },
-    )
-}
-
-/// Feature and env schema fields shared by build/exe/test/clippy.
-fn feature_fields() -> Vec<(String, StructField)> {
-    vec![
-        (
-            "features".into(),
-            StructField {
-                typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
-                default: None,
-                description: Some("Features to enable".into()),
-            },
-        ),
-        (
-            "all_features".into(),
-            StructField {
-                typ: Type::Optional(Box::new(Type::Bool)),
-                default: None,
-                description: Some("Enable all features".into()),
-            },
-        ),
-    ]
-}
-
-/// Environment schema fields (target/profile/toolchain) shared by build/exe/test/clippy.
-fn env_fields() -> Vec<(String, StructField)> {
-    vec![
-        (
-            "target".into(),
-            StructField {
-                typ: Type::Optional(Box::new(Type::String)),
-                default: None,
-                description: Some("Target triple (e.g. \"x86_64-unknown-linux-musl\")".into()),
-            },
-        ),
-        (
-            "profile".into(),
-            StructField {
-                typ: Type::Optional(Box::new(Type::String)),
-                default: None,
-                description: Some("Build profile (e.g. \"release\")".into()),
-            },
-        ),
-        (
-            "toolchain".into(),
-            StructField {
-                typ: Type::Optional(Box::new(Type::String)),
-                default: None,
-                description: Some("Rust toolchain (e.g. \"nightly\")".into()),
-            },
-        ),
-    ]
-}
-
-/// Schema output for test-kind resources that produce a `passed` bool.
-fn passed_output() -> StructType {
-    StructType {
-        description: None,
-        fields: vec![(
-            "passed".into(),
-            StructField {
-                typ: Type::Bool,
-                default: None,
-                description: Some("Whether the check passed".into()),
-            },
-        )],
-    }
 }
 
 /// A cargo command builder that can produce both a `Command` and a display string.

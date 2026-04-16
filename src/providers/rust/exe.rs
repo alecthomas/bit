@@ -4,25 +4,20 @@ use std::process::Stdio;
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema, StructField,
-    StructType,
-};
-use crate::value::Type;
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 use super::{CargoCommand, RustEnv, RustFeatures};
 
-/// Inputs for a `rust.exe` block.
-#[derive(Debug, Deserialize)]
+/// Build a Rust binary
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct RustExeInputs {
-    /// Binary target name (maps to `cargo build --bin <bin>`).
-    /// If omitted, cargo builds the default binary.
+    /// Binary target name (inferred if omitted)
     #[serde(default)]
     pub bin: Option<String>,
-    /// Package containing the binary (maps to `-p`).
+    /// Package containing the binary (-p flag)
     #[serde(default)]
     pub package: Option<String>,
-    /// Extra flags passed to `cargo build`.
+    /// Extra flags passed to cargo build
     #[serde(default)]
     pub flags: Vec<String>,
     #[serde(flatten)]
@@ -32,9 +27,9 @@ pub struct RustExeInputs {
 }
 
 /// Outputs from a `rust.exe` block.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct RustExeOutputs {
-    /// Path to the built binary.
+    /// Path to the built binary
     pub path: String,
 }
 
@@ -108,41 +103,6 @@ impl Resource for RustExeResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        let mut fields = vec![
-            (
-                "bin".into(),
-                StructField {
-                    typ: Type::Optional(Box::new(Type::String)),
-                    default: None,
-                    description: Some("Binary target name (inferred if omitted)".into()),
-                },
-            ),
-            super::package_field("Package containing the binary (-p flag)"),
-            super::flags_field("cargo build"),
-        ];
-        fields.extend(super::feature_fields());
-        fields.extend(super::env_fields());
-        ResourceSchema {
-            kind: ResourceKind::Build,
-            inputs: StructType {
-                description: Some("Build a Rust binary".into()),
-                fields,
-            },
-            outputs: StructType {
-                description: None,
-                fields: vec![(
-                    "path".into(),
-                    StructField {
-                        typ: Type::String,
-                        default: None,
-                        description: Some("Path to the built binary".into()),
-                    },
-                )],
-            },
-        }
     }
 
     fn resolve(&self, _inputs: &RustExeInputs) -> Result<Vec<ResolvedFile>, BoxError> {

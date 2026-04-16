@@ -1,19 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema, StructType,
-};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 use super::{CargoCommand, RustEnv, RustFeatures};
 
-/// Inputs for a `rust.build` block.
-#[derive(Debug, Deserialize)]
+/// Compile Rust packages
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct RustBuildInputs {
-    /// Package to build (maps to `cargo build -p <package>`).
+    /// Package to build (-p flag)
     #[serde(default)]
     pub package: Option<String>,
-    /// Extra flags passed to `cargo build`.
+    /// Extra flags passed to cargo build
     #[serde(default)]
     pub flags: Vec<String>,
     #[serde(flatten)]
@@ -22,8 +20,7 @@ pub struct RustBuildInputs {
     pub env: RustEnv,
 }
 
-/// Outputs from a `rust.build` block (none meaningful).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct RustBuildOutputs {}
 
 /// Persisted state for a `rust.build` block.
@@ -59,26 +56,6 @@ impl Resource for RustBuildResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        let mut fields = vec![
-            super::package_field("Package to build (-p flag)"),
-            super::flags_field("cargo build"),
-        ];
-        fields.extend(super::feature_fields());
-        fields.extend(super::env_fields());
-        ResourceSchema {
-            kind: ResourceKind::Build,
-            inputs: StructType {
-                description: Some("Compile Rust packages".into()),
-                fields,
-            },
-            outputs: StructType {
-                description: None,
-                fields: vec![],
-            },
-        }
     }
 
     fn resolve(&self, _inputs: &RustBuildInputs) -> Result<Vec<ResolvedFile>, BoxError> {
@@ -147,10 +124,32 @@ impl Resource for RustBuildResource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::Schema;
 
     #[test]
     fn resource_kind_is_build() {
         assert_eq!(Resource::kind(&RustBuildResource), ResourceKind::Build);
+    }
+
+    #[test]
+    fn schema_has_expected_fields() {
+        let schema = RustBuildInputs::schema();
+        let names: Vec<&str> = schema.fields.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"package"));
+        assert!(names.contains(&"flags"));
+        assert!(names.contains(&"features"));
+        assert!(names.contains(&"all_features"));
+        assert!(names.contains(&"target"));
+        assert!(names.contains(&"profile"));
+        assert!(names.contains(&"toolchain"));
+    }
+
+    #[test]
+    fn schema_description() {
+        assert_eq!(
+            RustBuildInputs::schema().description,
+            Some("Compile Rust packages".into())
+        );
     }
 
     #[test]

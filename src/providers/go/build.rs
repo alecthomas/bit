@@ -4,20 +4,16 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema, StructField,
-    StructType,
-};
-use crate::value::Type;
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 use super::GoEnv;
 
-/// Inputs for a `go.build` block.
-#[derive(Debug, Deserialize)]
+/// Compile Go packages without producing a binary
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoBuildInputs {
-    /// Go package to build (e.g. "./...").
+    /// Go package pattern (e.g. "./...")
     pub package: String,
-    /// Extra flags passed to `go build`.
+    /// Extra flags passed to go build
     #[serde(default)]
     pub flags: Vec<String>,
     #[serde(flatten)]
@@ -25,7 +21,7 @@ pub struct GoBuildInputs {
 }
 
 /// Outputs from a `go.build` block (none meaningful).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct GoBuildOutputs {}
 
 /// Persisted state for a `go.build` block.
@@ -50,61 +46,6 @@ impl Resource for GoBuildResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        ResourceSchema {
-            kind: ResourceKind::Build,
-            inputs: StructType {
-                description: Some("Compile Go packages without producing a binary".into()),
-                fields: vec![
-                    (
-                        "package".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Go package pattern (e.g. \"./...\")".into()),
-                        },
-                    ),
-                    (
-                        "flags".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
-                            default: None,
-                            description: Some("Extra flags passed to go build".into()),
-                        },
-                    ),
-                    (
-                        "goos".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Target OS".into()),
-                        },
-                    ),
-                    (
-                        "goarch".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Target architecture".into()),
-                        },
-                    ),
-                    (
-                        "cgo".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::Bool)),
-                            default: None,
-                            description: Some("Enable cgo".into()),
-                        },
-                    ),
-                ],
-            },
-            outputs: StructType {
-                description: None,
-                fields: vec![],
-            },
-        }
     }
 
     fn resolve(&self, inputs: &GoBuildInputs) -> Result<Vec<ResolvedFile>, BoxError> {

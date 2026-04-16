@@ -6,22 +6,19 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema,
-};
-use crate::value::{StructField, StructType, Type};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 use super::GoEnv;
 
-/// Inputs for a `go.test` block.
-#[derive(Debug, Deserialize)]
+/// Run Go tests
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoTestInputs {
-    /// Go package to test (e.g. "./...").
+    /// Go package pattern (e.g. "./...")
     pub package: String,
-    /// Extra flags passed to `go test`.
+    /// Extra flags passed to go test
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Show individual test results instead of package summaries.
+    /// Show individual test results
     #[serde(default)]
     pub verbose: bool,
     #[serde(flatten)]
@@ -29,8 +26,9 @@ pub struct GoTestInputs {
 }
 
 /// Outputs from a `go.test` block.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct GoTestOutputs {
+    /// Whether all tests passed
     pub passed: bool,
 }
 
@@ -189,76 +187,6 @@ impl Resource for GoTestResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        ResourceSchema {
-            kind: ResourceKind::Test,
-            inputs: StructType {
-                description: Some("Run Go tests".into()),
-                fields: vec![
-                    (
-                        "package".into(),
-                        StructField {
-                            typ: Type::String,
-                            default: None,
-                            description: Some("Go package pattern (e.g. \"./...\")".into()),
-                        },
-                    ),
-                    (
-                        "flags".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
-                            default: None,
-                            description: Some("Extra flags passed to go test".into()),
-                        },
-                    ),
-                    (
-                        "verbose".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::Bool)),
-                            default: None,
-                            description: Some("Show individual test results".into()),
-                        },
-                    ),
-                    (
-                        "goos".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Target OS".into()),
-                        },
-                    ),
-                    (
-                        "goarch".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Target architecture".into()),
-                        },
-                    ),
-                    (
-                        "cgo".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::Bool)),
-                            default: None,
-                            description: Some("Enable cgo".into()),
-                        },
-                    ),
-                ],
-            },
-            outputs: StructType {
-                description: None,
-                fields: vec![(
-                    "passed".into(),
-                    StructField {
-                        typ: Type::Bool,
-                        default: None,
-                        description: Some("Whether all tests passed".into()),
-                    },
-                )],
-            },
-        }
     }
 
     fn resolve(&self, inputs: &GoTestInputs) -> Result<Vec<ResolvedFile>, BoxError> {

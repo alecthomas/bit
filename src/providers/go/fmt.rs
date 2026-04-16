@@ -4,31 +4,28 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
-use crate::provider::{
-    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema, StructField,
-    StructType,
-};
-use crate::value::{Type, Value};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
 
 fn default_package() -> String {
     "./...".to_owned()
 }
 
-/// Inputs for `go.fmt` and `go.fmt-l` blocks.
-#[derive(Debug, Deserialize)]
+/// Format Go source files
+#[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoFmtInputs {
-    /// Go package pattern (e.g. "./..."). Defaults to "./...".
+    /// Go package pattern
     #[serde(default = "default_package")]
     pub package: String,
 }
 
 /// Outputs from a `go.fmt` block.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct GoFmtOutputs {}
 
-/// Outputs from a `go.fmt-l` block.
-#[derive(Debug, Serialize)]
+/// Check Go source formatting
+#[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct GoFmtCheckOutputs {
+    /// Whether all files are formatted
     pub passed: bool,
 }
 
@@ -36,20 +33,6 @@ pub struct GoFmtCheckOutputs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoFmtState {
     pub package: String,
-}
-
-fn schema_inputs() -> StructType {
-    StructType {
-        description: None,
-        fields: vec![(
-            "package".into(),
-            StructField {
-                typ: Type::Optional(Box::new(Type::String)),
-                default: Some(Value::Str("./...".into())),
-                description: Some("Go package pattern".into()),
-            },
-        )],
-    }
 }
 
 /// Collect `.go` file paths (excluding test files) for the given package pattern.
@@ -79,20 +62,6 @@ impl Resource for GoFmtResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        ResourceSchema {
-            kind: ResourceKind::Build,
-            inputs: StructType {
-                description: Some("Format Go source files".into()),
-                ..schema_inputs()
-            },
-            outputs: StructType {
-                description: None,
-                fields: vec![],
-            },
-        }
     }
 
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {
@@ -198,27 +167,6 @@ impl Resource for GoFmtCheckResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
-    }
-
-    fn schema(&self) -> ResourceSchema {
-        ResourceSchema {
-            kind: ResourceKind::Test,
-            inputs: StructType {
-                description: Some("Check Go source formatting".into()),
-                ..schema_inputs()
-            },
-            outputs: StructType {
-                description: None,
-                fields: vec![(
-                    "passed".into(),
-                    StructField {
-                        typ: Type::Bool,
-                        default: None,
-                        description: Some("Whether all files are formatted".into()),
-                    },
-                )],
-            },
-        }
     }
 
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {

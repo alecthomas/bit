@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::output::BlockWriter;
+use crate::schema::Schema;
 use crate::value::{Map, Value};
 pub use crate::value::{StructField, StructType};
 
@@ -87,12 +88,18 @@ pub trait Provider {
 /// via blanket impl) handles serde conversion at the registry boundary.
 pub trait Resource {
     type State: Serialize + DeserializeOwned;
-    type Inputs: DeserializeOwned;
-    type Outputs: Serialize;
+    type Inputs: DeserializeOwned + Schema;
+    type Outputs: Serialize + Schema;
 
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
-    fn schema(&self) -> ResourceSchema;
+    fn schema(&self) -> ResourceSchema {
+        ResourceSchema {
+            kind: self.kind(),
+            inputs: Self::Inputs::schema(),
+            outputs: Self::Outputs::schema(),
+        }
+    }
     /// Return the input files, input globs, and output files for this block.
     fn resolve(&self, inputs: &Self::Inputs) -> Result<Vec<ResolvedFile>, BoxError>;
     fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
@@ -252,10 +259,10 @@ mod tests {
         version: u32,
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, bit_derive::Schema)]
     struct StubInputs {}
 
-    #[derive(Debug, Serialize)]
+    #[derive(Debug, Serialize, bit_derive::Schema)]
     struct StubOutputs {}
 
     struct StubProvider;
@@ -291,20 +298,6 @@ mod tests {
 
         fn kind(&self) -> ResourceKind {
             ResourceKind::Build
-        }
-
-        fn schema(&self) -> ResourceSchema {
-            ResourceSchema {
-                kind: ResourceKind::Build,
-                inputs: StructType {
-                    description: Some("A stub resource for testing".into()),
-                    fields: vec![],
-                },
-                outputs: StructType {
-                    description: None,
-                    fields: vec![],
-                },
-            }
         }
 
         fn resolve(&self, _inputs: &StubInputs) -> Result<Vec<ResolvedFile>, BoxError> {
