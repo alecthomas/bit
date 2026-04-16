@@ -119,6 +119,7 @@ pub fn expand_matrix(
             pos: block.pos.clone(),
             name: node_name.clone(),
             doc: block.doc.clone(),
+            phase: block.phase,
             provider: block.provider.clone(),
             resource_name: block.resource.clone(),
             protected: block.protected,

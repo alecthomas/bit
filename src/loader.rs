@@ -164,6 +164,7 @@ pub fn load(
                         pos: b.pos.clone(),
                         name: b.name.clone(),
                         doc: b.doc.clone(),
+                        phase: b.phase,
                         provider: b.provider.clone(),
                         resource_name: b.resource.clone(),
                         protected: b.protected,
@@ -269,6 +270,7 @@ pub fn load(
         }
     }
 
+    dag.wire_phase_edges();
     dag.validate()?;
 
     for key in params.keys() {

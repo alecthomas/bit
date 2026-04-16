@@ -1,11 +1,8 @@
-fmt = rust.fmt {}
+pre fmt = rust.fmt {}
 
-debug = rust.exe {
-  after = [fmt]
-}
+debug = rust.exe {}
 
 release = rust.exe {
-  after = [fmt]
   profile = "release"
 }
 
@@ -15,20 +12,13 @@ image = docker.image {
 }
 
 # Tests
-test = rust.test {
-  after = [fmt]
-}
+test = rust.test {}
 
-clippy = rust.clippy {
-  after = [fmt]
-}
+clippy = rust.clippy {}
 
-fmt-check = rust.fmt-check {
-  after = [fmt]
-}
+fmt-check = rust.fmt-check {}
 
 integration-test = exec.test {
-  after = [fmt]
   depends_on = [debug]
   command  = <<-EOF
   ${debug.path} --version

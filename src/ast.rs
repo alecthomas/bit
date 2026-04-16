@@ -33,14 +33,23 @@ pub enum Statement {
     Output(Output),
 }
 
-/// `name = provider.resource { fields... }`
-/// or `protected name = provider.resource { fields... }`
+/// Execution phase for a block.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Phase {
+    Pre,
+    #[default]
+    Default,
+    Post,
+}
+
+/// `[pre|post] [protected] name = provider.resource { fields... }`
 /// or `name[key1, key2] = provider.resource { fields... }` (matrix expansion)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub pos: Pos,
     pub name: String,
     pub doc: Option<String>,
+    pub phase: Phase,
     pub protected: bool,
     /// Matrix expansion keys — list params to expand over.
     pub matrix_keys: Vec<String>,
@@ -192,6 +201,7 @@ mod tests {
             pos: Pos::default(),
             name: "server".into(),
             doc: None,
+            phase: Phase::Default,
             protected: false,
             matrix_keys: vec![],
             provider: "go".into(),

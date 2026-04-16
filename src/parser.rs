@@ -932,6 +932,13 @@ fn block_field(input: &mut &str) -> ModalResult<Field> {
 }
 
 fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
+    let phase = if opt(keyword("pre")).parse_next(input)?.is_some() {
+        Phase::Pre
+    } else if opt(keyword("post")).parse_next(input)?.is_some() {
+        Phase::Post
+    } else {
+        Phase::Default
+    };
     let protected = opt(keyword("protected")).map(|o| o.is_some()).parse_next(input)?;
     let name = ident_string.parse_next(input)?;
 
@@ -978,6 +985,7 @@ fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
         pos: Pos::default(),
         name,
         doc,
+        phase,
         protected,
         matrix_keys,
         provider,

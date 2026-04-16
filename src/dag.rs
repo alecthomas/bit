@@ -4,7 +4,7 @@ use petgraph::algo::toposort;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 
-use crate::ast::{Expr, Field, StringPart};
+use crate::ast::{Expr, Field, Phase, StringPart};
 use crate::provider::DynResource;
 
 /// The type of edge between two blocks.
@@ -33,6 +33,7 @@ pub struct DagNode {
     pub pos: crate::ast::Pos,
     pub name: String,
     pub doc: Option<String>,
+    pub phase: Phase,
     pub provider: String,
     pub resource_name: String,
     pub protected: bool,
@@ -103,6 +104,41 @@ impl Dag {
     /// Register a target.
     pub fn add_target(&mut self, name: String, blocks: Vec<String>, doc: Option<String>) {
         self.targets.insert(name, DagTarget { blocks, doc });
+    }
+
+    /// Add synthetic ordering edges between phases.
+    /// Every default block gets an ordering edge from each pre block,
+    /// and every post block gets an ordering edge from each default block.
+    pub fn wire_phase_edges(&mut self) {
+        let mut pre = Vec::new();
+        let mut default = Vec::new();
+        let mut post = Vec::new();
+        for (name, idx) in &self.indices {
+            match self.graph[*idx].phase {
+                Phase::Pre => pre.push(name.clone()),
+                Phase::Default => default.push(name.clone()),
+                Phase::Post => post.push(name.clone()),
+            }
+        }
+        for p in &pre {
+            for d in &default {
+                let from = self.indices[p];
+                let to = self.indices[d];
+                self.graph.add_edge(from, to, EdgeKind::Ordering);
+            }
+            for q in &post {
+                let from = self.indices[p];
+                let to = self.indices[q];
+                self.graph.add_edge(from, to, EdgeKind::Ordering);
+            }
+        }
+        for d in &default {
+            for q in &post {
+                let from = self.indices[d];
+                let to = self.indices[q];
+                self.graph.add_edge(from, to, EdgeKind::Ordering);
+            }
+        }
     }
 
     /// Validate the graph: no cycles, all target references are valid.

@@ -2,7 +2,7 @@
 
 A declarative build tool with dependency tracking, content-based caching, and parallel execution.
 
-bit reads a `BUILD.bit` file, resolves dependencies between blocks, detects what changed, and only rebuilds what's needed. Language-aware providers (e.g. Go, Docker) automatically discover inputs from source files, so in most cases you don't need to specify them manually.
+bit reads a `BUILD.bit` file, resolves dependencies between blocks, detects what changed, and only rebuilds what's needed. Language-aware providers (e.g. Go, Rust, Docker) automatically discover inputs from source files, so in most cases you don't need to specify them manually.
 
 Like Terraform, bit tracks the state of each block between runs. It detects drift (e.g. a deleted Docker image or stopped container), determines what actions are needed (create, update, replace, destroy), and applies only the minimum changes. `bit plan` shows what would change; `bit apply` makes it so; `bit destroy` tears it down.
 
@@ -107,6 +107,18 @@ If a `default` target is defined, `bit apply` with no arguments runs only that t
 
 ```bit
 target default = [server, test]
+```
+
+### Phases
+
+Blocks can be assigned to a phase with `pre` or `post` modifiers. All `pre` blocks complete before any default block starts; all default blocks complete before any `post` block starts. Within each phase, normal dependency ordering applies.
+
+```bit
+pre fmt = rust.fmt {}       # runs before everything
+post report = exec { ... }  # runs after everything
+
+debug = rust.exe {}         # default phase, waits for fmt
+test = rust.test {}         # default phase, waits for fmt
 ```
 
 ### Matrix Expansion
@@ -285,6 +297,57 @@ lint = go.lint {}                  # defaults to ./...
 lint = go.lint { package = "./cmd/app" }
 ```
 
+**`go.fmt`** — format Go source files with `gofmt`:
+```bit
+pre fmt = go.fmt {}                # defaults to ./...
+```
+
+**`go.fmt-l`** — check Go source formatting (test, fails if unformatted):
+```bit
+fmt-check = go.fmt-l {}
+```
+
+### rust
+
+Rust-aware provider. Uses `cargo metadata` to discover local package source directories for input tracking. Shared inputs: `package`, `flags`, `features`, `all_features`, `target`, `profile`, `toolchain`.
+
+**`rust.exe`** — build a Rust binary:
+```bit
+app = rust.exe {
+  bin = "myapp"            # optional, inferred from Cargo.toml
+  package = "my-crate"     # optional, for workspaces
+  profile = "release"      # optional
+}
+```
+Outputs `path` — the binary location, discovered from cargo's JSON output.
+
+**`rust.build`** — compile without producing a binary:
+```bit
+check = rust.build {}
+```
+
+**`rust.test`** — run tests:
+```bit
+test = rust.test {
+  verbose = true           # optional, show individual test results
+}
+```
+
+**`rust.clippy`** — run Clippy linter:
+```bit
+clippy = rust.clippy {}
+```
+
+**`rust.fmt`** — format Rust source files with `cargo fmt`:
+```bit
+pre fmt = rust.fmt {}
+```
+
+**`rust.fmt-check`** — check Rust formatting (test, fails if unformatted):
+```bit
+fmt-check = rust.fmt-check {}
+```
+
 ### docker
 
 **`docker.image`** — build a Docker image (auto-detects inputs from Dockerfile COPY/ADD):
@@ -313,6 +376,7 @@ app = docker.container {
 
 1. Parse `BUILD.bit` and build a dependency DAG
    - Module blocks (from `.bit/modules/`) are expanded into namespaced inner blocks
+   - Phase modifiers (`pre`/`post`) add synthetic ordering edges between phases
 2. For each block in topological order:
    - Evaluate field expressions (with upstream outputs in scope)
    - Resolve input files via the provider
