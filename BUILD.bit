@@ -10,7 +10,6 @@ release = exec {
   command = "cargo build --release"
   output = "target/release/bit"
   inputs = inputs
-  depends_on = [test]
 }
 
 image = docker.image {
@@ -29,8 +28,9 @@ integration-test = exec.test {
   depends_on = [debug]
   command  = <<-EOF
   ${debug.path} --version
-  ${debug.path} plan
+  ${debug.path} --plan
   EOF
 }
 
+# Build the usual suspects
 target default = [release, test]

@@ -39,6 +39,8 @@ pub enum LoadError {
         name: String,
         from: String,
     },
+    #[error("unknown param: {name}")]
+    UnknownParam { name: String },
     #[error("failed to load module {0}: {1}")]
     ModuleLoad(String, String),
     #[error("failed to parse module {0}: {1}")]
@@ -81,10 +83,12 @@ pub fn load(
     let mut matrix_blocks: HashMap<String, Vec<String>> = HashMap::new();
     let mut deferred_matrix: Vec<crate::ast::Block> = Vec::new();
     let mut missing_params: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut declared_params: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for stmt in &module.statements {
         match stmt {
             Statement::Param(p) => {
+                declared_params.insert(p.name.clone());
                 let value = if let Some(v) = params.get(&p.name) {
                     Some(v.clone())
                 } else if let Some(default) = &p.default {
@@ -266,6 +270,12 @@ pub fn load(
 
     dag.validate()?;
 
+    for key in params.keys() {
+        if !declared_params.contains(key) {
+            return Err(LoadError::UnknownParam { name: key.clone() });
+        }
+    }
+
     Ok((dag, BaseScope { scope, missing_params }))
 }
 
@@ -369,6 +379,17 @@ server = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let (_dag, base) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
         assert!(base.missing_params.contains("env"));
+    }
+
+    #[test]
+    fn load_unknown_param_errors() {
+        let input = "param env : string\n";
+        let module = parser::parse(input, "<test>").unwrap();
+        let mut params = Map::new();
+        params.insert("bogus".into(), Value::Str("val".into()));
+        let result = load(&module, &params, &test_registry(), &EmptyStore, Path::new("."));
+        let err = result.err().expect("expected error");
+        assert!(err.to_string().contains("unknown param: bogus"), "got: {err}");
     }
 
     #[test]
