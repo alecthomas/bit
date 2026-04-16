@@ -210,7 +210,9 @@ fn main() {
         }
     } else if cli.test {
         let (_module, mut dag, base, store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets);
+        let names = dag.test_order().unwrap_or_default();
+        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let output = Output::new(&name_refs);
         if let Err(e) = engine::test(&mut dag, &base, store.as_ref(), &output, jobs) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
