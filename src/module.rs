@@ -263,6 +263,7 @@ pub fn expand_module(
         ctx.dag.add_node(DagNode {
             pos: block.pos.clone(),
             name: qualified_name.clone(),
+            doc: block.doc.clone(),
             provider: block.provider.clone(),
             resource_name: block.resource.clone(),
             protected: block.protected,
@@ -404,6 +405,7 @@ pub fn expand_module(
     ctx.dag.add_node(DagNode {
         pos: crate::ast::Pos::default(),
         name: instance_name.to_owned(),
+        doc: None,
         provider: "module".into(),
         resource_name: "module".into(),
         protected: false,

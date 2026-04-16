@@ -118,6 +118,7 @@ pub fn expand_matrix(
         dag.add_node(DagNode {
             pos: block.pos.clone(),
             name: node_name.clone(),
+            doc: block.doc.clone(),
             provider: block.provider.clone(),
             resource_name: block.resource.clone(),
             protected: block.protected,

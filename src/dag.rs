@@ -32,6 +32,7 @@ pub enum DagError {
 pub struct DagNode {
     pub pos: crate::ast::Pos,
     pub name: String,
+    pub doc: Option<String>,
     pub provider: String,
     pub resource_name: String,
     pub protected: bool,

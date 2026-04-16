@@ -45,6 +45,10 @@ struct Cli {
     #[arg(long)]
     info: bool,
 
+    /// List all blocks
+    #[arg(long)]
+    list: bool,
+
     /// Show provider/resource schema (optional filter: "go", "docker.image")
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     schema: Option<String>,
@@ -174,13 +178,13 @@ fn main() {
     }
 
     // Validate mutually exclusive mode flags
-    let mode_count = [cli.plan, cli.destroy, cli.test, cli.dump]
+    let mode_count = [cli.plan, cli.destroy, cli.test, cli.dump, cli.list]
         .iter()
         .filter(|&&b| b)
         .count();
     if mode_count > 1 {
         eprintln!(
-            "{} --plan, --destroy, --test, and --dump are mutually exclusive",
+            "{} --plan, --destroy, --test, --dump, and --list are mutually exclusive",
             "error:".red().bold()
         );
         process::exit(1);
@@ -216,6 +220,25 @@ fn main() {
         if let Err(e) = engine::test(&mut dag, &base, store.as_ref(), &output, jobs) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
+        }
+    } else if cli.list {
+        let (_module, dag, _base, _store) = load_module(&registry, &params);
+        match dag.topo_order() {
+            Ok(names) => {
+                for name in &names {
+                    let node = dag.get_node(name).expect("node in topo order");
+                    let pad = "  ".repeat(dag.depth(name));
+                    let typ = format!("{}.{}", node.provider, node.resource_name);
+                    match &node.doc {
+                        Some(doc) => println!("{pad}{name} ({}) — {}", typ.dim(), doc.dim()),
+                        None => println!("{pad}{name} ({})", typ.dim()),
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("{} {e}", "error:".red().bold());
+                process::exit(1);
+            }
         }
     } else if cli.dump {
         let (_module, mut dag, base, _store) = load_module(&registry, &params);

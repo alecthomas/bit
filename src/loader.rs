@@ -163,6 +163,7 @@ pub fn load(
                     dag.add_node(DagNode {
                         pos: b.pos.clone(),
                         name: b.name.clone(),
+                        doc: b.doc.clone(),
                         provider: b.provider.clone(),
                         resource_name: b.resource.clone(),
                         protected: b.protected,
