@@ -361,6 +361,7 @@ impl Provider for RustProvider {
             Box::new(test::RustTestResource),
             Box::new(clippy::RustClippyResource),
             Box::new(fmt::RustFmtResource),
+            Box::new(fmt::RustFmtCheckResource),
         ]
     }
 
@@ -382,12 +383,13 @@ mod tests {
         let provider = RustProvider;
         assert_eq!(provider.name(), "rust");
         let resources = provider.resources();
-        assert_eq!(resources.len(), 5);
+        assert_eq!(resources.len(), 6);
         assert_eq!(resources[0].name(), "build");
         assert_eq!(resources[1].name(), "exe");
         assert_eq!(resources[2].name(), "test");
         assert_eq!(resources[3].name(), "clippy");
         assert_eq!(resources[4].name(), "fmt");
+        assert_eq!(resources[5].name(), "fmt-check");
     }
 
     #[test]

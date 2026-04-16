@@ -9,10 +9,10 @@ use crate::value::Type;
 
 use super::{CargoCommand, RustEnv};
 
-/// Inputs for a `rust.fmt` block.
+/// Inputs shared by `rust.fmt` and `rust.fmt-check`.
 #[derive(Debug, Deserialize)]
 pub struct RustFmtInputs {
-    /// Package to check formatting for (maps to `cargo fmt -p <package>`).
+    /// Package to format (maps to `cargo fmt -p <package>`).
     #[serde(default)]
     pub package: Option<String>,
     /// Extra flags passed to `cargo fmt`.
@@ -22,13 +22,7 @@ pub struct RustFmtInputs {
     pub env: RustEnv,
 }
 
-/// Outputs from a `rust.fmt` block.
-#[derive(Debug, Serialize)]
-pub struct RustFmtOutputs {
-    pub passed: bool,
-}
-
-/// Persisted state for a `rust.fmt` block.
+/// Persisted state shared by `rust.fmt` and `rust.fmt-check`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RustFmtState {
     pub package: Option<String>,
@@ -37,11 +31,18 @@ pub struct RustFmtState {
     pub env: RustEnv,
 }
 
-pub struct RustFmtResource;
+/// Outputs from `rust.fmt` (build, no meaningful outputs).
+#[derive(Debug, Serialize)]
+pub struct RustFmtOutputs {}
 
-/// Build the cargo fmt command.
-/// Note: `cargo fmt` only respects toolchain, not --target/--profile.
-fn fmt_command(inputs: &RustFmtInputs) -> CargoCommand {
+/// Outputs from `rust.fmt-check` (test, pass/fail).
+#[derive(Debug, Serialize)]
+pub struct RustFmtCheckOutputs {
+    pub passed: bool,
+}
+
+/// Build a cargo fmt CargoCommand. `cargo fmt` only respects toolchain, not --target/--profile.
+fn base_fmt_command(inputs: &RustFmtInputs) -> CargoCommand {
     let program = if let Some(tc) = &inputs.env.toolchain {
         format!("cargo+{tc}")
     } else {
@@ -52,10 +53,71 @@ fn fmt_command(inputs: &RustFmtInputs) -> CargoCommand {
     if let Some(pkg) = &inputs.package {
         cargo.arg2("-p", pkg);
     }
-    cargo.arg("--check");
     cargo.extra_flags(&inputs.flags);
     cargo
 }
+
+fn fmt_command(inputs: &RustFmtInputs) -> CargoCommand {
+    base_fmt_command(inputs)
+}
+
+fn fmt_check_command(inputs: &RustFmtInputs) -> CargoCommand {
+    let mut cargo = base_fmt_command(inputs);
+    cargo.arg("--check");
+    cargo
+}
+
+fn schema_inputs(description: &str) -> StructType {
+    StructType {
+        description: Some(description.into()),
+        fields: vec![
+            super::package_field("Package to format (-p flag)"),
+            super::flags_field("cargo fmt"),
+            (
+                "toolchain".into(),
+                StructField {
+                    typ: Type::Optional(Box::new(Type::String)),
+                    default: None,
+                    description: Some("Rust toolchain (e.g. \"nightly\")".into()),
+                },
+            ),
+        ],
+    }
+}
+
+fn resolve(_inputs: &RustFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {
+    let mut files = super::resolve_rust_inputs()?;
+    for name in ["rustfmt.toml", ".rustfmt.toml"] {
+        let path = std::path::Path::new(name);
+        if path.exists() {
+            files.push(ResolvedFile::Input(path.to_path_buf()));
+        }
+    }
+    Ok(files)
+}
+
+fn plan_action(inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> PlanAction {
+    let Some(prior) = prior_state else {
+        return PlanAction::Create;
+    };
+    if prior.package != inputs.package || prior.flags != inputs.flags || prior.env != inputs.env {
+        PlanAction::Update
+    } else {
+        PlanAction::None
+    }
+}
+
+fn save_state(inputs: &RustFmtInputs) -> RustFmtState {
+    RustFmtState {
+        package: inputs.package.clone(),
+        flags: inputs.flags.clone(),
+        env: inputs.env.clone(),
+    }
+}
+
+// -- rust.fmt (build) ---------------------------------------------------------
+
+pub struct RustFmtResource;
 
 impl Resource for RustFmtResource {
     type State = RustFmtState;
@@ -67,62 +129,28 @@ impl Resource for RustFmtResource {
     }
 
     fn kind(&self) -> ResourceKind {
-        ResourceKind::Test
+        ResourceKind::Build
     }
 
     fn schema(&self) -> ResourceSchema {
         ResourceSchema {
-            kind: ResourceKind::Test,
-            inputs: StructType {
-                description: Some("Check Rust formatting with rustfmt".into()),
-                fields: vec![
-                    super::package_field("Package to check formatting (-p flag)"),
-                    super::flags_field("cargo fmt"),
-                    (
-                        "toolchain".into(),
-                        StructField {
-                            typ: Type::Optional(Box::new(Type::String)),
-                            default: None,
-                            description: Some("Rust toolchain (e.g. \"nightly\")".into()),
-                        },
-                    ),
-                ],
+            kind: ResourceKind::Build,
+            inputs: schema_inputs("Format Rust source files"),
+            outputs: StructType {
+                description: None,
+                fields: vec![],
             },
-            outputs: super::passed_output(),
         }
     }
 
-    fn resolve(&self, _inputs: &RustFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-        let mut files = super::resolve_rust_inputs()?;
-        for name in ["rustfmt.toml", ".rustfmt.toml"] {
-            let path = std::path::Path::new(name);
-            if path.exists() {
-                files.push(ResolvedFile::Input(path.to_path_buf()));
-            }
-        }
-        Ok(files)
+    fn resolve(&self, inputs: &RustFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {
+        resolve(inputs)
     }
 
     fn plan(&self, inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
-        let description = fmt_command(inputs).display();
-
-        let Some(prior) = prior_state else {
-            return Ok(PlanResult {
-                action: PlanAction::Create,
-                description,
-                reason: None,
-            });
-        };
-
-        let action = if prior.package != inputs.package || prior.flags != inputs.flags || prior.env != inputs.env {
-            PlanAction::Update
-        } else {
-            PlanAction::None
-        };
-
         Ok(PlanResult {
-            action,
-            description,
+            action: plan_action(inputs, prior_state),
+            description: fmt_command(inputs).display(),
             reason: None,
         })
     }
@@ -133,15 +161,10 @@ impl Resource for RustFmtResource {
         _prior_state: Option<&RustFmtState>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<RustFmtState, RustFmtOutputs>, BoxError> {
-        let passed = fmt_command(inputs).run(writer).is_ok();
-
+        fmt_command(inputs).run(writer)?;
         Ok(ApplyResult {
-            outputs: RustFmtOutputs { passed },
-            state: Some(RustFmtState {
-                package: inputs.package.clone(),
-                flags: inputs.flags.clone(),
-                env: inputs.env.clone(),
-            }),
+            outputs: RustFmtOutputs {},
+            state: Some(save_state(inputs)),
         })
     }
 
@@ -151,7 +174,69 @@ impl Resource for RustFmtResource {
 
     fn refresh(&self, prior_state: &RustFmtState) -> Result<ApplyResult<RustFmtState, RustFmtOutputs>, BoxError> {
         Ok(ApplyResult {
-            outputs: RustFmtOutputs { passed: true },
+            outputs: RustFmtOutputs {},
+            state: Some(prior_state.clone()),
+        })
+    }
+}
+
+// -- rust.fmt-check (test) ----------------------------------------------------
+
+pub struct RustFmtCheckResource;
+
+impl Resource for RustFmtCheckResource {
+    type State = RustFmtState;
+    type Inputs = RustFmtInputs;
+    type Outputs = RustFmtCheckOutputs;
+
+    fn name(&self) -> &str {
+        "fmt-check"
+    }
+
+    fn kind(&self) -> ResourceKind {
+        ResourceKind::Test
+    }
+
+    fn schema(&self) -> ResourceSchema {
+        ResourceSchema {
+            kind: ResourceKind::Test,
+            inputs: schema_inputs("Check Rust formatting"),
+            outputs: super::passed_output(),
+        }
+    }
+
+    fn resolve(&self, inputs: &RustFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {
+        resolve(inputs)
+    }
+
+    fn plan(&self, inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
+        Ok(PlanResult {
+            action: plan_action(inputs, prior_state),
+            description: fmt_check_command(inputs).display(),
+            reason: None,
+        })
+    }
+
+    fn apply(
+        &self,
+        inputs: &RustFmtInputs,
+        _prior_state: Option<&RustFmtState>,
+        writer: &BlockWriter,
+    ) -> Result<ApplyResult<RustFmtState, RustFmtCheckOutputs>, BoxError> {
+        let passed = fmt_check_command(inputs).run(writer).is_ok();
+        Ok(ApplyResult {
+            outputs: RustFmtCheckOutputs { passed },
+            state: Some(save_state(inputs)),
+        })
+    }
+
+    fn destroy(&self, _prior_state: &RustFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
+        Ok(())
+    }
+
+    fn refresh(&self, prior_state: &RustFmtState) -> Result<ApplyResult<RustFmtState, RustFmtCheckOutputs>, BoxError> {
+        Ok(ApplyResult {
+            outputs: RustFmtCheckOutputs { passed: true },
             state: Some(prior_state.clone()),
         })
     }
@@ -162,12 +247,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resource_kind_is_test() {
-        assert_eq!(Resource::kind(&RustFmtResource), ResourceKind::Test);
+    fn fmt_resource_kind_is_build() {
+        assert_eq!(Resource::kind(&RustFmtResource), ResourceKind::Build);
     }
 
     #[test]
-    fn plan_create_when_no_prior_state() {
+    fn fmt_check_resource_kind_is_test() {
+        assert_eq!(Resource::kind(&RustFmtCheckResource), ResourceKind::Test);
+    }
+
+    #[test]
+    fn fmt_plan_create() {
         let inputs = RustFmtInputs {
             package: None,
             flags: vec![],
@@ -175,18 +265,44 @@ mod tests {
         };
         let result = Resource::plan(&RustFmtResource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
+        assert_eq!(result.description, "cargo fmt");
+    }
+
+    #[test]
+    fn fmt_check_plan_create() {
+        let inputs = RustFmtInputs {
+            package: None,
+            flags: vec![],
+            env: RustEnv::default(),
+        };
+        let result = Resource::plan(&RustFmtCheckResource, &inputs, None).unwrap();
+        assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo fmt --check");
     }
 
     #[test]
-    fn plan_create_with_package() {
+    fn fmt_plan_with_package() {
         let inputs = RustFmtInputs {
             package: Some("my-crate".into()),
             flags: vec![],
             env: RustEnv::default(),
         };
         let result = Resource::plan(&RustFmtResource, &inputs, None).unwrap();
-        assert_eq!(result.description, "cargo fmt -p my-crate --check");
+        assert_eq!(result.description, "cargo fmt -p my-crate");
+    }
+
+    #[test]
+    fn fmt_check_plan_with_toolchain() {
+        let inputs = RustFmtInputs {
+            package: None,
+            flags: vec![],
+            env: RustEnv {
+                toolchain: Some("nightly".into()),
+                ..Default::default()
+            },
+        };
+        let result = Resource::plan(&RustFmtCheckResource, &inputs, None).unwrap();
+        assert_eq!(result.description, "cargo+nightly fmt --check");
     }
 
     #[test]
@@ -219,28 +335,5 @@ mod tests {
         };
         let result = Resource::plan(&RustFmtResource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
-    }
-
-    #[test]
-    fn fmt_command_plain() {
-        let inputs = RustFmtInputs {
-            package: None,
-            flags: vec![],
-            env: RustEnv::default(),
-        };
-        assert_eq!(fmt_command(&inputs).display(), "cargo fmt --check");
-    }
-
-    #[test]
-    fn fmt_command_with_toolchain_and_package() {
-        let inputs = RustFmtInputs {
-            package: Some("my-crate".into()),
-            flags: vec![],
-            env: RustEnv {
-                toolchain: Some("nightly".into()),
-                ..Default::default()
-            },
-        };
-        assert_eq!(fmt_command(&inputs).display(), "cargo+nightly fmt -p my-crate --check");
     }
 }

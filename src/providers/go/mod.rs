@@ -1,5 +1,6 @@
 pub mod build;
 pub mod exe;
+pub mod fmt;
 pub mod lint;
 pub mod scanner;
 pub mod test;
@@ -56,6 +57,8 @@ impl Provider for GoProvider {
             Box::new(build::GoBuildResource),
             Box::new(test::GoTestResource),
             Box::new(lint::GoLintResource),
+            Box::new(fmt::GoFmtResource),
+            Box::new(fmt::GoFmtCheckResource),
         ]
     }
 
@@ -77,10 +80,12 @@ mod tests {
         let provider = GoProvider;
         assert_eq!(provider.name(), "go");
         let resources = provider.resources();
-        assert_eq!(resources.len(), 4);
+        assert_eq!(resources.len(), 6);
         assert_eq!(resources[0].name(), "exe");
         assert_eq!(resources[1].name(), "build");
         assert_eq!(resources[2].name(), "test");
         assert_eq!(resources[3].name(), "lint");
+        assert_eq!(resources[4].name(), "fmt");
+        assert_eq!(resources[5].name(), "fmt-l");
     }
 }
