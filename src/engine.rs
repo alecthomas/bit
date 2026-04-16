@@ -184,6 +184,10 @@ struct ContentHashResult {
 }
 
 /// Describe why a block's content hash changed compared to its prior state.
+fn relative_display(path: &std::path::Path, cwd: &std::path::Path) -> String {
+    path.strip_prefix(cwd).unwrap_or(path).to_string_lossy().into_owned()
+}
+
 fn change_reason(
     resolved: &[ResolvedFile],
     prior: &PriorState,
@@ -192,6 +196,8 @@ fn change_reason(
     dirty_deps: &std::collections::HashSet<String>,
     mtime_cache: &mut MtimeCache,
 ) -> Option<String> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+
     // Check for dirty dependency blocks
     let mut dirty: Vec<_> = dag
         .content_deps(block_name)
@@ -218,7 +224,7 @@ fn change_reason(
                         let stored = prior.file_timestamps.get(key.as_ref());
                         let current = cached_mtime(&p, mtime_cache);
                         if stored.map(String::as_str) != current.as_deref() {
-                            changed_inputs.push(p.to_string_lossy().into_owned());
+                            changed_inputs.push(relative_display(&p, &cwd));
                         }
                     }
                 }
@@ -229,10 +235,11 @@ fn change_reason(
         let stored = prior.file_timestamps.get(key.as_ref());
         let current = cached_mtime(path, mtime_cache);
         if stored.map(String::as_str) != current.as_deref() {
+            let display = relative_display(path, &cwd);
             if is_output {
-                changed_outputs.push(key.into_owned());
+                changed_outputs.push(display);
             } else {
-                changed_inputs.push(key.into_owned());
+                changed_inputs.push(display);
             }
         }
     }
@@ -1486,5 +1493,21 @@ mod tests {
         let results = apply(&mut dag, &base, &store, &out, None, 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn test_relative_display() {
+        use std::path::Path;
+
+        let cwd = Path::new("/home/user/project");
+        assert_eq!(
+            relative_display(Path::new("/home/user/project/src/main.rs"), cwd),
+            "src/main.rs"
+        );
+        assert_eq!(
+            relative_display(Path::new("/other/path/file.rs"), cwd),
+            "/other/path/file.rs"
+        );
+        assert_eq!(relative_display(Path::new("/home/user/project"), cwd), "");
     }
 }
