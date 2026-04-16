@@ -394,19 +394,27 @@ fn validate_active_params(dag: &Dag, order: &[String], base: &BaseScope) -> Resu
 
 /// Resolve the block execution order for a given target.
 /// - `None` → use `default` target if defined, else all blocks
-/// - `Some("...")` → all blocks
-/// - `Some(name)` → named target or block
-pub fn resolve_order(dag: &Dag, target: Option<&str>) -> Result<Vec<String>, EngineError> {
-    match target {
-        Some("...") => Ok(dag.topo_order()?),
-        Some(t) => Ok(dag.target_order(t)?),
-        None => {
-            if dag.targets().contains_key("default") {
-                Ok(dag.target_order("default")?)
-            } else {
-                Ok(dag.topo_order()?)
+/// - empty → default target if defined, else all blocks
+/// - `["..."]` → all blocks
+/// - one or more names → union of their target/block orders
+pub fn resolve_order(dag: &Dag, targets: &[String]) -> Result<Vec<String>, EngineError> {
+    if targets.is_empty() {
+        if dag.targets().contains_key("default") {
+            Ok(dag.target_order("default")?)
+        } else {
+            Ok(dag.topo_order()?)
+        }
+    } else if targets.len() == 1 && targets[0] == "..." {
+        Ok(dag.topo_order()?)
+    } else {
+        let mut needed = std::collections::HashSet::new();
+        for t in targets {
+            for name in dag.target_order(t)? {
+                needed.insert(name);
             }
         }
+        let all = dag.topo_order()?;
+        Ok(all.into_iter().filter(|n| needed.contains(n)).collect())
     }
 }
 
@@ -416,9 +424,9 @@ pub fn plan(
     base: &BaseScope,
     store: &dyn StateStore,
     output: &Output,
-    target: Option<&str>,
+    targets: &[String],
 ) -> Result<Vec<BlockPlan>, EngineError> {
-    let order = resolve_order(dag, target)?;
+    let order = resolve_order(dag, targets)?;
     validate_active_params(dag, &order, base)?;
 
     let mut scope = base.scope.clone();
@@ -506,17 +514,17 @@ pub fn plan(
 }
 
 /// Apply all blocks in the DAG (or a target subset).
-/// With no target: runs the `default` target if defined, else all blocks.
-/// With `...`: runs all blocks.
+/// With no targets: runs the `default` target if defined, else all blocks.
+/// With `["..."]`: runs all blocks.
 pub fn apply(
     dag: &mut Dag,
     base: &BaseScope,
     store: &dyn StateStore,
     output: &Output,
-    target: Option<&str>,
+    targets: &[String],
     jobs: usize,
 ) -> Result<Vec<BlockPlan>, EngineError> {
-    let order = resolve_order(dag, target)?;
+    let order = resolve_order(dag, targets)?;
     validate_active_params(dag, &order, base)?;
     if jobs <= 1 {
         apply_order(dag, base, store, output, &order)
@@ -1011,13 +1019,8 @@ fn execute_block(
 }
 
 /// Destroy blocks in reverse dependency order.
-pub fn destroy(
-    dag: &mut Dag,
-    store: &dyn StateStore,
-    output: &Output,
-    target: Option<&str>,
-) -> Result<(), EngineError> {
-    let mut order = resolve_order(dag, target)?;
+pub fn destroy(dag: &mut Dag, store: &dyn StateStore, output: &Output, targets: &[String]) -> Result<(), EngineError> {
+    let mut order = resolve_order(dag, targets)?;
     order.reverse();
 
     for name in &order {
@@ -1058,8 +1061,8 @@ pub fn destroy(
 }
 
 /// Dump evaluated inputs and stored outputs for all blocks (or a target subset).
-pub fn dump(dag: &mut Dag, base: &BaseScope, target: Option<&str>) -> Result<(), EngineError> {
-    let order = resolve_order(dag, target)?;
+pub fn dump(dag: &mut Dag, base: &BaseScope, targets: &[String]) -> Result<(), EngineError> {
+    let order = resolve_order(dag, targets)?;
 
     let mut scope = base.scope.clone();
 
@@ -1239,7 +1242,7 @@ mod tests {
         )
         .expect("load failed");
         let output = Output::new(&[]);
-        apply(&mut dag, &base, &store, &output, None, 1)
+        apply(&mut dag, &base, &store, &output, &[], 1)
     }
 
     #[test]
@@ -1295,7 +1298,7 @@ mod tests {
         )
         .unwrap();
         let out = Output::new(&[]);
-        let plans = plan(&mut dag, &base, &store, &out, None).unwrap();
+        let plans = plan(&mut dag, &base, &store, &out, &[]).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].plan.action, PlanAction::Create);
     }
@@ -1322,7 +1325,7 @@ mod tests {
         )
         .unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, None, 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
         assert!(!store.list().unwrap().is_empty());
 
         // Reload with state, then destroy
@@ -1334,7 +1337,7 @@ mod tests {
             std::path::Path::new("."),
         )
         .unwrap();
-        destroy(&mut dag, &store, &out, None).unwrap();
+        destroy(&mut dag, &store, &out, &[]).unwrap();
         assert!(store.list().unwrap().is_empty());
     }
 
@@ -1359,7 +1362,7 @@ mod tests {
         )
         .unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, None, 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
 
         let (mut dag, _base) = loader::load(
             &module,
@@ -1369,7 +1372,7 @@ mod tests {
             std::path::Path::new("."),
         )
         .unwrap();
-        destroy(&mut dag, &store, &out, None).unwrap();
+        destroy(&mut dag, &store, &out, &[]).unwrap();
         // State should still exist — destroy was skipped
         assert!(!store.list().unwrap().is_empty());
     }
@@ -1401,7 +1404,7 @@ mod tests {
         )
         .unwrap();
         let out = Output::new(&[]);
-        let results = apply(&mut dag, &base, &store, &out, Some("just_a"), 1).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, &["just_a".into()], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "a");
         assert!(out_a.exists());
@@ -1430,7 +1433,7 @@ mod tests {
         )
         .unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, None, 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
 
         // Verify persisted state has timestamps
         let stored = store.load("build").unwrap().unwrap();
@@ -1447,7 +1450,7 @@ mod tests {
             std::path::Path::new("."),
         )
         .unwrap();
-        let results = apply(&mut dag, &base, &store, &out, None, 1).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::None);
     }
@@ -1479,7 +1482,7 @@ mod tests {
             std::path::Path::new("."),
         )
         .unwrap();
-        apply(&mut dag, &base, &store, &out, None, 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
 
         // Modify input file (touch with new content to change both mtime and hash)
         std::fs::write(&input_file, "v2").unwrap();
@@ -1493,7 +1496,7 @@ mod tests {
             std::path::Path::new("."),
         )
         .unwrap();
-        let results = apply(&mut dag, &base, &store, &out, None, 1).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::Update);
     }

@@ -48,28 +48,28 @@ fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, base) =
         loader::load(&module, &Map::new(), &registry(), store, std::path::Path::new(".")).expect("load failed");
-    engine::apply(&mut dag, &base, store, &Output::new(&[]), None, 1).expect("apply failed")
+    engine::apply(&mut dag, &base, store, &Output::new(&[]), &[], 1).expect("apply failed")
 }
 
 fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, base) =
         loader::load(&module, &Map::new(), &registry(), store, std::path::Path::new(".")).expect("load failed");
-    engine::plan(&mut dag, &base, store, &Output::new(&[]), None).expect("plan failed")
+    engine::plan(&mut dag, &base, store, &Output::new(&[]), &[]).expect("plan failed")
 }
 
-fn run_dump(input: &str, store: &MemoryStore, target: Option<&str>) {
+fn run_dump(input: &str, store: &MemoryStore, targets: &[String]) {
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, base) =
         loader::load(&module, &Map::new(), &registry(), store, std::path::Path::new(".")).expect("load failed");
-    engine::dump(&mut dag, &base, target).expect("dump failed");
+    engine::dump(&mut dag, &base, targets).expect("dump failed");
 }
 
 fn run_destroy(input: &str, store: &MemoryStore) {
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, _base) =
         loader::load(&module, &Map::new(), &registry(), store, std::path::Path::new(".")).expect("load failed");
-    engine::destroy(&mut dag, store, &Output::new(&[]), None).expect("destroy failed");
+    engine::destroy(&mut dag, store, &Output::new(&[]), &[]).expect("destroy failed");
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn target_filters_execution() {
     let store = MemoryStore::new();
     let module = parser::parse(&input, "<test>").unwrap();
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), &store, std::path::Path::new(".")).unwrap();
-    let results = engine::apply(&mut dag, &base, &store, &Output::new(&[]), Some("just_a"), 1).unwrap();
+    let results = engine::apply(&mut dag, &base, &store, &Output::new(&[]), &["just_a".into()], 1).unwrap();
     assert_eq!(results.len(), 1);
     assert!(out_a.exists());
     assert!(!out_b.exists());
@@ -443,7 +443,7 @@ fn dump_before_apply() {
     );
     let store = MemoryStore::new();
     // Dump should succeed even with no prior state
-    run_dump(&input, &store, None);
+    run_dump(&input, &store, &[]);
 }
 
 #[test]
@@ -458,7 +458,7 @@ fn dump_after_apply() {
     let store = MemoryStore::new();
     run_apply(&input, &store);
     // Dump should show both inputs and stored outputs
-    run_dump(&input, &store, None);
+    run_dump(&input, &store, &[]);
 }
 
 #[test]
@@ -480,7 +480,7 @@ fn dump_with_target() {
     let store = MemoryStore::new();
     run_apply(&input, &store);
     // Dump filtered to target should succeed
-    run_dump(&input, &store, Some("just_a"));
+    run_dump(&input, &store, &["just_a".into()]);
 }
 
 /// Helper to set up a module file in .bit/modules/{provider}/{resource}.bit
@@ -493,7 +493,7 @@ fn write_module(dir: &std::path::Path, provider: &str, resource: &str, content: 
 fn run_apply_in_dir(dir: &std::path::Path, input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store, dir).expect("load failed");
-    engine::apply(&mut dag, &base, store, &Output::new(&[]), None, 1).expect("apply failed")
+    engine::apply(&mut dag, &base, store, &Output::new(&[]), &[], 1).expect("apply failed")
 }
 
 #[test]

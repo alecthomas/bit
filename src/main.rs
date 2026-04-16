@@ -1,7 +1,7 @@
 use std::fs;
 use std::process;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use yansi::Paint;
 
 use bit::engine;
@@ -18,50 +18,39 @@ use bit::value::Map;
 #[command(name = "bit", about = "bit — Build It", version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     /// Number of parallel jobs (default: number of CPUs)
-    #[arg(short = 'j', long = "jobs", global = true)]
+    #[arg(short = 'j', long = "jobs")]
     jobs: Option<usize>,
 
     /// Set a parameter value (e.g. -p verbose=true)
-    #[arg(short = 'p', long = "param", global = true, value_name = "KEY=VALUE")]
+    #[arg(short = 'p', long = "param", value_name = "KEY=VALUE")]
     params: Vec<String>,
 
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Subcommand)]
-enum Command {
     /// Show what would change without applying
-    Plan {
-        /// Target to plan (default: all blocks)
-        target: Option<String>,
-    },
-    /// Apply all blocks (or a target)
-    #[command(alias = "build")]
-    Apply {
-        /// Target to apply (default: all blocks)
-        target: Option<String>,
-    },
+    #[arg(long)]
+    plan: bool,
+
     /// Destroy blocks in reverse dependency order
-    #[command(alias = "clean")]
-    Destroy {
-        /// Target to destroy (default: all blocks)
-        target: Option<String>,
-    },
+    #[arg(long)]
+    destroy: bool,
+
     /// Run test blocks and their dependencies
-    Test,
-    /// Show parameters, targets, and outputs
-    Info,
+    #[arg(long)]
+    test: bool,
+
     /// Dump evaluated inputs and stored outputs
-    Dump {
-        /// Target to dump (default: all blocks)
-        target: Option<String>,
-    },
-    /// Show provider/resource schema
-    Schema {
-        /// Provider or provider.resource (e.g. "go", "go.exe", "docker.image")
-        filter: Option<String>,
-    },
+    #[arg(long)]
+    dump: bool,
+
+    /// Show parameters, targets, and outputs
+    #[arg(long)]
+    info: bool,
+
+    /// Show provider/resource schema (optional filter: "go", "docker.image")
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    schema: Option<String>,
+
+    /// Targets or blocks to operate on
+    targets: Vec<String>,
 }
 
 fn default_registry() -> ProviderRegistry {
@@ -159,163 +148,171 @@ fn load_module(
 }
 
 /// Create an Output formatter sized to the blocks that will actually run.
-fn make_output(dag: &bit::dag::Dag, target: Option<&str>) -> Output {
-    let names = engine::resolve_order(dag, target).unwrap_or_default();
+fn make_output(dag: &bit::dag::Dag, targets: &[String]) -> Output {
+    let names = engine::resolve_order(dag, targets).unwrap_or_default();
     let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
     Output::new(&name_refs)
 }
 
 fn main() {
     let cli = Cli::parse();
+
+    // --schema doesn't need the full DAG
+    if let Some(ref filter) = cli.schema {
+        let registry = default_registry();
+        find_and_chdir_project_root();
+        let filter = if filter.is_empty() { None } else { Some(filter.as_str()) };
+        print_schema(&registry, filter);
+        return;
+    }
+
+    // --info doesn't need the full DAG
+    if cli.info {
+        find_and_chdir_project_root();
+        print_info();
+        return;
+    }
+
+    // Validate mutually exclusive mode flags
+    let mode_count = [cli.plan, cli.destroy, cli.test, cli.dump]
+        .iter()
+        .filter(|&&b| b)
+        .count();
+    if mode_count > 1 {
+        eprintln!(
+            "{} --plan, --destroy, --test, and --dump are mutually exclusive",
+            "error:".red().bold()
+        );
+        process::exit(1);
+    }
+
     find_and_chdir_project_root();
     let registry = default_registry();
     let params = parse_params(&cli.params);
     let jobs = cli
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let targets = &cli.targets;
 
-    let command = cli.command.unwrap_or(Command::Apply { target: None });
-    match command {
-        Command::Plan { target } => {
-            let (_module, mut dag, base, store) = load_module(&registry, &params);
-            let output = make_output(&dag, target.as_deref());
-            match engine::plan(&mut dag, &base, store.as_ref(), &output, target.as_deref()) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{} {e}", "error:".red().bold());
-                    process::exit(1);
-                }
+    if cli.plan {
+        let (_module, mut dag, base, store) = load_module(&registry, &params);
+        let output = make_output(&dag, targets);
+        if let Err(e) = engine::plan(&mut dag, &base, store.as_ref(), &output, targets) {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    } else if cli.destroy {
+        let (_module, mut dag, _base, store) = load_module(&registry, &params);
+        let output = make_output(&dag, targets);
+        if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, targets) {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    } else if cli.test {
+        let (_module, mut dag, base, store) = load_module(&registry, &params);
+        let output = make_output(&dag, targets);
+        if let Err(e) = engine::test(&mut dag, &base, store.as_ref(), &output, jobs) {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    } else if cli.dump {
+        let (_module, mut dag, base, _store) = load_module(&registry, &params);
+        if let Err(e) = engine::dump(&mut dag, &base, targets) {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    } else {
+        // Default: apply
+        let (_module, mut dag, base, store) = load_module(&registry, &params);
+        let output = make_output(&dag, targets);
+        if let Err(e) = engine::apply(&mut dag, &base, store.as_ref(), &output, targets, jobs) {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    }
+}
+
+fn print_info() {
+    use bit::ast::Statement;
+
+    let source = match fs::read_to_string("BUILD.bit") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{} cannot read BUILD.bit: {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
+    let module = match bit::parser::parse(&source, "BUILD.bit") {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
+
+    let module_params: Vec<_> = module
+        .statements
+        .iter()
+        .filter_map(|s| match s {
+            Statement::Param(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    let targets: Vec<_> = module
+        .statements
+        .iter()
+        .filter_map(|s| match s {
+            Statement::Target(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let outputs: Vec<_> = module
+        .statements
+        .iter()
+        .filter_map(|s| match s {
+            Statement::Output(o) => Some(o),
+            _ => None,
+        })
+        .collect();
+
+    if !module_params.is_empty() {
+        println!("{}:", "Parameters".bold());
+        for p in &module_params {
+            let typ = p.typ.to_string();
+            let default = p.default.as_ref().map(|d| format!(" = {d}")).unwrap_or_default();
+            let sig = format!("{typ}{default}");
+            match &p.doc {
+                Some(doc) => println!("  {} ({}) — {}", p.name.bold(), sig.dim(), doc.dim()),
+                None => println!("  {} ({})", p.name.bold(), sig.dim()),
             }
         }
-        Command::Apply { target } => {
-            let (_module, mut dag, base, store) = load_module(&registry, &params);
-            let output = make_output(&dag, target.as_deref());
-            match engine::apply(&mut dag, &base, store.as_ref(), &output, target.as_deref(), jobs) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{} {e}", "error:".red().bold());
-                    process::exit(1);
-                }
+        println!();
+    }
+
+    if !targets.is_empty() {
+        println!("{}:", "Targets".bold());
+        for t in &targets {
+            match &t.doc {
+                Some(doc) => println!("  {} — {}", t.name.bold(), doc.dim()),
+                None => println!("  {}", t.name.bold()),
             }
         }
-        Command::Test => {
-            let (_module, mut dag, base, store) = load_module(&registry, &params);
-            let output = make_output(&dag, None);
-            match engine::test(&mut dag, &base, store.as_ref(), &output, jobs) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("{} {e}", "error:".red().bold());
-                    process::exit(1);
-                }
+        println!();
+    }
+
+    if !outputs.is_empty() {
+        println!("{}:", "Outputs".bold());
+        for o in &outputs {
+            match &o.doc {
+                Some(doc) => println!("  {} — {}", o.name.bold(), doc.dim()),
+                None => println!("  {}", o.name.bold()),
             }
         }
-        Command::Destroy { target } => {
-            let (_module, mut dag, _base, store) = load_module(&registry, &params);
-            let output = make_output(&dag, target.as_deref());
-            match engine::destroy(&mut dag, store.as_ref(), &output, target.as_deref()) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("{} {e}", "error:".red().bold());
-                    process::exit(1);
-                }
-            }
-        }
-        Command::Dump { target } => {
-            let (_module, mut dag, base, _store) = load_module(&registry, &params);
-            match engine::dump(&mut dag, &base, target.as_deref()) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("{} {e}", "error:".red().bold());
-                    process::exit(1);
-                }
-            }
-        }
-        Command::Info => {
-            use bit::ast::Statement;
+        println!();
+    }
 
-            let source = match fs::read_to_string("BUILD.bit") {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("{} cannot read BUILD.bit: {e}", "error:".red().bold());
-                    process::exit(1);
-                }
-            };
-            let module = match bit::parser::parse(&source, "BUILD.bit") {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("{} {e}", "error:".red().bold());
-                    process::exit(1);
-                }
-            };
-
-            let module_params: Vec<_> = module
-                .statements
-                .iter()
-                .filter_map(|s| match s {
-                    Statement::Param(p) => Some(p),
-                    _ => None,
-                })
-                .collect();
-            let targets: Vec<_> = module
-                .statements
-                .iter()
-                .filter_map(|s| match s {
-                    Statement::Target(t) => Some(t),
-                    _ => None,
-                })
-                .collect();
-            let outputs: Vec<_> = module
-                .statements
-                .iter()
-                .filter_map(|s| match s {
-                    Statement::Output(o) => Some(o),
-                    _ => None,
-                })
-                .collect();
-
-            if !module_params.is_empty() {
-                println!("{}:", "Parameters".bold());
-                for p in &module_params {
-                    let typ = p.typ.to_string();
-                    let default = p.default.as_ref().map(|d| format!(" = {d}")).unwrap_or_default();
-                    let sig = format!("{typ}{default}");
-                    match &p.doc {
-                        Some(doc) => println!("  {} ({}) — {}", p.name.bold(), sig.dim(), doc.dim()),
-                        None => println!("  {} ({})", p.name.bold(), sig.dim()),
-                    }
-                }
-                println!();
-            }
-
-            if !targets.is_empty() {
-                println!("{}:", "Targets".bold());
-                for t in &targets {
-                    match &t.doc {
-                        Some(doc) => println!("  {} — {}", t.name.bold(), doc.dim()),
-                        None => println!("  {}", t.name.bold()),
-                    }
-                }
-                println!();
-            }
-
-            if !outputs.is_empty() {
-                println!("{}:", "Outputs".bold());
-                for o in &outputs {
-                    match &o.doc {
-                        Some(doc) => println!("  {} — {}", o.name.bold(), doc.dim()),
-                        None => println!("  {}", o.name.bold()),
-                    }
-                }
-                println!();
-            }
-
-            if module_params.is_empty() && targets.is_empty() && outputs.is_empty() {
-                println!("No parameters, targets, or outputs defined.");
-            }
-        }
-        Command::Schema { filter } => {
-            print_schema(&registry, filter.as_deref());
-        }
+    if module_params.is_empty() && targets.is_empty() && outputs.is_empty() {
+        println!("No parameters, targets, or outputs defined.");
     }
 }
 
