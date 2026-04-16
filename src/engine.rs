@@ -11,7 +11,7 @@ use crate::output::{Event, Output};
 use crate::provider::{BoxError, PlanAction, PlanResult, ResolvedFile, ResourceKind};
 use crate::providers::hash_file;
 use crate::state::{StateError, StateStore};
-use crate::value::{Map, Value};
+use crate::value::{Map, Type, Value};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -494,7 +494,7 @@ pub fn plan(
         emit_event(&writer, event, &result.description, result.reason.as_deref());
 
         // Use stored outputs so downstream blocks can reference them
-        scope.set(name, Value::Map(prior.outputs));
+        scope.set(name, Value::strct(prior.outputs));
 
         plans.push(BlockPlan {
             name: name.clone(),
@@ -631,7 +631,7 @@ fn apply_order(
 
         if plan_result.action == PlanAction::None {
             writer.event(Event::Skipped, "no changes");
-            scope.set(name, Value::Map(prior.outputs));
+            scope.set(name, Value::strct(prior.outputs));
             results.push(BlockPlan {
                 name: name.clone(),
                 plan: plan_result,
@@ -707,7 +707,7 @@ fn apply_order(
         writer.event(Event::Ok, "");
 
         // Inject outputs into scope for downstream blocks
-        scope.set(name, Value::Map(apply_result.outputs));
+        scope.set(name, Value::strct(apply_result.outputs));
 
         results.push(BlockPlan {
             name: name.clone(),
@@ -805,7 +805,7 @@ fn apply_order_parallel(
                     }
 
                     // Merge outputs into scope
-                    scope.set(name, Value::Map(block_result.outputs.clone()));
+                    scope.set(name, Value::strct(block_result.outputs.clone()));
 
                     // Check test failure
                     if block_result.test_failed {
@@ -1076,12 +1076,15 @@ pub fn dump(dag: &mut Dag, base: &BaseScope, target: Option<&str>) -> Result<(),
         if !depends_on.is_empty() {
             inputs.insert(
                 "depends_on".into(),
-                Value::List(depends_on.into_iter().map(Value::Str).collect()),
+                Value::List(Type::String, depends_on.into_iter().map(Value::Str).collect()),
             );
         }
         let after = dag::collect_after(&node.fields);
         if !after.is_empty() {
-            inputs.insert("after".into(), Value::List(after.into_iter().map(Value::Str).collect()));
+            inputs.insert(
+                "after".into(),
+                Value::List(Type::String, after.into_iter().map(Value::Str).collect()),
+            );
         }
 
         let prior = match &node.prior_state {
@@ -1090,7 +1093,7 @@ pub fn dump(dag: &mut Dag, base: &BaseScope, target: Option<&str>) -> Result<(),
         };
 
         // Populate scope with stored outputs for downstream refs
-        scope.set(name, Value::Map(prior.outputs.clone()));
+        scope.set(name, Value::strct(prior.outputs.clone()));
 
         if i > 0 {
             println!();
@@ -1120,7 +1123,7 @@ pub fn dump(dag: &mut Dag, base: &BaseScope, target: Option<&str>) -> Result<(),
 fn print_value(key: &str, value: &Value, indent: usize) {
     let pad = " ".repeat(indent);
     match value {
-        Value::Map(map) => {
+        Value::Map(_, map) | Value::Struct(_, map) => {
             println!("{pad}{key}:");
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
@@ -1128,7 +1131,7 @@ fn print_value(key: &str, value: &Value, indent: usize) {
                 print_value(k, &map[k], indent + 2);
             }
         }
-        Value::List(items) => {
+        Value::List(_, items) => {
             println!("{pad}{key}:");
             for item in items {
                 println!("{pad}  - {item}");

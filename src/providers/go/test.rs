@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema,
+    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema,
 };
-use crate::value::Type;
+use crate::value::{StructField, StructType, Type};
 
 use super::GoEnv;
 
@@ -193,59 +193,71 @@ impl Resource for GoTestResource {
 
     fn schema(&self) -> ResourceSchema {
         ResourceSchema {
-            description: "Run Go tests".into(),
             kind: ResourceKind::Test,
-            inputs: vec![
-                FieldSchema {
-                    name: "package".into(),
-                    typ: Type::String,
-                    required: true,
-                    default: None,
-                    description: Some("Go package pattern (e.g. \"./...\")".into()),
-                },
-                FieldSchema {
-                    name: "flags".into(),
-                    typ: Type::List(Box::new(Type::String)),
-                    required: false,
-                    default: None,
-                    description: Some("Extra flags passed to go test".into()),
-                },
-                FieldSchema {
-                    name: "verbose".into(),
-                    typ: Type::Bool,
-                    required: false,
-                    default: None,
-                    description: Some("Show individual test results".into()),
-                },
-                FieldSchema {
-                    name: "goos".into(),
-                    typ: Type::String,
-                    required: false,
-                    default: None,
-                    description: Some("Target OS".into()),
-                },
-                FieldSchema {
-                    name: "goarch".into(),
-                    typ: Type::String,
-                    required: false,
-                    default: None,
-                    description: Some("Target architecture".into()),
-                },
-                FieldSchema {
-                    name: "cgo".into(),
-                    typ: Type::Bool,
-                    required: false,
-                    default: None,
-                    description: Some("Enable cgo".into()),
-                },
-            ],
-            outputs: vec![FieldSchema {
-                name: "passed".into(),
-                typ: Type::Bool,
-                required: true,
-                default: None,
-                description: Some("Whether all tests passed".into()),
-            }],
+            inputs: StructType {
+                description: Some("Run Go tests".into()),
+                fields: vec![
+                    (
+                        "package".into(),
+                        StructField {
+                            typ: Type::String,
+                            default: None,
+                            description: Some("Go package pattern (e.g. \"./...\")".into()),
+                        },
+                    ),
+                    (
+                        "flags".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
+                            default: None,
+                            description: Some("Extra flags passed to go test".into()),
+                        },
+                    ),
+                    (
+                        "verbose".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::Bool)),
+                            default: None,
+                            description: Some("Show individual test results".into()),
+                        },
+                    ),
+                    (
+                        "goos".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::String)),
+                            default: None,
+                            description: Some("Target OS".into()),
+                        },
+                    ),
+                    (
+                        "goarch".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::String)),
+                            default: None,
+                            description: Some("Target architecture".into()),
+                        },
+                    ),
+                    (
+                        "cgo".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::Bool)),
+                            default: None,
+                            description: Some("Enable cgo".into()),
+                        },
+                    ),
+                ],
+            },
+            outputs: StructType {
+                description: None,
+                fields: vec![(
+                    "passed".into(),
+                    StructField {
+                        typ: Type::Bool,
+                        default: None,
+                        description: Some("Whether all tests passed".into()),
+                    },
+                )],
+            },
         }
     }
 
@@ -380,7 +392,7 @@ mod tests {
         inputs.insert("package".into(), Value::Str("./...".into()));
         inputs.insert(
             "flags".into(),
-            Value::List(vec![
+            Value::list(vec![
                 Value::Str("-timeout".into()),
                 Value::Str("30s".into()),
                 Value::Str("-race".into()),

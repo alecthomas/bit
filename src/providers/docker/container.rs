@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, Resource, ResourceKind, ResourceSchema,
+    ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind, ResourceSchema, StructField, StructType,
 };
 use crate::value::{Type, Value};
 
@@ -290,103 +290,121 @@ impl Resource for ContainerResource {
 
     fn schema(&self) -> ResourceSchema {
         ResourceSchema {
-            description: "Run a Docker container (tracks state like Terraform)".into(),
             kind: ResourceKind::Build,
-            inputs: vec![
-                FieldSchema {
-                    name: "image".into(),
-                    typ: Type::String,
-                    required: true,
-                    default: None,
-                    description: Some("Docker image reference".into()),
-                },
-                FieldSchema {
-                    name: "name".into(),
-                    typ: Type::String,
-                    required: true,
-                    default: None,
-                    description: Some("Container name".into()),
-                },
-                FieldSchema {
-                    name: "ports".into(),
-                    typ: Type::List(Box::new(Type::String)),
-                    required: false,
-                    default: None,
-                    description: Some("Port mappings (e.g. \"8080:80\")".into()),
-                },
-                FieldSchema {
-                    name: "volumes".into(),
-                    typ: Type::List(Box::new(Type::String)),
-                    required: false,
-                    default: None,
-                    description: Some("Volume mounts".into()),
-                },
-                FieldSchema {
-                    name: "environment".into(),
-                    typ: Type::Map(Box::new(Type::String)),
-                    required: false,
-                    default: None,
-                    description: Some("Environment variables".into()),
-                },
-                FieldSchema {
-                    name: "command".into(),
-                    typ: Type::String,
-                    required: false,
-                    default: None,
-                    description: Some("Override CMD".into()),
-                },
-                FieldSchema {
-                    name: "entrypoint".into(),
-                    typ: Type::String,
-                    required: false,
-                    default: None,
-                    description: Some("Override ENTRYPOINT".into()),
-                },
-                FieldSchema {
-                    name: "restart".into(),
-                    typ: Type::String,
-                    required: false,
-                    default: Some(Value::Str("no".into())),
-                    description: Some("Restart policy".into()),
-                },
-                FieldSchema {
-                    name: "network".into(),
-                    typ: Type::String,
-                    required: false,
-                    default: None,
-                    description: Some("Docker network".into()),
-                },
-                FieldSchema {
-                    name: "working_dir".into(),
-                    typ: Type::String,
-                    required: false,
-                    default: None,
-                    description: Some("Working directory".into()),
-                },
-                FieldSchema {
-                    name: "healthcheck".into(),
-                    typ: Type::String,
-                    required: false,
-                    default: None,
-                    description: Some("Health check command or config".into()),
-                },
-            ],
-            outputs: vec![
-                FieldSchema {
-                    name: "container_id".into(),
-                    typ: Type::String,
-                    required: true,
-                    default: None,
-                    description: Some("Docker container ID".into()),
-                },
-                FieldSchema {
-                    name: "name".into(),
-                    typ: Type::String,
-                    required: true,
-                    default: None,
-                    description: Some("Container name".into()),
-                },
-            ],
+            inputs: StructType {
+                description: Some("Run a Docker container (tracks state like Terraform)".into()),
+                fields: vec![
+                    (
+                        "image".into(),
+                        StructField {
+                            typ: Type::String,
+                            default: None,
+                            description: Some("Docker image reference".into()),
+                        },
+                    ),
+                    (
+                        "name".into(),
+                        StructField {
+                            typ: Type::String,
+                            default: None,
+                            description: Some("Container name".into()),
+                        },
+                    ),
+                    (
+                        "ports".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
+                            default: None,
+                            description: Some("Port mappings (e.g. \"8080:80\")".into()),
+                        },
+                    ),
+                    (
+                        "volumes".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
+                            default: None,
+                            description: Some("Volume mounts".into()),
+                        },
+                    ),
+                    (
+                        "environment".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::Map(Box::new(Type::String)))),
+                            default: None,
+                            description: Some("Environment variables".into()),
+                        },
+                    ),
+                    (
+                        "command".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::String)),
+                            default: None,
+                            description: Some("Override CMD".into()),
+                        },
+                    ),
+                    (
+                        "entrypoint".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::String)),
+                            default: None,
+                            description: Some("Override ENTRYPOINT".into()),
+                        },
+                    ),
+                    (
+                        "restart".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::String)),
+                            default: Some(Value::Str("no".into())),
+                            description: Some("Restart policy".into()),
+                        },
+                    ),
+                    (
+                        "network".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::String)),
+                            default: None,
+                            description: Some("Docker network".into()),
+                        },
+                    ),
+                    (
+                        "working_dir".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::String)),
+                            default: None,
+                            description: Some("Working directory".into()),
+                        },
+                    ),
+                    (
+                        "healthcheck".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::String)),
+                            default: None,
+                            description: Some("Health check command or config".into()),
+                        },
+                    ),
+                ],
+            },
+            outputs: StructType {
+                description: None,
+                fields: vec![
+                    (
+                        "container_id".into(),
+                        StructField {
+                            typ: Type::String,
+                            default: None,
+                            description: Some("Docker container ID".into()),
+                        },
+                    ),
+                    (
+                        "name".into(),
+                        StructField {
+                            typ: Type::String,
+                            default: None,
+                            description: Some("Container name".into()),
+                        },
+                    ),
+                ],
+            },
         }
     }
 

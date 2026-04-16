@@ -76,7 +76,7 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
         Expr::Null => Ok(Value::Null),
         Expr::List(items) => {
             let values: Result<Vec<_>, _> = items.iter().map(|e| eval_inner(e, scope, mode)).collect();
-            Ok(Value::List(values?))
+            Ok(Value::list(values?))
         }
         Expr::Map(fields) => eval_map(fields, scope, mode),
         Expr::Ref(parts) => eval_ref(parts, scope, mode),
@@ -114,9 +114,9 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
             match (l, r) {
                 (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
                 (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
-                (Value::List(mut a), Value::List(b)) => {
+                (Value::List(typ, mut a), Value::List(_, b)) => {
                     a.extend(b);
-                    Ok(Value::List(a))
+                    Ok(Value::List(typ, a))
                 }
                 (l, r) => Err(EvalError::Type(format!(
                     "+ requires matching types (two numbers, strings, or lists), got {l} and {r}",
@@ -145,7 +145,9 @@ fn eval_map(fields: &[Field], scope: &Scope, mode: EvalMode) -> Result<Value, Ev
     for field in fields {
         map.insert(field.name.clone(), eval_inner(&field.value, scope, mode)?);
     }
-    Ok(Value::Map(map))
+    // Infer value type from first entry; default to String for empty maps.
+    let typ = map.values().next().map(Value::value_type).unwrap_or(Type::String);
+    Ok(Value::Map(typ, map))
 }
 
 fn eval_ref(parts: &[String], scope: &Scope, mode: EvalMode) -> Result<Value, EvalError> {
@@ -156,7 +158,7 @@ fn eval_ref(parts: &[String], scope: &Scope, mode: EvalMode) -> Result<Value, Ev
     let mut current = root.clone();
     for part in &parts[1..] {
         match current {
-            Value::Map(map) => match map.get(part).cloned() {
+            Value::Map(_, map) | Value::Struct(_, map) => match map.get(part).cloned() {
                 Some(val) => current = val,
                 None if mode == EvalMode::Lenient => {
                     return Ok(Value::Str(format!("${{{}}}", parts.join("."))));
@@ -354,7 +356,7 @@ fn builtin_glob(args: &[Value]) -> Result<Value, EvalError> {
             Err(e) => return Err(EvalError::Glob(e.to_string())),
         }
     }
-    Ok(Value::List(result))
+    Ok(Value::List(Type::String, result))
 }
 
 /// `secret(name)` — placeholder, TBD per spec
@@ -374,7 +376,7 @@ fn builtin_trim(args: &[Value]) -> Result<Value, EvalError> {
     check_arity("trim", args, 1)?;
     match &args[0] {
         Value::Str(s) => Ok(Value::Str(s.trim().to_owned())),
-        Value::List(items) => {
+        Value::List(typ, items) => {
             let trimmed = items
                 .iter()
                 .map(|v| match v {
@@ -382,7 +384,7 @@ fn builtin_trim(args: &[Value]) -> Result<Value, EvalError> {
                     _ => Err(EvalError::Type("trim on list requires string elements".into())),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::List(trimmed))
+            Ok(Value::List(typ.clone(), trimmed))
         }
         _ => Err(EvalError::Type("trim() requires a string or list".into())),
     }
@@ -399,7 +401,7 @@ fn builtin_lines(args: &[Value]) -> Result<Value, EvalError> {
         .filter(|l| !l.is_empty())
         .map(|l| Value::Str(l.to_owned()))
         .collect();
-    Ok(Value::List(items))
+    Ok(Value::List(Type::String, items))
 }
 
 /// `split(value, separator)`
@@ -412,22 +414,24 @@ fn builtin_split(args: &[Value]) -> Result<Value, EvalError> {
         .as_str()
         .ok_or_else(|| EvalError::Type("split() separator must be a string".into()))?;
     let items = s.split(sep).map(|p| Value::Str(p.to_owned())).collect();
-    Ok(Value::List(items))
+    Ok(Value::List(Type::String, items))
 }
 
 /// `uniq(list)` — deduplicate a list preserving order
 fn builtin_uniq(args: &[Value]) -> Result<Value, EvalError> {
     check_arity("uniq", args, 1)?;
-    let items = args[0]
-        .as_list()
-        .ok_or_else(|| EvalError::Type("uniq() requires a list".into()))?;
-    let mut seen = Vec::new();
-    for item in items {
-        if !seen.contains(item) {
-            seen.push(item.clone());
+    match &args[0] {
+        Value::List(typ, items) => {
+            let mut seen = Vec::new();
+            for item in items {
+                if !seen.contains(item) {
+                    seen.push(item.clone());
+                }
+            }
+            Ok(Value::List(typ.clone(), seen))
         }
+        _ => Err(EvalError::Type("uniq() requires a list".into())),
     }
-    Ok(Value::List(seen))
 }
 
 /// `basename(path)` — extract the file name from a path, or map over a list
@@ -441,7 +445,7 @@ fn builtin_basename(args: &[Value]) -> Result<Value, EvalError> {
                 .unwrap_or_default();
             Ok(Value::Str(name))
         }
-        Value::List(items) => {
+        Value::List(typ, items) => {
             let mapped = items
                 .iter()
                 .map(|v| match v {
@@ -455,7 +459,7 @@ fn builtin_basename(args: &[Value]) -> Result<Value, EvalError> {
                     _ => Err(EvalError::Type("basename on list requires string elements".into())),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::List(mapped))
+            Ok(Value::List(typ.clone(), mapped))
         }
         _ => Err(EvalError::Type("basename() requires a string or list".into())),
     }
@@ -472,7 +476,7 @@ fn builtin_dirname(args: &[Value]) -> Result<Value, EvalError> {
                 .unwrap_or_default();
             Ok(Value::Str(dir))
         }
-        Value::List(items) => {
+        Value::List(typ, items) => {
             let mapped = items
                 .iter()
                 .map(|v| match v {
@@ -486,7 +490,7 @@ fn builtin_dirname(args: &[Value]) -> Result<Value, EvalError> {
                     _ => Err(EvalError::Type("dirname on list requires string elements".into())),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::List(mapped))
+            Ok(Value::List(typ.clone(), mapped))
         }
         _ => Err(EvalError::Type("dirname() requires a string or list".into())),
     }
@@ -500,7 +504,7 @@ fn builtin_prefix(args: &[Value]) -> Result<Value, EvalError> {
         .ok_or_else(|| EvalError::Type("prefix() second argument must be a string".into()))?;
     match &args[0] {
         Value::Str(s) => Ok(Value::Str(format!("{pfx}{s}"))),
-        Value::List(items) => {
+        Value::List(typ, items) => {
             let mapped = items
                 .iter()
                 .map(|v| match v {
@@ -508,7 +512,7 @@ fn builtin_prefix(args: &[Value]) -> Result<Value, EvalError> {
                     _ => Err(EvalError::Type("prefix on list requires string elements".into())),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::List(mapped))
+            Ok(Value::List(typ.clone(), mapped))
         }
         _ => Err(EvalError::Type("prefix() requires a string or list".into())),
     }
@@ -522,7 +526,7 @@ fn builtin_suffix(args: &[Value]) -> Result<Value, EvalError> {
         .ok_or_else(|| EvalError::Type("suffix() second argument must be a string".into()))?;
     match &args[0] {
         Value::Str(s) => Ok(Value::Str(format!("{s}{sfx}"))),
-        Value::List(items) => {
+        Value::List(typ, items) => {
             let mapped = items
                 .iter()
                 .map(|v| match v {
@@ -530,7 +534,7 @@ fn builtin_suffix(args: &[Value]) -> Result<Value, EvalError> {
                     _ => Err(EvalError::Type("suffix on list requires string elements".into())),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::List(mapped))
+            Ok(Value::List(typ.clone(), mapped))
         }
         _ => Err(EvalError::Type("suffix() requires a string or list".into())),
     }
@@ -601,7 +605,7 @@ mod tests {
         let mut scope = Scope::new();
         let mut inner = Map::new();
         inner.insert("path".into(), Value::Str("/bin/server".into()));
-        scope.set("server", Value::Map(inner));
+        scope.set("server", Value::strct(inner));
         let expr = Expr::Ref(vec!["server".into(), "path".into()]);
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("/bin/server".into()));
     }
@@ -609,7 +613,7 @@ mod tests {
     #[test]
     fn eval_missing_field_strict_errors() {
         let mut scope = Scope::new();
-        scope.set("image", Value::Map(Map::new()));
+        scope.set("image", Value::strct(Map::new()));
         let expr = Expr::Ref(vec!["image".into(), "ref".into()]);
         let err = eval(&expr, &scope).unwrap_err();
         assert!(matches!(err, EvalError::UndefinedField(ref s) if s == "image.ref"));
@@ -618,7 +622,7 @@ mod tests {
     #[test]
     fn eval_missing_field_lenient_placeholder() {
         let mut scope = Scope::new();
-        scope.set("image", Value::Map(Map::new()));
+        scope.set("image", Value::strct(Map::new()));
         let expr = Expr::Ref(vec!["image".into(), "ref".into()]);
         assert_eq!(eval_lenient(&expr, &scope).unwrap(), Value::Str("${image.ref}".into()));
     }
@@ -626,7 +630,7 @@ mod tests {
     #[test]
     fn eval_missing_field_lenient_in_string() {
         let mut scope = Scope::new();
-        scope.set("image", Value::Map(Map::new()));
+        scope.set("image", Value::strct(Map::new()));
         let expr = Expr::Str(vec![
             StringPart::Literal("docker run ".into()),
             StringPart::Interpolation(Expr::Ref(vec!["image".into(), "ref".into()])),
@@ -643,7 +647,7 @@ mod tests {
         let expr = Expr::List(vec![Expr::Number(1.into()), Expr::Number(2.into())]);
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![Value::Number(1.into()), Value::Number(2.into())])
+            Value::list(vec![Value::Number(1.into()), Value::Number(2.into())])
         );
     }
 
@@ -656,7 +660,7 @@ mod tests {
         }]);
         let result = eval(&expr, &scope).unwrap();
         match result {
-            Value::Map(m) => assert_eq!(m.get("a"), Some(&Value::Number(1.into()))),
+            Value::Map(_, m) => assert_eq!(m.get("a"), Some(&Value::Number(1.into()))),
             _ => panic!("expected Map"),
         }
     }
@@ -741,7 +745,7 @@ mod tests {
         );
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![Value::Number(1.into()), Value::Number(2.into())])
+            Value::list(vec![Value::Number(1.into()), Value::Number(2.into())])
         );
     }
 
@@ -776,7 +780,7 @@ mod tests {
         );
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![
+            Value::list(vec![
                 Value::Str("a".into()),
                 Value::Str("b".into()),
                 Value::Str("c".into()),
@@ -794,7 +798,7 @@ mod tests {
         );
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![
+            Value::list(vec![
                 Value::Str("a".into()),
                 Value::Str("b".into()),
                 Value::Str("c".into()),
@@ -816,7 +820,7 @@ mod tests {
         );
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![Value::Str("a".into()), Value::Str("b".into()),])
+            Value::list(vec![Value::Str("a".into()), Value::Str("b".into()),])
         );
     }
 
@@ -835,7 +839,7 @@ mod tests {
         );
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![Value::Str("hello".into())])
+            Value::list(vec![Value::Str("hello".into())])
         );
     }
 
@@ -890,7 +894,7 @@ mod tests {
         );
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![Value::Str("b.txt".into()), Value::Str("d.go".into()),])
+            Value::list(vec![Value::Str("b.txt".into()), Value::Str("d.go".into()),])
         );
     }
 
@@ -918,7 +922,7 @@ mod tests {
         );
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![Value::Str("/a".into()), Value::Str("/c".into()),])
+            Value::list(vec![Value::Str("/a".into()), Value::Str("/c".into()),])
         );
     }
 
@@ -946,7 +950,7 @@ mod tests {
         );
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![Value::Str("linux/amd64".into()), Value::Str("linux/arm64".into()),])
+            Value::list(vec![Value::Str("linux/amd64".into()), Value::Str("linux/arm64".into()),])
         );
     }
 
@@ -974,7 +978,7 @@ mod tests {
         );
         assert_eq!(
             eval(&expr, &scope).unwrap(),
-            Value::List(vec![Value::Str("app.so".into()), Value::Str("lib.so".into()),])
+            Value::list(vec![Value::Str("app.so".into()), Value::Str("lib.so".into()),])
         );
     }
 }

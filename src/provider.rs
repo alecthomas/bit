@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 
 use crate::output::BlockWriter;
 use crate::value::{Map, Value};
+pub use crate::value::{StructField, StructType};
 
 /// Shorthand for the boxed error type used at provider boundaries.
 pub type BoxError = Box<dyn Error + Send + Sync>;
@@ -53,28 +54,16 @@ pub struct ApplyResult<S, O> {
 #[derive(Debug, Clone)]
 pub struct FuncSignature {
     pub name: String,
-    pub params: Vec<FieldSchema>,
+    pub params: Vec<(String, StructField)>,
     pub returns: crate::value::Type,
-}
-
-/// Describes a named, typed field — used for function params, resource
-/// inputs, and resource outputs.
-#[derive(Debug, Clone)]
-pub struct FieldSchema {
-    pub name: String,
-    pub typ: crate::value::Type,
-    pub required: bool,
-    pub default: Option<crate::value::Value>,
-    pub description: Option<String>,
 }
 
 /// Schema describing a resource's interface.
 #[derive(Debug, Clone)]
 pub struct ResourceSchema {
-    pub description: String,
     pub kind: ResourceKind,
-    pub inputs: Vec<FieldSchema>,
-    pub outputs: Vec<FieldSchema>,
+    pub inputs: StructType,
+    pub outputs: StructType,
 }
 
 /// Whether a resource produces build artifacts or test results.
@@ -306,10 +295,15 @@ mod tests {
 
         fn schema(&self) -> ResourceSchema {
             ResourceSchema {
-                description: "A stub resource for testing".into(),
                 kind: ResourceKind::Build,
-                inputs: vec![],
-                outputs: vec![],
+                inputs: StructType {
+                    description: Some("A stub resource for testing".into()),
+                    fields: vec![],
+                },
+                outputs: StructType {
+                    description: None,
+                    fields: vec![],
+                },
             }
         }
 

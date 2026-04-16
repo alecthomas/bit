@@ -376,6 +376,11 @@ fn map_entry(input: &mut &str) -> ModalResult<Field> {
     Ok(Field { name, value })
 }
 
+/// Parse a key inside a matrix slice reference: `"string"`, `'string'`, or `ident`.
+fn matrix_ref_key(input: &mut &str) -> ModalResult<String> {
+    alt((lex(plain_string), lex(plain_raw_string), ident_string)).parse_next(input)
+}
+
 fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
     let checkpoint = input.checkpoint();
     let name = ident_string.parse_next(input)?;
@@ -394,8 +399,19 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
         return Ok(Expr::Call(name, args));
     }
 
+    // Matrix slice reference: name["val1", "val2"] or name[ident]
+    let first = if opt('[').parse_next(input)?.is_some() {
+        let keys: Vec<String> = separated(1.., matrix_ref_key, lex(',')).parse_next(input)?;
+        cut_err(lex(']'))
+            .context(StrContext::Label("closing ']' in matrix ref"))
+            .parse_next(input)?;
+        format!("{name}[{}]", keys.join(", "))
+    } else {
+        name
+    };
+
     // Dotted reference: name.field.subfield
-    let mut parts = vec![name];
+    let mut parts = vec![first];
     while opt(lex('.')).parse_next(input)?.is_some() {
         parts.push(ident_string.parse_next(input)?);
     }
@@ -1822,6 +1838,42 @@ image[arch, region] = exec {
         match &result.statements[0] {
             Statement::Block(b) => assert!(b.matrix_keys.is_empty()),
             _ => panic!("expected Block"),
+        }
+    }
+
+    #[test]
+    fn parse_matrix_ref_quoted() {
+        let input = r#"let x = build["amd64", "cachew"].path"#;
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => {
+                assert_eq!(l.value, Expr::Ref(vec!["build[amd64, cachew]".into(), "path".into()]));
+            }
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_matrix_ref_single_key() {
+        let input = r#"let x = build["amd64"].path"#;
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => {
+                assert_eq!(l.value, Expr::Ref(vec!["build[amd64]".into(), "path".into()]));
+            }
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_matrix_ref_bare_ident() {
+        let input = "let x = build[amd64].path";
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => {
+                assert_eq!(l.value, Expr::Ref(vec!["build[amd64]".into(), "path".into()]));
+            }
+            _ => panic!("expected Let"),
         }
     }
 }

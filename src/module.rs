@@ -7,8 +7,8 @@ use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult as ProviderApplyResult, BoxError, DynResource, FieldSchema, PlanAction, PlanResult, ProviderRegistry,
-    ResolvedFile, ResourceKind, ResourceSchema,
+    ApplyResult as ProviderApplyResult, BoxError, DynResource, PlanAction, PlanResult, ProviderRegistry, ResolvedFile,
+    ResourceKind, ResourceSchema, StructField, StructType,
 };
 use crate::state::StateStore;
 use crate::value::{Map, Value, validate_type};
@@ -271,7 +271,7 @@ pub fn expand_module(
             prior_state,
         })?;
 
-        ctx.scope.set(&qualified_name, Value::Map(Map::new()));
+        ctx.scope.set(&qualified_name, Value::strct(Map::new()));
     }
 
     // Wire internal dependency edges for inner blocks
@@ -352,36 +352,52 @@ pub fn expand_module(
         .collect();
 
     // Build schema from the module's declared params and outputs
-    let schema_inputs: Vec<FieldSchema> = iface
+    let schema_inputs: Vec<(String, StructField)> = iface
         .params
         .iter()
-        .map(|p| FieldSchema {
-            name: p.name.clone(),
-            typ: p.typ.clone(),
-            required: p.default.is_none(),
-            default: p.default.as_ref().and_then(|d| expr::eval(d, &eval_scope).ok()),
-            description: p.doc.clone(),
+        .map(|p| {
+            let typ = if p.default.is_some() {
+                crate::value::Type::Optional(Box::new(p.typ.clone()))
+            } else {
+                p.typ.clone()
+            };
+            (
+                p.name.clone(),
+                StructField {
+                    typ,
+                    default: p.default.as_ref().and_then(|d| expr::eval(d, &eval_scope).ok()),
+                    description: p.doc.clone(),
+                },
+            )
         })
         .collect();
-    let schema_outputs: Vec<FieldSchema> = iface
+    let schema_outputs: Vec<(String, StructField)> = iface
         .outputs
         .iter()
-        .map(|o| FieldSchema {
-            name: o.name.clone(),
-            typ: crate::value::Type::String, // outputs are untyped; default to string
-            required: true,
-            default: None,
-            description: o.doc.clone(),
+        .map(|o| {
+            (
+                o.name.clone(),
+                StructField {
+                    typ: crate::value::Type::String,
+                    default: None,
+                    description: o.doc.clone(),
+                },
+            )
         })
         .collect();
     let resource_schema = ResourceSchema {
-        description: module_ast
-            .doc
-            .clone()
-            .unwrap_or_else(|| format!("Module from {}", module_path.display())),
         kind: ResourceKind::Build,
-        inputs: schema_inputs,
-        outputs: schema_outputs,
+        inputs: StructType {
+            description: module_ast
+                .doc
+                .clone()
+                .or_else(|| Some(format!("Module from {}", module_path.display()))),
+            fields: schema_inputs,
+        },
+        outputs: StructType {
+            description: None,
+            fields: schema_outputs,
+        },
     };
 
     let prior_state = ctx.store.load(instance_name)?;
@@ -425,7 +441,7 @@ pub fn expand_module(
         );
     }
 
-    ctx.scope.set(instance_name, Value::Map(Map::new()));
+    ctx.scope.set(instance_name, Value::strct(Map::new()));
 
     Ok(())
 }
@@ -584,7 +600,7 @@ mod tests {
         let val = Value::Bool(true);
         assert_eq!(val.to_expr(), Expr::Bool(true));
 
-        let val = Value::List(vec![Value::Str("a".into())]);
+        let val = Value::list(vec![Value::Str("a".into())]);
         assert_eq!(
             val.to_expr(),
             Expr::List(vec![Expr::Str(vec![StringPart::Literal("a".into())])])

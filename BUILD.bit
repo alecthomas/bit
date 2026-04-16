@@ -32,3 +32,5 @@ integration-test = exec.test {
   ${debug.path} plan
   EOF
 }
+
+target default = [release, test]

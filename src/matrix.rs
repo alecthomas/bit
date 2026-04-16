@@ -164,13 +164,13 @@ pub fn expand_matrix(
                 .collect::<Vec<String>>()
                 .join(", ")
         };
-        matrix_map.insert(key, Value::Map(Map::new()));
+        matrix_map.insert(key, Value::strct(Map::new()));
     }
-    scope.set(&block.name, Value::Map(matrix_map));
+    scope.set(&block.name, Value::strct(matrix_map));
 
     // Also register each expanded node in scope as placeholder
     for expanded in &expanded_names {
-        scope.set(expanded, Value::Map(Map::new()));
+        scope.set(expanded, Value::strct(Map::new()));
     }
 
     Ok(())

@@ -393,12 +393,12 @@ fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {
         ResourceKind::Test => "test",
     };
 
-    println!("{} ({}) — {}", name.bold(), kind_label.dim(), schema.description);
+    let desc = schema.inputs.description.as_deref().unwrap_or("");
+    println!("{} ({}) — {}", name.bold(), kind_label.dim(), desc);
 
-    if !schema.inputs.is_empty() {
+    if !schema.inputs.fields.is_empty() {
         println!("  {}:", "Inputs".bold());
-        for f in &schema.inputs {
-            let req = if f.required { "" } else { "?" };
+        for (field_name, f) in &schema.inputs.fields {
             let def = f
                 .default
                 .as_ref()
@@ -406,24 +406,27 @@ fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {
                 .unwrap_or_default();
             match &f.description {
                 Some(desc) => println!(
-                    "    {}{} ({}{}) — {}",
-                    f.name,
-                    req,
+                    "    {} ({}{}) — {}",
+                    field_name,
                     f.typ.to_string().dim(),
                     def.dim(),
                     desc.dim()
                 ),
-                None => println!("    {}{} ({}{})", f.name, req, f.typ.to_string().dim(), def.dim()),
+                None => {
+                    println!("    {} ({}{})", field_name, f.typ.to_string().dim(), def.dim())
+                }
             }
         }
     }
 
-    if !schema.outputs.is_empty() {
+    if !schema.outputs.fields.is_empty() {
         println!("  {}:", "Outputs".bold());
-        for f in &schema.outputs {
+        for (field_name, f) in &schema.outputs.fields {
             match &f.description {
-                Some(desc) => println!("    {} ({}) — {}", f.name, f.typ.to_string().dim(), desc.dim()),
-                None => println!("    {} ({})", f.name, f.typ.to_string().dim()),
+                Some(desc) => {
+                    println!("    {} ({}) — {}", field_name, f.typ.to_string().dim(), desc.dim())
+                }
+                None => println!("    {} ({})", field_name, f.typ.to_string().dim()),
             }
         }
     }
@@ -431,7 +434,7 @@ fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {
 
 /// Scan .bit/modules/ for module files and derive their schemas.
 fn scan_module_schemas(root: &std::path::Path) -> Vec<(String, String, bit::provider::ResourceSchema)> {
-    use bit::provider::{FieldSchema, ResourceKind, ResourceSchema};
+    use bit::provider::{ResourceKind, ResourceSchema, StructField, StructType};
 
     let modules_dir = root.join(".bit/modules");
     let Ok(providers) = std::fs::read_dir(&modules_dir) else {
@@ -472,22 +475,29 @@ fn scan_module_schemas(root: &std::path::Path) -> Vec<(String, String, bit::prov
                             .default
                             .as_ref()
                             .and_then(|d| bit::expr::eval(d, &bit::expr::Scope::new()).ok());
-                        inputs.push(FieldSchema {
-                            name: p.name.clone(),
-                            typ: p.typ.clone(),
-                            required: p.default.is_none(),
-                            default,
-                            description: p.doc.clone(),
-                        });
+                        let typ = if p.default.is_some() {
+                            bit::value::Type::Optional(Box::new(p.typ.clone()))
+                        } else {
+                            p.typ.clone()
+                        };
+                        inputs.push((
+                            p.name.clone(),
+                            StructField {
+                                typ,
+                                default,
+                                description: p.doc.clone(),
+                            },
+                        ));
                     }
                     bit::ast::Statement::Output(o) => {
-                        outputs.push(FieldSchema {
-                            name: o.name.clone(),
-                            typ: bit::value::Type::String,
-                            required: true,
-                            default: None,
-                            description: o.doc.clone(),
-                        });
+                        outputs.push((
+                            o.name.clone(),
+                            StructField {
+                                typ: bit::value::Type::String,
+                                default: None,
+                                description: o.doc.clone(),
+                            },
+                        ));
                     }
                     _ => {}
                 }
@@ -503,10 +513,15 @@ fn scan_module_schemas(root: &std::path::Path) -> Vec<(String, String, bit::prov
                 display_name,
                 resource_name,
                 ResourceSchema {
-                    description: module.doc.unwrap_or_else(|| format!("Module from {}", path.display())),
                     kind: ResourceKind::Build,
-                    inputs,
-                    outputs,
+                    inputs: StructType {
+                        description: module.doc.or_else(|| Some(format!("Module from {}", path.display()))),
+                        fields: inputs,
+                    },
+                    outputs: StructType {
+                        description: None,
+                        fields: outputs,
+                    },
                 },
             ));
         }

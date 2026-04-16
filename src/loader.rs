@@ -168,7 +168,7 @@ pub fn load(
                     })?;
 
                     block_names.push(b.name.clone());
-                    scope.set(&b.name, Value::Map(Map::new()));
+                    scope.set(&b.name, Value::strct(Map::new()));
                 }
             }
             Statement::Target(t) => {
@@ -278,7 +278,7 @@ fn resolve_dep(name: &str, dag: &Dag, matrix_blocks: &HashMap<String, Vec<String
     }
     // If name matches a matrix block, resolve to all expanded slice names
     if matrix_blocks.contains_key(name)
-        && let Some(Value::Map(map)) = scope.get(name)
+        && let Some(Value::Struct(_, map)) = scope.get(name)
     {
         return map.keys().map(|k| format!("{name}[{k}]")).collect();
     }

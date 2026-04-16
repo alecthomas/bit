@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, FieldSchema, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema,
+    ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind, ResourceSchema, StructField,
+    StructType,
 };
 use crate::value::{Type, Value};
 
@@ -54,31 +55,39 @@ impl Resource for GoLintResource {
 
     fn schema(&self) -> ResourceSchema {
         ResourceSchema {
-            description: "Run golangci-lint".into(),
             kind: ResourceKind::Test,
-            inputs: vec![
-                FieldSchema {
-                    name: "package".into(),
-                    typ: Type::String,
-                    required: false,
-                    default: Some(Value::Str("./...".into())),
-                    description: Some("Go package pattern".into()),
-                },
-                FieldSchema {
-                    name: "flags".into(),
-                    typ: Type::List(Box::new(Type::String)),
-                    required: false,
-                    default: None,
-                    description: Some("Extra flags passed to golangci-lint run".into()),
-                },
-            ],
-            outputs: vec![FieldSchema {
-                name: "passed".into(),
-                typ: Type::Bool,
-                required: true,
-                default: None,
-                description: Some("Whether linting passed".into()),
-            }],
+            inputs: StructType {
+                description: Some("Run golangci-lint".into()),
+                fields: vec![
+                    (
+                        "package".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::String)),
+                            default: Some(Value::Str("./...".into())),
+                            description: Some("Go package pattern".into()),
+                        },
+                    ),
+                    (
+                        "flags".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::List(Box::new(Type::String)))),
+                            default: None,
+                            description: Some("Extra flags passed to golangci-lint run".into()),
+                        },
+                    ),
+                ],
+            },
+            outputs: StructType {
+                description: None,
+                fields: vec![(
+                    "passed".into(),
+                    StructField {
+                        typ: Type::Bool,
+                        default: None,
+                        description: Some("Whether linting passed".into()),
+                    },
+                )],
+            },
         }
     }
 
