@@ -401,7 +401,7 @@ fn validate_active_params(dag: &Dag, order: &[String], base: &BaseScope) -> Resu
                     pos: node.pos.clone(),
                     block: name.clone(),
                     source: crate::expr::EvalError::UndefinedVar(format!(
-                        "missing required param '{r}' (use -p {r}=VALUE)"
+                        "missing required param '{r}' (use -P {r}=VALUE)"
                     )),
                 });
             }

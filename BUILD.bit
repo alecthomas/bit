@@ -14,7 +14,9 @@ image = docker.image {
 # Tests
 test = rust.test {}
 
-clippy = rust.clippy {}
+clippy = rust.clippy {
+  flags = ["--", "-D", "warnings"]
+}
 
 integration-test = exec.test {
   depends_on = [debug]

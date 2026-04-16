@@ -22,36 +22,36 @@ struct Cli {
     #[arg(short = 'j', long = "jobs")]
     jobs: Option<usize>,
 
-    /// Set a parameter value (e.g. -p verbose=true)
-    #[arg(short = 'p', long = "param", value_name = "KEY=VALUE")]
+    /// Set a parameter value (e.g. -P verbose=true)
+    #[arg(short = 'P', long = "param", value_name = "KEY=VALUE")]
     params: Vec<String>,
 
     /// Show what would change without applying
-    #[arg(long)]
+    #[arg(short = 'p', long)]
     plan: bool,
 
     /// Destroy blocks in reverse dependency order
-    #[arg(long)]
-    destroy: bool,
+    #[arg(short = 'c', long)]
+    clean: bool,
 
     /// Run test blocks and their dependencies
-    #[arg(long)]
+    #[arg(short = 't', long)]
     test: bool,
 
     /// Dump evaluated inputs and stored outputs
-    #[arg(long)]
+    #[arg(short = 'd', long)]
     dump: bool,
 
     /// Show parameters, targets, and outputs
-    #[arg(long)]
+    #[arg(short = 'i', long)]
     info: bool,
 
     /// List all blocks
-    #[arg(long)]
+    #[arg(short = 'l', long)]
     list: bool,
 
     /// Show provider/resource schema (optional filter: "go", "docker.image")
-    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    #[arg(short = 's', long, num_args = 0..=1, default_missing_value = "")]
     schema: Option<String>,
 
     /// Targets or blocks to operate on
@@ -180,13 +180,13 @@ fn main() {
     }
 
     // Validate mutually exclusive mode flags
-    let mode_count = [cli.plan, cli.destroy, cli.test, cli.dump, cli.list]
+    let mode_count = [cli.plan, cli.clean, cli.test, cli.dump, cli.list]
         .iter()
         .filter(|&&b| b)
         .count();
     if mode_count > 1 {
         eprintln!(
-            "{} --plan, --destroy, --test, --dump, and --list are mutually exclusive",
+            "{} --plan, --clean, --test, --dump, and --list are mutually exclusive",
             "error:".red().bold()
         );
         process::exit(1);
@@ -207,7 +207,7 @@ fn main() {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
-    } else if cli.destroy {
+    } else if cli.clean {
         let (_module, mut dag, _base, store) = load_module(&registry, &params);
         let output = make_output(&dag, targets);
         if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, targets) {
