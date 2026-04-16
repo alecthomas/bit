@@ -11,6 +11,7 @@ use bit::provider::ProviderRegistry;
 use bit::providers::docker::DockerProvider;
 use bit::providers::exec::ExecProvider;
 use bit::providers::go::GoProvider;
+use bit::providers::rust::RustProvider;
 use bit::state;
 use bit::value::Map;
 
@@ -62,6 +63,7 @@ fn default_registry() -> ProviderRegistry {
     reg.register(Box::new(ExecProvider));
     reg.register(Box::new(DockerProvider));
     reg.register(Box::new(GoProvider));
+    reg.register(Box::new(RustProvider));
     reg
 }
 

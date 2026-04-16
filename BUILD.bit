@@ -1,15 +1,7 @@
-let inputs = ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
+debug = rust.exe {}
 
-debug = exec {
-  command = "cargo build"
-  output = "target/debug/bit"
-  inputs = inputs
-}
-
-release = exec {
-  command = "cargo build --release"
-  output = "target/release/bit"
-  inputs = inputs
+release = rust.exe {
+  profile = "release"
 }
 
 image = docker.image {
@@ -18,11 +10,11 @@ image = docker.image {
 }
 
 # Tests
-test = exec.test {
-  depends_on = [debug]
-  command = "cargo test --quiet"
-  inputs = inputs
-}
+test = rust.test {}
+
+clippy = rust.clippy {}
+
+fmt = rust.fmt {}
 
 integration-test = exec.test {
   depends_on = [debug]
@@ -33,4 +25,4 @@ integration-test = exec.test {
 }
 
 # Build the usual suspects
-target default = [release, test]
+target default = [release, test, clippy, fmt]

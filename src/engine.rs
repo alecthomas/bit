@@ -112,6 +112,9 @@ type HashCache = HashMap<PathBuf, String>;
 /// Cache of file path -> mtime, shared across all blocks in a run.
 type MtimeCache = HashMap<PathBuf, FileTimestamp>;
 
+/// Cache of glob pattern -> expanded file paths, shared across all blocks in a run.
+type GlobCache = HashMap<String, Vec<PathBuf>>;
+
 /// Return the modification time of a file, using the shared cache.
 fn cached_mtime(path: &std::path::Path, cache: &mut MtimeCache) -> Option<FileTimestamp> {
     if let Some(ts) = cache.get(path) {
@@ -195,6 +198,7 @@ fn change_reason(
     block_name: &str,
     dirty_deps: &std::collections::HashSet<String>,
     mtime_cache: &mut MtimeCache,
+    glob_cache: &mut GlobCache,
 ) -> Option<String> {
     let cwd = std::env::current_dir().unwrap_or_default();
 
@@ -218,14 +222,23 @@ fn change_reason(
             ResolvedFile::Input(p) => (p, false),
             ResolvedFile::Output(p) => (p, true),
             ResolvedFile::InputGlob(pattern) => {
-                if let Ok(paths) = glob::glob(pattern) {
-                    for p in paths.flatten().filter(|p| p.is_file()) {
-                        let key = p.to_string_lossy();
-                        let stored = prior.file_timestamps.get(key.as_ref());
-                        let current = cached_mtime(&p, mtime_cache);
-                        if stored.map(String::as_str) != current.as_deref() {
-                            changed_inputs.push(relative_display(&p, &cwd));
+                let expanded = glob_cache.entry(pattern.clone()).or_insert_with(|| {
+                    let mut result = Vec::new();
+                    if let Ok(paths) = glob::glob(pattern) {
+                        for path in paths.flatten() {
+                            if path.is_file() {
+                                result.push(path);
+                            }
                         }
+                    }
+                    result
+                });
+                for p in expanded {
+                    let key = p.to_string_lossy();
+                    let stored = prior.file_timestamps.get(key.as_ref());
+                    let current = cached_mtime(p, mtime_cache);
+                    if stored.map(String::as_str) != current.as_deref() {
+                        changed_inputs.push(relative_display(p, &cwd));
                     }
                 }
                 continue;
@@ -336,8 +349,8 @@ fn compute_content_hash(
 }
 
 /// Expand resolved file entries into concrete file paths.
-/// InputGlob patterns are expanded via filesystem glob.
-fn expand_resolved(entries: &[ResolvedFile]) -> Vec<std::path::PathBuf> {
+/// InputGlob patterns are expanded via filesystem glob, with results cached.
+fn expand_resolved(entries: &[ResolvedFile], glob_cache: &mut GlobCache) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     for entry in entries {
         match entry {
@@ -345,13 +358,18 @@ fn expand_resolved(entries: &[ResolvedFile]) -> Vec<std::path::PathBuf> {
                 files.push(p.clone());
             }
             ResolvedFile::InputGlob(pattern) => {
-                if let Ok(paths) = glob::glob(pattern) {
-                    for path in paths.flatten() {
-                        if path.is_file() {
-                            files.push(path);
+                let expanded = glob_cache.entry(pattern.clone()).or_insert_with(|| {
+                    let mut result = Vec::new();
+                    if let Ok(paths) = glob::glob(pattern) {
+                        for path in paths.flatten() {
+                            if path.is_file() {
+                                result.push(path);
+                            }
                         }
                     }
-                }
+                    result
+                });
+                files.extend(expanded.iter().cloned());
             }
         }
     }
@@ -434,6 +452,7 @@ pub fn plan(
     let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut hash_cache = HashCache::new();
     let mut mtime_cache = MtimeCache::new();
+    let mut glob_cache = GlobCache::new();
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
@@ -459,7 +478,7 @@ pub fn plan(
         })?;
 
         // Hash inputs + existing outputs + parent states to detect changes
-        let all_files = expand_resolved(&resolved);
+        let all_files = expand_resolved(&resolved, &mut glob_cache);
         let has_dirty_dep = dag.content_deps(name).iter().any(|d| dirty.contains(d));
         let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
         let inputs_changed = has_dirty_dep || hash_result.hash != prior.content_hash;
@@ -477,7 +496,7 @@ pub fn plan(
         if result.action == PlanAction::None && inputs_changed && prior.provider_state.is_some() {
             result.action = PlanAction::Update;
             if result.reason.is_none() {
-                result.reason = change_reason(&resolved, &prior, dag, name, &dirty, &mut mtime_cache);
+                result.reason = change_reason(&resolved, &prior, dag, name, &dirty, &mut mtime_cache, &mut glob_cache);
             }
         }
 
@@ -561,6 +580,7 @@ fn apply_order(
     let mut results = Vec::new();
     let mut hash_cache = HashCache::new();
     let mut mtime_cache = MtimeCache::new();
+    let mut glob_cache = GlobCache::new();
 
     for name in order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
@@ -584,7 +604,7 @@ fn apply_order(
             phase: "resolve",
             source: e,
         })?;
-        let all_files = expand_resolved(&resolved);
+        let all_files = expand_resolved(&resolved, &mut glob_cache);
         let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
         let inputs_changed = hash_result.hash != prior.content_hash;
 
@@ -619,6 +639,7 @@ fn apply_order(
                         name,
                         &std::collections::HashSet::new(),
                         &mut mtime_cache,
+                        &mut glob_cache,
                     )
                 };
             }
@@ -678,7 +699,7 @@ fn apply_order(
                     mtime_cache.remove(p);
                 }
             }
-            let post_files = expand_resolved(&post_entries);
+            let post_files = expand_resolved(&post_entries, &mut glob_cache);
             // Force full hash on post-apply (no fast path — files just changed).
             let post_prior = default_prior();
             let post_hash = compute_content_hash(
@@ -888,7 +909,8 @@ fn execute_block(
         phase: "resolve",
         source: e,
     })?;
-    let all_files = expand_resolved(&resolved);
+    let mut glob_cache = GlobCache::new();
+    let all_files = expand_resolved(&resolved, &mut glob_cache);
     let mut hash_cache = HashCache::new();
     let mut mtime_cache = MtimeCache::new();
     let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
@@ -921,6 +943,7 @@ fn execute_block(
                     name,
                     &std::collections::HashSet::new(),
                     &mut mtime_cache,
+                    &mut glob_cache,
                 )
             };
         }
@@ -974,7 +997,7 @@ fn execute_block(
     // Compute post-apply hash
     let wrapped_state = if let Some(new_state) = &apply_result.state {
         let post_entries = node.resource.resolve(&inputs).unwrap_or_default();
-        let post_files = expand_resolved(&post_entries);
+        let post_files = expand_resolved(&post_entries, &mut glob_cache);
         let mut post_hash_cache = HashCache::new();
         let mut post_mtime_cache = MtimeCache::new();
         let post_prior = default_prior();
