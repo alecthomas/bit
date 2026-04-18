@@ -58,6 +58,10 @@ struct Cli {
     #[arg(short = 'D', long)]
     debug: bool,
 
+    /// Disable live scrolling regions; stream all output line-by-line.
+    #[arg(short = 'L', long)]
+    long: bool,
+
     /// Targets or blocks to operate on
     targets: Vec<String>,
 }
@@ -164,10 +168,10 @@ fn load_module(
 }
 
 /// Create an Output formatter sized to the blocks that will actually run.
-fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool) -> Output {
+fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool, long: bool) -> Output {
     let names = engine::resolve_order(dag, targets).unwrap_or_default();
     let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    Output::new(&name_refs).with_debug(debug)
+    Output::new(&name_refs).with_debug(debug).with_long(long)
 }
 
 fn main() {
@@ -212,14 +216,14 @@ fn main() {
 
     if cli.plan {
         let (_module, mut dag, base, store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets, cli.debug);
+        let output = make_output(&dag, targets, cli.debug, cli.long);
         if let Err(e) = engine::plan(&mut dag, &base, store.as_ref(), &output, targets) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
     } else if cli.clean {
         let (_module, mut dag, _base, store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets, cli.debug);
+        let output = make_output(&dag, targets, cli.debug, cli.long);
         if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, targets) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
@@ -228,7 +232,7 @@ fn main() {
         let (_module, mut dag, base, store) = load_module(&registry, &params);
         let names = dag.test_order().unwrap_or_default();
         let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        let output = Output::new(&name_refs).with_debug(cli.debug);
+        let output = Output::new(&name_refs).with_debug(cli.debug).with_long(cli.long);
         if let Err(e) = engine::test(&mut dag, &base, store.as_ref(), &output, jobs) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
@@ -261,7 +265,7 @@ fn main() {
     } else {
         // Default: apply
         let (_module, mut dag, base, store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets, cli.debug);
+        let output = make_output(&dag, targets, cli.debug, cli.long);
         if let Err(e) = engine::apply(&mut dag, &base, store.as_ref(), &output, targets, jobs) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);

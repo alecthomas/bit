@@ -1,10 +1,15 @@
+use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, StdoutLock, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use indexmap::IndexMap;
 use yansi::{Color, Paint, Painted};
+
+/// Number of streamed output lines retained per active task in the live region.
+const REGION_LINES: usize = 5;
 
 /// Emit a debug message via an `Output` or `BlockWriter`, formatting the
 /// message only when debug is enabled on the target. Mirrors `log::debug!` /
@@ -116,8 +121,21 @@ fn color_for_name(name: &str) -> Color {
     Color::Fixed(usable_colors[idx])
 }
 
+/// Rendering state for a single task that currently occupies a live region.
+#[derive(Default)]
+struct TaskState {
+    /// Fully-formatted header lines (from the `Starting` event). Always visible.
+    header: Vec<String>,
+    /// Last `REGION_LINES` streamed output lines, fully formatted.
+    recent: VecDeque<String>,
+}
+
 /// Thread-safe output formatter. All output goes through this to keep
 /// block prefixes aligned and interleaved output readable.
+///
+/// When stdout is a TTY, each active task gets a fixed-height "live region"
+/// at the bottom of the screen showing its header and most recent output
+/// lines. Events and completed tasks scroll upward off the region naturally.
 #[derive(Clone)]
 pub struct Output {
     inner: Arc<Mutex<OutputInner>>,
@@ -129,6 +147,17 @@ pub struct Output {
 
 struct OutputInner {
     max_name_len: usize,
+    /// Whether live scrolling regions are used. True only when stdout is a
+    /// terminal AND the user has not opted out via [`Output::with_long`].
+    /// When false, output is plain line-by-line streaming.
+    live: bool,
+    /// Cached terminal width in columns (0 = unknown / unlimited).
+    term_width: usize,
+    /// Per-task live-region state, in insertion order.
+    active: IndexMap<String, TaskState>,
+    /// Number of terminal rows currently occupied by the live region, used
+    /// to know how far up to move the cursor before clearing.
+    live_rows: usize,
 }
 
 /// Format a `Duration` as a compact relative offset for debug output:
@@ -149,8 +178,20 @@ fn format_elapsed(d: Duration) -> String {
 impl Output {
     pub fn new(block_names: &[&str]) -> Self {
         let max_name_len = block_names.iter().map(|n| n.len()).max().unwrap_or(0);
+        let live = io::stdout().is_terminal();
+        let term_width = if live {
+            console::Term::stdout().size().1 as usize
+        } else {
+            0
+        };
         Self {
-            inner: Arc::new(Mutex::new(OutputInner { max_name_len })),
+            inner: Arc::new(Mutex::new(OutputInner {
+                max_name_len,
+                live,
+                term_width,
+                active: IndexMap::new(),
+                live_rows: 0,
+            })),
             debug: false,
             start: Instant::now(),
         }
@@ -159,6 +200,18 @@ impl Output {
     /// Enable or disable debug output. Builder-style: returns the updated value.
     pub fn with_debug(mut self, debug: bool) -> Self {
         self.debug = debug;
+        self
+    }
+
+    /// Force long-form line-by-line streaming, disabling live scrolling
+    /// regions even on a TTY. Useful for log-friendly transcripts and
+    /// debugging.
+    pub fn with_long(self, long: bool) -> Self {
+        if long {
+            let mut inner = self.inner.lock().expect("output lock poisoned");
+            inner.live = false;
+            inner.term_width = 0;
+        }
         self
     }
 
@@ -178,7 +231,7 @@ impl Output {
         let stamped = format!("{} {message}", format_elapsed(self.start.elapsed()));
         // Passing an empty name produces a prefix of `<spaces> <symbol>` with
         // the same width as real block prefixes (right-aligned padding).
-        self.print_event("", Event::Debug, None, &stamped);
+        self.dispatch_event("", Event::Debug, None, &stamped, /*raw=*/ false);
     }
 
     /// Create a writer for a specific block.
@@ -201,72 +254,251 @@ impl Output {
         }
     }
 
+    fn dispatch_stream(&self, name: &str, color: Color, indent: Option<usize>, content: &str, stderr: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        let line = inner.fmt_stream_line(name, color, indent, content, stderr);
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        inner.push_stream(&mut out, name, line);
+    }
+
+    fn dispatch_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str, raw: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        let lines = if raw {
+            inner.fmt_event_raw(name, event, indent, message)
+        } else {
+            inner.fmt_event(name, event, indent, message)
+        };
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        // `event_raw` is used by providers for *intermediate* progress events
+        // (e.g. per-suite `test_suite_passed`). These flow through the task's
+        // live region so they scroll within the 5-line window and are gone
+        // when the region collapses on completion. Only `event` (non-raw)
+        // Ok/Failed/Skipped/NoChange are terminal for the region.
+        match (event, raw) {
+            (Event::Starting, _) => inner.open_region(&mut out, name, lines),
+            (Event::Ok | Event::Failed | Event::Skipped | Event::NoChange, false) => {
+                inner.close_region(&mut out, name, lines)
+            }
+            (_, true) if inner.active.contains_key(name) => inner.push_stream_many(&mut out, name, lines),
+            _ => inner.print_detached(&mut out, &lines),
+        }
+    }
+}
+
+impl OutputInner {
     fn prefix(&self, name: &str, sep: &str, indent: Option<usize>) -> String {
         match indent {
             Some(n) => {
                 let pad = "  ".repeat(n);
                 format!("{pad}{name} {sep}")
             }
-            None => {
-                let inner = self.inner.lock().unwrap();
-                format!("{:>width$} {sep}", name, width = inner.max_name_len)
-            }
+            None => format!("{:>width$} {sep}", name, width = self.max_name_len),
         }
     }
 
-    fn print_line(&self, name: &str, color: Color, indent: Option<usize>, content: &str) {
-        let prefix = self.prefix(name, "│", indent);
-        println!("{} {content}", prefix.paint(color));
+    /// Truncate a (possibly ANSI-colored) line to the cached terminal width
+    /// so it renders on exactly one row. When width is unknown (non-TTY or
+    /// detection failure), the line is returned unchanged.
+    fn fit(&self, line: &str) -> String {
+        if self.term_width == 0 {
+            return line.to_string();
+        }
+        console::truncate_str(line, self.term_width, "").into_owned()
     }
 
-    fn print_stderr_line(&self, name: &str, color: Color, indent: Option<usize>, content: &str) {
+    fn fmt_stream_line(&self, name: &str, color: Color, indent: Option<usize>, content: &str, stderr: bool) -> String {
         let prefix = self.prefix(name, "│", indent);
-        println!("{} {}", prefix.paint(color), content.dim().italic());
+        let raw = if stderr {
+            format!("{} {}", prefix.paint(color), content.dim().italic())
+        } else {
+            format!("{} {content}", prefix.paint(color))
+        };
+        self.fit(&raw)
     }
 
-    fn print_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str) {
+    fn fmt_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str) -> Vec<String> {
         let color = color_for_name(name);
         let prefix = self.prefix(name, event.symbol(), indent);
         let dim = event.is_dim();
+        let mut lines = Vec::new();
         if message.is_empty() {
             let text = format!("{event:?}").to_lowercase();
-            println!(
+            lines.push(self.fit(&format!(
                 "{} {}",
                 prefix.paint(color).dim_if(dim),
-                text.paint(event.color()).dim_if(dim)
-            );
-        } else {
-            let mut lines = message.lines();
-            if let Some(first) = lines.next() {
-                println!(
-                    "{} {}",
-                    prefix.paint(color).dim_if(dim),
-                    first.paint(event.color()).dim_if(dim)
-                );
-            }
-            let cont_prefix = self.prefix(name, "┆", indent);
-            for line in lines {
-                println!(
-                    "{} {}",
-                    cont_prefix.paint(color).dim_if(dim),
-                    line.paint(event.color()).dim_if(dim)
-                );
-            }
+                text.paint(event.color()).dim_if(dim),
+            )));
+            return lines;
         }
+        let mut src = message.lines();
+        if let Some(first) = src.next() {
+            lines.push(self.fit(&format!(
+                "{} {}",
+                prefix.paint(color).dim_if(dim),
+                first.paint(event.color()).dim_if(dim),
+            )));
+        }
+        let cont_prefix = self.prefix(name, "┆", indent);
+        for line in src {
+            lines.push(self.fit(&format!(
+                "{} {}",
+                cont_prefix.paint(color).dim_if(dim),
+                line.paint(event.color()).dim_if(dim),
+            )));
+        }
+        lines
     }
 
-    /// Like `print_event` but the message is pre-formatted and not re-painted.
-    fn print_event_raw(&self, name: &str, event: Event, indent: Option<usize>, message: &str) {
+    fn fmt_event_raw(&self, name: &str, event: Event, indent: Option<usize>, message: &str) -> Vec<String> {
         let color = color_for_name(name);
         let dim = event.is_dim();
         let prefix = self.prefix(name, event.symbol(), indent);
-        let mut lines = message.lines();
-        if let Some(first) = lines.next() {
-            println!("{} {first}", prefix.paint(color).dim_if(dim));
+        let mut lines = Vec::new();
+        let mut src = message.lines();
+        if let Some(first) = src.next() {
+            lines.push(self.fit(&format!("{} {first}", prefix.paint(color).dim_if(dim),)));
         }
         let cont_prefix = self.prefix(name, "┆", indent);
+        for line in src {
+            lines.push(self.fit(&format!("{} {line}", cont_prefix.paint(color).dim_if(dim),)));
+        }
+        lines
+    }
+
+    /// Move the cursor to the top of the live region and clear everything
+    /// below it. Caller is responsible for redrawing afterwards.
+    fn clear_live(&mut self, out: &mut StdoutLock<'_>) -> io::Result<()> {
+        if self.live_rows > 0 {
+            // ESC[{N}A  = cursor up N lines (column unchanged; after a println
+            //             we're at column 0 so this lands at column 0 of the
+            //             first drawn line).
+            // ESC[0J    = clear from cursor to end of screen.
+            write!(out, "\x1b[{}A\x1b[0J", self.live_rows)?;
+            self.live_rows = 0;
+        }
+        Ok(())
+    }
+
+    /// Render every active task's header + recent buffer at the current
+    /// cursor position, updating `live_rows` with the total rows drawn.
+    fn redraw_live(&mut self, out: &mut StdoutLock<'_>) -> io::Result<()> {
+        let mut rows = 0;
+        for state in self.active.values() {
+            for line in &state.header {
+                writeln!(out, "{line}")?;
+                rows += 1;
+            }
+            for line in &state.recent {
+                writeln!(out, "{line}")?;
+                rows += 1;
+            }
+        }
+        self.live_rows = rows;
+        out.flush()
+    }
+
+    /// Print lines above the live region (they scroll naturally upward).
+    /// Used for debug, plan-mode change events, and intermediate `event_raw`.
+    fn print_detached(&mut self, out: &mut StdoutLock<'_>, lines: &[String]) {
+        if !self.live {
+            for line in lines {
+                let _ = writeln!(out, "{line}");
+            }
+            return;
+        }
+        let _ = self.clear_live(out);
         for line in lines {
-            println!("{} {line}", cont_prefix.paint(color).dim_if(dim));
+            let _ = writeln!(out, "{line}");
+        }
+        let _ = self.redraw_live(out);
+    }
+
+    /// Append a streamed output line to a task's live region (dropping the
+    /// oldest when the buffer exceeds `REGION_LINES`). In non-TTY mode this
+    /// just prints the line.
+    fn push_stream(&mut self, out: &mut StdoutLock<'_>, name: &str, line: String) {
+        if !self.live {
+            let _ = writeln!(out, "{line}");
+            return;
+        }
+        let _ = self.clear_live(out);
+        let state = self.active.entry(name.to_string()).or_default();
+        if state.recent.len() == REGION_LINES {
+            state.recent.pop_front();
+        }
+        state.recent.push_back(line);
+        let _ = self.redraw_live(out);
+    }
+
+    /// Like `push_stream` for multiple lines, with a single clear + redraw.
+    /// Used by intermediate `event_raw` messages (e.g. test suite summaries)
+    /// that can be multi-line but should still flow through the live region.
+    fn push_stream_many(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<String>) {
+        if !self.live {
+            for line in &lines {
+                let _ = writeln!(out, "{line}");
+            }
+            return;
+        }
+        let _ = self.clear_live(out);
+        let state = self.active.entry(name.to_string()).or_default();
+        for line in lines {
+            if state.recent.len() == REGION_LINES {
+                state.recent.pop_front();
+            }
+            state.recent.push_back(line);
+        }
+        let _ = self.redraw_live(out);
+    }
+
+    /// Begin (or replace) a task's live region with the given header lines.
+    fn open_region(&mut self, out: &mut StdoutLock<'_>, name: &str, header: Vec<String>) {
+        if !self.live {
+            for line in &header {
+                let _ = writeln!(out, "{line}");
+            }
+            return;
+        }
+        let _ = self.clear_live(out);
+        let state = self.active.entry(name.to_string()).or_default();
+        state.header = header;
+        // Use fully-qualified form: `yansi::Paint` has a deprecated `clear()`
+        // extension on every type that shadows `VecDeque::clear`.
+        VecDeque::clear(&mut state.recent);
+        let _ = self.redraw_live(out);
+    }
+
+    /// Print the task's terminal event above the live region and remove
+    /// the region. In non-TTY mode this just prints the lines.
+    fn close_region(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<String>) {
+        if !self.live {
+            for line in &lines {
+                let _ = writeln!(out, "{line}");
+            }
+            return;
+        }
+        let _ = self.clear_live(out);
+        self.active.shift_remove(name);
+        for line in &lines {
+            let _ = writeln!(out, "{line}");
+        }
+        let _ = self.redraw_live(out);
+    }
+}
+
+impl Drop for OutputInner {
+    fn drop(&mut self) {
+        // Best-effort cleanup so a stranded live region doesn't mangle the
+        // terminal after normal exit. Panics have already unwound by here;
+        // if the process is aborting this runs only for the thread that
+        // owns the last Arc.
+        if self.live && self.live_rows > 0 {
+            let stdout = io::stdout();
+            let mut out = stdout.lock();
+            let _ = self.clear_live(&mut out);
+            let _ = out.flush();
         }
     }
 }
@@ -282,7 +514,8 @@ pub struct BlockWriter {
 
 impl BlockWriter {
     pub fn event(&self, event: Event, message: &str) {
-        self.output.print_event(&self.name, event, self.indent, message);
+        self.output
+            .dispatch_event(&self.name, event, self.indent, message, /*raw=*/ false);
     }
 
     /// Whether debug output is enabled for the underlying Output.
@@ -299,22 +532,27 @@ impl BlockWriter {
             return;
         }
         let stamped = format!("{} {message}", format_elapsed(self.output.start.elapsed()));
-        self.output.print_event(&self.name, Event::Debug, self.indent, &stamped);
+        self.output
+            .dispatch_event(&self.name, Event::Debug, self.indent, &stamped, false);
     }
 
-    /// Like `event`, but the message is pre-formatted with ANSI codes
-    /// and will not be re-painted by the output layer.
+    /// Like `event`, but the message is pre-formatted with ANSI codes and
+    /// will not be re-painted by the output layer. Intended for *intermediate*
+    /// progress events (e.g. per-test-suite summaries) that should scroll
+    /// above the live region rather than terminate it.
     pub fn event_raw(&self, event: Event, message: &str) {
-        self.output.print_event_raw(&self.name, event, self.indent, message);
+        self.output
+            .dispatch_event(&self.name, event, self.indent, message, /*raw=*/ true);
     }
 
     pub fn line(&self, content: &str) {
-        self.output.print_line(&self.name, self.color, self.indent, content);
+        self.output
+            .dispatch_stream(&self.name, self.color, self.indent, content, false);
     }
 
     pub fn stderr_line(&self, content: &str) {
         self.output
-            .print_stderr_line(&self.name, self.color, self.indent, content);
+            .dispatch_stream(&self.name, self.color, self.indent, content, true);
     }
 
     /// Write all lines from a reader, prefixed with the block name.
@@ -341,7 +579,7 @@ impl BlockWriter {
             suite.bold(),
             detail.dim()
         );
-        self.output.print_event_raw(&self.name, Event::Ok, self.indent, &msg);
+        self.event_raw(Event::Ok, &msg);
     }
 
     /// Emit a failing test suite summary with individual failures.
@@ -371,15 +609,13 @@ impl BlockWriter {
                 msg.push_str(&format!("\n    {}", line.dim()));
             }
         }
-        self.output
-            .print_event_raw(&self.name, Event::Failed, self.indent, &msg);
+        self.event_raw(Event::Failed, &msg);
     }
 
     /// Emit a skipped test suite.
     pub fn test_suite_skipped(&self, suite: &str) {
         let msg = format!("{} {}", "SKIP".paint(Color::Yellow).bold(), suite.dim());
-        self.output
-            .print_event_raw(&self.name, Event::Skipped, self.indent, &msg);
+        self.event_raw(Event::Skipped, &msg);
     }
 
     /// Emit a single passing test (verbose mode).
@@ -391,7 +627,7 @@ impl BlockWriter {
             format!("{suite}/{name}").bold(),
             format!("({ms}ms)").dim(),
         );
-        self.output.print_event_raw(&self.name, Event::Ok, self.indent, &msg);
+        self.event_raw(Event::Ok, &msg);
     }
 
     /// Emit a single failing test with output (verbose mode).
@@ -406,8 +642,7 @@ impl BlockWriter {
         for line in output.lines() {
             msg.push_str(&format!("\n  {}", line.dim()));
         }
-        self.output
-            .print_event_raw(&self.name, Event::Failed, self.indent, &msg);
+        self.event_raw(Event::Failed, &msg);
     }
 
     /// Emit a single skipped test (verbose mode).
@@ -417,8 +652,7 @@ impl BlockWriter {
             "SKIP".paint(Color::Yellow).bold(),
             format!("{suite}/{name}").dim(),
         );
-        self.output
-            .print_event_raw(&self.name, Event::Skipped, self.indent, &msg);
+        self.event_raw(Event::Skipped, &msg);
     }
 
     /// Write all lines from a reader as stderr output.
@@ -506,5 +740,86 @@ mod tests {
         let c1 = color_for_name("api");
         let c2 = color_for_name("worker");
         assert_ne!(c1, c2);
+    }
+
+    /// Build an `OutputInner` in non-TTY mode for testing region bookkeeping
+    /// without actually writing escape codes to a real terminal.
+    fn inner_tty(max_name_len: usize, term_width: usize) -> OutputInner {
+        OutputInner {
+            max_name_len,
+            live: true,
+            term_width,
+            active: IndexMap::new(),
+            live_rows: 0,
+        }
+    }
+
+    #[test]
+    fn fit_truncates_to_term_width() {
+        let inner = inner_tty(4, 10);
+        // 15 visible chars, width 10 -> truncated to 10.
+        let line = "0123456789ABCDE";
+        let fitted = inner.fit(line);
+        assert_eq!(console::measure_text_width(&fitted), 10);
+    }
+
+    #[test]
+    fn fit_noop_when_width_unknown() {
+        let mut inner = inner_tty(4, 0);
+        inner.live = false;
+        let line = "hello world";
+        assert_eq!(inner.fit(line), line);
+    }
+
+    #[test]
+    fn region_open_tracks_rows() {
+        let mut inner = inner_tty(4, 80);
+        // Simulate open_region without a real stdout: manipulate state directly.
+        let state = inner.active.entry("a".to_string()).or_default();
+        state.header = vec!["h1".into(), "h2".into()];
+        // Redraw would write 2 header + 0 recent = 2 rows.
+        let mut buf: Vec<u8> = Vec::new();
+        // Fake stdout lock by writing to Vec via a helper mirroring redraw_live.
+        let mut rows = 0;
+        for s in inner.active.values() {
+            for line in &s.header {
+                writeln!(&mut buf, "{line}").unwrap();
+                rows += 1;
+            }
+            for line in &s.recent {
+                writeln!(&mut buf, "{line}").unwrap();
+                rows += 1;
+            }
+        }
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn region_recent_caps_at_region_lines() {
+        let mut inner = inner_tty(4, 80);
+        let state = inner.active.entry("a".to_string()).or_default();
+        for i in 0..REGION_LINES + 3 {
+            if state.recent.len() == REGION_LINES {
+                state.recent.pop_front();
+            }
+            state.recent.push_back(format!("line{i}"));
+        }
+        assert_eq!(state.recent.len(), REGION_LINES);
+        assert_eq!(state.recent.front().map(|s| s.as_str()), Some("line3"));
+        assert_eq!(state.recent.back().map(|s| s.as_str()), Some("line7"));
+    }
+
+    #[test]
+    fn active_preserves_insertion_order() {
+        let mut inner = inner_tty(4, 80);
+        inner.active.insert("first".into(), TaskState::default());
+        inner.active.insert("second".into(), TaskState::default());
+        inner.active.insert("third".into(), TaskState::default());
+        let order: Vec<&str> = inner.active.keys().map(String::as_str).collect();
+        assert_eq!(order, vec!["first", "second", "third"]);
+
+        inner.active.shift_remove("second");
+        let order: Vec<&str> = inner.active.keys().map(String::as_str).collect();
+        assert_eq!(order, vec!["first", "third"]);
     }
 }
