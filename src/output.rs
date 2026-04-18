@@ -275,8 +275,9 @@ impl Output {
         // Ok/Failed/Skipped/NoChange are terminal for the region.
         match (event, raw) {
             (Event::Starting, _) => inner.open_region(&mut out, name, lines),
-            (Event::Ok | Event::Failed | Event::Skipped | Event::NoChange, false) => {
-                inner.close_region(&mut out, name, lines)
+            (Event::Failed, false) => inner.close_region(&mut out, name, lines, /*preserve_tail=*/ true),
+            (Event::Ok | Event::Skipped | Event::NoChange, false) => {
+                inner.close_region(&mut out, name, lines, /*preserve_tail=*/ false)
             }
             (_, true) if inner.active.contains_key(name) => inner.push_stream_many(&mut out, name, lines),
             _ => inner.print_detached(&mut out, &lines),
@@ -467,17 +468,39 @@ impl OutputInner {
         let _ = self.redraw_live(out);
     }
 
+    /// Snapshot the block's last `REGION_LINES` streamed lines without
+    /// removing them from state. Returns an empty vec if the block has
+    /// no active region. Exposed as a pure method for testing.
+    fn recent_tail(&self, name: &str) -> Vec<String> {
+        self.active
+            .get(name)
+            .map(|state| state.recent.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Print the task's terminal event above the live region and remove
-    /// the region. In non-TTY mode this just prints the lines.
-    fn close_region(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<String>) {
+    /// the region. When `preserve_tail` is true (on failure), the
+    /// block's last `REGION_LINES` streamed lines are flushed above the
+    /// event so the context that led to the failure stays on screen.
+    /// In non-TTY mode the tail was already streamed; only `lines`
+    /// (the terminal event) needs printing.
+    fn close_region(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<String>, preserve_tail: bool) {
         if !self.live {
             for line in &lines {
                 let _ = writeln!(out, "{line}");
             }
             return;
         }
+        let tail = if preserve_tail {
+            self.recent_tail(name)
+        } else {
+            Vec::new()
+        };
         let _ = self.clear_live(out);
         self.active.shift_remove(name);
+        for line in &tail {
+            let _ = writeln!(out, "{line}");
+        }
         for line in &lines {
             let _ = writeln!(out, "{line}");
         }
@@ -804,6 +827,24 @@ mod tests {
         assert_eq!(state.recent.len(), REGION_LINES);
         assert_eq!(state.recent.front().map(|s| s.as_str()), Some("line3"));
         assert_eq!(state.recent.back().map(|s| s.as_str()), Some("line7"));
+    }
+
+    #[test]
+    fn recent_tail_snapshots_buffered_lines() {
+        let mut inner = inner_tty(4, 80);
+        let state = inner.active.entry("backend".to_string()).or_default();
+        state.recent.push_back("first".into());
+        state.recent.push_back("second".into());
+        state.recent.push_back("third".into());
+
+        let tail = inner.recent_tail("backend");
+        assert_eq!(tail, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn recent_tail_empty_for_unknown_block() {
+        let inner = inner_tty(4, 80);
+        assert!(inner.recent_tail("missing").is_empty());
     }
 
     #[test]
