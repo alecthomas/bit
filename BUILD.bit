@@ -22,7 +22,7 @@ integration-test = exec.test {
   depends_on = [debug]
   command  = <<-EOF
   ${debug.path} --version
-  ${debug.path} --plan
+  ${debug.path} --plan ...
   EOF
 }
 

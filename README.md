@@ -4,7 +4,7 @@ A declarative build tool with dependency tracking, content-based caching, and pa
 
 bit reads a `BUILD.bit` file, resolves dependencies between blocks, detects what changed, and only rebuilds what's needed. Language-aware providers (e.g. Go, Rust, Docker) automatically discover inputs from source files, so in most cases you don't need to specify them manually.
 
-Like Terraform, bit tracks the state of each block between runs. It detects drift (e.g. a deleted Docker image or stopped container), determines what actions are needed (create, update, replace, destroy), and applies only the minimum changes. `bit plan` shows what would change; `bit apply` makes it so; `bit destroy` tears it down.
+Like Terraform, bit tracks the state of each block between runs. It detects drift (e.g. a deleted Docker image or stopped container), determines what actions are needed (create, update, destroy), and applies only the minimum changes. `bit --plan` shows what would change; `bit` makes it so; `bit --clean` tears it down.
 
 ## Install
 
@@ -49,7 +49,7 @@ image = docker.image {
   depends_on = [server-linux]
 }
 
-# bit tracks container state like Terraform — detects drift, replaces on config change
+# bit tracks container state like Terraform — detects drift, rebuilds on config change
 app = docker.container {
   image = image.ref
   name = "myapp"
@@ -63,13 +63,16 @@ target deploy = [app]
 ```
 
 ```sh
-bit              # runs `apply` (default)
-bit plan         # show what would change
-bit apply build  # apply a specific target
-bit test         # run test blocks
-bit destroy      # remove outputs
-bit list         # list targets
-bit dump         # show evaluated inputs/outputs
+bit              # apply the default target (or all blocks if no default)
+bit ...          # apply every block regardless of the default target
+bit build        # apply a specific target or block
+bit --plan       # show what would change
+bit --test       # run test blocks
+bit --clean      # destroy in reverse dependency order
+bit --list       # list all blocks
+bit --dump       # show evaluated inputs/stored outputs
+bit --info       # show parameters, targets, and outputs
+bit --schema     # show provider/resource schemas
 ```
 
 ## Language
@@ -97,13 +100,13 @@ Special fields:
 - `depends_on = [block, ...]` — content-coupled dependency (changes propagate)
 - `after = [block, ...]` — ordering-only dependency
 
-Prefix with `protected` to prevent replacement/destruction:
+Prefix with `protected` to prevent destruction:
 
 ```bit
 protected db = docker.container { ... }
 ```
 
-If a `default` target is defined, `bit apply` with no arguments runs only that target. Use `bit apply ...` to run all blocks.
+If a `default` target is defined, `bit` with no arguments runs only that target. Pass explicit targets or block names (`bit build release`) to run a specific subset, or `bit ...` to run every block regardless of the default.
 
 ```bit
 target default = [server, test]
