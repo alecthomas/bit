@@ -35,11 +35,20 @@ bit --clean                 # tear down (including the postgres container)
 | `node_modules`   | `pnpm.install`    | Install workspace deps; auto-discovers every `package.json` |
 | `frontend`       | `pnpm.run`        | `pnpm --filter frontend run build` → `frontend/dist` |
 | `bff`            | `pnpm.run`        | `pnpm --filter bff run build` → `bff/dist` |
-| `backend`        | `go.exe`          | `go build ./cmd/server` → `dist/backend` |
+| `backend`        | `go.exe`          | `go build ./cmd/server` → `dist/backend` (native, for local run) |
+| `backend-linux`  | `go.exe`          | Linux cross-build → `dist/backend-linux` (for Docker image) |
+| `backend-image`  | `docker.image`    | `example-backend:latest` from `dist/backend-linux` |
+| `bff-image`      | `docker.image`    | `example-bff:latest` from `bff/dist` + runtime deps |
 | `postgres`       | `docker.container`| `postgres:16` with a `pg_isready` healthcheck |
 | `backend-test`   | `go.test`         | `go test ./...` (depends on `postgres`) |
 | `bff-test`       | `pnpm.test`       | `vitest run` in `bff/` |
 | `frontend-test`  | `pnpm.test`       | `vitest run` in `frontend/` |
+
+The `-image` blocks are not in the default `build` target — run them explicitly:
+
+```sh
+bit backend-image bff-image
+```
 
 ## Running the app locally
 
@@ -67,6 +76,7 @@ node bff/dist/index.js &
 ```
 example/
 ├── BUILD.bit
+├── docker/             # Dockerfiles for backend and bff images
 ├── go.mod              # Go module at the root — go.exe walks up from cwd
 ├── cmd/server/         # Go HTTP server
 ├── internal/users/     # Postgres-backed user store

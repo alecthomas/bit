@@ -28,6 +28,27 @@ backend = go.exe {
   output  = "dist/backend"
 }
 
+backend-linux = go.exe {
+  package = "./cmd/server"
+  output  = "dist/backend-linux"
+  goos    = "linux"
+  cgo     = false
+}
+
+# ── Docker images ─────────────────────────────────────────────────────────────
+
+backend-image = docker.image {
+  tag        = "example-backend:latest"
+  dockerfile = "docker/backend.Dockerfile"
+  depends_on = [backend-linux]
+}
+
+bff-image = docker.image {
+  tag        = "example-bff:latest"
+  dockerfile = "docker/bff.Dockerfile"
+  depends_on = [bff]
+}
+
 # ── Postgres test container ───────────────────────────────────────────────────
 
 postgres = docker.container {
@@ -64,4 +85,4 @@ frontend-test = pnpm.test {
 
 target build   = [frontend, bff, backend]
 target test    = [backend-test, bff-test, frontend-test]
-#target default = [frontend, bff, backend, backend-test, bff-test, frontend-test]
+target default = [frontend, bff, backend, backend-test, bff-test, frontend-test]
