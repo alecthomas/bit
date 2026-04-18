@@ -58,6 +58,8 @@ pub enum Event {
     Destroy,
     NoChange,
     Debug,
+    /// Terminal: block was skipped because it is `protected` (destroy refused).
+    Protected,
 }
 
 impl Event {
@@ -72,11 +74,12 @@ impl Event {
             Event::Destroy => "-",
             Event::NoChange => "·",
             Event::Debug => "⚙",
+            Event::Protected => "⊘",
         }
     }
 
     fn is_dim(&self) -> bool {
-        matches!(self, Event::Skipped | Event::NoChange | Event::Debug)
+        matches!(self, Event::Skipped | Event::NoChange | Event::Debug | Event::Protected)
     }
 
     pub fn color(&self) -> Color {
@@ -90,6 +93,7 @@ impl Event {
             Event::Destroy => Color::Red,
             Event::NoChange => Color::Primary,
             Event::Debug => Color::Blue,
+            Event::Protected => Color::Primary,
         }
     }
 }
@@ -282,7 +286,7 @@ impl Output {
         match (event, raw) {
             (Event::Starting, _) => inner.open_region(&mut out, name, lines),
             (Event::Failed, false) => inner.close_region(&mut out, name, lines, /*preserve_tail=*/ true),
-            (Event::Ok | Event::Skipped | Event::NoChange, false) => {
+            (Event::Ok | Event::Skipped | Event::NoChange | Event::Protected, false) => {
                 inner.close_region(&mut out, name, lines, /*preserve_tail=*/ false)
             }
             (_, true) if inner.active.contains_key(name) => inner.push_stream_many(&mut out, name, lines),

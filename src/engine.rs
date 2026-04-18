@@ -1196,7 +1196,7 @@ pub fn destroy(dag: &mut Dag, store: &dyn StateStore, output: &Output, targets: 
         let writer = output.writer(name);
 
         if node.protected {
-            writer.event(Event::Skipped, "protected");
+            writer.event(Event::Protected, "protected");
             continue;
         }
 

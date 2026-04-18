@@ -54,7 +54,7 @@ bff-image = docker.image {
 # Not attached to example-net so `bit --clean` without a target doesn't drag
 # the network into teardown while dev containers are still attached.
 
-postgres = docker.container {
+protected postgres = docker.container {
   image       = "postgres:16"
   name        = "example-postgres"
   ports       = ["${pg_port}:5432"]
