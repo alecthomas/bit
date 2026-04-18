@@ -86,6 +86,7 @@ dependencies = [
  "bigdecimal",
  "bit-derive",
  "clap",
+ "dirs",
  "glob",
  "parse-dockerfile",
  "petgraph",

@@ -128,7 +128,13 @@ fn load_module(
     Box<dyn bit::state::StateStore>,
 ) {
     let root = std::path::Path::new(".");
-    let store = Box::new(state::default_store(root));
+    let store = match state::default_store(root) {
+        Ok(s) => Box::new(s),
+        Err(e) => {
+            eprintln!("{} cannot open state store: {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
     let source = match fs::read_to_string("BUILD.bit") {
         Ok(s) => s,
         Err(e) => {

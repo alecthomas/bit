@@ -619,24 +619,7 @@ $ bit watch deploy
   [12:03:44] ✓ staging_migrations  1.1s (applied)
 ```
 
-## 14. Configuration
-
-```toml
-# bit.toml
-root = "main.bit"
-
-[state]
-backend = "local"
-path    = ".bit/state"
-
-[cache]
-dir = ".bit/cache"
-
-[providers]
-path = [".bit/providers", "~/.bit/providers"]
-```
-
-## 15. Example: Source to Production
+## 14. Example: Source to Production
 
 ```
 # ── .bit/modules/smoke/smoke.bit ──

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -11,6 +12,8 @@ pub enum StateError {
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("cannot determine user cache directory")]
+    NoCacheDir,
 }
 
 /// Persists block state between runs. State is always JSON.
@@ -80,9 +83,22 @@ impl StateStore for JsonFileStore {
     }
 }
 
-/// Returns a `JsonFileStore` at the default path.
-pub fn default_store(root: &Path) -> JsonFileStore {
-    JsonFileStore::new(root.join(".bit/state/state.json"))
+/// Returns a `JsonFileStore` in the user's cache directory, partitioned by
+/// a SHA-256 hash of the canonicalized absolute `root` path so each project
+/// gets its own state file.
+///
+/// # Errors
+///
+/// Returns [`StateError::NoCacheDir`] if the platform cache directory cannot
+/// be resolved, or [`StateError::Io`] if `root` cannot be canonicalized.
+pub fn default_store(root: &Path) -> Result<JsonFileStore, StateError> {
+    let cache = dirs::cache_dir().ok_or(StateError::NoCacheDir)?;
+    let abs = fs::canonicalize(root)?;
+    // Hash the absolute path so different projects don't collide on a single
+    // state file. Hex-encoding `Sha256` output keeps the directory name ASCII.
+    let hash = Sha256::digest(abs.as_os_str().as_encoded_bytes());
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(JsonFileStore::new(cache.join("bit").join(hex).join("state.json")))
 }
 
 #[cfg(test)]
@@ -151,5 +167,18 @@ mod tests {
         let store = JsonFileStore::new(dir.path().join("deep/nested/state.json"));
         store.save("block1", &json!("data")).unwrap();
         assert!(dir.path().join("deep/nested/state.json").exists());
+    }
+
+    #[test]
+    fn default_store_is_under_cache_dir_and_partitioned() {
+        let cache = dirs::cache_dir().expect("cache dir available on test platform");
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let store_a = default_store(a.path()).unwrap();
+        let store_b = default_store(b.path()).unwrap();
+        assert!(store_a.path.starts_with(cache.join("bit")));
+        assert!(store_b.path.starts_with(cache.join("bit")));
+        assert_ne!(store_a.path, store_b.path);
+        assert_eq!(store_a.path.file_name().unwrap(), "state.json");
     }
 }

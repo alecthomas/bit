@@ -21,6 +21,7 @@ shellexpand = "3.1.2"
 thiserror = "2.0.18"
 winnow = "1.0.0"
 yansi = "1.0.1"
+dirs = "6.0.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"

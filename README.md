@@ -382,6 +382,6 @@ app = docker.container {
    - Resolve input files via the provider
    - Compute a content hash (file contents + dependency hashes)
    - Skip if nothing changed; apply if inputs differ
-3. Persist state to `.bit/state/state.json`
+3. Persist state to the user's cache directory (e.g. `~/Library/Caches/bit/<hash>/state.json` on macOS, `~/.cache/bit/<hash>/state.json` on Linux), partitioned by a hash of the project's absolute path
 
 Parallel execution with `-j N` (defaults to CPU count).
