@@ -407,12 +407,22 @@ image = docker.image {
 app = docker.container {
   image = image.ref
   name = "myapp"
+  network = net.name
   ports = ["8080:8080"]
   volumes = ["/data:/data"]
   environment = { DB_HOST = "localhost" }
   healthcheck = "curl -sf http://localhost:8080/health"
 }
 ```
+
+**`docker.network`** — create a Docker network (tracked state, adopts existing network with the same name):
+```bit
+net = docker.network {
+  name = "myapp-net"
+  driver = "bridge"    # optional, defaults to bridge
+}
+```
+Containers reference it via `network = net.name`. Destroy removes the network; existing containers attached to it block removal until they're destroyed first (reverse topological order handles this automatically).
 
 ## How It Works
 
