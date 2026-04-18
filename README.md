@@ -411,9 +411,11 @@ app = docker.container {
   ports = ["8080:8080"]
   volumes = ["/data:/data"]
   environment = { DB_HOST = "localhost" }
+  extra_hosts = { "legacy.db" = "10.0.1.5" }
   healthcheck = "curl -sf http://localhost:8080/health"
 }
 ```
+On Linux, `host.docker.internal: host-gateway` is added automatically (unless the user overrides it), so containers can reach host services the same way they do under Docker Desktop on Mac/Windows.
 
 **`docker.network`** — create a Docker network (tracked state, adopts existing network with the same name):
 ```bit

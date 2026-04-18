@@ -138,6 +138,24 @@ pub struct ContainerInputs {
     /// Health check command or config
     #[serde(default)]
     pub healthcheck: Option<Healthcheck>,
+    /// Extra /etc/hosts entries (hostname → address). On Linux,
+    /// `host.docker.internal: host-gateway` is auto-added if not present.
+    #[serde(default)]
+    pub extra_hosts: HashMap<String, String>,
+}
+
+/// Merge the user's `extra_hosts` with platform defaults. On Linux we
+/// inject `host.docker.internal: host-gateway` when absent so containers
+/// can reach host services consistently with Docker Desktop on
+/// Mac/Windows. The result is sorted by hostname for deterministic CLI
+/// arg order (important for plan stability / tests).
+fn resolve_extra_hosts(user: &HashMap<String, String>, is_linux: bool) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = user.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    if is_linux && !user.contains_key("host.docker.internal") {
+        out.push(("host.docker.internal".into(), "host-gateway".into()));
+    }
+    out.sort();
+    out
 }
 
 fn default_restart() -> String {
@@ -296,6 +314,9 @@ impl Resource for ContainerResource {
         if let Some(net) = &inputs.network {
             cmd.arg("--network").arg(net);
         }
+        for (host, addr) in resolve_extra_hosts(&inputs.extra_hosts, cfg!(target_os = "linux")) {
+            cmd.arg("--add-host").arg(format!("{host}:{addr}"));
+        }
         if let Some(wd) = &inputs.working_dir {
             cmd.arg("-w").arg(wd);
         }
@@ -414,6 +435,7 @@ mod tests {
             network: None,
             working_dir: None,
             healthcheck: None,
+            extra_hosts: HashMap::new(),
         }
     }
 
@@ -442,6 +464,48 @@ mod tests {
         assert_eq!(parse_duration("2m"), Duration::from_secs(120));
         assert_eq!(parse_duration("500ms"), Duration::from_millis(500));
         assert_eq!(parse_duration("30"), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn resolve_extra_hosts_passes_through_user_entries() {
+        let mut user = HashMap::new();
+        user.insert("legacy.db".to_owned(), "10.0.1.5".to_owned());
+        user.insert("search".to_owned(), "10.0.1.6".to_owned());
+        let resolved = resolve_extra_hosts(&user, /*is_linux=*/ false);
+        assert_eq!(
+            resolved,
+            vec![
+                ("legacy.db".to_owned(), "10.0.1.5".to_owned()),
+                ("search".to_owned(), "10.0.1.6".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_extra_hosts_injects_host_gateway_on_linux() {
+        let resolved = resolve_extra_hosts(&HashMap::new(), /*is_linux=*/ true);
+        assert_eq!(
+            resolved,
+            vec![("host.docker.internal".to_owned(), "host-gateway".to_owned())]
+        );
+    }
+
+    #[test]
+    fn resolve_extra_hosts_respects_user_host_internal_override() {
+        let mut user = HashMap::new();
+        user.insert("host.docker.internal".to_owned(), "1.2.3.4".to_owned());
+        let resolved = resolve_extra_hosts(&user, /*is_linux=*/ true);
+        // User override wins; no duplicate injected.
+        assert_eq!(
+            resolved,
+            vec![("host.docker.internal".to_owned(), "1.2.3.4".to_owned())]
+        );
+    }
+
+    #[test]
+    fn resolve_extra_hosts_no_inject_on_non_linux() {
+        let resolved = resolve_extra_hosts(&HashMap::new(), /*is_linux=*/ false);
+        assert!(resolved.is_empty());
     }
 
     #[test]
