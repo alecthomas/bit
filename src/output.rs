@@ -8,8 +8,14 @@ use std::time::{Duration, Instant};
 use indexmap::IndexMap;
 use yansi::{Color, Paint, Painted};
 
-/// Number of streamed output lines retained per active task in the live region.
+/// Number of streamed output lines displayed per active task in the live
+/// region while it runs.
 const REGION_LINES: usize = 5;
+
+/// Size of the rolling buffer retained per task. On failure the full
+/// buffer is flushed above the failure event so the error context isn't
+/// lost to scrollback.
+const TAIL_LINES: usize = 20;
 
 /// Emit a debug message via an `Output` or `BlockWriter`, formatting the
 /// message only when debug is enabled on the target. Mirrors `log::debug!` /
@@ -430,8 +436,9 @@ impl OutputInner {
         Ok(())
     }
 
-    /// Render every active task's header + recent buffer at the current
-    /// cursor position, updating `live_rows` with the total rows drawn.
+    /// Render every active task's header + the last `REGION_LINES`
+    /// entries of its rolling buffer at the current cursor position,
+    /// updating `live_rows` with the total rows drawn.
     fn redraw_live(&mut self, out: &mut StdoutLock<'_>) -> io::Result<()> {
         let mut rows = 0;
         for state in self.active.values() {
@@ -439,7 +446,9 @@ impl OutputInner {
                 writeln!(out, "{line}")?;
                 rows += 1;
             }
-            for line in &state.recent {
+            let visible = state.recent.len().min(REGION_LINES);
+            let skip = state.recent.len() - visible;
+            for line in state.recent.iter().skip(skip) {
                 writeln!(out, "{line}")?;
                 rows += 1;
             }
@@ -464,12 +473,11 @@ impl OutputInner {
         let _ = self.redraw_live(out);
     }
 
-    /// Append a streamed output line to a task's live region (dropping the
-    /// oldest when the buffer exceeds `REGION_LINES`). In non-TTY mode this
-    /// just prints the line.
-    /// Push one or more rows into the task's live region buffer.
-    /// Used by dispatch_stream (wrapped stream lines) and intermediate
-    /// `event_raw` messages (e.g. test suite summaries).
+    /// Push one or more rows into the task's rolling buffer (capped at
+    /// `TAIL_LINES`). The live region only renders the last
+    /// `REGION_LINES` of this buffer while the task runs; the rest is
+    /// kept so a failure can flush full context. In non-TTY mode this
+    /// just prints each line immediately.
     fn push_stream_many(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<String>) {
         if !self.live {
             for line in &lines {
@@ -480,7 +488,7 @@ impl OutputInner {
         let _ = self.clear_live(out);
         let state = self.active.entry(name.to_string()).or_default();
         for line in lines {
-            if state.recent.len() == REGION_LINES {
+            if state.recent.len() == TAIL_LINES {
                 state.recent.pop_front();
             }
             state.recent.push_back(line);
@@ -835,18 +843,36 @@ mod tests {
     }
 
     #[test]
-    fn region_recent_caps_at_region_lines() {
+    fn region_recent_caps_at_tail_lines() {
         let mut inner = inner_tty(4, 80);
         let state = inner.active.entry("a".to_string()).or_default();
-        for i in 0..REGION_LINES + 3 {
-            if state.recent.len() == REGION_LINES {
+        for i in 0..TAIL_LINES + 3 {
+            if state.recent.len() == TAIL_LINES {
                 state.recent.pop_front();
             }
             state.recent.push_back(format!("line{i}"));
         }
-        assert_eq!(state.recent.len(), REGION_LINES);
+        assert_eq!(state.recent.len(), TAIL_LINES);
         assert_eq!(state.recent.front().map(|s| s.as_str()), Some("line3"));
-        assert_eq!(state.recent.back().map(|s| s.as_str()), Some("line7"));
+        assert_eq!(
+            state.recent.back().map(|s| s.as_str()),
+            Some(format!("line{}", TAIL_LINES + 2).as_str())
+        );
+    }
+
+    #[test]
+    fn recent_tail_returns_full_rolling_buffer() {
+        let mut inner = inner_tty(4, 80);
+        let state = inner.active.entry("backend".to_string()).or_default();
+        // Fill past REGION_LINES but under TAIL_LINES.
+        for i in 0..12 {
+            state.recent.push_back(format!("line{i}"));
+        }
+        let tail = inner.recent_tail("backend");
+        // recent_tail surfaces the full buffer, not just the live-region slice.
+        assert_eq!(tail.len(), 12);
+        assert_eq!(tail.first().map(|s| s.as_str()), Some("line0"));
+        assert_eq!(tail.last().map(|s| s.as_str()), Some("line11"));
     }
 
     #[test]
