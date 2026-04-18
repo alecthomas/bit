@@ -85,9 +85,10 @@ fn ws_and_comments(input: &mut &str) -> ModalResult<()> {
     Ok(())
 }
 
-/// Skip whitespace and comments, capturing the last contiguous block of
-/// `# ...` lines as a doc string. A blank line between comment blocks
-/// resets the capture (only the final adjacent block is kept).
+/// Skip whitespace and comments, capturing the comment block directly
+/// adjacent to the following statement as a doc string. A blank line
+/// between a comment block and the statement detaches it — the
+/// comment is consumed but discarded.
 fn ws_capturing_doc(input: &mut &str) -> Option<String> {
     let mut doc_lines: Vec<String> = Vec::new();
     let mut had_blank_line = false;
@@ -107,7 +108,8 @@ fn ws_capturing_doc(input: &mut &str) -> Option<String> {
         }
 
         if input.starts_with('#') {
-            // Blank line before this comment block — reset accumulated doc
+            // Blank line before this comment block — earlier lines were
+            // not attached to anything, discard them
             if had_blank_line {
                 doc_lines.clear();
             }
@@ -123,6 +125,11 @@ fn ws_capturing_doc(input: &mut &str) -> Option<String> {
             doc_lines.push(line.to_owned());
             let _ = opt::<_, _, ErrMode<ContextError>, _>('\n').parse_next(input);
         } else {
+            // A blank line between the final comment block and the statement
+            // means the comment is not attached — discard it.
+            if had_blank_line {
+                doc_lines.clear();
+            }
             break;
         }
     }
@@ -1675,6 +1682,19 @@ mod tests {
         let input = "let x = 1\n";
         let result = parse(input, "<test>").unwrap();
         assert_eq!(result.doc, None);
+    }
+
+    #[test]
+    fn section_comment_between_blocks_not_attached() {
+        // A comment separated from the following block by a blank line is
+        // a section header, not a doc comment — it should not attach.
+        let input = "first = exec { command = \"a\" }\n\n# ── Section ──\n\nsecond = exec { command = \"b\" }\n";
+        let result = parse(input, "<test>").unwrap();
+        assert_eq!(result.statements.len(), 2);
+        match &result.statements[1] {
+            Statement::Block(b) => assert_eq!(b.doc, None),
+            _ => panic!("expected Block"),
+        }
     }
 
     #[test]
