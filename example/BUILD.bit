@@ -1,0 +1,67 @@
+let pg_user = "postgres"
+let pg_pass = "postgres"
+let pg_db   = "app"
+let pg_port = "5432"
+
+# ── JS workspace ──────────────────────────────────────────────────────────────
+
+node_modules = pnpm.install {}
+
+frontend = pnpm.run {
+  package    = "frontend"
+  script     = "build"
+  output     = "frontend/dist"
+  depends_on = [node_modules]
+}
+
+bff = pnpm.run {
+  package    = "bff"
+  script     = "build"
+  output     = "bff/dist"
+  depends_on = [node_modules]
+}
+
+# ── Go service ────────────────────────────────────────────────────────────────
+
+backend = go.exe {
+  package = "./cmd/server"
+  output  = "dist/backend"
+}
+
+# ── Postgres test container ───────────────────────────────────────────────────
+
+postgres = docker.container {
+  image       = "postgres:16"
+  name        = "example-postgres"
+  ports       = ["${pg_port}:5432"]
+  environment = {
+    POSTGRES_USER     = pg_user,
+    POSTGRES_PASSWORD = pg_pass,
+    POSTGRES_DB       = pg_db
+  }
+  healthcheck = "pg_isready -U ${pg_user} -d ${pg_db}"
+}
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+backend-test = go.test {
+  package    = "./..."
+  flags      = ["-timeout", "30s"]
+  depends_on = [postgres]
+}
+
+bff-test = pnpm.test {
+  package    = "bff"
+  depends_on = [node_modules]
+}
+
+frontend-test = pnpm.test {
+  package    = "frontend"
+  depends_on = [node_modules]
+}
+
+# ── Targets ───────────────────────────────────────────────────────────────────
+
+target build   = [frontend, bff, backend]
+target test    = [backend-test, bff-test, frontend-test]
+#target default = [frontend, bff, backend, backend-test, bff-test, frontend-test]

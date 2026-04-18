@@ -1,0 +1,11 @@
+{
+  "name": "example-workspace",
+  "version": "1.0.0",
+  "description": "bit end-to-end example",
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.33.0",
+  "private": true
+}

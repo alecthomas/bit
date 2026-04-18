@@ -1,0 +1,5 @@
+node_modules/
+dist/
+bff/dist/
+frontend/dist/
+*.tsbuildinfo
