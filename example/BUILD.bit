@@ -46,14 +46,19 @@ backend-image = docker.image {
 bff-image = docker.image {
   tag        = "example-bff:latest"
   dockerfile = "docker/bff.Dockerfile"
-  depends_on = [bff]
+  depends_on = [bff, frontend]
 }
 
-# ── Postgres test container ───────────────────────────────────────────────────
+# ── Runtime network + containers ──────────────────────────────────────────────
+
+network = docker.network { name = "example-net" }
+
+let db_url = "postgres://${pg_user}:${pg_pass}@example-postgres:5432/${pg_db}?sslmode=disable"
 
 postgres = docker.container {
   image       = "postgres:16"
   name        = "example-postgres"
+  network     = network.name
   ports       = ["${pg_port}:5432"]
   environment = {
     POSTGRES_USER     = pg_user,
@@ -61,6 +66,32 @@ postgres = docker.container {
     POSTGRES_DB       = pg_db
   }
   healthcheck = "pg_isready -U ${pg_user} -d ${pg_db}"
+}
+
+backend-container = docker.container {
+  image       = backend-image.ref
+  name        = "example-backend"
+  network     = network.name
+  ports       = ["8080:8080"]
+  environment = {
+    DATABASE_URL = db_url,
+    ADDR         = ":8080"
+  }
+  healthcheck = "wget -qO- http://localhost:8080/health"
+  depends_on  = [postgres]
+}
+
+bff-container = docker.container {
+  image       = bff-image.ref
+  name        = "example-bff"
+  network     = network.name
+  ports       = ["3000:3000"]
+  environment = {
+    BACKEND_URL = "http://example-backend:8080",
+    PORT        = "3000"
+  }
+  healthcheck = "wget -qO- http://localhost:3000/healthz"
+  depends_on  = [backend-container]
 }
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -85,4 +116,5 @@ frontend-test = pnpm.test {
 
 target build   = [frontend, bff, backend]
 target test    = [backend-test, bff-test, frontend-test]
+target dev     = [bff-container]
 target default = [frontend, bff, backend, backend-test, bff-test, frontend-test]

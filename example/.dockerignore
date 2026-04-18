@@ -1,5 +1,4 @@
 node_modules
-frontend/dist
 .git
 *.tsbuildinfo
 .DS_Store

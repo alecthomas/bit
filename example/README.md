@@ -22,11 +22,14 @@ The BFF serves the built frontend bundle and proxies `/api/*` to the Go backend.
 ```sh
 bit --list                  # list blocks
 bit --plan                  # show what would change
-bit                         # build + test everything
+bit                         # build + test everything (default target)
 bit build                   # build artifacts only
 bit test                    # run all tests (spins up postgres)
-bit --clean                 # tear down (including the postgres container)
+bit dev                     # bring up the full stack on a Docker network
+bit --clean ...             # tear down every block (including containers)
 ```
+
+Open <http://localhost:3000> after `bit dev`.
 
 ## What `BUILD.bit` does
 
@@ -38,38 +41,42 @@ bit --clean                 # tear down (including the postgres container)
 | `backend`        | `go.exe`          | `go build ./cmd/server` → `dist/backend` (native, for local run) |
 | `backend-linux`  | `go.exe`          | Linux cross-build → `dist/backend-linux` (for Docker image) |
 | `backend-image`  | `docker.image`    | `example-backend:latest` from `dist/backend-linux` |
-| `bff-image`      | `docker.image`    | `example-bff:latest` from `bff/dist` + runtime deps |
-| `postgres`       | `docker.container`| `postgres:16` with a `pg_isready` healthcheck |
+| `bff-image`      | `docker.image`    | `example-bff:latest` bundling `bff/dist` + `frontend/dist` |
+| `network`        | `docker.network`  | `example-net` — shared bridge for the runtime containers |
+| `postgres`       | `docker.container`| `postgres:16` on the network, `pg_isready` healthcheck |
+| `backend-container` | `docker.container` | Runs `example-backend:latest`, healthcheck on `/health` |
+| `bff-container`  | `docker.container`| Runs `example-bff:latest`, healthcheck on `/healthz` |
 | `backend-test`   | `go.test`         | `go test ./...` (depends on `postgres`) |
 | `bff-test`       | `pnpm.test`       | `vitest run` in `bff/` |
 | `frontend-test`  | `pnpm.test`       | `vitest run` in `frontend/` |
 
-The `-image` blocks are not in the default `build` target — run them explicitly:
+The image, network, and runtime-container blocks are not in the default `build`/`test` targets. Trigger them explicitly:
 
 ```sh
-bit backend-image bff-image
+bit backend-image bff-image   # build container images
+bit dev                       # build everything and bring up the stack
 ```
 
-## Running the app locally
+## Running the app
 
-After `bit build`:
+`bit dev` builds the images and brings up the full stack on `example-net`:
+
+```
+bff-container :3000  ──────▶  backend-container :8080  ──────▶  postgres :5432
+      │                                                            (host :5432)
+      └── also serves the React bundle at /
+```
+
+Then:
 
 ```sh
-docker run --rm -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=app -p 5432:5432 postgres:16 &
-
-./dist/backend &                        # :8080
-node bff/dist/index.js &                # :3000, proxies /api -> :8080
 open http://localhost:3000
+curl -sS http://localhost:3000/api/users
+curl -sS -X POST http://localhost:3000/api/users \
+  -H 'Content-Type: application/json' -d '{"name":"ada"}'
 ```
 
-Or use the `postgres` container bit already manages:
-
-```sh
-bit postgres                            # ensure the container is up
-./dist/backend &
-node bff/dist/index.js &
-```
+To stop the stack: `bit --clean ...` (the `...` tells bit to destroy every block, not just those reachable from the default target).
 
 ## Layout
 
