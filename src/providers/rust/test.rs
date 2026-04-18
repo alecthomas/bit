@@ -173,17 +173,20 @@ fn parse_failure_output(lines: &[String]) -> Vec<(String, String)> {
     results
 }
 
-/// Process `cargo test` stdout, parsing test events and forwarding to the writer.
-fn process_test_output(reader: impl BufRead, writer: &BlockWriter, verbose: bool) -> TestResult {
+/// Process `cargo test` output, parsing test events and forwarding to the writer.
+///
+/// Consumes lines lazily from `lines`, so callers that feed it from a live
+/// pipe (see `apply`) will see events emitted as each suite finishes — not
+/// all at once at the end. The BufRead-based caller path uses
+/// `reader.lines().map_while(Result::ok)` to adapt.
+fn process_test_output(lines: impl IntoIterator<Item = String>, writer: &BlockWriter, verbose: bool) -> TestResult {
     let mut all_passed = true;
     let mut had_events = false;
     let mut current_suite = String::new();
     let mut failure_lines: Vec<String> = Vec::new();
     let mut in_failures_section = false;
 
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-
+    for line in lines {
         // Detect the "failures:" section that cargo test prints with full output.
         if line.trim() == "failures:" {
             in_failures_section = true;
@@ -359,29 +362,34 @@ impl Resource for RustTestResource {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        // Collect lines from both streams in arrival order. Stderr carries
-        // suite headers ("Running ...", "Doc-tests ...") while stdout has
-        // test results. The parser needs both interleaved.
-        let lines = std::sync::Mutex::new(Vec::<String>::new());
-        std::thread::scope(|s| {
+        // Stream lines from both pipes through a channel so the parser can
+        // emit `test_suite_passed` / etc. events as each suite finishes,
+        // giving the live region something to show during a long test run.
+        // Stderr carries suite headers ("Running ...", "Doc-tests ...") and
+        // stdout carries results; both are interleaved by arrival time.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let result = std::thread::scope(|s| {
             if let Some(out) = stdout {
-                s.spawn(|| {
+                let tx = tx.clone();
+                s.spawn(move || {
                     for line in BufReader::new(out).lines().map_while(Result::ok) {
-                        lines.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+                        let _ = tx.send(line);
                     }
                 });
             }
             if let Some(err) = stderr {
-                s.spawn(|| {
+                let tx = tx.clone();
+                s.spawn(move || {
                     for line in BufReader::new(err).lines().map_while(Result::ok) {
-                        lines.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+                        let _ = tx.send(line);
                     }
                 });
             }
+            // Drop the original sender so `rx` closes once both pipe threads
+            // have finished and dropped their clones.
+            drop(tx);
+            process_test_output(rx, writer, inputs.verbose)
         });
-
-        let combined = lines.into_inner().unwrap_or_default();
-        let result = process_test_output(std::io::Cursor::new(combined.join("\n")), writer, inputs.verbose);
 
         let status = child
             .wait()
@@ -542,7 +550,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(std::io::Cursor::new(output), &writer, false);
+        let result = process_test_output(output.lines().map(String::from), &writer, false);
         assert!(result.passed);
         assert!(result.had_events);
     }
@@ -557,7 +565,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(std::io::Cursor::new(output), &writer, false);
+        let result = process_test_output(output.lines().map(String::from), &writer, false);
         assert!(!result.passed);
         assert!(result.had_events);
     }
@@ -586,7 +594,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(std::io::Cursor::new(output), &writer, false);
+        let result = process_test_output(output.lines().map(String::from), &writer, false);
         assert!(!result.passed);
         assert!(result.had_events);
     }
@@ -618,7 +626,7 @@ mod tests {
     fn process_output_no_events() {
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(std::io::Cursor::new(""), &writer, false);
+        let result = process_test_output(std::iter::empty::<String>(), &writer, false);
         assert!(result.passed);
         assert!(!result.had_events);
     }
