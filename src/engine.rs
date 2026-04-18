@@ -71,12 +71,19 @@ fn timestamp_from_system_time(t: SystemTime) -> FileTimestamp {
 }
 
 /// Wrapped state persisted by the engine. Contains the provider's own state,
-/// outputs, and a combined hash of all inputs (resolved files + parent states).
+/// outputs, and the combined hash covering resolved files, parent states, and
+/// evaluated input fields.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct WrappedState {
     state: serde_json::Value,
     outputs: Map,
     content_hash: String,
+    /// Hash of the block's evaluated input fields at last apply. Used as a
+    /// fast-path signal: if `input_hash` matches the current inputs, the
+    /// file+dep portion of `content_hash` can be reused from the prior run
+    /// without re-reading file contents.
+    #[serde(default)]
+    input_hash: String,
     /// Modification timestamps of input/output files at last apply.
     /// Keyed by file path string for portable serialization.
     #[serde(default)]
@@ -91,6 +98,7 @@ struct PriorState {
     provider_state: Option<serde_json::Value>,
     outputs: Map,
     content_hash: String,
+    input_hash: String,
     file_timestamps: HashMap<String, FileTimestamp>,
     dep_hashes: HashMap<String, String>,
 }
@@ -103,6 +111,7 @@ fn unwrap_state(stored: &serde_json::Value) -> PriorState {
         provider_state: Some(wrapped.state),
         outputs: wrapped.outputs,
         content_hash: wrapped.content_hash,
+        input_hash: wrapped.input_hash,
         file_timestamps: wrapped.file_timestamps,
         dep_hashes: wrapped.dep_hashes,
     }
@@ -133,9 +142,23 @@ fn default_prior() -> PriorState {
         provider_state: None,
         outputs: Map::new(),
         content_hash: String::new(),
+        input_hash: String::new(),
         file_timestamps: HashMap::new(),
         dep_hashes: HashMap::new(),
     }
+}
+
+/// Hash the block's evaluated input fields in canonical (key-sorted) JSON form.
+/// Routing via `serde_json::to_value` first forces the HashMap-backed `Map`
+/// through serde_json's BTreeMap-backed object type, producing deterministic
+/// key ordering regardless of HashMap iteration order.
+fn hash_inputs(inputs: &Map) -> String {
+    let canonical = serde_json::to_value(inputs)
+        .and_then(|v| serde_json::to_string(&v))
+        .unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 /// Cache of file path -> content hash, shared across all blocks in a run.
@@ -214,6 +237,7 @@ fn timestamps_unchanged(
 /// Result of content hash computation, including metadata for fast-path caching.
 struct ContentHashResult {
     hash: String,
+    input_hash: String,
     file_timestamps: HashMap<String, FileTimestamp>,
     dep_hashes: HashMap<String, String>,
 }
@@ -223,12 +247,14 @@ fn relative_display(path: &std::path::Path, cwd: &std::path::Path) -> String {
     path.strip_prefix(cwd).unwrap_or(path).to_string_lossy().into_owned()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn change_reason(
     resolved: &[ResolvedFile],
     prior: &PriorState,
     dag: &Dag,
     block_name: &str,
     dirty_deps: &std::collections::HashSet<String>,
+    input_hash: &str,
     mtime_cache: &mut MtimeCache,
     glob_cache: &mut GlobCache,
 ) -> Option<String> {
@@ -307,11 +333,19 @@ fn change_reason(
         return Some("file set changed".into());
     }
 
+    // Fall back to inputs: if nothing above matched but the stored input_hash
+    // differs, a field on the block itself must have changed (e.g. a config
+    // string like `ports` or `image`).
+    if !prior.input_hash.is_empty() && prior.input_hash != input_hash {
+        return Some("inputs changed".into());
+    }
+
     None
 }
 
 /// Compute a combined hash of files and parent block states.
 /// If stored timestamps indicate nothing changed, returns the stored hash (fast path).
+#[allow(clippy::too_many_arguments)]
 fn compute_content_hash(
     files: &[PathBuf],
     dag: &Dag,
@@ -319,10 +353,13 @@ fn compute_content_hash(
     store: &dyn StateStore,
     cache: &mut HashCache,
     mtime_cache: &mut MtimeCache,
+    input_hash: &str,
     prior: &PriorState,
 ) -> ContentHashResult {
-    // Fast path: if all timestamps and dep hashes match, reuse stored hash.
+    // Fast path: if inputs, file timestamps, and dep hashes all match the
+    // prior run, reuse the stored content hash without re-reading files.
     if !prior.content_hash.is_empty()
+        && prior.input_hash == input_hash
         && timestamps_unchanged(
             files,
             &prior.file_timestamps,
@@ -335,6 +372,7 @@ fn compute_content_hash(
     {
         return ContentHashResult {
             hash: prior.content_hash.clone(),
+            input_hash: input_hash.to_owned(),
             file_timestamps: prior.file_timestamps.clone(),
             dep_hashes: prior.dep_hashes.clone(),
         };
@@ -343,6 +381,10 @@ fn compute_content_hash(
     // Slow path: full content hash.
     let mut hasher = Sha256::new();
     let mut new_timestamps = HashMap::with_capacity(files.len());
+
+    // Fold in evaluated inputs first so changes to non-file fields (e.g. a
+    // docker container's `ports` or `environment`) shift the hash.
+    hasher.update(input_hash.as_bytes());
 
     // Hash files (sorted for determinism)
     let mut sorted = files.to_vec();
@@ -375,6 +417,7 @@ fn compute_content_hash(
 
     ContentHashResult {
         hash: format!("sha256:{:x}", hasher.finalize()),
+        input_hash: input_hash.to_owned(),
         file_timestamps: new_timestamps,
         dep_hashes: new_dep_hashes,
     }
@@ -412,7 +455,6 @@ fn plan_action_to_event(action: &PlanAction) -> Event {
     match action {
         PlanAction::Create => Event::Create,
         PlanAction::Update => Event::Update,
-        PlanAction::Replace => Event::Replace,
         PlanAction::Destroy => Event::Destroy,
         PlanAction::None => Event::NoChange,
     }
@@ -510,7 +552,17 @@ pub fn plan(
         // Hash inputs + existing outputs + parent states to detect changes
         let all_files = expand_resolved(&resolved, &mut glob_cache);
         let has_dirty_dep = dag.content_deps(name).iter().any(|d| dirty.contains(d));
-        let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
+        let input_hash = hash_inputs(&inputs);
+        let hash_result = compute_content_hash(
+            &all_files,
+            dag,
+            name,
+            store,
+            &mut hash_cache,
+            &mut mtime_cache,
+            &input_hash,
+            &prior,
+        );
         let inputs_changed = has_dirty_dep || hash_result.hash != prior.content_hash;
         crate::debug!(
             writer,
@@ -535,7 +587,16 @@ pub fn plan(
         if result.action == PlanAction::None && inputs_changed && prior.provider_state.is_some() {
             result.action = PlanAction::Update;
             if result.reason.is_none() {
-                result.reason = change_reason(&resolved, &prior, dag, name, &dirty, &mut mtime_cache, &mut glob_cache);
+                result.reason = change_reason(
+                    &resolved,
+                    &prior,
+                    dag,
+                    name,
+                    &dirty,
+                    &input_hash,
+                    &mut mtime_cache,
+                    &mut glob_cache,
+                );
             }
         }
 
@@ -543,16 +604,11 @@ pub fn plan(
             dirty.insert(name.clone());
         }
 
-        if node.protected && matches!(result.action, PlanAction::Replace | PlanAction::Destroy) {
-            let action = match result.action {
-                PlanAction::Replace => "replaced",
-                PlanAction::Destroy => "destroyed",
-                _ => unreachable!(),
-            };
+        if node.protected && result.action == PlanAction::Destroy {
             return Err(EngineError::Protected {
                 pos: node.pos.clone(),
                 block: name.clone(),
-                action,
+                action: "destroyed",
             });
         }
 
@@ -656,7 +712,17 @@ fn apply_order(
             source: e,
         })?;
         let all_files = expand_resolved(&resolved, &mut glob_cache);
-        let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
+        let input_hash = hash_inputs(&inputs);
+        let hash_result = compute_content_hash(
+            &all_files,
+            dag,
+            name,
+            store,
+            &mut hash_cache,
+            &mut mtime_cache,
+            &input_hash,
+            &prior,
+        );
         let inputs_changed = hash_result.hash != prior.content_hash;
 
         // Never skip previously failed test blocks
@@ -673,7 +739,7 @@ fn apply_order(
                 source: e,
             })?;
 
-        // Engine forces update if inputs changed or test previously failed
+        // Engine forces update if inputs changed or test previously failed.
         if plan_result.action == PlanAction::None
             && (inputs_changed || previously_failed)
             && prior.provider_state.is_some()
@@ -689,6 +755,7 @@ fn apply_order(
                         dag,
                         name,
                         &std::collections::HashSet::new(),
+                        &input_hash,
                         &mut mtime_cache,
                         &mut glob_cache,
                     )
@@ -696,16 +763,11 @@ fn apply_order(
             }
         }
 
-        if node.protected && matches!(plan_result.action, PlanAction::Replace | PlanAction::Destroy) {
-            let action = match plan_result.action {
-                PlanAction::Replace => "replaced",
-                PlanAction::Destroy => "destroyed",
-                _ => unreachable!(),
-            };
+        if node.protected && plan_result.action == PlanAction::Destroy {
             return Err(EngineError::Protected {
                 pos: node.pos.clone(),
                 block: name.clone(),
-                action,
+                action: "destroyed",
             });
         }
 
@@ -760,12 +822,14 @@ fn apply_order(
                 store,
                 &mut hash_cache,
                 &mut mtime_cache,
+                &input_hash,
                 &post_prior,
             );
             let wrapped = WrappedState {
                 state: new_state.clone(),
                 outputs: apply_result.outputs.clone(),
                 content_hash: post_hash.hash,
+                input_hash: post_hash.input_hash,
                 file_timestamps: post_hash.file_timestamps,
                 dep_hashes: post_hash.dep_hashes,
             };
@@ -963,7 +1027,17 @@ fn execute_block(
     let all_files = expand_resolved(&resolved, &mut glob_cache);
     let mut hash_cache = HashCache::new();
     let mut mtime_cache = MtimeCache::new();
-    let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
+    let input_hash = hash_inputs(&inputs);
+    let hash_result = compute_content_hash(
+        &all_files,
+        dag,
+        name,
+        store,
+        &mut hash_cache,
+        &mut mtime_cache,
+        &input_hash,
+        &prior,
+    );
     let inputs_changed = hash_result.hash != prior.content_hash;
     crate::debug!(
         writer,
@@ -1000,6 +1074,7 @@ fn execute_block(
                     dag,
                     name,
                     &std::collections::HashSet::new(),
+                    &input_hash,
                     &mut mtime_cache,
                     &mut glob_cache,
                 )
@@ -1007,16 +1082,11 @@ fn execute_block(
         }
     }
 
-    if node.protected && matches!(plan_result.action, PlanAction::Replace | PlanAction::Destroy) {
-        let action = match plan_result.action {
-            PlanAction::Replace => "replaced",
-            PlanAction::Destroy => "destroyed",
-            _ => unreachable!(),
-        };
+    if node.protected && plan_result.action == PlanAction::Destroy {
         return Err(EngineError::Protected {
             pos: node.pos.clone(),
             block: name.to_owned(),
-            action,
+            action: "destroyed",
         });
     }
 
@@ -1073,6 +1143,7 @@ fn execute_block(
             store,
             &mut post_hash_cache,
             &mut post_mtime_cache,
+            &input_hash,
             &post_prior,
         );
         crate::debug!(writer, "post-apply hash={}", short_hash(&post_hash.hash));
@@ -1080,6 +1151,7 @@ fn execute_block(
             state: new_state.clone(),
             outputs: apply_result.outputs.clone(),
             content_hash: post_hash.hash,
+            input_hash: post_hash.input_hash,
             file_timestamps: post_hash.file_timestamps,
             dep_hashes: post_hash.dep_hashes,
         };

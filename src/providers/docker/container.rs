@@ -4,7 +4,6 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::output::BlockWriter;
 use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
@@ -105,23 +104,6 @@ fn parse_duration(s: &str) -> Duration {
     Duration::from_secs(s.parse().unwrap_or(0))
 }
 
-/// Hash a healthcheck config for change detection.
-fn hash_healthcheck(hasher: &mut Sha256, hc: &Healthcheck) {
-    hasher.update(b"healthcheck\0");
-    hasher.update(hc.test().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(hc.interval().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(hc.timeout().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(hc.retries().to_string().as_bytes());
-    hasher.update(b"\0");
-    if let Some(sp) = hc.start_period() {
-        hasher.update(sp.as_bytes());
-    }
-    hasher.update(b"\0");
-}
-
 /// Run a Docker container (tracks state like Terraform)
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct ContainerInputs {
@@ -162,55 +144,6 @@ fn default_restart() -> String {
     "no".into()
 }
 
-/// Compute a deterministic hash of all container config fields so we can
-/// detect when the container needs to be recreated.
-fn config_hash(inputs: &ContainerInputs) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(inputs.image.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(inputs.name.as_bytes());
-    hasher.update(b"\0");
-    for p in &inputs.ports {
-        hasher.update(p.as_bytes());
-        hasher.update(b"\0");
-    }
-    for v in &inputs.volumes {
-        hasher.update(v.as_bytes());
-        hasher.update(b"\0");
-    }
-    // Sort env keys for determinism
-    let mut env_keys: Vec<&String> = inputs.environment.keys().collect();
-    env_keys.sort();
-    for k in env_keys {
-        hasher.update(k.as_bytes());
-        hasher.update(b"=");
-        hasher.update(inputs.environment[k].as_bytes());
-        hasher.update(b"\0");
-    }
-    if let Some(cmd) = &inputs.command {
-        hasher.update(cmd.as_bytes());
-    }
-    hasher.update(b"\0");
-    if let Some(ep) = &inputs.entrypoint {
-        hasher.update(ep.as_bytes());
-    }
-    hasher.update(b"\0");
-    hasher.update(inputs.restart.as_bytes());
-    hasher.update(b"\0");
-    if let Some(net) = &inputs.network {
-        hasher.update(net.as_bytes());
-    }
-    hasher.update(b"\0");
-    if let Some(wd) = &inputs.working_dir {
-        hasher.update(wd.as_bytes());
-    }
-    hasher.update(b"\0");
-    if let Some(hc) = &inputs.healthcheck {
-        hash_healthcheck(&mut hasher, hc);
-    }
-    format!("{:x}", hasher.finalize())
-}
-
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct ContainerOutputs {
     /// Docker container ID
@@ -223,7 +156,6 @@ pub struct ContainerOutputs {
 pub struct ContainerState {
     pub name: String,
     pub container_id: String,
-    pub config_hash: String,
 }
 
 /// Check whether a container with the given name is running.
@@ -314,15 +246,9 @@ impl Resource for ContainerResource {
             });
         };
 
-        let hash = config_hash(inputs);
-        if hash != prior.config_hash {
-            return Ok(PlanResult {
-                action: PlanAction::Replace,
-                description: desc,
-                reason: Some("config changed".into()),
-            });
-        }
-
+        // Re-create if the container drifted away (was stopped/removed out of
+        // band). When the block's inputs change, the engine sees a hash delta
+        // and upgrades None → Update.
         if !container_running(&prior.name) {
             return Ok(PlanResult {
                 action: PlanAction::Create,
@@ -431,7 +357,6 @@ impl Resource for ContainerResource {
             state: Some(ContainerState {
                 name: inputs.name.clone(),
                 container_id: container_id.clone(),
-                config_hash: config_hash(inputs),
             }),
             outputs: ContainerOutputs {
                 container_id,
@@ -462,7 +387,6 @@ impl Resource for ContainerResource {
             state: Some(ContainerState {
                 name: prior_state.name.clone(),
                 container_id: container_id.clone(),
-                config_hash: prior_state.config_hash.clone(),
             }),
             outputs: ContainerOutputs {
                 container_id,
@@ -502,58 +426,14 @@ mod tests {
     }
 
     #[test]
-    fn plan_replace_when_config_changed() {
-        let inputs = test_inputs();
-        let prior = ContainerState {
-            name: "test-nginx".into(),
-            container_id: "abc123".into(),
-            config_hash: "stale-hash".into(),
-        };
-        let result = Resource::plan(&ContainerResource, &inputs, Some(&prior)).unwrap();
-        assert_eq!(result.action, PlanAction::Replace);
-    }
-
-    #[test]
     fn plan_create_when_container_missing() {
         let inputs = test_inputs();
         let prior = ContainerState {
             name: "nonexistent-container-bit-test".into(),
             container_id: "abc123".into(),
-            config_hash: config_hash(&inputs),
         };
         let result = Resource::plan(&ContainerResource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Create);
-    }
-
-    #[test]
-    fn config_hash_deterministic() {
-        let inputs = test_inputs();
-        assert_eq!(config_hash(&inputs), config_hash(&inputs));
-    }
-
-    #[test]
-    fn config_hash_changes_with_image() {
-        let mut a = test_inputs();
-        let mut b = test_inputs();
-        a.image = "nginx:1".into();
-        b.image = "nginx:2".into();
-        assert_ne!(config_hash(&a), config_hash(&b));
-    }
-
-    #[test]
-    fn config_hash_changes_with_env() {
-        let mut a = test_inputs();
-        let b = test_inputs();
-        a.environment.insert("FOO".into(), "bar".into());
-        assert_ne!(config_hash(&a), config_hash(&b));
-    }
-
-    #[test]
-    fn config_hash_changes_with_healthcheck() {
-        let mut a = test_inputs();
-        let b = test_inputs();
-        a.healthcheck = Some(Healthcheck::Command("curl localhost".into()));
-        assert_ne!(config_hash(&a), config_hash(&b));
     }
 
     #[test]
@@ -572,16 +452,5 @@ mod tests {
         assert_eq!(hc.timeout(), "5s");
         assert_eq!(hc.retries(), 3);
         assert!(hc.start_period().is_none());
-    }
-
-    #[test]
-    fn config_hash_env_order_independent() {
-        let mut a = test_inputs();
-        let mut b = test_inputs();
-        a.environment.insert("A".into(), "1".into());
-        a.environment.insert("B".into(), "2".into());
-        b.environment.insert("B".into(), "2".into());
-        b.environment.insert("A".into(), "1".into());
-        assert_eq!(config_hash(&a), config_hash(&b));
     }
 }

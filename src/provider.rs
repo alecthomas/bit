@@ -30,7 +30,6 @@ pub enum ResolvedFile {
 pub enum PlanAction {
     Create,
     Update,
-    Replace,
     Destroy,
     None,
 }
