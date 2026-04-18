@@ -253,10 +253,10 @@ impl Output {
 
     fn dispatch_stream(&self, name: &str, color: Color, indent: Option<usize>, content: &str, stderr: bool) {
         let mut inner = self.inner.lock().unwrap();
-        let line = inner.fmt_stream_line(name, color, indent, content, stderr);
+        let lines = inner.fmt_stream_line(name, color, indent, content, stderr);
         let stdout = io::stdout();
         let mut out = stdout.lock();
-        inner.push_stream(&mut out, name, line);
+        inner.push_stream_many(&mut out, name, lines);
     }
 
     fn dispatch_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str, raw: bool) {
@@ -296,55 +296,100 @@ impl OutputInner {
         }
     }
 
-    /// Truncate a (possibly ANSI-colored) line to the cached terminal width
-    /// so it renders on exactly one row. When width is unknown (non-TTY or
-    /// detection failure), the line is returned unchanged.
-    fn fit(&self, line: &str) -> String {
-        if self.term_width == 0 {
-            return line.to_string();
+    /// Split (possibly ANSI-styled) `content` into chunks whose display
+    /// width is at most `width`. When `width == 0` (unknown terminal
+    /// size) or `content` already fits, returns a single-chunk Vec.
+    fn wrap_content(content: &str, width: usize) -> Vec<String> {
+        if width == 0 || content.is_empty() || console::measure_text_width(content) <= width {
+            return vec![content.to_string()];
         }
-        console::truncate_str(line, self.term_width, "").into_owned()
+        let mut out = Vec::new();
+        let mut remaining = content;
+        while !remaining.is_empty() {
+            if console::measure_text_width(remaining) <= width {
+                out.push(remaining.to_string());
+                break;
+            }
+            let head = console::truncate_str(remaining, width, "");
+            let head_len = head.len();
+            // Safety: if truncate_str couldn't make progress (e.g. a single
+            // grapheme wider than `width`), emit the rest as-is and stop.
+            if head_len == 0 {
+                out.push(remaining.to_string());
+                break;
+            }
+            out.push(head.into_owned());
+            remaining = &remaining[head_len..];
+        }
+        out
     }
 
-    fn fmt_stream_line(&self, name: &str, color: Color, indent: Option<usize>, content: &str, stderr: bool) -> String {
-        let prefix = self.prefix(name, "│", indent);
-        let raw = if stderr {
-            format!("{} {}", prefix.paint(color), content.dim().italic())
-        } else {
-            format!("{} {content}", prefix.paint(color))
-        };
-        self.fit(&raw)
+    /// Available width for content given a prefix. Returns 0 when the
+    /// terminal width is unknown (which `wrap_content` interprets as
+    /// "don't split").
+    fn content_width(&self, prefix: &str) -> usize {
+        if self.term_width == 0 {
+            return 0;
+        }
+        let prefix_width = console::measure_text_width(prefix);
+        self.term_width.saturating_sub(prefix_width + 1)
+    }
+
+    fn fmt_stream_line(
+        &self,
+        name: &str,
+        color: Color,
+        indent: Option<usize>,
+        content: &str,
+        stderr: bool,
+    ) -> Vec<String> {
+        let head_prefix = self.prefix(name, "│", indent);
+        let cont_prefix = self.prefix(name, "┆", indent);
+        let chunks = Self::wrap_content(content, self.content_width(&head_prefix));
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let prefix = if i == 0 { &head_prefix } else { &cont_prefix };
+                if stderr {
+                    format!("{} {}", prefix.paint(color), chunk.dim().italic())
+                } else {
+                    format!("{} {chunk}", prefix.paint(color))
+                }
+            })
+            .collect()
     }
 
     fn fmt_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str) -> Vec<String> {
         let color = color_for_name(name);
-        let prefix = self.prefix(name, event.symbol(), indent);
-        let dim = event.is_dim();
-        let mut lines = Vec::new();
-        if message.is_empty() {
-            let text = format!("{event:?}").to_lowercase();
-            lines.push(self.fit(&format!(
-                "{} {}",
-                prefix.paint(color).dim_if(dim),
-                text.paint(event.color()).dim_if(dim),
-            )));
-            return lines;
-        }
-        let mut src = message.lines();
-        if let Some(first) = src.next() {
-            lines.push(self.fit(&format!(
-                "{} {}",
-                prefix.paint(color).dim_if(dim),
-                first.paint(event.color()).dim_if(dim),
-            )));
-        }
+        let head_prefix = self.prefix(name, event.symbol(), indent);
         let cont_prefix = self.prefix(name, "┆", indent);
-        for line in src {
-            lines.push(self.fit(&format!(
-                "{} {}",
-                cont_prefix.paint(color).dim_if(dim),
-                line.paint(event.color()).dim_if(dim),
-            )));
+        let dim = event.is_dim();
+
+        let body: String = if message.is_empty() {
+            format!("{event:?}").to_lowercase()
+        } else {
+            message.to_owned()
+        };
+
+        let mut lines = Vec::new();
+        // Multiple logical lines in the message become multiple rows; each
+        // row then wraps to fit the terminal.
+        let mut first = true;
+        for logical in body.lines() {
+            let prefix = if first { &head_prefix } else { &cont_prefix };
+            for (i, chunk) in Self::wrap_content(logical, self.content_width(prefix))
+                .into_iter()
+                .enumerate()
+            {
+                let p = if first && i == 0 { &head_prefix } else { &cont_prefix };
+                lines.push(format!(
+                    "{} {}",
+                    p.paint(color).dim_if(dim),
+                    chunk.paint(event.color()).dim_if(dim),
+                ));
+            }
+            first = false;
         }
         lines
     }
@@ -352,15 +397,21 @@ impl OutputInner {
     fn fmt_event_raw(&self, name: &str, event: Event, indent: Option<usize>, message: &str) -> Vec<String> {
         let color = color_for_name(name);
         let dim = event.is_dim();
-        let prefix = self.prefix(name, event.symbol(), indent);
-        let mut lines = Vec::new();
-        let mut src = message.lines();
-        if let Some(first) = src.next() {
-            lines.push(self.fit(&format!("{} {first}", prefix.paint(color).dim_if(dim),)));
-        }
+        let head_prefix = self.prefix(name, event.symbol(), indent);
         let cont_prefix = self.prefix(name, "┆", indent);
-        for line in src {
-            lines.push(self.fit(&format!("{} {line}", cont_prefix.paint(color).dim_if(dim),)));
+
+        let mut lines = Vec::new();
+        let mut first = true;
+        for logical in message.lines() {
+            let prefix = if first { &head_prefix } else { &cont_prefix };
+            for (i, chunk) in Self::wrap_content(logical, self.content_width(prefix))
+                .into_iter()
+                .enumerate()
+            {
+                let p = if first && i == 0 { &head_prefix } else { &cont_prefix };
+                lines.push(format!("{} {chunk}", p.paint(color).dim_if(dim)));
+            }
+            first = false;
         }
         lines
     }
@@ -416,23 +467,9 @@ impl OutputInner {
     /// Append a streamed output line to a task's live region (dropping the
     /// oldest when the buffer exceeds `REGION_LINES`). In non-TTY mode this
     /// just prints the line.
-    fn push_stream(&mut self, out: &mut StdoutLock<'_>, name: &str, line: String) {
-        if !self.live {
-            let _ = writeln!(out, "{line}");
-            return;
-        }
-        let _ = self.clear_live(out);
-        let state = self.active.entry(name.to_string()).or_default();
-        if state.recent.len() == REGION_LINES {
-            state.recent.pop_front();
-        }
-        state.recent.push_back(line);
-        let _ = self.redraw_live(out);
-    }
-
-    /// Like `push_stream` for multiple lines, with a single clear + redraw.
-    /// Used by intermediate `event_raw` messages (e.g. test suite summaries)
-    /// that can be multi-line but should still flow through the live region.
+    /// Push one or more rows into the task's live region buffer.
+    /// Used by dispatch_stream (wrapped stream lines) and intermediate
+    /// `event_raw` messages (e.g. test suite summaries).
     fn push_stream_many(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<String>) {
         if !self.live {
             for line in &lines {
@@ -775,23 +812,6 @@ mod tests {
     }
 
     #[test]
-    fn fit_truncates_to_term_width() {
-        let inner = inner_tty(4, 10);
-        // 15 visible chars, width 10 -> truncated to 10.
-        let line = "0123456789ABCDE";
-        let fitted = inner.fit(line);
-        assert_eq!(console::measure_text_width(&fitted), 10);
-    }
-
-    #[test]
-    fn fit_noop_when_width_unknown() {
-        let mut inner = inner_tty(4, 0);
-        inner.live = false;
-        let line = "hello world";
-        assert_eq!(inner.fit(line), line);
-    }
-
-    #[test]
     fn region_open_tracks_rows() {
         let mut inner = inner_tty(4, 80);
         // Simulate open_region without a real stdout: manipulate state directly.
@@ -827,6 +847,43 @@ mod tests {
         assert_eq!(state.recent.len(), REGION_LINES);
         assert_eq!(state.recent.front().map(|s| s.as_str()), Some("line3"));
         assert_eq!(state.recent.back().map(|s| s.as_str()), Some("line7"));
+    }
+
+    #[test]
+    fn wrap_content_noop_when_fits() {
+        let chunks = OutputInner::wrap_content("hello world", 80);
+        assert_eq!(chunks, vec!["hello world"]);
+    }
+
+    #[test]
+    fn wrap_content_splits_long_line() {
+        let chunks = OutputInner::wrap_content("abcdefghij", 4);
+        assert_eq!(chunks, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn wrap_content_empty_when_width_zero() {
+        let chunks = OutputInner::wrap_content("anything", 0);
+        assert_eq!(chunks, vec!["anything"]);
+    }
+
+    #[test]
+    fn wrap_content_handles_empty_input() {
+        let chunks = OutputInner::wrap_content("", 10);
+        assert_eq!(chunks, vec![""]);
+    }
+
+    #[test]
+    fn fmt_stream_line_wraps_long_content() {
+        let inner = inner_tty(4, 30);
+        // prefix "backend │" width = 11, available = 30 - 11 - 1 = 18.
+        let lines = inner.fmt_stream_line("backend", color_for_name("backend"), None, &"x".repeat(40), false);
+        assert!(lines.len() >= 2, "expected wrapping, got {:?}", lines.len());
+        // First line uses the primary separator; continuations use ┆.
+        assert!(lines[0].contains('│'));
+        for cont in &lines[1..] {
+            assert!(cont.contains('┆'), "continuation should use ┆, got {cont:?}");
+        }
     }
 
     #[test]
