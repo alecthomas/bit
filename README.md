@@ -250,6 +250,7 @@ app = exec {
   command = "make build"
   output = "bin/app"       # single string or list
   inputs = ["src/**/*.c"]  # glob patterns
+  clean = "make clean"     # optional: replaces default output removal on --clean
 }
 ```
 
@@ -260,8 +261,11 @@ test = exec.test {
   inputs = ["src/**/*.c"]
   format = "ctrf"          # optional: parse CTRF JSON from stdout
   transform = ".results"   # optional: jq expression for CTRF
+  clean = "make clean"     # optional: command to run on --clean
 }
 ```
+
+If `clean` is set, it runs instead of the default teardown (`rm -rf` of outputs for `exec`, no-op for `exec.test`). `clean` failures abort destroy so state is preserved for retry; honors `dir`.
 
 ### go
 

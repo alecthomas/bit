@@ -25,6 +25,9 @@ pub struct ExecInputs {
     /// Working directory for the command
     #[serde(default)]
     pub dir: Option<String>,
+    /// Shell command to run on `bit --clean` (replaces the default removal of outputs)
+    #[serde(default)]
+    pub clean: Option<String>,
 }
 
 #[derive(Debug, Serialize, bit_derive::Schema)]
@@ -60,6 +63,8 @@ pub struct ExecState {
     pub output: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean: Option<String>,
 }
 
 /// Deserialize a field that can be either a single string or a list of strings.
@@ -92,6 +97,36 @@ where
     }
 
     deserializer.deserialize_any(StringOrVec)
+}
+
+/// Run a shell command under `sh -c`, piping stdout/stderr through the block
+/// writer. Returns `Err` if the command exits non-zero.
+fn run_command(command: &str, dir: Option<&str>, writer: &BlockWriter) -> Result<(), BoxError> {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| format!("failed to execute command: {e}"))?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    std::thread::scope(|s| {
+        if let Some(out) = stdout {
+            s.spawn(|| writer.pipe_stdout(BufReader::new(out)));
+        }
+        if let Some(err) = stderr {
+            s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
+        }
+    });
+
+    let status = child.wait().map_err(|e| format!("failed to wait for command: {e}"))?;
+    if !status.success() {
+        return Err(format!("command exited with {status}").into());
+    }
+    Ok(())
 }
 
 pub struct ExecProvider;
@@ -151,7 +186,7 @@ impl Resource for ExecResource {
             });
         };
 
-        let action = if prior.command != inputs.command || prior.dir != inputs.dir {
+        let action = if prior.command != inputs.command || prior.dir != inputs.dir || prior.clean != inputs.clean {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -181,33 +216,7 @@ impl Resource for ExecResource {
             }
         }
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(&inputs.command)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(dir) = &inputs.dir {
-            cmd.current_dir(dir);
-        }
-
-        let mut child = cmd.spawn().map_err(|e| format!("failed to execute command: {e}"))?;
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        std::thread::scope(|s| {
-            if let Some(out) = stdout {
-                s.spawn(|| writer.pipe_stdout(BufReader::new(out)));
-            }
-            if let Some(err) = stderr {
-                s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
-            }
-        });
-
-        let status = child.wait().map_err(|e| format!("failed to wait for command: {e}"))?;
-        if !status.success() {
-            return Err(format!("command exited with {status}").into());
-        }
+        run_command(&inputs.command, inputs.dir.as_deref(), writer)?;
 
         Ok(ApplyResult {
             outputs: ExecOutputs::from_paths(&inputs.output),
@@ -215,12 +224,17 @@ impl Resource for ExecResource {
                 command: inputs.command.clone(),
                 output: inputs.output.clone(),
                 dir: inputs.dir.clone(),
+                clean: inputs.clean.clone(),
             }),
         })
     }
 
     fn destroy(&self, prior_state: &ExecState, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
+        if let Some(clean) = &prior_state.clean {
+            writer.event(Event::Starting, clean);
+            return run_command(clean, prior_state.dir.as_deref(), writer);
+        }
         for output in &prior_state.output {
             let path = Path::new(output);
             if path.is_dir() {
@@ -258,6 +272,9 @@ pub struct ExecTestInputs {
     /// Working directory for the command
     #[serde(default)]
     pub dir: Option<String>,
+    /// Shell command to run on `bit --clean`
+    #[serde(default)]
+    pub clean: Option<String>,
 }
 
 #[derive(Debug, Serialize, bit_derive::Schema)]
@@ -272,6 +289,8 @@ pub struct ExecTestState {
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean: Option<String>,
 }
 
 struct ExecTestResource;
@@ -311,7 +330,7 @@ impl Resource for ExecTestResource {
             });
         };
 
-        let action = if prior.command != inputs.command || prior.dir != inputs.dir {
+        let action = if prior.command != inputs.command || prior.dir != inputs.dir || prior.clean != inputs.clean {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -330,42 +349,24 @@ impl Resource for ExecTestResource {
         _prior_state: Option<&ExecTestState>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(&inputs.command)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(dir) = &inputs.dir {
-            cmd.current_dir(dir);
-        }
-
-        let mut child = cmd.spawn().map_err(|e| format!("failed to execute command: {e}"))?;
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        std::thread::scope(|s| {
-            if let Some(out) = stdout {
-                s.spawn(|| writer.pipe_stdout(BufReader::new(out)));
-            }
-            if let Some(err) = stderr {
-                s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
-            }
-        });
-
-        let status = child.wait().map_err(|e| format!("failed to wait for command: {e}"))?;
-        let passed = status.success();
+        let passed = run_command(&inputs.command, inputs.dir.as_deref(), writer).is_ok();
 
         Ok(ApplyResult {
             outputs: ExecTestOutputs { passed },
             state: Some(ExecTestState {
                 command: inputs.command.clone(),
                 dir: inputs.dir.clone(),
+                clean: inputs.clean.clone(),
             }),
         })
     }
 
-    fn destroy(&self, _prior_state: &ExecTestState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &ExecTestState, writer: &BlockWriter) -> Result<(), BoxError> {
+        use crate::output::Event;
+        if let Some(clean) = &prior_state.clean {
+            writer.event(Event::Starting, clean);
+            return run_command(clean, prior_state.dir.as_deref(), writer);
+        }
         Ok(())
     }
 
@@ -393,6 +394,7 @@ mod tests {
             output: vec!["out".into()],
             inputs: vec!["src/**/*.rs".into()],
             dir: None,
+            clean: None,
         };
 
         let resource = ExecResource;
@@ -409,6 +411,7 @@ mod tests {
             output: vec!["out".into()],
             inputs: vec![],
             dir: None,
+            clean: None,
         };
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, None).unwrap();
@@ -422,11 +425,13 @@ mod tests {
             output: vec!["out".into()],
             inputs: vec![],
             dir: None,
+            clean: None,
         };
         let prior = ExecState {
             command: "echo hi".into(),
             output: vec!["out/".into()],
             dir: None,
+            clean: None,
         };
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -440,11 +445,13 @@ mod tests {
             output: vec!["out".into()],
             inputs: vec![],
             dir: None,
+            clean: None,
         };
         let prior = ExecState {
             command: "echo hi".into(),
             output: vec!["out/".into()],
             dir: None,
+            clean: None,
         };
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -460,6 +467,7 @@ mod tests {
             output: vec![output.to_string_lossy().into_owned()],
             inputs: vec![],
             dir: None,
+            clean: None,
         };
         let resource = ExecResource;
         let out = crate::output::Output::new(&[]);
@@ -477,6 +485,7 @@ mod tests {
             output: vec!["/dev/null".into()],
             inputs: vec![],
             dir: None,
+            clean: None,
         };
         let resource = ExecResource;
         let out = crate::output::Output::new(&[]);
@@ -495,6 +504,7 @@ mod tests {
             command: "echo hi".into(),
             output: vec![output.to_string_lossy().into_owned()],
             dir: None,
+            clean: None,
         };
 
         let resource = ExecResource;
@@ -543,6 +553,7 @@ mod tests {
             inputs: vec![],
             output: vec![],
             dir: None,
+            clean: None,
         };
         let resource = ExecTestResource;
         let out = crate::output::Output::new(&[]);
@@ -558,6 +569,7 @@ mod tests {
             inputs: vec![],
             output: vec![],
             dir: None,
+            clean: None,
         };
         let resource = ExecTestResource;
         let out = crate::output::Output::new(&[]);
@@ -579,11 +591,13 @@ mod tests {
             output: vec!["out".into()],
             inputs: vec![],
             dir: Some("/tmp".into()),
+            clean: None,
         };
         let prior = ExecState {
             command: "echo hi".into(),
             output: vec!["out".into()],
             dir: None,
+            clean: None,
         };
         let resource = ExecResource;
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -600,6 +614,7 @@ mod tests {
             output: vec![output.to_string_lossy().into_owned()],
             inputs: vec![],
             dir: Some(canon.to_string_lossy().into_owned()),
+            clean: None,
         };
         let resource = ExecResource;
         let out = crate::output::Output::new(&[]);
@@ -621,6 +636,7 @@ mod tests {
             inputs: vec![],
             output: vec![],
             dir: Some(canon.to_string_lossy().into_owned()),
+            clean: None,
         };
         let resource = ExecTestResource;
         let out = crate::output::Output::new(&[]);
@@ -634,16 +650,105 @@ mod tests {
     }
 
     #[test]
+    fn destroy_runs_clean_and_skips_output_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("build_output");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("file.txt"), "data").unwrap();
+        let marker = dir.path().join("cleaned.txt");
+
+        let state = ExecState {
+            command: "echo hi".into(),
+            output: vec![output.to_string_lossy().into_owned()],
+            dir: None,
+            clean: Some(format!("touch {}", marker.display())),
+        };
+
+        let resource = ExecResource;
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        Resource::destroy(&resource, &state, &writer).unwrap();
+
+        assert!(marker.exists(), "clean command must have run");
+        assert!(output.exists(), "outputs should NOT be removed when clean is set");
+    }
+
+    #[test]
+    fn destroy_propagates_clean_failure() {
+        let state = ExecState {
+            command: "echo hi".into(),
+            output: vec![],
+            dir: None,
+            clean: Some("false".into()),
+        };
+        let resource = ExecResource;
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        assert!(Resource::destroy(&resource, &state, &writer).is_err());
+    }
+
+    #[test]
+    fn plan_update_when_clean_changed() {
+        let inputs = ExecInputs {
+            command: "echo hi".into(),
+            output: vec!["out".into()],
+            inputs: vec![],
+            dir: None,
+            clean: Some("rm -rf out".into()),
+        };
+        let prior = ExecState {
+            command: "echo hi".into(),
+            output: vec!["out".into()],
+            dir: None,
+            clean: None,
+        };
+        let resource = ExecResource;
+        let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
+        assert_eq!(result.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn test_destroy_runs_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("cleaned.txt");
+        let state = ExecTestState {
+            command: "true".into(),
+            dir: None,
+            clean: Some(format!("touch {}", marker.display())),
+        };
+        let resource = ExecTestResource;
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        Resource::destroy(&resource, &state, &writer).unwrap();
+        assert!(marker.exists());
+    }
+
+    #[test]
+    fn test_destroy_is_noop_without_clean() {
+        let state = ExecTestState {
+            command: "true".into(),
+            dir: None,
+            clean: None,
+        };
+        let resource = ExecTestResource;
+        let out = crate::output::Output::new(&[]);
+        let writer = out.writer("test");
+        Resource::destroy(&resource, &state, &writer).unwrap();
+    }
+
+    #[test]
     fn test_plan_update_when_dir_changed() {
         let inputs = ExecTestInputs {
             command: "true".into(),
             inputs: vec![],
             output: vec![],
             dir: Some("/tmp".into()),
+            clean: None,
         };
         let prior = ExecTestState {
             command: "true".into(),
             dir: None,
+            clean: None,
         };
         let resource = ExecTestResource;
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
