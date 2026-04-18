@@ -355,6 +355,41 @@ pre fmt = rust.fmt {}
 fmt-check = rust.fmt-check {}
 ```
 
+### pnpm
+
+pnpm-aware provider with workspace discovery. Parses `pnpm-workspace.yaml` and each package's `package.json` once per run; resolves package names to directories; scans sources automatically (skipping `node_modules/`, `dist/`, `build/`, `.next/`, `.turbo/`, etc.). Works on single-package projects too (no `pnpm-workspace.yaml` needed).
+
+**`pnpm.install`** — install workspace dependencies:
+```bit
+deps = pnpm.install {
+  dir = "."           # optional, defaults to current directory
+  frozen = true       # optional, defaults to true (--frozen-lockfile)
+}
+```
+Inputs: all `package.json` files + `pnpm-lock.yaml` + `pnpm-workspace.yaml`. Destroy removes every `node_modules/` tree in the workspace.
+
+**`pnpm.run`** — run a `package.json` script:
+```bit
+frontend = pnpm.run {
+  package = "frontend"        # optional, omit to run at workspace root
+  script  = "build"
+  output  = "frontend/dist"   # optional, tracked for caching + destroy
+  args    = ["--mode=production"]  # optional, appended after `--`
+  inputs  = ["shared/**/*.ts"]     # optional, extends auto-detected sources
+}
+```
+Inputs: package source tree (recursive, skips build dirs and declared outputs) + workspace `pnpm-lock.yaml`. With no `package`, runs at the workspace root with just `package.json` as the input — add extras via `inputs`.
+
+**`pnpm.test`** — run a test script:
+```bit
+test = pnpm.test {
+  package = "frontend"
+  script  = "test"    # optional, defaults to "test"
+}
+```
+
+Not covered by this provider (use `exec` for these): recursive filters (`pnpm -r run`), glob filters (`--filter './packages/*'`), `pnpm exec <binary>`, `pnpm dlx`, parallel-execution flags.
+
 ### docker
 
 **`docker.image`** — build a Docker image (auto-detects inputs from Dockerfile COPY/ADD):

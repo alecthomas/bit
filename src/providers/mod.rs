@@ -7,6 +7,7 @@ use crate::provider::BoxError;
 pub mod docker;
 pub mod exec;
 pub mod go;
+pub mod pnpm;
 pub mod rust;
 
 /// Compute a SHA256 content hash for a file.

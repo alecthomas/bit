@@ -24,6 +24,7 @@ yansi = "1.0.1"
 dirs = "6.0.0"
 console = "0.16.3"
 indexmap = "2.14.0"
+serde_yml = "0.0.12"
 
 [dev-dependencies]
 tempfile = "3.27.0"
