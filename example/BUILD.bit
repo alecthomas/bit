@@ -49,16 +49,14 @@ bff-image = docker.image {
   depends_on = [bff, frontend]
 }
 
-# ── Runtime network + containers ──────────────────────────────────────────────
-
-network = docker.network { name = "example-net" }
-
-let db_url = "postgres://${pg_user}:${pg_pass}@example-postgres:5432/${pg_db}?sslmode=disable"
+# ── Postgres (test) ───────────────────────────────────────────────────────────
+# Host-exposed only; consumed by backend-test via localhost:5432.
+# Not attached to example-net so `bit --clean` without a target doesn't drag
+# the network into teardown while dev containers are still attached.
 
 postgres = docker.container {
   image       = "postgres:16"
   name        = "example-postgres"
-  network     = network.name
   ports       = ["${pg_port}:5432"]
   environment = {
     POSTGRES_USER     = pg_user,
@@ -68,17 +66,35 @@ postgres = docker.container {
   healthcheck = "pg_isready -U ${pg_user} -d ${pg_db}"
 }
 
+# ── Runtime network + containers ──────────────────────────────────────────────
+
+network = docker.network { name = "example-net" }
+
+postgres-dev = docker.container {
+  image       = "postgres:16"
+  name        = "example-postgres-dev"
+  network     = network.name
+  environment = {
+    POSTGRES_USER     = pg_user,
+    POSTGRES_PASSWORD = pg_pass,
+    POSTGRES_DB       = pg_db
+  }
+  healthcheck = "pg_isready -U ${pg_user} -d ${pg_db}"
+}
+
+let dev_db_url = "postgres://${pg_user}:${pg_pass}@example-postgres-dev:5432/${pg_db}?sslmode=disable"
+
 backend-container = docker.container {
   image       = backend-image.ref
   name        = "example-backend"
   network     = network.name
   ports       = ["8080:8080"]
   environment = {
-    DATABASE_URL = db_url,
+    DATABASE_URL = dev_db_url,
     ADDR         = ":8080"
   }
   healthcheck = "wget -qO- http://localhost:8080/health"
-  depends_on  = [postgres]
+  depends_on  = [postgres-dev]
 }
 
 bff-container = docker.container {
