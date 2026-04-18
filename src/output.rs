@@ -2,8 +2,28 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use yansi::{Color, Paint, Painted};
+
+/// Emit a debug message via an `Output` or `BlockWriter`, formatting the
+/// message only when debug is enabled on the target. Mirrors `log::debug!` /
+/// `tracing::debug!` so argument expressions and the `format!` allocation
+/// are skipped entirely on the common (debug-off) path.
+///
+/// The target must expose `debug_enabled()` and `debug(&str)` methods —
+/// both [`Output`] and [`BlockWriter`] do.
+#[macro_export]
+macro_rules! debug {
+    ($target:expr, $($arg:tt)*) => {{
+        // Bind once so callers may pass method-call expressions (e.g.
+        // `output.writer(name)`) without evaluating them twice.
+        let __bit_debug_target = &$target;
+        if __bit_debug_target.debug_enabled() {
+            __bit_debug_target.debug(&format!($($arg)*));
+        }
+    }};
+}
 
 /// Extension trait for conditionally dimming styled output.
 trait DimIf {
@@ -27,6 +47,7 @@ pub enum Event {
     Replace,
     Destroy,
     NoChange,
+    Debug,
 }
 
 impl Event {
@@ -41,11 +62,12 @@ impl Event {
             Event::Replace => "!",
             Event::Destroy => "-",
             Event::NoChange => "·",
+            Event::Debug => "⚙",
         }
     }
 
     fn is_dim(&self) -> bool {
-        matches!(self, Event::Skipped | Event::NoChange)
+        matches!(self, Event::Skipped | Event::NoChange | Event::Debug)
     }
 
     pub fn color(&self) -> Color {
@@ -59,6 +81,7 @@ impl Event {
             Event::Replace => Color::Magenta,
             Event::Destroy => Color::Red,
             Event::NoChange => Color::Primary,
+            Event::Debug => Color::Blue,
         }
     }
 }
@@ -98,10 +121,29 @@ fn color_for_name(name: &str) -> Color {
 #[derive(Clone)]
 pub struct Output {
     inner: Arc<Mutex<OutputInner>>,
+    /// Whether `debug()` calls should actually emit output.
+    debug: bool,
+    /// Reference timestamp used to compute `+elapsed` prefixes on debug lines.
+    start: Instant,
 }
 
 struct OutputInner {
     max_name_len: usize,
+}
+
+/// Format a `Duration` as a compact relative offset for debug output:
+/// sub-second values are printed in ms (`+12ms`), sub-minute in seconds with
+/// one decimal (`+1.2s`), and longer durations as `+1m23s`.
+fn format_elapsed(d: Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("+{ms}ms")
+    } else if ms < 60_000 {
+        format!("+{:.1}s", d.as_secs_f64())
+    } else {
+        let secs = d.as_secs();
+        format!("+{}m{}s", secs / 60, secs % 60)
+    }
 }
 
 impl Output {
@@ -109,7 +151,34 @@ impl Output {
         let max_name_len = block_names.iter().map(|n| n.len()).max().unwrap_or(0);
         Self {
             inner: Arc::new(Mutex::new(OutputInner { max_name_len })),
+            debug: false,
+            start: Instant::now(),
         }
+    }
+
+    /// Enable or disable debug output. Builder-style: returns the updated value.
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
+    }
+
+    /// Whether debug output is enabled.
+    pub fn debug_enabled(&self) -> bool {
+        self.debug
+    }
+
+    /// Emit an engine-level debug message, padded to align with block-prefixed
+    /// output so it lines up visually with per-block messages. Each line is
+    /// prefixed with the elapsed time since this `Output` was constructed.
+    /// No-op when debug is disabled.
+    pub fn debug(&self, message: &str) {
+        if !self.debug {
+            return;
+        }
+        let stamped = format!("{} {message}", format_elapsed(self.start.elapsed()));
+        // Passing an empty name produces a prefix of `<spaces> <symbol>` with
+        // the same width as real block prefixes (right-aligned padding).
+        self.print_event("", Event::Debug, None, &stamped);
     }
 
     /// Create a writer for a specific block.
@@ -214,6 +283,23 @@ pub struct BlockWriter {
 impl BlockWriter {
     pub fn event(&self, event: Event, message: &str) {
         self.output.print_event(&self.name, event, self.indent, message);
+    }
+
+    /// Whether debug output is enabled for the underlying Output.
+    /// Prefer the `debug!` macro over calling this directly.
+    pub fn debug_enabled(&self) -> bool {
+        self.output.debug
+    }
+
+    /// Emit a block-scoped debug message. Each line is prefixed with the
+    /// elapsed time since the `Output` was constructed. No-op when debug is
+    /// disabled. Prefer the `debug!` macro to avoid formatting when disabled.
+    pub fn debug(&self, message: &str) {
+        if !self.output.debug {
+            return;
+        }
+        let stamped = format!("{} {message}", format_elapsed(self.output.start.elapsed()));
+        self.output.print_event(&self.name, Event::Debug, self.indent, &stamped);
     }
 
     /// Like `event`, but the message is pre-formatted with ANSI codes

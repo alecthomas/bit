@@ -52,6 +52,18 @@ pub struct BlockPlan {
 /// because the value exceeds JSON's safe integer range (2^53).
 type FileTimestamp = String;
 
+/// Truncate a hash string for compact debug output. Strips the `sha256:`
+/// algorithm prefix (all engine hashes share it) then takes the first 8 hex
+/// chars. Returns `"<none>"` for an empty string so "no prior hash" is
+/// distinguishable from a real hash.
+fn short_hash(h: &str) -> &str {
+    if h.is_empty() {
+        return "<none>";
+    }
+    let hex = h.strip_prefix("sha256:").unwrap_or(h);
+    if hex.len() > 8 { &hex[..8] } else { hex }
+}
+
 /// Read a `SystemTime` into our string-of-nanos representation.
 fn timestamp_from_system_time(t: SystemTime) -> FileTimestamp {
     let d = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
@@ -93,6 +105,26 @@ fn unwrap_state(stored: &serde_json::Value) -> PriorState {
         content_hash: wrapped.content_hash,
         file_timestamps: wrapped.file_timestamps,
         dep_hashes: wrapped.dep_hashes,
+    }
+}
+
+/// Resolve a block's prior state from its persisted representation, emitting
+/// a debug line describing whether state was restored.
+fn restore_prior(writer: &crate::output::BlockWriter, prior_state: Option<&serde_json::Value>) -> PriorState {
+    match prior_state {
+        Some(s) => {
+            let prior = unwrap_state(s);
+            crate::debug!(
+                writer,
+                "restored state from store (hash={})",
+                short_hash(&prior.content_hash)
+            );
+            prior
+        }
+        None => {
+            crate::debug!(writer, "no prior state in store");
+            default_prior()
+        }
     }
 }
 
@@ -446,6 +478,7 @@ pub fn plan(
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = resolve_order(dag, targets)?;
     validate_active_params(dag, &order, base)?;
+    crate::debug!(output, "plan: {} block(s) in order: {}", order.len(), order.join(", "));
 
     let mut scope = base.scope.clone();
     let mut plans = Vec::new();
@@ -464,10 +497,7 @@ pub fn plan(
             source: e,
         })?;
 
-        let prior = match &node.prior_state {
-            Some(s) => unwrap_state(s),
-            None => default_prior(),
-        };
+        let prior = restore_prior(&writer, node.prior_state.as_ref());
 
         // Resolve files
         let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
@@ -482,6 +512,15 @@ pub fn plan(
         let has_dirty_dep = dag.content_deps(name).iter().any(|d| dirty.contains(d));
         let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
         let inputs_changed = has_dirty_dep || hash_result.hash != prior.content_hash;
+        crate::debug!(
+            writer,
+            "resolved {} file(s), hash={} prior_hash={} dirty_dep={} inputs_changed={}",
+            all_files.len(),
+            short_hash(&hash_result.hash),
+            short_hash(&prior.content_hash),
+            has_dirty_dep,
+            inputs_changed,
+        );
 
         let mut result = node
             .resource
@@ -517,6 +556,7 @@ pub fn plan(
             });
         }
 
+        crate::debug!(writer, "planned action: {:?}", result.action);
         let event = plan_action_to_event(&result.action);
         emit_event(&writer, event, &result.description, result.reason.as_deref());
 
@@ -545,6 +585,13 @@ pub fn apply(
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = resolve_order(dag, targets)?;
     validate_active_params(dag, &order, base)?;
+    crate::debug!(
+        output,
+        "apply: {} block(s), jobs={}, order: {}",
+        order.len(),
+        jobs,
+        order.join(", ")
+    );
     if jobs <= 1 {
         apply_order(dag, base, store, output, &order)
     } else {
@@ -561,6 +608,13 @@ pub fn test(
     jobs: usize,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = dag.test_order()?;
+    crate::debug!(
+        output,
+        "test: {} block(s), jobs={}, order: {}",
+        order.len(),
+        jobs,
+        order.join(", ")
+    );
     if jobs <= 1 {
         apply_order(dag, base, store, output, &order)
     } else {
@@ -592,10 +646,7 @@ fn apply_order(
             source: e,
         })?;
 
-        let prior = match &node.prior_state {
-            Some(s) => unwrap_state(s),
-            None => default_prior(),
-        };
+        let prior = restore_prior(&writer, node.prior_state.as_ref());
 
         // Resolve files and compute combined hash
         let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
@@ -719,6 +770,7 @@ fn apply_order(
                 dep_hashes: post_hash.dep_hashes,
             };
             store.save(name, &serde_json::to_value(&wrapped).unwrap())?;
+            crate::debug!(writer, "saved state (hash={})", short_hash(&wrapped.content_hash));
         }
 
         // Check test blocks
@@ -826,11 +878,12 @@ fn apply_order_parallel(
                     let name = &block_result.name;
 
                     // Persist state
-                    if let Some(state) = &block_result.wrapped_state
-                        && let Err(e) = store.save(name, state)
-                    {
-                        failed = Some(e.into());
-                        continue;
+                    if let Some(state) = &block_result.wrapped_state {
+                        if let Err(e) = store.save(name, state) {
+                            failed = Some(e.into());
+                            continue;
+                        }
+                        crate::debug!(output.writer(name), "saved state");
                     }
 
                     // Merge outputs into scope
@@ -898,10 +951,7 @@ fn execute_block(
         source: e,
     })?;
 
-    let prior = match &node.prior_state {
-        Some(s) => unwrap_state(s),
-        None => default_prior(),
-    };
+    let prior = restore_prior(writer, node.prior_state.as_ref());
 
     let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
         pos: node.pos.clone(),
@@ -915,6 +965,14 @@ fn execute_block(
     let mut mtime_cache = MtimeCache::new();
     let hash_result = compute_content_hash(&all_files, dag, name, store, &mut hash_cache, &mut mtime_cache, &prior);
     let inputs_changed = hash_result.hash != prior.content_hash;
+    crate::debug!(
+        writer,
+        "resolved {} file(s), hash={} prior_hash={} inputs_changed={}",
+        all_files.len(),
+        short_hash(&hash_result.hash),
+        short_hash(&prior.content_hash),
+        inputs_changed,
+    );
 
     let previously_failed = node.resource.kind() == ResourceKind::Test
         && prior.outputs.get("passed").and_then(|v| v.as_bool()) == Some(false);
@@ -961,6 +1019,13 @@ fn execute_block(
             action,
         });
     }
+
+    crate::debug!(
+        writer,
+        "planned action: {:?} previously_failed={}",
+        plan_result.action,
+        previously_failed
+    );
 
     if plan_result.action == PlanAction::None {
         writer.event(Event::Skipped, "no changes");
@@ -1010,6 +1075,7 @@ fn execute_block(
             &mut post_mtime_cache,
             &post_prior,
         );
+        crate::debug!(writer, "post-apply hash={}", short_hash(&post_hash.hash));
         let wrapped = WrappedState {
             state: new_state.clone(),
             outputs: apply_result.outputs.clone(),
@@ -1019,6 +1085,7 @@ fn execute_block(
         };
         Some(serde_json::to_value(&wrapped).expect("serialize wrapped state"))
     } else {
+        crate::debug!(writer, "apply returned no state (stateless block)");
         None
     };
 
@@ -1045,6 +1112,12 @@ fn execute_block(
 pub fn destroy(dag: &mut Dag, store: &dyn StateStore, output: &Output, targets: &[String]) -> Result<(), EngineError> {
     let mut order = resolve_order(dag, targets)?;
     order.reverse();
+    crate::debug!(
+        output,
+        "destroy: {} block(s) in reverse order: {}",
+        order.len(),
+        order.join(", ")
+    );
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
@@ -1077,6 +1150,7 @@ pub fn destroy(dag: &mut Dag, store: &dyn StateStore, output: &Output, targets: 
         })?;
 
         store.remove(name)?;
+        crate::debug!(writer, "removed state from store");
         writer.event(Event::Ok, "");
     }
 

@@ -54,6 +54,10 @@ struct Cli {
     #[arg(short = 's', long, num_args = 0..=1, default_missing_value = "")]
     schema: Option<String>,
 
+    /// Emit verbose debug information through the output system
+    #[arg(short = 'D', long)]
+    debug: bool,
+
     /// Targets or blocks to operate on
     targets: Vec<String>,
 }
@@ -160,10 +164,10 @@ fn load_module(
 }
 
 /// Create an Output formatter sized to the blocks that will actually run.
-fn make_output(dag: &bit::dag::Dag, targets: &[String]) -> Output {
+fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool) -> Output {
     let names = engine::resolve_order(dag, targets).unwrap_or_default();
     let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    Output::new(&name_refs)
+    Output::new(&name_refs).with_debug(debug)
 }
 
 fn main() {
@@ -208,14 +212,14 @@ fn main() {
 
     if cli.plan {
         let (_module, mut dag, base, store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets);
+        let output = make_output(&dag, targets, cli.debug);
         if let Err(e) = engine::plan(&mut dag, &base, store.as_ref(), &output, targets) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
     } else if cli.clean {
         let (_module, mut dag, _base, store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets);
+        let output = make_output(&dag, targets, cli.debug);
         if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, targets) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
@@ -224,7 +228,7 @@ fn main() {
         let (_module, mut dag, base, store) = load_module(&registry, &params);
         let names = dag.test_order().unwrap_or_default();
         let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        let output = Output::new(&name_refs);
+        let output = Output::new(&name_refs).with_debug(cli.debug);
         if let Err(e) = engine::test(&mut dag, &base, store.as_ref(), &output, jobs) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
@@ -257,7 +261,7 @@ fn main() {
     } else {
         // Default: apply
         let (_module, mut dag, base, store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets);
+        let output = make_output(&dag, targets, cli.debug);
         if let Err(e) = engine::apply(&mut dag, &base, store.as_ref(), &output, targets, jobs) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
