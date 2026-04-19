@@ -1,12 +1,18 @@
+# Postgres superuser for both the test and dev databases.
 let pg_user = "postgres"
+# Postgres password for both the test and dev databases.
 let pg_pass = "postgres"
+# Application database name.
 let pg_db   = "app"
+# Host port the test Postgres is exposed on.
 let pg_port = "5432"
 
 # ── JS workspace ──────────────────────────────────────────────────────────────
 
+# Install the pnpm workspace's node_modules.
 node_modules = pnpm.install {}
 
+# Build the frontend SPA into frontend/dist.
 frontend = pnpm.run {
   package    = "frontend"
   script     = "build"
@@ -14,6 +20,7 @@ frontend = pnpm.run {
   depends_on = [node_modules]
 }
 
+# Build the BFF (backend-for-frontend) into bff/dist.
 bff = pnpm.run {
   package    = "bff"
   script     = "build"
@@ -23,11 +30,13 @@ bff = pnpm.run {
 
 # ── Go service ────────────────────────────────────────────────────────────────
 
+# Build the Go backend server for the host platform.
 backend = go.exe {
   package = "./cmd/server"
   output  = "dist/backend"
 }
 
+# Build the Go backend server as a static linux binary for the container image.
 backend-linux = go.exe {
   package = "./cmd/server"
   output  = "dist/backend-linux"
@@ -37,12 +46,14 @@ backend-linux = go.exe {
 
 # ── Docker images ─────────────────────────────────────────────────────────────
 
+# Package the linux backend binary into a Docker image.
 backend-image = docker.image {
   tag        = "example-backend:latest"
   dockerfile = "docker/backend.Dockerfile"
   depends_on = [backend-linux]
 }
 
+# Package the BFF build and frontend assets into a Docker image.
 bff-image = docker.image {
   tag        = "example-bff:latest"
   dockerfile = "docker/bff.Dockerfile"
@@ -50,10 +61,11 @@ bff-image = docker.image {
 }
 
 # ── Postgres (test) ───────────────────────────────────────────────────────────
-# Host-exposed only; consumed by backend-test via localhost:5432.
-# Not attached to example-net so `bit --clean` without a target doesn't drag
-# the network into teardown while dev containers are still attached.
 
+# Test Postgres instance, host-exposed and consumed by backend-test via
+# localhost:5432. Not attached to example-net so `bit --clean` without a
+# target doesn't drag the network into teardown while dev containers are
+# still attached.
 protected postgres = docker.container {
   image       = "postgres:16"
   name        = "example-postgres"
@@ -68,8 +80,10 @@ protected postgres = docker.container {
 
 # ── Runtime network + containers ──────────────────────────────────────────────
 
+# Shared Docker network for the dev container stack.
 network = docker.network { name = "example-net" }
 
+# Dev Postgres instance on example-net, used by the running backend container.
 postgres-dev = docker.container {
   image       = "postgres:16"
   name        = "example-postgres-dev"
@@ -82,8 +96,10 @@ postgres-dev = docker.container {
   healthcheck = "pg_isready -U ${pg_user} -d ${pg_db}"
 }
 
+# Connection URL the dev backend container uses to reach postgres-dev.
 let dev_db_url = "postgres://${pg_user}:${pg_pass}@example-postgres-dev:5432/${pg_db}?sslmode=disable"
 
+# Run the backend image on example-net, wired to postgres-dev.
 backend-container = docker.container {
   image       = backend-image.ref
   name        = "example-backend"
@@ -97,6 +113,7 @@ backend-container = docker.container {
   depends_on  = [postgres-dev]
 }
 
+# Run the BFF image on example-net, proxying to backend-container.
 bff-container = docker.container {
   image       = bff-image.ref
   name        = "example-bff"
@@ -112,17 +129,20 @@ bff-container = docker.container {
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
+# Go test suite; depends on the test Postgres being up.
 backend-test = go.test {
   package    = "./..."
   flags      = ["-timeout", "30s"]
   depends_on = [postgres]
 }
 
+# BFF unit tests.
 bff-test = pnpm.test {
   package    = "bff"
   depends_on = [node_modules]
 }
 
+# Frontend unit tests.
 frontend-test = pnpm.test {
   package    = "frontend"
   depends_on = [node_modules]
@@ -130,7 +150,11 @@ frontend-test = pnpm.test {
 
 # ── Targets ───────────────────────────────────────────────────────────────────
 
+# Build all deployable artifacts.
 target build   = [frontend, bff, backend]
+# Run the full test matrix.
 target test    = [backend-test, bff-test, frontend-test]
+# Bring up the dev container stack (BFF fans out to backend and Postgres).
 target dev     = [bff-container]
+# Default target: build everything and run all tests.
 target default = [frontend, bff, backend, backend-test, bff-test, frontend-test]

@@ -1,23 +1,29 @@
+# Format Rust sources before any build step runs.
 pre fmt = rust.fmt {}
 
+# Debug build of the `bit` binary.
 debug = rust.exe {}
 
+# Release build of the `bit` binary.
 release = rust.exe {
   profile = "release"
 }
 
+# Package the release binary into a Docker image tagged `bit:latest`.
 image = docker.image {
   tag = "bit:latest"
   depends_on = [release]
 }
 
-# Tests
+# Run the Rust unit test suite.
 test = rust.test {}
 
+# Lint with clippy, treating warnings as errors.
 clippy = rust.clippy {
   flags = ["--", "-D", "warnings"]
 }
 
+# End-to-end smoke test of the debug binary.
 integration-test = exec.test {
   depends_on = [debug]
   command  = <<-EOF
@@ -26,6 +32,8 @@ integration-test = exec.test {
   EOF
 }
 
+# Latest commit SHA touching the tree-sitter grammar; used to pin the Zed
+# extension's grammar revision.
 let tree_sitter_rev = exec("git log -1 --format=%H -- integrations/tree-sitter") | trim
 
 # Sync the Zed extension's grammar rev to the latest commit touching
@@ -39,5 +47,5 @@ protected sync-zed-rev = exec {
   output = "integrations/zed/extension.toml"
 }
 
-# Build the usual suspects
+# Default target: release binary, tests, lints, and Zed rev sync.
 target default = [release, test, clippy, sync-zed-rev]
