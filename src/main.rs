@@ -51,6 +51,10 @@ struct Cli {
     #[arg(short = 'l', long)]
     list: bool,
 
+    /// Render the block dependency graph as ASCII art
+    #[arg(short = 'g', long)]
+    graph: bool,
+
     /// Show provider/resource schema (optional filter: "go", "docker.image")
     #[arg(short = 's', long, num_args = 0..=1, default_missing_value = "")]
     schema: Option<String>,
@@ -196,13 +200,13 @@ fn main() {
     }
 
     // Validate mutually exclusive mode flags
-    let mode_count = [cli.plan, cli.clean, cli.test, cli.dump, cli.list]
+    let mode_count = [cli.plan, cli.clean, cli.test, cli.dump, cli.list, cli.graph]
         .iter()
         .filter(|&&b| b)
         .count();
     if mode_count > 1 {
         eprintln!(
-            "{} --plan, --clean, --test, --dump, and --list are mutually exclusive",
+            "{} --plan, --clean, --test, --dump, --list, and --graph are mutually exclusive",
             "error:".red().bold()
         );
         process::exit(1);
@@ -243,6 +247,15 @@ fn main() {
         let (_module, dag, _base, _store) = load_module(&registry, &params);
         match dag.topo_order() {
             Ok(names) => print_block_tree(&dag, &names),
+            Err(e) => {
+                eprintln!("{} {e}", "error:".red().bold());
+                process::exit(1);
+            }
+        }
+    } else if cli.graph {
+        let (_module, dag, _base, _store) = load_module(&registry, &params);
+        match dag.topo_order() {
+            Ok(names) => println!("{}", bit::graph::render(&dag, &names)),
             Err(e) => {
                 eprintln!("{} {e}", "error:".red().bold());
                 process::exit(1);

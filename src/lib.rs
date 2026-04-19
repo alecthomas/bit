@@ -2,6 +2,7 @@ pub mod ast;
 pub mod dag;
 pub mod engine;
 pub mod expr;
+pub mod graph;
 pub mod loader;
 pub mod matrix;
 pub mod module;
