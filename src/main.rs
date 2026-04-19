@@ -182,20 +182,19 @@ fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool, long: bool)
 
 /// Compute per-node graph styles that reflect each block's planned action.
 /// Invokes `engine::plan` with a silent Output so the event stream doesn't
-/// pollute stdout before the graph is rendered. If planning fails, returns
-/// an empty map so the graph still renders plainly rather than aborting.
+/// pollute stdout before the graph is rendered. Plan errors are returned
+/// to the caller so `--plan --graph` surfaces them instead of silently
+/// degrading to an unstyled graph.
 fn plan_styles(
     dag: &mut bit::dag::Dag,
     base: &bit::loader::BaseScope,
     store: &dyn bit::state::StateStore,
     targets: &[String],
-) -> std::collections::HashMap<String, bit::graph::NodeStyle> {
+) -> Result<std::collections::HashMap<String, bit::graph::NodeStyle>, engine::EngineError> {
     use yansi::Paint;
     let silent = Output::silent();
-    let Ok(plans) = engine::plan(dag, base, store, &silent, targets) else {
-        return std::collections::HashMap::new();
-    };
-    plans
+    let plans = engine::plan(dag, base, store, &silent, targets)?;
+    Ok(plans
         .into_iter()
         .map(|bp| {
             let event = engine::plan_action_to_event(&bp.plan.action);
@@ -215,7 +214,7 @@ fn plan_styles(
             let arrow = symbol.chars().next().map(|glyph| (glyph, paint_with(symbol)));
             (bp.name, bit::graph::NodeStyle { label, rendered, arrow })
         })
-        .collect()
+        .collect())
 }
 
 fn main() {
@@ -269,7 +268,13 @@ fn main() {
             }
         };
         let styles = if cli.plan {
-            plan_styles(&mut dag, &base, store.as_ref(), targets)
+            match plan_styles(&mut dag, &base, store.as_ref(), targets) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{} {e}", "error:".red().bold());
+                    process::exit(1);
+                }
+            }
         } else {
             std::collections::HashMap::new()
         };
