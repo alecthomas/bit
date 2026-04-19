@@ -142,8 +142,12 @@ struct Layout {
     pos: HashMap<String, (usize, usize)>,
     /// Column x-offset for each layer.
     layer_x: Vec<usize>,
-    /// Width of the channel between adjacent layers.
-    channel: usize,
+    /// Turn column for each source slot with at least one edge whose target
+    /// sits on a different row. Absent for sources that only have straight
+    /// (same-row) edges. Per-source lanes keep vertical strokes from
+    /// different sources from stacking into the same column and creating
+    /// ambiguous junctions.
+    turn_col: HashMap<String, usize>,
     /// Total grid width and height.
     width: usize,
     height: usize,
@@ -270,22 +274,73 @@ impl Layout {
             }
         }
 
-        // Layer widths and x-offsets. `channel` is a fixed 4-char gap
-        // between columns; edges share the mid-channel column per
-        // source, accepting that verticals from different sources may
-        // stack as `┼` crossings.
-        let channel = 4;
+        // Per-source lane assignment. For every channel (gap between two
+        // adjacent layers), every source slot with at least one turning
+        // edge gets a dedicated column for its vertical stroke. Sources
+        // are ordered by row (then by key) so lanes fill the channel
+        // top-to-bottom in a stable, deterministic way. This prevents
+        // two different sources from sharing a turn column and stacking
+        // their verticals into ambiguous `┼` junctions.
+        let num_channels = layers.len().saturating_sub(1);
+        let mut layer_of: HashMap<String, usize> = HashMap::new();
+        for (l, lyr) in layers.iter().enumerate() {
+            for slot in lyr {
+                layer_of.insert(slot.key(), l);
+            }
+        }
+        let mut sources_per_channel: Vec<Vec<String>> = vec![Vec::new(); num_channels];
+        let mut seen: Vec<HashSet<String>> = vec![HashSet::new(); num_channels];
+        for (u, v) in &edges {
+            if row_of[u] == row_of[v] {
+                continue;
+            }
+            let lu = layer_of[u];
+            if seen[lu].insert(u.clone()) {
+                sources_per_channel[lu].push(u.clone());
+            }
+        }
+        for srcs in &mut sources_per_channel {
+            srcs.sort_by(|a, b| row_of[a].cmp(&row_of[b]).then_with(|| a.cmp(b)));
+        }
+
+        // Layer widths and per-channel widths sized to hold every lane
+        // plus room for the arrow column and a leading horizontal.
+        const MIN_CHANNEL: usize = 4;
         let layer_width: Vec<usize> = layers
             .iter()
             .map(|lyr| lyr.iter().map(|s| s.label_width()).max().unwrap_or(0))
             .collect();
+        let channels: Vec<usize> = sources_per_channel
+            .iter()
+            .map(|srcs| (srcs.len() + 2).max(MIN_CHANNEL))
+            .collect();
         let mut layer_x: Vec<usize> = Vec::with_capacity(layers.len());
         let mut cursor = 0;
-        for w in &layer_width {
+        for (l, w) in layer_width.iter().enumerate() {
             layer_x.push(cursor);
-            cursor += w + channel;
+            cursor += w;
+            if l + 1 < layer_width.len() {
+                cursor += channels[l];
+            }
         }
-        let width = cursor.saturating_sub(channel).max(1);
+        let width = cursor.max(1);
+
+        // Assign each source its lane column. Lanes pack tight against
+        // the target layer (rightmost N+1 columns are: lane_0 … lane_{N-1}
+        // then the arrow column) so incoming verticals sit close to
+        // their destination label, which reads naturally.
+        let mut turn_col: HashMap<String, usize> = HashMap::new();
+        for (k, srcs) in sources_per_channel.iter().enumerate() {
+            if srcs.is_empty() {
+                continue;
+            }
+            // `next_x - 1` is reserved for the arrow glyph into a real
+            // target; lanes occupy the columns immediately to its left.
+            let base = layer_x[k + 1] - srcs.len() - 1;
+            for (i, s) in srcs.iter().enumerate() {
+                turn_col.insert(s.clone(), base + i);
+            }
+        }
 
         // Finalise positions and canvas dimensions.
         let mut pos: HashMap<String, (usize, usize)> = HashMap::new();
@@ -303,7 +358,7 @@ impl Layout {
             edges,
             pos,
             layer_x,
-            channel,
+            turn_col,
             width,
             height,
         }
@@ -366,15 +421,11 @@ impl Layout {
             return;
         }
 
-        // Turning edge: turn in the channel between layers. Clamped so
-        // it never falls inside a label column, which would visually
-        // attach to the wrong node. Within the channel, spread by source
-        // position so verticals from different sources don't all stack
-        // at the same column.
-        let channel_start = self.layer_x[lv].saturating_sub(self.channel);
-        let channel_end = horiz_end;
-        let desired = u_right + ((horiz_end.saturating_sub(u_right)) / 2).max(1);
-        let turn = desired.clamp(channel_start, channel_end);
+        // Turning edge: turn at the source's dedicated lane column. Every
+        // source with at least one turning edge is assigned a unique
+        // column in the channel at layout time, so two sources can
+        // never share a vertical and produce an ambiguous junction.
+        let turn = self.turn_col[u];
 
         for x in u_right..turn {
             merge(grid, x, ru, HORIZ);
@@ -651,6 +702,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sibling_sources_get_distinct_turn_columns() {
+        // Two sources in the same layer, each with edges that turn into
+        // the next layer. Each source must get its own turn column so
+        // their verticals never stack into the same column — otherwise
+        // the graph becomes ambiguous about which source feeds which
+        // target.
+        let p = parents(&[("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")]);
+        let names = vec!["a".into(), "b".into(), "x".into(), "y".into()];
+        let layout = Layout::build_from_parents(&names, &p);
+        let a_col = layout.turn_col.get("a").copied().expect("source a needs a turn column");
+        let b_col = layout.turn_col.get("b").copied().expect("source b needs a turn column");
+        assert_ne!(a_col, b_col, "sibling sources must turn in distinct columns");
     }
 
     #[test]
