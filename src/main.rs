@@ -254,7 +254,7 @@ fn main() {
         }
     } else if cli.graph {
         let (_module, dag, _base, _store) = load_module(&registry, &params);
-        match dag.topo_order() {
+        match engine::resolve_order(&dag, targets) {
             Ok(names) => println!("{}", bit::graph::render(&dag, &names)),
             Err(e) => {
                 eprintln!("{} {e}", "error:".red().bold());

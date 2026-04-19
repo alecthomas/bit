@@ -5,7 +5,7 @@ let pg_pass = "postgres"
 # Application database name.
 let pg_db   = "app"
 # Host port the test Postgres is exposed on.
-let pg_port = "5432"
+let pg_port = 5432
 
 # ── JS workspace ──────────────────────────────────────────────────────────────
 
