@@ -255,6 +255,41 @@ impl Dag {
         &self.targets
     }
 
+    /// Return block names for a target (or single block) plus all of their
+    /// transitive dependents (the blocks that depend on them), in topological
+    /// order (dependencies first — callers typically reverse this for teardown).
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - A target name or a block name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DagError::UnknownBlock`] if `target` is neither a known target
+    /// nor a known block name, and [`DagError::Cycle`] if the graph contains a
+    /// cycle.
+    pub fn transitive_dependents(&self, target: &str) -> Result<Vec<String>, DagError> {
+        // Resolve either a named target (set of blocks) or a single block.
+        let block_names: Vec<String> = if let Some(t) = self.targets.get(target) {
+            t.blocks.clone()
+        } else if self.indices.contains_key(target) {
+            vec![target.to_owned()]
+        } else {
+            return Err(DagError::UnknownBlock(target.into()));
+        };
+
+        let mut needed = HashSet::new();
+        for name in &block_names {
+            let block_name = name.split('.').next().unwrap_or(name);
+            if let Some(&idx) = self.indices.get(block_name) {
+                collect_transitive_dependents(&self.graph, idx, &mut needed);
+            }
+        }
+
+        let all = self.topo_order()?;
+        Ok(all.into_iter().filter(|n| needed.contains(n)).collect())
+    }
+
     /// Return test blocks and their transitive dependencies in topological order.
     pub fn test_order(&self) -> Result<Vec<String>, DagError> {
         use crate::provider::ResourceKind;
@@ -341,6 +376,19 @@ fn collect_transitive_deps(graph: &DiGraph<DagNode, EdgeKind>, node: NodeIndex, 
     }
     for neighbor in graph.neighbors_directed(node, petgraph::Direction::Incoming) {
         collect_transitive_deps(graph, neighbor, result);
+    }
+}
+
+/// Walk outgoing edges from `node`, inserting every reachable block (inclusive)
+/// into `result`. These are the blocks that depend, directly or transitively,
+/// on `node` — i.e. blocks that must be destroyed before `node` can be.
+fn collect_transitive_dependents(graph: &DiGraph<DagNode, EdgeKind>, node: NodeIndex, result: &mut HashSet<String>) {
+    let name = &graph[node].name;
+    if !result.insert(name.clone()) {
+        return;
+    }
+    for neighbor in graph.neighbors_directed(node, petgraph::Direction::Outgoing) {
+        collect_transitive_dependents(graph, neighbor, result);
     }
 }
 

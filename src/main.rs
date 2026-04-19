@@ -31,7 +31,7 @@ struct Cli {
     #[arg(short = 'p', long)]
     plan: bool,
 
-    /// Destroy blocks in reverse dependency order
+    /// Destroy the named blocks and their dependents in reverse topological order
     #[arg(short = 'c', long)]
     clean: bool,
 

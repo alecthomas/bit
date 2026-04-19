@@ -1180,9 +1180,34 @@ fn execute_block(
     })
 }
 
-/// Destroy blocks in reverse dependency order.
+/// Destroy each target block and all of its transitive dependents, in reverse
+/// topological order (sinks first, so each block is torn down before the
+/// blocks it depends on).
+///
+/// # Arguments
+///
+/// * `targets` - Block or target names to destroy. An empty slice or the
+///   single literal `"..."` destroys every block in the DAG.
+///
+/// # Errors
+///
+/// Returns [`EngineError`] if a target is unknown, a cycle exists, or a
+/// provider fails during teardown.
 pub fn destroy(dag: &mut Dag, store: &dyn StateStore, output: &Output, targets: &[String]) -> Result<(), EngineError> {
-    let mut order = resolve_order(dag, targets)?;
+    let destroy_all = targets.is_empty() || (targets.len() == 1 && targets[0] == "...");
+    let mut order: Vec<String> = if destroy_all {
+        dag.topo_order()?
+    } else {
+        // Gather each target's transitive dependents (inclusive) and emit them
+        // in a single topological order so tie-breaking stays deterministic.
+        let mut needed = std::collections::HashSet::new();
+        for t in targets {
+            for name in dag.transitive_dependents(t)? {
+                needed.insert(name);
+            }
+        }
+        dag.topo_order()?.into_iter().filter(|n| needed.contains(n)).collect()
+    };
     order.reverse();
     crate::debug!(
         output,
@@ -1544,6 +1569,106 @@ mod tests {
         destroy(&mut dag, &store, &out, &[]).unwrap();
         // State should still exist — destroy was skipped
         assert!(!store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn destroy_target_removes_only_target_and_dependents() {
+        // Build a chain a -> b -> c (c depends on b depends on a), apply all,
+        // then destroy "b" and assert a survives while b and c are removed.
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        let file_c = dir.path().join("c.txt");
+        let input = format!(
+            concat!(
+                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"cp ${{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "c = exec {{\n  command = \"cp ${{b.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            ),
+            file_a.display(),
+            file_a.display(),
+            file_b.display(),
+            file_b.display(),
+            file_c.display(),
+            file_c.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let out = Output::new(&[]);
+        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        let mut stored: Vec<String> = store.list().unwrap();
+        stored.sort();
+        assert_eq!(stored, vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
+
+        // Cleaning "b" should remove b and its dependent c, but leave a alone.
+        let (mut dag, _base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        destroy(&mut dag, &store, &out, &["b".into()]).unwrap();
+        assert_eq!(store.list().unwrap(), vec!["a".to_owned()]);
+    }
+
+    #[test]
+    fn destroy_leaf_target_does_not_touch_dependencies() {
+        // Destroying the leaf c must leave both a and b intact — the old
+        // behaviour walked dependencies and would have removed them too.
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        let file_c = dir.path().join("c.txt");
+        let input = format!(
+            concat!(
+                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"cp ${{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "c = exec {{\n  command = \"cp ${{b.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            ),
+            file_a.display(),
+            file_a.display(),
+            file_b.display(),
+            file_b.display(),
+            file_c.display(),
+            file_c.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let out = Output::new(&[]);
+        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+
+        let (mut dag, _base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        destroy(&mut dag, &store, &out, &["c".into()]).unwrap();
+        let mut stored: Vec<String> = store.list().unwrap();
+        stored.sort();
+        assert_eq!(stored, vec!["a".to_owned(), "b".to_owned()]);
     }
 
     #[test]

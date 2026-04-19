@@ -68,7 +68,7 @@ bit ...          # apply every block regardless of the default target
 bit build        # apply a specific target or block
 bit --plan       # show what would change
 bit --test       # run test blocks
-bit --clean      # destroy in reverse dependency order
+bit --clean      # destroy targets and their dependents in reverse topological order
 bit --list       # list all blocks
 bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
