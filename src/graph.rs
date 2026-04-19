@@ -25,6 +25,28 @@ const T_LEFT: char = '┤';
 const CROSS: char = '┼';
 const ARROW: char = '→';
 
+/// Per-node styling for [`render`]. The caller supplies both a visible
+/// label (used to compute column widths at layout time) and a rendered
+/// string (typically wrapped in ANSI colour codes) that is emitted in
+/// place of the label at output time. Keeping these separate means the
+/// graph module stays agnostic of any particular colour library.
+///
+/// When `arrow` is set, the `→` glyph on every incoming edge that
+/// terminates at this node is replaced with the given single-character
+/// marker (its `char`), and the rendered form (often ANSI-wrapped) is
+/// emitted in that cell. Graph roots — nodes with no incoming edges —
+/// have no arrow to replace and therefore show nothing extra.
+#[derive(Clone, Debug)]
+pub struct NodeStyle {
+    /// Visible text for width calculations — no ANSI sequences.
+    pub label: String,
+    /// Text emitted in the final output, typically ANSI-wrapped.
+    pub rendered: String,
+    /// Optional replacement for the arrow glyph on edges terminating at
+    /// this node: `(visible_char, rendered_text)`.
+    pub arrow: Option<(char, String)>,
+}
+
 /// Render the DAG as a left-to-right ASCII graph, grouped by phase.
 ///
 /// Blocks are partitioned into pre / default / post phases, and each
@@ -33,7 +55,12 @@ const ARROW: char = '→';
 /// layout implies ordering. Within a phase, all parent edges are
 /// rendered (both content and ordering), since the graph represents
 /// run-time relationships.
-pub fn render(dag: &Dag, names: &[String]) -> String {
+///
+/// # Arguments
+///
+/// * `styles` - Optional per-node label overrides and colour wrappers.
+///   Nodes missing from the map render as plain names with no colour.
+pub fn render(dag: &Dag, names: &[String], styles: &HashMap<String, NodeStyle>) -> String {
     let mut pre: Vec<String> = Vec::new();
     let mut default: Vec<String> = Vec::new();
     let mut post: Vec<String> = Vec::new();
@@ -45,16 +72,19 @@ pub fn render(dag: &Dag, names: &[String]) -> String {
         }
     }
 
-    let parts: Vec<Vec<Vec<char>>> = [pre, default, post]
+    // Each phase is rendered as a list of (emitted_line, visible_width)
+    // pairs. Visible width is what counts for inter-phase padding; the
+    // emitted line may additionally contain ANSI escape sequences.
+    let parts: Vec<Vec<(String, usize)>> = [pre, default, post]
         .iter()
         .filter(|phase| !phase.is_empty())
-        .map(|phase| render_phase(dag, phase).lines().map(|l| l.chars().collect()).collect())
+        .map(|phase| render_phase(dag, phase, styles))
         .collect();
 
     let height = parts.iter().map(|p| p.len()).max().unwrap_or(0);
     let widths: Vec<usize> = parts
         .iter()
-        .map(|p| p.iter().map(|r| r.len()).max().unwrap_or(0))
+        .map(|p| p.iter().map(|(_, w)| *w).max().unwrap_or(0))
         .collect();
     const GUTTER: usize = 4;
 
@@ -66,12 +96,11 @@ pub fn render(dag: &Dag, names: &[String]) -> String {
                     out.push(' ');
                 }
             }
-            let line: &[char] = part.get(row).map(|l| l.as_slice()).unwrap_or(&[]);
-            for c in line {
-                out.push(*c);
-            }
+            let empty = (String::new(), 0usize);
+            let (line, visible_w) = part.get(row).unwrap_or(&empty);
+            out.push_str(line);
             if i + 1 < parts.len() {
-                for _ in line.len()..widths[i] {
+                for _ in *visible_w..widths[i] {
                     out.push(' ');
                 }
             }
@@ -81,7 +110,7 @@ pub fn render(dag: &Dag, names: &[String]) -> String {
     out.trim_end_matches('\n').to_owned()
 }
 
-fn render_phase(dag: &Dag, names: &[String]) -> String {
+fn render_phase(dag: &Dag, names: &[String], styles: &HashMap<String, NodeStyle>) -> Vec<(String, usize)> {
     let visible: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
     let mut parents: HashMap<String, Vec<String>> = HashMap::new();
     for name in names {
@@ -93,41 +122,63 @@ fn render_phase(dag: &Dag, names: &[String]) -> String {
                 .collect(),
         );
     }
-    render_parents(names, &parents)
+    let mut labels: HashMap<String, String> = HashMap::new();
+    let mut rendered: HashMap<String, String> = HashMap::new();
+    let mut arrows: HashMap<String, (char, String)> = HashMap::new();
+    for name in names {
+        if let Some(style) = styles.get(name) {
+            labels.insert(name.clone(), style.label.clone());
+            rendered.insert(name.clone(), style.rendered.clone());
+            if let Some(arrow) = &style.arrow {
+                arrows.insert(name.clone(), arrow.clone());
+            }
+        }
+    }
+    Layout::build_from_parents(names, &parents, &labels).rasterise(&rendered, &arrows)
 }
 
 /// Render from a precomputed parents map. `topo` must list every node in
 /// topological order (parents before children). Exposed for tests that
 /// can't easily construct a full `Dag`.
+#[cfg(test)]
 fn render_parents(topo: &[String], parents: &HashMap<String, Vec<String>>) -> String {
-    Layout::build_from_parents(topo, parents).rasterise()
+    let layout = Layout::build_from_parents(topo, parents, &HashMap::new());
+    layout
+        .rasterise(&HashMap::new(), &HashMap::new())
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-/// A layout slot. Real nodes carry their block name; dummies are
-/// waypoints inserted so long edges traverse adjacent columns only.
-/// `edge_id` identifies the originating edge; `hop` distinguishes
-/// multiple dummies along the same edge.
+/// A layout slot. Real nodes carry a `key` (the block name, used for edge
+/// lookups) and a separate `label` (what gets drawn and measured). The two
+/// differ when the caller supplies a decorated label — for example `+ foo`
+/// with a plan symbol prepended — so we can lay out around the rendered
+/// width while still routing edges by name. Dummies are waypoints inserted
+/// so long edges traverse adjacent columns only; `edge_id` identifies the
+/// originating edge, `hop` distinguishes multiple dummies along it.
 #[derive(Clone, Debug)]
 enum Slot {
-    Real(String),
+    Real { key: String, label: String },
     Dummy { edge_id: usize, hop: usize },
 }
 
 impl Slot {
     fn key(&self) -> String {
         match self {
-            Slot::Real(n) => n.clone(),
+            Slot::Real { key, .. } => key.clone(),
             Slot::Dummy { edge_id, hop } => format!("__dummy_{edge_id}_{hop}"),
         }
     }
 
     fn is_real(&self) -> bool {
-        matches!(self, Slot::Real(_))
+        matches!(self, Slot::Real { .. })
     }
 
     fn label_width(&self) -> usize {
         match self {
-            Slot::Real(n) => n.chars().count(),
+            Slot::Real { label, .. } => label.chars().count(),
             Slot::Dummy { .. } => 0,
         }
     }
@@ -154,7 +205,11 @@ struct Layout {
 }
 
 impl Layout {
-    fn build_from_parents(names: &[String], parents: &HashMap<String, Vec<String>>) -> Self {
+    fn build_from_parents(
+        names: &[String],
+        parents: &HashMap<String, Vec<String>>,
+        labels: &HashMap<String, String>,
+    ) -> Self {
         let mut children: HashMap<String, Vec<String>> = HashMap::new();
         let mut raw_edges: Vec<(String, String)> = Vec::new();
         for name in names {
@@ -179,12 +234,17 @@ impl Layout {
         }
         let max_layer = layer.values().copied().max().unwrap_or(0);
 
-        // Seed each layer with real nodes, alphabetically.
+        // Seed each layer with real nodes, alphabetically. The label
+        // defaults to the block name when no override is provided.
         let mut layers: Vec<Vec<Slot>> = vec![Vec::new(); max_layer + 1];
         let mut sorted = names.to_vec();
         sorted.sort();
         for name in &sorted {
-            layers[layer[name]].push(Slot::Real(name.clone()));
+            let label = labels.get(name).cloned().unwrap_or_else(|| name.clone());
+            layers[layer[name]].push(Slot::Real {
+                key: name.clone(),
+                label,
+            });
         }
 
         // Expand long edges with dummy waypoints; rebuild the edge list so
@@ -364,18 +424,39 @@ impl Layout {
         }
     }
 
-    fn rasterise(&self) -> String {
+    /// Rasterise the layout to a list of `(emitted_line, visible_width)`
+    /// pairs, one per row. When a label key appears in `rendered`, the
+    /// emitted string substitutes the rendered form (typically ANSI-
+    /// wrapped) for the label's characters; the visible width still
+    /// reflects the original label.
+    ///
+    /// When a real node's key appears in `arrows`, every incoming arrow
+    /// glyph terminating at that node is replaced with the visible
+    /// character from the tuple, and the rendered form (e.g. an ANSI-
+    /// coloured symbol) is substituted at emit time. Graph roots have
+    /// no arrow to replace, so their entries in `arrows` are ignored.
+    fn rasterise(
+        &self,
+        rendered: &HashMap<String, String>,
+        arrows: &HashMap<String, (char, String)>,
+    ) -> Vec<(String, usize)> {
         let mut grid: Vec<Vec<char>> = vec![vec![' '; self.width]; self.height];
+        // Label / arrow regions per row: (start_col, visible_width, emit_text).
+        let mut per_row: Vec<Vec<(usize, usize, String)>> = vec![Vec::new(); self.height];
 
-        // Draw real-node labels.
+        // Draw real-node labels onto the grid and record each label's
+        // footprint so the final emit can swap in the rendered form.
         for lyr in &self.layers {
             for slot in lyr {
-                let Slot::Real(name) = slot else { continue };
+                let Slot::Real { key, label } = slot else { continue };
                 let (l, r) = self.pos[&slot.key()];
                 let x = self.layer_x[l];
-                for (i, ch) in name.chars().enumerate() {
+                let width = label.chars().count();
+                for (i, ch) in label.chars().enumerate() {
                     grid[r][x + i] = ch;
                 }
+                let emit = rendered.get(key).cloned().unwrap_or_else(|| label.clone());
+                per_row[r].push((x, width, emit));
             }
         }
 
@@ -384,13 +465,61 @@ impl Layout {
             self.draw_edge(&mut grid, u, v);
         }
 
+        // Arrow-glyph substitution. Every real node in layer >= 1 has its
+        // incoming edges terminating at `(layer_x[l] - 1, row)`; if a
+        // symbol is configured for that node, overwrite the `→` with
+        // the visible character and record the rendered form so the
+        // emit loop swaps in any ANSI colouring.
+        for lyr in &self.layers {
+            for slot in lyr {
+                let Slot::Real { key, .. } = slot else { continue };
+                let Some((glyph, emit)) = arrows.get(key) else { continue };
+                let (l, r) = self.pos[&slot.key()];
+                if l == 0 {
+                    // Graph root — no incoming edge, so no arrow to replace.
+                    continue;
+                }
+                let col = self.layer_x[l] - 1;
+                if grid[r][col] == ARROW {
+                    grid[r][col] = *glyph;
+                    per_row[r].push((col, 1, emit.clone()));
+                }
+            }
+        }
+
+        for row in &mut per_row {
+            row.sort_by_key(|(start, ..)| *start);
+        }
+
+        // Emit each row, substituting the rendered form at label columns
+        // and computing visible width (trailing spaces trimmed) so the
+        // caller can pad correctly when composing phases side-by-side.
         grid.into_iter()
-            .map(|row| {
-                let s: String = row.into_iter().collect();
-                s.trim_end().to_owned()
+            .enumerate()
+            .map(|(r, row)| {
+                let regions = &per_row[r];
+                let mut out = String::new();
+                let mut col = 0;
+                let mut rgn_i = 0;
+                while col < row.len() {
+                    if rgn_i < regions.len() && regions[rgn_i].0 == col {
+                        let (_, w, ref text) = regions[rgn_i];
+                        out.push_str(text);
+                        col += w;
+                        rgn_i += 1;
+                    } else {
+                        out.push(row[col]);
+                        col += 1;
+                    }
+                }
+                // Compute visible width by counting non-trailing-space
+                // chars in the raw grid row, then trim trailing spaces
+                // from the emitted string (ANSI bytes never look like
+                // spaces so this is safe).
+                let visible_w = row.iter().rposition(|c| *c != ' ').map(|i| i + 1).unwrap_or(0);
+                (out.trim_end_matches(' ').to_owned(), visible_w)
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect()
     }
 
     fn draw_edge(&self, grid: &mut [Vec<char>], u: &str, v: &str) {
@@ -490,9 +619,9 @@ fn slot_tiebreak(a: &Slot, b: &Slot) -> std::cmp::Ordering {
     // Real nodes sort before dummies on ties, so dummies get out of the
     // way and real nodes keep their parent-aligned rows.
     match (a, b) {
-        (Slot::Real(_), Slot::Dummy { .. }) => std::cmp::Ordering::Less,
-        (Slot::Dummy { .. }, Slot::Real(_)) => std::cmp::Ordering::Greater,
-        (Slot::Real(n1), Slot::Real(n2)) => n1.cmp(n2),
+        (Slot::Real { .. }, Slot::Dummy { .. }) => std::cmp::Ordering::Less,
+        (Slot::Dummy { .. }, Slot::Real { .. }) => std::cmp::Ordering::Greater,
+        (Slot::Real { key: a, .. }, Slot::Real { key: b, .. }) => a.cmp(b),
         (Slot::Dummy { edge_id: a, hop: ha }, Slot::Dummy { edge_id: b, hop: hb }) => a.cmp(b).then(ha.cmp(hb)),
     }
 }
@@ -713,10 +842,51 @@ mod tests {
         // target.
         let p = parents(&[("a", "x"), ("a", "y"), ("b", "x"), ("b", "y")]);
         let names = vec!["a".into(), "b".into(), "x".into(), "y".into()];
-        let layout = Layout::build_from_parents(&names, &p);
+        let layout = Layout::build_from_parents(&names, &p, &HashMap::new());
         let a_col = layout.turn_col.get("a").copied().expect("source a needs a turn column");
         let b_col = layout.turn_col.get("b").copied().expect("source b needs a turn column");
         assert_ne!(a_col, b_col, "sibling sources must turn in distinct columns");
+    }
+
+    #[test]
+    fn rasterise_substitutes_rendered_label() {
+        // Decorating "a" with an ANSI-styled rendered form must not shift
+        // the visible layout: "b" still renders one column past "a"'s
+        // visible width, regardless of how many ANSI bytes the rendered
+        // form adds.
+        let p = parents(&[("a", "b")]);
+        let names = vec!["a".into(), "b".into()];
+        let mut labels = HashMap::new();
+        labels.insert("a".to_owned(), "a".to_owned());
+        let layout = Layout::build_from_parents(&names, &p, &labels);
+        let mut rendered = HashMap::new();
+        rendered.insert("a".to_owned(), "\x1b[32ma\x1b[0m".to_owned());
+        let rows = layout.rasterise(&rendered, &HashMap::new());
+        assert_eq!(rows.len(), 1);
+        let (line, visible_w) = &rows[0];
+        // Line contains ANSI escapes…
+        assert!(line.contains("\x1b[32m"), "expected ANSI prefix in {line:?}");
+        // …but visible width reflects the raw glyphs (a + horizontals + → + b).
+        assert!(*visible_w > 0);
+        // And "b" still appears as a plain literal in the output.
+        assert!(line.contains('b'));
+    }
+
+    #[test]
+    fn rasterise_replaces_arrow_with_plan_glyph() {
+        // A non-root node with an arrow override should have its incoming
+        // `→` replaced by the configured glyph. The root `a` has no
+        // incoming arrow, so any override for it is silently ignored.
+        let p = parents(&[("a", "b")]);
+        let names = vec!["a".into(), "b".into()];
+        let layout = Layout::build_from_parents(&names, &p, &HashMap::new());
+        let mut arrows = HashMap::new();
+        arrows.insert("b".to_owned(), ('+', "+".to_owned()));
+        arrows.insert("a".to_owned(), ('+', "+".to_owned()));
+        let rows = layout.rasterise(&HashMap::new(), &arrows);
+        let (line, _) = &rows[0];
+        assert!(line.contains('+'), "expected + arrow replacement in {line:?}");
+        assert!(!line.contains(ARROW), "expected → to be gone in {line:?}");
     }
 
     #[test]

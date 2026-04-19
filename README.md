@@ -70,10 +70,18 @@ bit --plan       # show what would change
 bit --test       # run test blocks
 bit --clean      # destroy targets and their dependents in reverse topological order
 bit --list       # list all blocks
+bit --graph      # render the DAG as an ASCII graph
+bit --plan --graph  # …and colour each node by its planned action
 bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
 bit --schema     # show provider/resource schemas
 ```
+
+All block/target-taking modes (`bit`, `--plan`, `--clean`, `--graph`, `--dump`)
+accept the same positional selector: no argument uses the `default` target
+(or every block if none), `...` forces every block, or name one or more
+targets/blocks to scope the operation. `--clean <name>` destroys that block
+plus anything that depends on it, in reverse topological order.
 
 ## Language
 

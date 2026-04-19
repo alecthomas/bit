@@ -180,6 +180,44 @@ fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool, long: bool)
     Output::new(&name_refs).with_debug(debug).with_long(long)
 }
 
+/// Compute per-node graph styles that reflect each block's planned action.
+/// Invokes `engine::plan` with a silent Output so the event stream doesn't
+/// pollute stdout before the graph is rendered. If planning fails, returns
+/// an empty map so the graph still renders plainly rather than aborting.
+fn plan_styles(
+    dag: &mut bit::dag::Dag,
+    base: &bit::loader::BaseScope,
+    store: &dyn bit::state::StateStore,
+    targets: &[String],
+) -> std::collections::HashMap<String, bit::graph::NodeStyle> {
+    use yansi::Paint;
+    let silent = Output::silent();
+    let Ok(plans) = engine::plan(dag, base, store, &silent, targets) else {
+        return std::collections::HashMap::new();
+    };
+    plans
+        .into_iter()
+        .map(|bp| {
+            let event = engine::plan_action_to_event(&bp.plan.action);
+            let label = bp.name.clone();
+            let dim = matches!(event, bit::output::Event::NoChange | bit::output::Event::Protected);
+            let paint_with = |text: &str| {
+                let painted = text.paint(event.color());
+                if dim {
+                    painted.dim().to_string()
+                } else {
+                    painted.to_string()
+                }
+            };
+            let rendered = paint_with(&label);
+            // Event::symbol() returns a single-char marker (`+`, `~`, `-`, `·`, `⊘`).
+            let symbol = event.symbol();
+            let arrow = symbol.chars().next().map(|glyph| (glyph, paint_with(symbol)));
+            (bp.name, bit::graph::NodeStyle { label, rendered, arrow })
+        })
+        .collect()
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -199,14 +237,15 @@ fn main() {
         return;
     }
 
-    // Validate mutually exclusive mode flags
-    let mode_count = [cli.plan, cli.clean, cli.test, cli.dump, cli.list, cli.graph]
-        .iter()
-        .filter(|&&b| b)
-        .count();
-    if mode_count > 1 {
+    // Validate mutually exclusive mode flags. `--plan` and `--graph` are
+    // the one permitted combination: together they render a coloured
+    // graph annotated with each block's planned action.
+    let exclusive_modes = [cli.clean, cli.test, cli.dump, cli.list];
+    let exclusive_count = exclusive_modes.iter().filter(|&&b| b).count();
+    let with_plan_or_graph = cli.plan || cli.graph;
+    if exclusive_count > 1 || (exclusive_count == 1 && with_plan_or_graph) {
         eprintln!(
-            "{} --plan, --clean, --test, --dump, --list, and --graph are mutually exclusive",
+            "{} --plan, --clean, --test, --dump, --list, and --graph are mutually exclusive (except --plan --graph)",
             "error:".red().bold()
         );
         process::exit(1);
@@ -220,7 +259,22 @@ fn main() {
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
     let targets = &cli.targets;
 
-    if cli.plan {
+    if cli.graph {
+        let (_module, mut dag, base, store) = load_module(&registry, &params);
+        let names = match engine::resolve_order(&dag, targets) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("{} {e}", "error:".red().bold());
+                process::exit(1);
+            }
+        };
+        let styles = if cli.plan {
+            plan_styles(&mut dag, &base, store.as_ref(), targets)
+        } else {
+            std::collections::HashMap::new()
+        };
+        println!("{}", bit::graph::render(&dag, &names, &styles));
+    } else if cli.plan {
         let (_module, mut dag, base, store) = load_module(&registry, &params);
         let output = make_output(&dag, targets, cli.debug, cli.long);
         if let Err(e) = engine::plan(&mut dag, &base, store.as_ref(), &output, targets) {
@@ -247,15 +301,6 @@ fn main() {
         let (_module, dag, _base, _store) = load_module(&registry, &params);
         match dag.topo_order() {
             Ok(names) => print_block_tree(&dag, &names),
-            Err(e) => {
-                eprintln!("{} {e}", "error:".red().bold());
-                process::exit(1);
-            }
-        }
-    } else if cli.graph {
-        let (_module, dag, _base, _store) = load_module(&registry, &params);
-        match engine::resolve_order(&dag, targets) {
-            Ok(names) => println!("{}", bit::graph::render(&dag, &names)),
             Err(e) => {
                 eprintln!("{} {e}", "error:".red().bold());
                 process::exit(1);

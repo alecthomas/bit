@@ -451,7 +451,7 @@ fn expand_resolved(entries: &[ResolvedFile], glob_cache: &mut GlobCache) -> Vec<
     files
 }
 
-fn plan_action_to_event(action: &PlanAction) -> Event {
+pub fn plan_action_to_event(action: &PlanAction) -> Event {
     match action {
         PlanAction::Create => Event::Create,
         PlanAction::Update => Event::Update,

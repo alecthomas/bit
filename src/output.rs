@@ -63,7 +63,7 @@ pub enum Event {
 }
 
 impl Event {
-    fn symbol(&self) -> &'static str {
+    pub fn symbol(&self) -> &'static str {
         match self {
             Event::Starting => "▶",
             Event::Skipped => "·",
@@ -148,6 +148,10 @@ pub struct Output {
     inner: Arc<Mutex<OutputInner>>,
     /// Whether `debug()` calls should actually emit output.
     debug: bool,
+    /// When true, all event and stream dispatches are dropped — used when
+    /// an engine function is invoked only for its return value (e.g.
+    /// computing plan state to colour `--graph`).
+    silent: bool,
     /// Reference timestamp used to compute `+elapsed` prefixes on debug lines.
     start: Instant,
 }
@@ -200,6 +204,7 @@ impl Output {
                 live_rows: 0,
             })),
             debug: false,
+            silent: false,
             start: Instant::now(),
         }
     }
@@ -208,6 +213,15 @@ impl Output {
     pub fn with_debug(mut self, debug: bool) -> Self {
         self.debug = debug;
         self
+    }
+
+    /// Suppress all event and stream output. Used when an engine function
+    /// is invoked only for its return value and the textual event stream
+    /// would be noise.
+    pub fn silent() -> Self {
+        let mut out = Self::new(&[]);
+        out.silent = true;
+        out
     }
 
     /// Force long-form line-by-line streaming, disabling live scrolling
@@ -262,6 +276,9 @@ impl Output {
     }
 
     fn dispatch_stream(&self, name: &str, color: Color, indent: Option<usize>, content: &str, stderr: bool) {
+        if self.silent {
+            return;
+        }
         let mut inner = self.inner.lock().unwrap();
         let lines = inner.fmt_stream_line(name, color, indent, content, stderr);
         let stdout = io::stdout();
@@ -270,6 +287,9 @@ impl Output {
     }
 
     fn dispatch_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str, raw: bool) {
+        if self.silent {
+            return;
+        }
         let mut inner = self.inner.lock().unwrap();
         let lines = if raw {
             inner.fmt_event_raw(name, event, indent, message)
