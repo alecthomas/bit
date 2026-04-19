@@ -26,11 +26,11 @@ integration-test = exec.test {
   EOF
 }
 
+let tree_sitter_rev = exec("git log -1 --format=%H -- integrations/tree-sitter") | trim
+
 # Sync the Zed extension's grammar rev to the latest commit touching
 # integrations/tree-sitter. The SHA is baked into the command, so bit's
 # content hash re-runs this only when a new commit lands.
-let tree_sitter_rev = exec("git log -1 --format=%H -- integrations/tree-sitter") | trim
-
 protected sync-zed-rev = exec {
   command = <<-EOF
     sed -i.bak 's|^rev = ".*"|rev = "${tree_sitter_rev}"|' integrations/zed/extension.toml

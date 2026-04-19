@@ -1,5 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
+use petgraph::Direction;
 use petgraph::algo::toposort;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
@@ -156,9 +158,62 @@ impl Dag {
     }
 
     /// Return block names in topological order (dependencies first).
+    /// Ties between independent nodes are broken alphabetically on block
+    /// name, so the order is deterministic across runs.
     pub fn topo_order(&self) -> Result<Vec<String>, DagError> {
-        let sorted = toposort(&self.graph, None).map_err(|_| DagError::Cycle)?;
-        Ok(sorted.into_iter().map(|idx| self.graph[idx].name.clone()).collect())
+        let mut in_degree: HashMap<NodeIndex, usize> = HashMap::with_capacity(self.graph.node_count());
+        for idx in self.graph.node_indices() {
+            in_degree.insert(idx, self.graph.neighbors_directed(idx, Direction::Incoming).count());
+        }
+
+        // Min-heap keyed on block name for deterministic tie-breaking.
+        let mut ready: BinaryHeap<Reverse<(String, NodeIndex)>> = BinaryHeap::new();
+        for (&idx, &deg) in &in_degree {
+            if deg == 0 {
+                ready.push(Reverse((self.graph[idx].name.clone(), idx)));
+            }
+        }
+
+        let mut out = Vec::with_capacity(in_degree.len());
+        while let Some(Reverse((_, idx))) = ready.pop() {
+            out.push(self.graph[idx].name.clone());
+            for nbr in self.graph.neighbors_directed(idx, Direction::Outgoing) {
+                let Some(deg) = in_degree.get_mut(&nbr) else { continue };
+                *deg -= 1;
+                if *deg == 0 {
+                    ready.push(Reverse((self.graph[nbr].name.clone(), nbr)));
+                }
+            }
+        }
+
+        if out.len() != self.graph.node_count() {
+            return Err(DagError::Cycle);
+        }
+        Ok(out)
+    }
+
+    /// Return the preferred parent for tree rendering: the
+    /// content-coupled (`depends_on` / reference) parent sorted
+    /// alphabetically, falling back to the alphabetically-first
+    /// ordering-only parent (e.g. a synthetic phase edge).
+    /// Returns `None` for root nodes.
+    pub fn primary_parent(&self, name: &str) -> Option<String> {
+        let idx = *self.indices.get(name)?;
+        let mut dep_parents: Vec<String> = Vec::new();
+        let mut ord_parents: Vec<String> = Vec::new();
+        for edge in self.graph.edges_directed(idx, Direction::Incoming) {
+            let parent = self.graph[edge.source()].name.clone();
+            match edge.weight() {
+                EdgeKind::Dependency => dep_parents.push(parent),
+                EdgeKind::Ordering => ord_parents.push(parent),
+            }
+        }
+        dep_parents.sort();
+        ord_parents.sort();
+        dep_parents
+            .into_iter()
+            .next()
+            .or_else(|| ord_parents.into_iter().next())
     }
 
     /// Return block names for a target in topological order.

@@ -242,17 +242,7 @@ fn main() {
     } else if cli.list {
         let (_module, dag, _base, _store) = load_module(&registry, &params);
         match dag.topo_order() {
-            Ok(names) => {
-                for name in &names {
-                    let node = dag.get_node(name).expect("node in topo order");
-                    let pad = "  ".repeat(dag.depth(name));
-                    let typ = format!("{}.{}", node.provider, node.resource_name);
-                    match &node.doc {
-                        Some(doc) => println!("{pad}{name} ({}) — {}", typ.dim(), doc.dim()),
-                        None => println!("{pad}{name} ({})", typ.dim()),
-                    }
-                }
-            }
+            Ok(names) => print_block_tree(&dag, &names),
             Err(e) => {
                 eprintln!("{} {e}", "error:".red().bold());
                 process::exit(1);
@@ -272,6 +262,65 @@ fn main() {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
+    }
+}
+
+/// Render the DAG as a tree, grouping blocks under their primary parent
+/// (content-coupled dep preferred over synthetic ordering edges, ties
+/// broken alphabetically). Blocks with additional parents get an
+/// `(also: x, y)` suffix so the extra relationships aren't lost.
+fn print_block_tree(dag: &bit::dag::Dag, names: &[String]) {
+    use std::collections::HashMap;
+
+    let mut children: HashMap<Option<String>, Vec<String>> = HashMap::new();
+    for name in names {
+        let parent = dag.primary_parent(name);
+        children.entry(parent).or_default().push(name.clone());
+    }
+    for kids in children.values_mut() {
+        kids.sort();
+    }
+    print_block_tree_node(dag, &children, None, 0);
+}
+
+fn print_block_tree_node(
+    dag: &bit::dag::Dag,
+    children: &std::collections::HashMap<Option<String>, Vec<String>>,
+    parent: Option<&str>,
+    depth: usize,
+) {
+    let key = parent.map(String::from);
+    let Some(kids) = children.get(&key) else { return };
+    for name in kids {
+        let Some(node) = dag.get_node(name) else { continue };
+        let pad = "  ".repeat(depth);
+        let typ = format!("{}.{}", node.provider, node.resource_name);
+        // Show extra content-coupled parents inline. Phase-edge
+        // ordering parents are omitted — they apply to every default
+        // block and would just be noise.
+        let primary = dag.primary_parent(name);
+        let mut others: Vec<String> = dag
+            .content_deps(name)
+            .into_iter()
+            .filter(|p| Some(p.as_str()) != primary.as_deref())
+            .collect();
+        others.sort();
+        let also = if others.is_empty() {
+            String::new()
+        } else {
+            format!(" (also: {})", others.join(", "))
+        };
+        match &node.doc {
+            Some(doc) => {
+                // Terse listing: first line only, ellipsis if truncated.
+                let mut lines = doc.lines();
+                let first = lines.next().unwrap_or("");
+                let suffix = if lines.next().is_some() { "…" } else { "" };
+                println!("{pad}{name} ({}) — {}{}{also}", typ.dim(), first.dim(), suffix.dim());
+            }
+            None => println!("{pad}{name} ({}){also}", typ.dim()),
+        }
+        print_block_tree_node(dag, children, Some(name), depth + 1);
     }
 }
 

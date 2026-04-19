@@ -416,6 +416,40 @@ b = exec {
     }
 
     #[test]
+    fn topo_order_is_stable_and_alphabetical() {
+        // Three independent blocks defined out of alphabetical order.
+        // Stable order should be alphabetical regardless of input order.
+        let input = r#"
+zebra = exec { command = "z" output = "z" }
+apple = exec { command = "a" output = "a" }
+mango = exec { command = "m" output = "m" }
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        assert_eq!(dag.topo_order().unwrap(), vec!["apple", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn primary_parent_prefers_dependency_over_ordering() {
+        // integration-test content-depends on debug and has a phase-edge
+        // ordering-dep on fmt. Primary should be debug.
+        let input = r#"
+pre fmt = exec { command = "fmt" output = "fmt" }
+debug = exec { command = "d" output = "d" }
+integration-test = exec {
+  command  = "t"
+  output   = "t"
+  depends_on = [debug]
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        assert_eq!(dag.primary_parent("integration-test"), Some("debug".into()));
+        assert_eq!(dag.primary_parent("debug"), Some("fmt".into()));
+        assert_eq!(dag.primary_parent("fmt"), None);
+    }
+
+    #[test]
     fn load_target() {
         let input = r#"
 server = exec {
