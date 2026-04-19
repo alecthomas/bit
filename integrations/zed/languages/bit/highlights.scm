@@ -27,6 +27,7 @@
 (heredoc) @string
 (escape_sequence) @string.escape
 (number) @number
+(duration) @number
 (boolean) @boolean
 (null) @constant.builtin
 

@@ -1,0 +1,7 @@
+# Tree-sitter generated parser + metadata (regenerated via `tree-sitter generate`).
+integrations/tree-sitter/src/parser.c linguist-generated=true
+integrations/tree-sitter/src/grammar.json linguist-generated=true
+integrations/tree-sitter/src/node-types.json linguist-generated=true
+
+# Tree-sitter runtime headers (vendored from the tree-sitter CLI).
+integrations/tree-sitter/src/tree_sitter/*.h linguist-vendored=true

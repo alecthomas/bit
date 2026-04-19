@@ -24,6 +24,10 @@
             "named": true
           },
           {
+            "type": "duration",
+            "named": true
+          },
+          {
             "type": "heredoc",
             "named": true
           },
@@ -75,6 +79,10 @@
           },
           {
             "type": "call",
+            "named": true
+          },
+          {
+            "type": "duration",
             "named": true
           },
           {
@@ -131,6 +139,10 @@
           },
           {
             "type": "call",
+            "named": true
+          },
+          {
+            "type": "duration",
             "named": true
           },
           {
@@ -191,6 +203,10 @@
           },
           {
             "type": "call",
+            "named": true
+          },
+          {
+            "type": "duration",
             "named": true
           },
           {
@@ -361,6 +377,10 @@
           "named": true
         },
         {
+          "type": "duration",
+          "named": true
+        },
+        {
           "type": "heredoc",
           "named": true
         },
@@ -453,6 +473,10 @@
             "named": true
           },
           {
+            "type": "duration",
+            "named": true
+          },
+          {
             "type": "heredoc",
             "named": true
           },
@@ -526,6 +550,10 @@
             "named": true
           },
           {
+            "type": "duration",
+            "named": true
+          },
+          {
             "type": "heredoc",
             "named": true
           },
@@ -588,6 +616,10 @@
             "named": true
           },
           {
+            "type": "duration",
+            "named": true
+          },
+          {
             "type": "heredoc",
             "named": true
           },
@@ -647,6 +679,10 @@
           },
           {
             "type": "call",
+            "named": true
+          },
+          {
+            "type": "duration",
             "named": true
           },
           {
@@ -715,6 +751,10 @@
         },
         {
           "type": "call",
+          "named": true
+        },
+        {
+          "type": "duration",
           "named": true
         },
         {
@@ -805,6 +845,10 @@
             "named": true
           },
           {
+            "type": "duration",
+            "named": true
+          },
+          {
             "type": "heredoc",
             "named": true
           },
@@ -870,6 +914,10 @@
         },
         {
           "type": "call",
+          "named": true
+        },
+        {
+          "type": "duration",
           "named": true
         },
         {
@@ -985,6 +1033,10 @@
           },
           {
             "type": "call",
+            "named": true
+          },
+          {
+            "type": "duration",
             "named": true
           },
           {
@@ -1115,6 +1167,10 @@
             "named": true
           },
           {
+            "type": "duration",
+            "named": true
+          },
+          {
             "type": "heredoc",
             "named": true
           },
@@ -1180,6 +1236,10 @@
           },
           {
             "type": "call",
+            "named": true
+          },
+          {
+            "type": "duration",
             "named": true
           },
           {
@@ -1282,6 +1342,10 @@
             "named": true
           },
           {
+            "type": "duration",
+            "named": true
+          },
+          {
             "type": "heredoc",
             "named": true
           },
@@ -1338,6 +1402,10 @@
         },
         {
           "type": "call",
+          "named": true
+        },
+        {
+          "type": "duration",
           "named": true
         },
         {
@@ -1580,6 +1648,14 @@
     "type": "comment",
     "named": true,
     "extra": true
+  },
+  {
+    "type": "duration",
+    "named": false
+  },
+  {
+    "type": "duration",
+    "named": true
   },
   {
     "type": "else",

@@ -304,6 +304,7 @@ fn rust_type_to_schema_type(ty: &Type, has_default: bool) -> TokenStream2 {
                 "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "usize" | "isize" => {
                     quote! { crate::value::Type::Number }
                 }
+                "Duration" => quote! { crate::value::Type::Duration },
                 "Option" => {
                     let inner = extract_generic_arg(seg);
                     let inner_expr = rust_type_to_schema_type(&inner, false);

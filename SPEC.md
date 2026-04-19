@@ -165,7 +165,9 @@ Intentionally minimal. No loops, no user-defined functions. `if` expressions are
 
 ### Types
 
-`string` (double-quoted with `${}` interpolation, or single-quoted raw), `int`, `bool`, `list`, `map`, `path`, `secret`. Union types with `|`: `string | [string]`.
+`string` (double-quoted with `${}` interpolation, or single-quoted raw), `int`, `bool`, `duration`, `list`, `map`, `path`, `secret`. Union types with `|`: `string | [string]`.
+
+Duration literals are unquoted and fuse a numeric value with a unit suffix (no whitespace): `5s`, `500ms`, `1.5h`, `30m`, `1d`. Supported units: `ns`, `us`, `ms`, `s`, `m`, `h`, `d`. A bare `5` is a number; `5s` is a duration.
 
 Double-quoted strings support escape sequences (`\n`, `\t`, `\\`, `\"`, `\$`) and `${expr}` interpolation. Single-quoted strings are raw: no escapes, no interpolation — content is taken verbatim.
 

@@ -581,6 +581,10 @@
         },
         {
           "type": "STRING",
+          "value": "duration"
+        },
+        {
+          "type": "STRING",
           "value": "path"
         },
         {
@@ -857,6 +861,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "duration"
+        },
+        {
+          "type": "SYMBOL",
           "name": "number"
         },
         {
@@ -1024,6 +1032,17 @@
     "number": {
       "type": "PATTERN",
       "value": "\\d+(\\.\\d+)?"
+    },
+    "duration": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 1,
+        "content": {
+          "type": "PATTERN",
+          "value": "\\d+(\\.\\d+)?(ns|us|ms|s|m|h|d)"
+        }
+      }
     },
     "boolean": {
       "type": "CHOICE",

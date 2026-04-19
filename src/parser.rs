@@ -225,6 +225,7 @@ fn typ_scalar(input: &mut &str) -> ModalResult<Type> {
             "string" => Some(Type::String),
             "number" => Some(Type::Number),
             "bool" => Some(Type::Bool),
+            "duration" => Some(Type::Duration),
             "path" => Some(Type::Path),
             "secret" => Some(Type::Secret),
             _ => None,
@@ -323,14 +324,37 @@ fn number_expr(input: &mut &str) -> ModalResult<Expr> {
     use bigdecimal::BigDecimal;
     use std::str::FromStr;
 
-    let digits = lex(take_while(1.., |c: char| c.is_ascii_digit())).parse_next(input)?;
-    // Optional decimal part.
+    // Digits + optional decimal part (no trailing-whitespace consumption
+    // yet — a duration unit must sit flush against the digits).
+    let digits: &str = take_while(1.., |c: char| c.is_ascii_digit()).parse_next(input)?;
     let frac = opt(('.', take_while(1.., |c: char| c.is_ascii_digit()))).parse_next(input)?;
-    let s = match frac {
+    let num_str = match frac {
         Some((_, f)) => format!("{digits}.{f}"),
         None => digits.to_owned(),
     };
-    let n = BigDecimal::from_str(&s).map_err(|_| ErrMode::Backtrack(ContextError::new()))?;
+
+    // If a duration unit follows immediately (no whitespace), emit a
+    // Duration literal. `ns`/`us`/`ms` are tried before `s`/`m` so the
+    // longer suffix wins. After the unit we require that the next char
+    // isn't alphanumeric/underscore — otherwise `5seconds` would be
+    // mis-parsed as `5s` + `econds`.
+    let checkpoint = input.checkpoint();
+    if let Some(unit) = opt(alt(("ns", "us", "ms", "s", "m", "h", "d"))).parse_next(input)? {
+        let next_is_word = input
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !next_is_word {
+            let duration =
+                crate::value::parse_duration(&num_str, unit).map_err(|_| ErrMode::Backtrack(ContextError::new()))?;
+            ws(input)?;
+            return Ok(Expr::Duration(duration));
+        }
+        input.reset(&checkpoint);
+    }
+
+    ws(input)?;
+    let n = BigDecimal::from_str(&num_str).map_err(|_| ErrMode::Backtrack(ContextError::new()))?;
     Ok(Expr::Number(n))
 }
 
@@ -860,6 +884,7 @@ fn infer_type(expr: &Expr) -> Option<Type> {
         Expr::Str(_) => Some(Type::String),
         Expr::Number(_) => Some(Type::Number),
         Expr::Bool(_) => Some(Type::Bool),
+        Expr::Duration(_) => Some(Type::Duration),
         Expr::List(items) => {
             let elem = infer_type(items.first()?)?;
             Some(Type::List(Box::new(elem)))
@@ -1070,6 +1095,49 @@ mod tests {
         match &result.statements[0] {
             Statement::Let(l) => assert_eq!(l.value, Expr::Bool(true)),
             _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_duration_literals() {
+        use crate::value::Duration;
+        let cases: &[(&str, Duration)] = &[
+            ("5s", Duration::from_secs(5)),
+            ("500ms", Duration::from_millis(500)),
+            ("2m", Duration::from_secs(120)),
+            ("1h", Duration::from_secs(3600)),
+            ("1.5h", Duration::from_secs(5400)),
+            ("1d", Duration::from_secs(86400)),
+        ];
+        for (literal, expected) in cases {
+            let src = format!("let t = {literal}");
+            let result = parse(&src, "<test>").unwrap_or_else(|e| panic!("parse '{literal}': {e}"));
+            match &result.statements[0] {
+                Statement::Let(l) => assert_eq!(l.value, Expr::Duration(*expected), "literal {literal}"),
+                _ => panic!("expected Let"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_duration_vs_number_disambiguation() {
+        // Plain digits with no suffix → Number.
+        let result = parse("let x = 5", "<test>").unwrap();
+        assert!(matches!(&result.statements[0], Statement::Let(l) if matches!(l.value, Expr::Number(_))));
+        // Digits + duration unit → Duration.
+        let result = parse("let x = 5s", "<test>").unwrap();
+        assert!(matches!(&result.statements[0], Statement::Let(l) if matches!(l.value, Expr::Duration(_))));
+    }
+
+    #[test]
+    fn parse_duration_type_annotation() {
+        let result = parse("param timeout : duration = 30s", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Param(p) => {
+                assert_eq!(p.typ, Type::Duration);
+                assert_eq!(p.default, Some(Expr::Duration(crate::value::Duration::from_secs(30))));
+            }
+            _ => panic!("expected Param"),
         }
     }
 

@@ -168,6 +168,18 @@ func(arg1, arg2)        # function calls
 block.field             # block output references
 ```
 
+### Durations
+
+Duration literals are unquoted and fuse a number with a unit suffix — no whitespace between them:
+
+```bit
+interval = 5s
+timeout  = 500ms
+budget   = 1.5h
+```
+
+Supported units: `ns`, `us`, `ms`, `s`, `m`, `h`, `d`. A bare `5` is a number; `5s` is a duration.
+
 ### Built-in Functions
 
 | Function | Description |

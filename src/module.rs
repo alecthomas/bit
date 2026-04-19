@@ -531,7 +531,7 @@ fn rewrite_expr(
             Box::new(rewrite_expr(lhs, inner_blocks, substitutions, prefix)),
             Box::new(rewrite_expr(rhs, inner_blocks, substitutions, prefix)),
         ),
-        Expr::Number(_) | Expr::Bool(_) | Expr::Null => expr.clone(),
+        Expr::Number(_) | Expr::Bool(_) | Expr::Duration(_) | Expr::Null => expr.clone(),
     }
 }
 

@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
 use crate::output::BlockWriter;
 use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::value::Duration;
 
 /// Healthcheck config — either a bare command string or a full object
 /// with interval/timeout/retries/start_period.
@@ -18,18 +19,18 @@ pub enum Healthcheck {
     Full {
         /// Command to run
         test: String,
-        /// How often to run the check (default: 5s)
+        /// How often to run the check (default: 1s)
         #[serde(default = "default_interval")]
-        interval: String,
+        interval: Duration,
         /// How long a check can take before it counts as a failure (default: 5s)
         #[serde(default = "default_timeout")]
-        timeout: String,
+        timeout: Duration,
         /// Number of consecutive failures required to mark unhealthy (default: 3)
         #[serde(default = "default_retries")]
         retries: u32,
         /// Grace period before failures count
         #[serde(default)]
-        start_period: Option<String>,
+        start_period: Option<Duration>,
     },
 }
 
@@ -41,73 +42,54 @@ impl Healthcheck {
         }
     }
 
-    fn interval(&self) -> &str {
+    fn interval(&self) -> Duration {
         match self {
-            Healthcheck::Command(_) => "5s",
-            Healthcheck::Full { interval, .. } => interval,
+            Healthcheck::Command(_) => default_interval(),
+            Healthcheck::Full { interval, .. } => *interval,
         }
     }
 
-    fn timeout(&self) -> &str {
+    fn timeout(&self) -> Duration {
         match self {
-            Healthcheck::Command(_) => "5s",
-            Healthcheck::Full { timeout, .. } => timeout,
+            Healthcheck::Command(_) => default_timeout(),
+            Healthcheck::Full { timeout, .. } => *timeout,
         }
     }
 
     fn retries(&self) -> u32 {
         match self {
-            Healthcheck::Command(_) => 3,
+            Healthcheck::Command(_) => default_retries(),
             Healthcheck::Full { retries, .. } => *retries,
         }
     }
 
-    fn start_period(&self) -> Option<&str> {
+    fn start_period(&self) -> Option<Duration> {
         match self {
             Healthcheck::Command(_) => None,
-            Healthcheck::Full { start_period, .. } => start_period.as_deref(),
+            Healthcheck::Full { start_period, .. } => *start_period,
         }
     }
 
     /// Total deadline: start_period + (interval * retries) + timeout.
     fn deadline(&self) -> Duration {
-        let start = self.start_period().map(parse_duration).unwrap_or_default();
-        let interval = parse_duration(self.interval());
-        let timeout = parse_duration(self.timeout());
-        start + interval * self.retries() + timeout
+        self.start_period().unwrap_or_default() + self.interval() * self.retries() + self.timeout()
     }
 
     fn poll_interval(&self) -> Duration {
-        parse_duration(self.interval())
+        self.interval()
     }
 }
 
-fn default_interval() -> String {
-    "5s".into()
+fn default_interval() -> Duration {
+    Duration::from_secs(1)
 }
 
-fn default_timeout() -> String {
-    "5s".into()
+fn default_timeout() -> Duration {
+    Duration::from_secs(5)
 }
 
 fn default_retries() -> u32 {
     3
-}
-
-/// Parse a Docker-style duration string (e.g. "10s", "1m", "500ms").
-fn parse_duration(s: &str) -> Duration {
-    let s = s.trim();
-    if let Some(ms) = s.strip_suffix("ms") {
-        return Duration::from_millis(ms.parse().unwrap_or(0));
-    }
-    if let Some(m) = s.strip_suffix('m') {
-        return Duration::from_secs(m.parse::<u64>().unwrap_or(0) * 60);
-    }
-    if let Some(secs) = s.strip_suffix('s') {
-        return Duration::from_secs(secs.parse().unwrap_or(0));
-    }
-    // Bare number treated as seconds
-    Duration::from_secs(s.parse().unwrap_or(0))
 }
 
 /// Run a Docker container (tracks state like Terraform)
@@ -214,7 +196,7 @@ fn wait_healthy(name: &str, hc: &Healthcheck, writer: &BlockWriter) -> Result<()
     writer.line("waiting for healthcheck...");
 
     loop {
-        std::thread::sleep(interval);
+        std::thread::sleep(interval.as_std());
 
         let output = Command::new("docker")
             .args(["inspect", "--format", "{{.State.Health.Status}}", name])
@@ -232,7 +214,7 @@ fn wait_healthy(name: &str, hc: &Healthcheck, writer: &BlockWriter) -> Result<()
                 return Err("container healthcheck failed: unhealthy".into());
             }
             _ => {
-                if start.elapsed() > deadline {
+                if start.elapsed() > deadline.as_std() {
                     return Err(format!("container healthcheck timed out after {}s", deadline.as_secs()).into());
                 }
             }
@@ -329,11 +311,11 @@ impl Resource for ContainerResource {
 
         if let Some(hc) = &inputs.healthcheck {
             cmd.arg("--health-cmd").arg(hc.test());
-            cmd.arg("--health-interval").arg(hc.interval());
-            cmd.arg("--health-timeout").arg(hc.timeout());
+            cmd.arg("--health-interval").arg(hc.interval().to_string());
+            cmd.arg("--health-timeout").arg(hc.timeout().to_string());
             cmd.arg("--health-retries").arg(hc.retries().to_string());
             if let Some(sp) = hc.start_period() {
-                cmd.arg("--health-start-period").arg(sp);
+                cmd.arg("--health-start-period").arg(sp.to_string());
             }
         }
 
@@ -465,14 +447,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_duration_values() {
-        assert_eq!(parse_duration("10s"), Duration::from_secs(10));
-        assert_eq!(parse_duration("2m"), Duration::from_secs(120));
-        assert_eq!(parse_duration("500ms"), Duration::from_millis(500));
-        assert_eq!(parse_duration("30"), Duration::from_secs(30));
-    }
-
-    #[test]
     fn resolve_extra_hosts_passes_through_user_entries() {
         let mut user = HashMap::new();
         user.insert("legacy.db".to_owned(), "10.0.1.5".to_owned());
@@ -518,8 +492,8 @@ mod tests {
     fn healthcheck_command_defaults() {
         let hc = Healthcheck::Command("curl localhost".into());
         assert_eq!(hc.test(), "curl localhost");
-        assert_eq!(hc.interval(), "5s");
-        assert_eq!(hc.timeout(), "5s");
+        assert_eq!(hc.interval(), Duration::from_secs(1));
+        assert_eq!(hc.timeout(), Duration::from_secs(5));
         assert_eq!(hc.retries(), 3);
         assert!(hc.start_period().is_none());
     }

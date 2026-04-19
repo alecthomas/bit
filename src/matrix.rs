@@ -254,7 +254,7 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs
             Box::new(rewrite_matrix_expr(lhs, key_subs, block_subs)),
             Box::new(rewrite_matrix_expr(rhs, key_subs, block_subs)),
         ),
-        Expr::Number(_) | Expr::Bool(_) | Expr::Null => expr.clone(),
+        Expr::Number(_) | Expr::Bool(_) | Expr::Duration(_) | Expr::Null => expr.clone(),
     }
 }
 

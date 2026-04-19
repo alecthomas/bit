@@ -107,7 +107,7 @@ module.exports = grammar({
 
     map_type: $ => seq('{', 'string', '=', $.type, '}'),
 
-    scalar_type: _ => choice('string', 'number', 'bool', 'path', 'secret'),
+    scalar_type: _ => choice('string', 'number', 'bool', 'duration', 'path', 'secret'),
 
     // ── Expressions ──
 
@@ -167,6 +167,7 @@ module.exports = grammar({
       $.string,
       $.raw_string,
       $.heredoc,
+      $.duration,
       $.number,
       $.boolean,
       $.null,
@@ -213,6 +214,11 @@ module.exports = grammar({
     // ── Scalars ──
 
     number: _ => /\d+(\.\d+)?/,
+
+    // Duration literals: `5s`, `500ms`, `1.5h` — longer unit suffixes
+    // must come first so `ms` isn't read as `m` + `s`. Takes precedence
+    // over `number` via tree-sitter's longest-match rule.
+    duration: _ => token(prec(1, /\d+(\.\d+)?(ns|us|ms|s|m|h|d)/)),
 
     boolean: _ => choice('true', 'false'),
 

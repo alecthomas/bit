@@ -1,6 +1,6 @@
 use bigdecimal::BigDecimal;
 
-use crate::value::Type;
+use crate::value::{Duration, Type};
 
 /// Source position (1-indexed line and column).
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -127,6 +127,7 @@ impl std::fmt::Display for Expr {
             }
             Expr::Number(n) => write!(f, "{n}"),
             Expr::Bool(b) => write!(f, "{b}"),
+            Expr::Duration(d) => write!(f, "{d}"),
             Expr::Null => write!(f, "null"),
             Expr::List(items) => {
                 write!(f, "[")?;
@@ -160,6 +161,7 @@ pub enum Expr {
     Str(Vec<StringPart>),
     Number(BigDecimal),
     Bool(bool),
+    Duration(Duration),
     Null,
     /// `[a, b, c]`
     List(Vec<Expr>),

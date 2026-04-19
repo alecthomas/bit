@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Duration as StdDuration;
 
 use bigdecimal::BigDecimal;
 use serde::de;
@@ -7,6 +8,85 @@ use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub type Map = HashMap<String, Value>;
+
+/// A duration value — newtype over `std::time::Duration` that carries
+/// bit's string-literal serde format (`"5s"`, `"500ms"`, …) so fields
+/// of this type don't need `#[serde(with = …)]` annotations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Duration(pub StdDuration);
+
+impl Duration {
+    pub const ZERO: Self = Self(StdDuration::ZERO);
+
+    pub fn from_secs(secs: u64) -> Self {
+        Self(StdDuration::from_secs(secs))
+    }
+
+    pub fn from_millis(ms: u64) -> Self {
+        Self(StdDuration::from_millis(ms))
+    }
+
+    pub fn from_nanos(ns: u64) -> Self {
+        Self(StdDuration::from_nanos(ns))
+    }
+
+    pub fn as_std(self) -> StdDuration {
+        self.0
+    }
+
+    pub fn as_secs(self) -> u64 {
+        self.0.as_secs()
+    }
+
+    pub fn as_nanos(self) -> u128 {
+        self.0.as_nanos()
+    }
+}
+
+impl fmt::Display for Duration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format_duration(*self))
+    }
+}
+
+impl std::ops::Add for Duration {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::Mul<u32> for Duration {
+    type Output = Self;
+    fn mul(self, rhs: u32) -> Self {
+        Self(self.0 * rhs)
+    }
+}
+
+impl From<StdDuration> for Duration {
+    fn from(d: StdDuration) -> Self {
+        Self(d)
+    }
+}
+
+impl From<Duration> for StdDuration {
+    fn from(d: Duration) -> Self {
+        d.0
+    }
+}
+
+impl Serialize for Duration {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format_duration(*self))
+    }
+}
+
+impl<'de> Deserialize<'de> for Duration {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        parse_duration_literal(&s).map_err(de::Error::custom)
+    }
+}
 
 /// A named, typed field within a struct — carries all metadata.
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +121,7 @@ pub enum Value {
     Bool(bool),
     Number(BigDecimal),
     Str(String),
+    Duration(Duration),
     List(Type, Vec<Value>),
     Map(Type, Map),
     Struct(StructType, Map),
@@ -52,6 +133,7 @@ impl fmt::Display for Value {
             Value::Str(s) => write!(f, "{s}"),
             Value::Number(n) => write!(f, "{n}"),
             Value::Bool(b) => write!(f, "{b}"),
+            Value::Duration(d) => write!(f, "{d}"),
             Value::List(_, items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
@@ -117,6 +199,7 @@ impl Value {
             Value::Bool(_) => Type::Bool,
             Value::Number(_) => Type::Number,
             Value::Str(_) => Type::String,
+            Value::Duration(_) => Type::Duration,
             Value::List(typ, _) => Type::List(Box::new(typ.clone())),
             Value::Map(typ, _) => Type::Map(Box::new(typ.clone())),
             Value::Struct(st, _) => Type::Struct(st.clone()),
@@ -135,6 +218,7 @@ impl Value {
             Value::Str(s) => Expr::Str(vec![StringPart::Literal(s.clone())]),
             Value::Number(n) => Expr::Number(n.clone()),
             Value::Bool(b) => Expr::Bool(*b),
+            Value::Duration(d) => Expr::Duration(*d),
             Value::Null => Expr::Null,
             Value::List(_, items) => Expr::List(items.iter().map(|v| v.to_expr()).collect()),
             Value::Map(_, map) | Value::Struct(_, map) => Expr::Map(
@@ -169,6 +253,13 @@ impl Value {
         }
     }
 
+    pub fn as_duration(&self) -> Option<Duration> {
+        match self {
+            Value::Duration(d) => Some(*d),
+            _ => None,
+        }
+    }
+
     pub fn as_list(&self) -> Option<&[Value]> {
         match self {
             Value::List(_, items) => Some(items),
@@ -196,6 +287,7 @@ impl Serialize for Value {
             Value::Bool(b) => serializer.serialize_bool(*b),
             Value::Number(n) => n.serialize(serializer),
             Value::Str(s) => serializer.serialize_str(s),
+            Value::Duration(d) => d.serialize(serializer),
             Value::List(_, items) => {
                 let mut seq = serializer.serialize_seq(Some(items.len()))?;
                 for item in items {
@@ -248,6 +340,7 @@ impl std::fmt::Display for Type {
             Type::String => write!(f, "string"),
             Type::Number => write!(f, "number"),
             Type::Bool => write!(f, "bool"),
+            Type::Duration => write!(f, "duration"),
             Type::List(inner) => write!(f, "[{inner}]"),
             Type::Map(inner) => write!(f, "{{string = {inner}}}"),
             Type::Struct(st) => {
@@ -282,6 +375,7 @@ pub enum Type {
     String,
     Number,
     Bool,
+    Duration,
     List(Box<Type>),
     Map(Box<Type>),
     Struct(StructType),
@@ -299,6 +393,7 @@ pub fn validate_type(value: &Value, typ: &Type) -> Result<(), String> {
         (Type::String | Type::Path | Type::Secret, Value::Str(_)) => Ok(()),
         (Type::Number, Value::Number(_)) => Ok(()),
         (Type::Bool, Value::Bool(_)) => Ok(()),
+        (Type::Duration, Value::Duration(_)) => Ok(()),
         (Type::List(inner), Value::List(_, items)) => {
             for (i, item) in items.iter().enumerate() {
                 validate_type(item, inner).map_err(|e| format!("[{i}]: {e}"))?;
@@ -342,10 +437,80 @@ fn type_name(value: &Value) -> &'static str {
         Value::Bool(_) => "bool",
         Value::Number(_) => "number",
         Value::Str(_) => "string",
+        Value::Duration(_) => "duration",
         Value::List(..) => "list",
         Value::Map(..) => "map",
         Value::Struct(..) => "struct",
     }
+}
+
+/// Parse a duration literal like `5s`, `1m`, `500ms`, `2h`, `1d`.
+/// Returns an error message on malformed input.
+pub fn parse_duration(value: &str, unit: &str) -> Result<Duration, String> {
+    let n: f64 = value
+        .parse()
+        .map_err(|e| format!("invalid duration value '{value}': {e}"))?;
+    if n < 0.0 {
+        return Err(format!("duration cannot be negative: {value}{unit}"));
+    }
+    let nanos_per_unit: f64 = match unit {
+        "ns" => 1.0,
+        "us" => 1_000.0,
+        "ms" => 1_000_000.0,
+        "s" => 1_000_000_000.0,
+        "m" => 60.0 * 1_000_000_000.0,
+        "h" => 3600.0 * 1_000_000_000.0,
+        "d" => 86_400.0 * 1_000_000_000.0,
+        _ => return Err(format!("unknown duration unit: '{unit}'")),
+    };
+    let total_nanos = n * nanos_per_unit;
+    if !total_nanos.is_finite() || total_nanos > u64::MAX as f64 {
+        return Err(format!("duration overflow: {value}{unit}"));
+    }
+    Ok(Duration::from_nanos(total_nanos as u64))
+}
+
+/// Valid duration unit suffixes, longest first for greedy matching.
+pub const DURATION_UNITS: &[&str] = &["ns", "us", "ms", "s", "m", "h", "d"];
+
+/// Parse a whole duration literal like `"5s"`, `"500ms"`, `"1.5h"`.
+pub fn parse_duration_literal(s: &str) -> Result<Duration, String> {
+    let s = s.trim();
+    for unit in DURATION_UNITS {
+        if let Some(value) = s.strip_suffix(unit) {
+            return parse_duration(value.trim(), unit);
+        }
+    }
+    Err(format!(
+        "invalid duration '{s}' (expected a value followed by one of: {})",
+        DURATION_UNITS.join(", ")
+    ))
+}
+
+/// Format a `Duration` as a canonical bit literal — picks the largest
+/// exact unit. Sub-millisecond values render in microseconds or
+/// nanoseconds. Zero formats as `"0s"`.
+pub fn format_duration(d: Duration) -> String {
+    let nanos = d.as_nanos();
+    if nanos == 0 {
+        return "0s".into();
+    }
+    let (unit_nanos, suffix) = if nanos.is_multiple_of(86_400 * 1_000_000_000) {
+        (86_400u128 * 1_000_000_000, "d")
+    } else if nanos.is_multiple_of(3600 * 1_000_000_000) {
+        (3600u128 * 1_000_000_000, "h")
+    } else if nanos.is_multiple_of(60 * 1_000_000_000) {
+        (60u128 * 1_000_000_000, "m")
+    } else if nanos.is_multiple_of(1_000_000_000) {
+        (1_000_000_000u128, "s")
+    } else if nanos.is_multiple_of(1_000_000) {
+        (1_000_000u128, "ms")
+    } else if nanos.is_multiple_of(1_000) {
+        (1_000u128, "us")
+    } else {
+        (1u128, "ns")
+    };
+    format!("{}{}", nanos / unit_nanos, suffix)
 }
 
 #[cfg(test)]

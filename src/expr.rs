@@ -73,6 +73,7 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
         Expr::Str(parts) => eval_string(parts, scope, mode),
         Expr::Number(n) => Ok(Value::Number(n.clone())),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
+        Expr::Duration(d) => Ok(Value::Duration(*d)),
         Expr::Null => Ok(Value::Null),
         Expr::List(items) => {
             let values: Result<Vec<_>, _> = items.iter().map(|e| eval_inner(e, scope, mode)).collect();
