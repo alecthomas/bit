@@ -1,0 +1,12 @@
+id = "bit"
+name = "Bit"
+version = "0.1.0"
+schema_version = 1
+authors = ["Alec Thomas <alec@swapoff.org>"]
+description = "Syntax support for the bit build language"
+repository = "https://github.com/alecthomas/bit"
+
+[grammars.bit]
+repository = "file:///Users/alec/dev/bit"
+rev = "3391b10c78f52aea5fb63ddc6c9087cd9c9bfab6"
+path = "integrations/tree-sitter"
