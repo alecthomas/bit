@@ -1,29 +1,48 @@
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Lit, Meta, Type, parse_macro_input};
+use syn::{Data, DataEnum, DataStruct, DeriveInput, Fields, Ident, Lit, Meta, Type, parse_macro_input};
 
-/// Derive the `Schema` trait for a struct, generating a `StructType` from its fields.
+/// Derive the `Schema` and `SchemaType` traits.
 ///
 /// Supports:
+/// - Structs with named fields: produces `Schema` (a `StructType`) and a
+///   `SchemaType` that wraps it as `Type::Struct`.
+/// - Enums (typically `#[serde(untagged)]`): produces `SchemaType` as a
+///   `Type::Union` of each variant's schema. `Schema` is not implemented
+///   for enums. Variants may be:
+///     - unit (no fields) — currently unsupported
+///     - newtype (one unnamed field) — uses the field's schema type
+///     - struct variants (named fields) — produces a `Type::Struct`
+///
+/// Field-level support:
 /// - Doc comments as field/struct descriptions
 /// - `#[serde(flatten)]` to inline fields from another `Schema` type
-/// - `Option<T>`, `Vec<T>`, `bool`, `String`, numeric types
+/// - `#[serde(rename = "...")]` to rename a field in the schema
+/// - `#[serde(default)]` / `#[serde(default = "...")]` makes collection
+///   and `bool` types optional
+/// - `Option<T>`, `Vec<T>`, `HashMap<_, V>`, `bool`, `String`, numerics;
+///   any other named type is resolved via its `SchemaType` impl
 /// - `#[schema(description = "...")]` to override the description
 #[proc_macro_derive(Schema, attributes(schema, serde))]
 pub fn derive_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
 
-    let struct_doc = extract_doc_comment(&input.attrs);
-
-    let Data::Struct(data) = &input.data else {
-        return syn::Error::new_spanned(&input.ident, "Schema can only be derived for structs")
+    match &input.data {
+        Data::Struct(data) => derive_schema_struct(name, &input.attrs, data),
+        Data::Enum(data) => derive_schema_enum(name, data),
+        Data::Union(_) => syn::Error::new_spanned(name, "Schema cannot be derived for unions")
             .to_compile_error()
-            .into();
-    };
+            .into(),
+    }
+}
+
+fn derive_schema_struct(name: &Ident, attrs: &[syn::Attribute], data: &DataStruct) -> TokenStream {
+    let struct_doc = extract_doc_comment(attrs);
 
     let Fields::Named(fields) = &data.fields else {
-        return syn::Error::new_spanned(&input.ident, "Schema requires named fields")
+        return syn::Error::new_spanned(name, "Schema requires named fields")
             .to_compile_error()
             .into();
     };
@@ -33,7 +52,7 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
     for field in &fields.named {
         let field_name = field.ident.as_ref().unwrap();
 
-        // Check for #[serde(flatten)] — inline the inner type's schema fields.
+        // #[serde(flatten)] — inline the inner type's schema fields.
         if has_serde_attr(&field.attrs, "flatten") {
             let ty = &field.ty;
             field_exprs.push(quote! {
@@ -42,22 +61,15 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
             continue;
         }
 
-        // Skip fields named "depends_on" or "after" — these are engine-level.
+        // "depends_on" / "after" are engine-level and aren't part of the
+        // provider's schema.
         let name_str = field_name.to_string();
         if name_str == "depends_on" || name_str == "after" {
             continue;
         }
 
-        // Use serde rename if present, otherwise the field name.
         let schema_name = get_serde_rename(&field.attrs).unwrap_or_else(|| name_str.clone());
-        let doc = extract_doc_comment(&field.attrs);
-        let schema_desc = get_schema_description(&field.attrs).or(doc);
-
-        let desc_expr = match &schema_desc {
-            Some(d) => quote! { Some(#d.into()) },
-            None => quote! { None },
-        };
-
+        let desc_expr = description_expr(&field.attrs);
         let has_default = has_serde_attr(&field.attrs, "default");
         let type_expr = rust_type_to_schema_type(&field.ty, has_default);
 
@@ -89,9 +101,101 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
                 }
             }
         }
+
+        impl crate::schema::SchemaType for #name {
+            fn schema_type() -> crate::value::Type {
+                crate::value::Type::Struct(<Self as crate::schema::Schema>::schema())
+            }
+        }
     };
 
     expanded.into()
+}
+
+fn derive_schema_enum(name: &Ident, data: &DataEnum) -> TokenStream {
+    let mut variant_exprs: Vec<TokenStream2> = Vec::new();
+
+    for variant in &data.variants {
+        let type_expr = match &variant.fields {
+            Fields::Unit => {
+                return syn::Error::new_spanned(variant, "Schema: unit enum variants are not supported")
+                    .to_compile_error()
+                    .into();
+            }
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                // Newtype variant: delegate to the inner type's schema.
+                let ty = &fields.unnamed.first().unwrap().ty;
+                rust_type_to_schema_type(ty, false)
+            }
+            Fields::Unnamed(_) => {
+                return syn::Error::new_spanned(
+                    variant,
+                    "Schema: tuple variants with multiple fields are not supported",
+                )
+                .to_compile_error()
+                .into();
+            }
+            Fields::Named(fields) => {
+                let inner_exprs: Vec<TokenStream2> = fields
+                    .named
+                    .iter()
+                    .map(|f| {
+                        let field_name = f.ident.as_ref().unwrap().to_string();
+                        let field_name = get_serde_rename(&f.attrs).unwrap_or(field_name);
+                        let desc_expr = description_expr(&f.attrs);
+                        let has_default = has_serde_attr(&f.attrs, "default");
+                        let typ = rust_type_to_schema_type(&f.ty, has_default);
+                        quote! {
+                            fields.push((
+                                #field_name.into(),
+                                crate::value::StructField {
+                                    typ: #typ,
+                                    default: None,
+                                    description: #desc_expr,
+                                },
+                            ));
+                        }
+                    })
+                    .collect();
+                let variant_desc_expr = match extract_doc_comment(&variant.attrs) {
+                    Some(d) => quote! { Some(#d.into()) },
+                    None => quote! { None },
+                };
+                quote! {
+                    {
+                        let mut fields = Vec::new();
+                        #(#inner_exprs)*
+                        crate::value::Type::Struct(crate::value::StructType {
+                            description: #variant_desc_expr,
+                            fields,
+                        })
+                    }
+                }
+            }
+        };
+        variant_exprs.push(type_expr);
+    }
+
+    let expanded = quote! {
+        impl crate::schema::SchemaType for #name {
+            fn schema_type() -> crate::value::Type {
+                crate::value::Type::Union(vec![
+                    #(#variant_exprs),*
+                ])
+            }
+        }
+    };
+
+    expanded.into()
+}
+
+fn description_expr(attrs: &[syn::Attribute]) -> TokenStream2 {
+    let doc = extract_doc_comment(attrs);
+    let desc = get_schema_description(attrs).or(doc);
+    match desc {
+        Some(d) => quote! { Some(#d.into()) },
+        None => quote! { None },
+    }
 }
 
 /// Extract the combined doc comment from `#[doc = "..."]` attributes.
@@ -182,7 +286,7 @@ fn get_schema_description(attrs: &[syn::Attribute]) -> Option<String> {
 
 /// Map a Rust type to a `crate::value::Type` token expression.
 /// `has_default` indicates `#[serde(default)]` — Vec/HashMap/bool become optional.
-fn rust_type_to_schema_type(ty: &Type, has_default: bool) -> proc_macro2::TokenStream {
+fn rust_type_to_schema_type(ty: &Type, has_default: bool) -> TokenStream2 {
     match ty {
         Type::Path(tp) => {
             let seg = tp.path.segments.last().unwrap();
@@ -225,10 +329,12 @@ fn rust_type_to_schema_type(ty: &Type, has_default: bool) -> proc_macro2::TokenS
                         map
                     }
                 }
-                _ => quote! { crate::value::Type::String },
+                // Unknown named type — delegate to its SchemaType impl.
+                _ => quote! { <#ty as crate::schema::SchemaType>::schema_type() },
             }
         }
-        _ => quote! { crate::value::Type::String },
+        // Unknown complex type shape — delegate to its SchemaType impl.
+        _ => quote! { <#ty as crate::schema::SchemaType>::schema_type() },
     }
 }
 

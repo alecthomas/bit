@@ -10,18 +10,24 @@ use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, R
 
 /// Healthcheck config — either a bare command string or a full object
 /// with interval/timeout/retries/start_period.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, bit_derive::Schema)]
 #[serde(untagged)]
 pub enum Healthcheck {
+    /// Shell command to run
     Command(String),
     Full {
+        /// Command to run
         test: String,
+        /// How often to run the check (default: 5s)
         #[serde(default = "default_interval")]
         interval: String,
+        /// How long a check can take before it counts as a failure (default: 5s)
         #[serde(default = "default_timeout")]
         timeout: String,
+        /// Number of consecutive failures required to mark unhealthy (default: 3)
         #[serde(default = "default_retries")]
         retries: u32,
+        /// Grace period before failures count
         #[serde(default)]
         start_period: Option<String>,
     },
