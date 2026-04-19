@@ -1,0 +1,51 @@
+================================================================================
+simple heredoc
+================================================================================
+x = exec {
+  command = <<EOF
+hello world
+EOF
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (heredoc))))
+
+================================================================================
+heredoc with strip indent
+================================================================================
+x = exec {
+  command = <<-EOF
+    hello
+    world
+  EOF
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (heredoc))))
+
+================================================================================
+heredoc with custom label
+================================================================================
+x = exec {
+  command = <<SCRIPT
+echo done
+SCRIPT
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (heredoc))))

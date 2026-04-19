@@ -1,0 +1,165 @@
+================================================================================
+simple block
+================================================================================
+server = go.binary {
+  main = "./cmd/server"
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (string))))
+
+================================================================================
+empty block
+================================================================================
+fmt = rust.fmt {}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier)))
+
+================================================================================
+bare provider block (no resource)
+================================================================================
+docs = exec {
+  command = "make"
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (string))))
+
+================================================================================
+pre phase modifier
+================================================================================
+pre fmt = rust.fmt {}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    phase: (phase_modifier)
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier)))
+
+================================================================================
+post phase modifier
+================================================================================
+post report = exec {}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    phase: (phase_modifier)
+    name: (identifier)
+    provider: (identifier)))
+
+================================================================================
+protected modifier
+================================================================================
+protected db = aws.aurora {
+  cluster = "prod"
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    protected: (protected_modifier)
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (string))))
+
+================================================================================
+pre and protected modifiers
+================================================================================
+pre protected db = aws.aurora {}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    phase: (phase_modifier)
+    protected: (protected_modifier)
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier)))
+
+================================================================================
+matrix expansion keys
+================================================================================
+binary[arch] = go.binary {
+  goarch = arch
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    matrix_keys: (block_matrix_keys
+      (identifier))
+    provider: (identifier)
+    resource: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (reference
+        (identifier)))))
+
+================================================================================
+matrix expansion multiple keys
+================================================================================
+deploy[arch, region] = kubernetes.deployment {}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    matrix_keys: (block_matrix_keys
+      (identifier)
+      (identifier))
+    provider: (identifier)
+    resource: (identifier)))
+
+================================================================================
+fields with commas
+================================================================================
+image = docker.image {
+  tag = "myapp:latest",
+  dockerfile = "Dockerfile",
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (string))
+    (field_assignment
+      name: (identifier)
+      value: (string))))
+
+================================================================================
+kebab-case identifiers
+================================================================================
+integration-test = exec.test {
+  depends_on = [backend-linux]
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (list
+        (reference
+          (identifier))))))
