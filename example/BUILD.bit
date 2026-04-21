@@ -148,6 +148,106 @@ frontend-test = pnpm.test {
   depends_on = [node_modules]
 }
 
+# ── Registry + Kubernetes (k3d local) ─────────────────────────────────────────
+
+let k3d_cluster   = "example"
+let registry_addr = "localhost:5000"
+
+# Local Docker registry for pushing images.
+protected registry = docker.container {
+  image       = "registry:2"
+  name        = "example-registry"
+  ports       = ["5000:5000"]
+  restart     = "always"
+  healthcheck = "wget -qO- http://localhost:5000/v2/ || exit 1"
+}
+
+# Push images to the local registry and pin the kustomize overlay.
+backend-push = docker.push {
+  image      = backend-image.ref
+  tag        = "${registry_addr}/example-backend:${backend-image.image_id}"
+  depends_on = [registry]
+}
+
+bff-push = docker.push {
+  image      = bff-image.ref
+  tag        = "${registry_addr}/example-bff:${bff-image.image_id}"
+  depends_on = [registry]
+}
+
+kustomize-pin-backend = exec {
+  command = "cd k8s/overlays/local && kustomize edit set image example-backend=${backend-push.ref}"
+  resolve = "grep '${backend-image.image_id}' k8s/overlays/local/kustomization.yaml"
+}
+
+kustomize-pin-bff = exec {
+  command = "cd k8s/overlays/local && kustomize edit set image example-bff=${bff-push.ref}"
+  resolve = "grep '${bff-image.image_id}' k8s/overlays/local/kustomization.yaml"
+  after   = [kustomize-pin-backend]
+}
+
+# Create a local k3d cluster connected to the registry.
+protected k3d = exec {
+  command    = "k3d cluster create --config k8s/overlays/local/k3d-cluster.yaml"
+  resolve    = "k3d cluster list -o json | jq -e '.[] | select(.name == \"${k3d_cluster}\")'"
+  inputs     = ["k8s/overlays/local/k3d-cluster.yaml"]
+  clean      = "k3d cluster delete ${k3d_cluster}"
+}
+
+let k3d_ctx = "k3d-${k3d_cluster}"
+
+# Render the kustomize overlay; per-component blocks filter by label.
+let k8s_apply  = "kustomize build k8s/overlays/local | kubectl apply -l app="
+let k8s_delete = "kustomize build k8s/overlays/local | kubectl delete -l app="
+let k8s_ctx    = " --context ${k3d_ctx} -f -"
+
+# Create the namespace.
+k8s-namespace = exec {
+  command    = "kubectl apply -f k8s/base/namespace.yaml --context ${k3d_ctx}"
+  resolve    = "kubectl get ns example --context ${k3d_ctx} -o name 2>/dev/null"
+  inputs     = ["k8s/base/namespace.yaml"]
+  depends_on = [k3d]
+  clean      = "kubectl delete ns example --context ${k3d_ctx}"
+}
+
+# Deploy Postgres and wait for readiness.
+k8s-postgres = exec {
+  command = <<-EOF
+    ${k8s_apply}postgres${k8s_ctx}
+    kubectl wait --for=condition=ready pod -l app=postgres -n example --context ${k3d_ctx} --timeout=120s
+  EOF
+  resolve    = "kubectl get pods -l app=postgres -n example --context ${k3d_ctx} -o name 2>/dev/null"
+  inputs     = ["k8s/base/postgres/**/*.yaml"]
+  depends_on = [k8s-namespace]
+  clean      = "${k8s_delete}postgres${k8s_ctx}"
+}
+
+# Deploy the backend and wait for readiness.
+k8s-backend = exec {
+  command = <<-EOF
+    ${k8s_apply}backend${k8s_ctx}
+    kubectl wait --for=condition=ready pod -l app=backend -n example --context ${k3d_ctx} --timeout=120s
+  EOF
+  resolve    = "kubectl get pods -l app=backend -n example --context ${k3d_ctx} -o name 2>/dev/null"
+  inputs     = ["k8s/base/backend/**/*.yaml"]
+  depends_on = [kustomize-pin-backend]
+  after      = [k8s-postgres]
+  clean      = "${k8s_delete}backend${k8s_ctx}"
+}
+
+# Deploy the BFF and wait for readiness.
+k8s-bff = exec {
+  command = <<-EOF
+    ${k8s_apply}bff${k8s_ctx}
+    kubectl wait --for=condition=ready pod -l app=bff -n example --context ${k3d_ctx} --timeout=120s
+  EOF
+  resolve    = "kubectl get pods -l app=bff -n example --context ${k3d_ctx} -o name 2>/dev/null"
+  inputs     = ["k8s/base/bff/**/*.yaml"]
+  depends_on = [kustomize-pin-bff]
+  after      = [k8s-backend]
+  clean      = "${k8s_delete}bff${k8s_ctx}"
+}
+
 # ── Targets ───────────────────────────────────────────────────────────────────
 
 # Build all deployable artifacts.
@@ -156,5 +256,7 @@ target build   = [frontend, bff, backend]
 target test    = [backend-test, bff-test, frontend-test]
 # Bring up the dev container stack (BFF fans out to backend and Postgres).
 target dev     = [bff-container]
+# Deploy to local k3d cluster.
+target k8s     = [k8s-bff]
 # Default target: build everything and run all tests.
 target default = [frontend, bff, backend, backend-test, bff-test, frontend-test]

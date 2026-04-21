@@ -69,7 +69,7 @@ fn run_destroy(input: &str, store: &MemoryStore) {
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, _base) =
         loader::load(&module, &Map::new(), &registry(), store, std::path::Path::new(".")).expect("load failed");
-    engine::destroy(&mut dag, store, &Output::new(&[]), &[]).expect("destroy failed");
+    engine::destroy(&mut dag, store, &Output::new(&[]), &[], false).expect("destroy failed");
 }
 
 #[test]

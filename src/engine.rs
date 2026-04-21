@@ -52,16 +52,14 @@ pub struct BlockPlan {
 /// because the value exceeds JSON's safe integer range (2^53).
 type FileTimestamp = String;
 
-/// Truncate a hash string for compact debug output. Strips the `sha256:`
-/// algorithm prefix (all engine hashes share it) then takes the first 8 hex
+/// Truncate a hash string for compact debug output. Takes the first 8 hex
 /// chars. Returns `"<none>"` for an empty string so "no prior hash" is
 /// distinguishable from a real hash.
 fn short_hash(h: &str) -> &str {
     if h.is_empty() {
         return "<none>";
     }
-    let hex = h.strip_prefix("sha256:").unwrap_or(h);
-    if hex.len() > 8 { &hex[..8] } else { hex }
+    if h.len() > 8 { &h[..8] } else { h }
 }
 
 /// Read a `SystemTime` into our string-of-nanos representation.
@@ -158,7 +156,7 @@ fn hash_inputs(inputs: &Map) -> String {
         .unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    format!("{:x}", hasher.finalize())
 }
 
 /// Cache of file path -> content hash, shared across all blocks in a run.
@@ -416,7 +414,7 @@ fn compute_content_hash(
     }
 
     ContentHashResult {
-        hash: format!("sha256:{:x}", hasher.finalize()),
+        hash: format!("{:x}", hasher.finalize()),
         input_hash: input_hash.to_owned(),
         file_timestamps: new_timestamps,
         dep_hashes: new_dep_hashes,
@@ -1188,12 +1186,23 @@ fn execute_block(
 ///
 /// * `targets` - Block or target names to destroy. An empty slice or the
 ///   single literal `"..."` destroys every block in the DAG.
+/// * `force` - When true, destroy protected blocks and continue past provider
+///   errors (the failing block still shows an error, but remaining blocks
+///   proceed).
 ///
 /// # Errors
 ///
 /// Returns [`EngineError`] if a target is unknown, a cycle exists, or a
-/// provider fails during teardown.
-pub fn destroy(dag: &mut Dag, store: &dyn StateStore, output: &Output, targets: &[String]) -> Result<(), EngineError> {
+/// provider fails during teardown (unless `force` is set, in which case
+/// provider errors are collected and the first is returned after all blocks
+/// have been processed).
+pub fn destroy(
+    dag: &mut Dag,
+    store: &dyn StateStore,
+    output: &Output,
+    targets: &[String],
+    force: bool,
+) -> Result<(), EngineError> {
     let destroy_all = targets.is_empty() || (targets.len() == 1 && targets[0] == "...");
     let mut order: Vec<String> = if destroy_all {
         dag.topo_order()?
@@ -1216,11 +1225,13 @@ pub fn destroy(dag: &mut Dag, store: &dyn StateStore, output: &Output, targets: 
         order.join(", ")
     );
 
+    let mut first_error: Option<EngineError> = None;
+
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
         let writer = output.writer(name);
 
-        if node.protected {
+        if node.protected && !force {
             writer.event(Event::Protected, "protected");
             continue;
         }
@@ -1236,22 +1247,31 @@ pub fn destroy(dag: &mut Dag, store: &dyn StateStore, output: &Output, targets: 
             continue;
         };
 
-        node.resource.destroy(&provider_state, &writer).map_err(|e| {
-            writer.event(Event::Failed, &e.to_string());
-            EngineError::Provider {
+        if let Err(e) = node.resource.destroy(&provider_state, &writer) {
+            let err = EngineError::Provider {
                 pos: node.pos.clone(),
                 block: name.clone(),
                 phase: "destroy",
                 source: e,
+            };
+            writer.event(Event::Failed, &format!("{err}"));
+            if !force {
+                return Err(err);
             }
-        })?;
+            if first_error.is_none() {
+                first_error = Some(err);
+            }
+        }
 
         store.remove(name)?;
         crate::debug!(writer, "removed state from store");
         writer.event(Event::Ok, "");
     }
 
-    Ok(())
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Dump evaluated inputs and stored outputs for all blocks (or a target subset).
@@ -1531,7 +1551,7 @@ mod tests {
             std::path::Path::new("."),
         )
         .unwrap();
-        destroy(&mut dag, &store, &out, &[]).unwrap();
+        destroy(&mut dag, &store, &out, &[], false).unwrap();
         assert!(store.list().unwrap().is_empty());
     }
 
@@ -1566,9 +1586,102 @@ mod tests {
             std::path::Path::new("."),
         )
         .unwrap();
-        destroy(&mut dag, &store, &out, &[]).unwrap();
+        destroy(&mut dag, &store, &out, &[], false).unwrap();
         // State should still exist — destroy was skipped
         assert!(!store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn force_destroys_protected_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out.txt");
+        let input = format!(
+            "protected build = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            output.display(),
+            output.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let out = Output::new(&[]);
+        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        assert!(!store.list().unwrap().is_empty());
+
+        let (mut dag, _base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        destroy(&mut dag, &store, &out, &[], true).unwrap();
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn force_continues_past_destroy_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_a = dir.path().join("a.txt");
+        let out_b = dir.path().join("b.txt");
+        let input = format!(
+            concat!(
+                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n  clean = \"false\"\n}}\n",
+                "b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            ),
+            out_a.display(),
+            out_a.display(),
+            out_b.display(),
+            out_b.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+
+        let (mut dag, base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let out = Output::new(&[]);
+        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+
+        let (mut dag, _base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        // Without force, first error stops everything
+        assert!(destroy(&mut dag, &store, &out, &[], false).is_err());
+
+        let (mut dag, _base) = loader::load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &store,
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        // With force, still returns error but processes all blocks
+        let result = destroy(&mut dag, &store, &out, &[], true);
+        assert!(result.is_err());
+        // "b" should have been cleaned despite "a" failing first
+        // (reverse order: b first, then a — a fails but b already succeeded)
+        // Both states should be removed since we remove state even on error in force mode
+        assert!(store.list().unwrap().is_empty());
     }
 
     #[test]
@@ -1618,7 +1731,7 @@ mod tests {
             std::path::Path::new("."),
         )
         .unwrap();
-        destroy(&mut dag, &store, &out, &["b".into()]).unwrap();
+        destroy(&mut dag, &store, &out, &["b".into()], false).unwrap();
         assert_eq!(store.list().unwrap(), vec!["a".to_owned()]);
     }
 
@@ -1665,7 +1778,7 @@ mod tests {
             std::path::Path::new("."),
         )
         .unwrap();
-        destroy(&mut dag, &store, &out, &["c".into()]).unwrap();
+        destroy(&mut dag, &store, &out, &["c".into()], false).unwrap();
         let mut stored: Vec<String> = store.list().unwrap();
         stored.sort();
         assert_eq!(stored, vec!["a".to_owned(), "b".to_owned()]);

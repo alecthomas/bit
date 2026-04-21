@@ -1,0 +1,24 @@
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: example
+servers: 1
+agents: 0
+ports:
+  - port: 3001:30000
+    nodeFilters:
+      - loadbalancer
+registries:
+  config: |
+    mirrors:
+      "localhost:5000":
+        endpoint:
+          - http://host.k3d.internal:5000
+options:
+  k3d:
+    wait: true
+  k3s:
+    extraArgs:
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*

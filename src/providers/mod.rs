@@ -15,5 +15,5 @@ pub fn hash_file(path: &Path) -> Result<String, BoxError> {
     let contents = std::fs::read(path)?;
     let mut hasher = sha2::Sha256::new();
     hasher.update(&contents);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("{:x}", hasher.finalize()))
 }

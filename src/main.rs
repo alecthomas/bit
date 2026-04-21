@@ -35,6 +35,10 @@ struct Cli {
     #[arg(short = 'c', long)]
     clean: bool,
 
+    /// Force clean: destroy protected blocks and continue past errors
+    #[arg(short = 'f', long)]
+    force: bool,
+
     /// Run test blocks and their dependencies
     #[arg(short = 't', long)]
     test: bool,
@@ -236,6 +240,11 @@ fn main() {
         return;
     }
 
+    if cli.force && !cli.clean {
+        eprintln!("{} --force can only be used with --clean", "error:".red().bold());
+        process::exit(1);
+    }
+
     // Validate mutually exclusive mode flags. `--plan` and `--graph` are
     // the one permitted combination: together they render a coloured
     // graph annotated with each block's planned action.
@@ -289,7 +298,7 @@ fn main() {
     } else if cli.clean {
         let (_module, mut dag, _base, store) = load_module(&registry, &params);
         let output = make_output(&dag, targets, cli.debug, cli.long);
-        if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, targets) {
+        if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, targets, cli.force) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }

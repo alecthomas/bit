@@ -1,6 +1,6 @@
 {
-  "name": "frontend",
   "version": "0.1.0",
+  "name": "frontend",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",

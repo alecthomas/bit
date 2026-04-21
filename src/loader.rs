@@ -49,6 +49,12 @@ pub enum LoadError {
     MatrixKeyNotFound { pos: crate::ast::Pos, name: String },
     #[error("{pos}: matrix key '{name}' must be a list")]
     MatrixKeyNotList { pos: crate::ast::Pos, name: String },
+    #[error("{pos}: name '{name}' is already used by a {existing}")]
+    DuplicateName {
+        pos: crate::ast::Pos,
+        name: String,
+        existing: &'static str,
+    },
 }
 
 /// The base scope of evaluated params and let bindings, shared with the engine
@@ -84,6 +90,7 @@ pub fn load(
     let mut deferred_matrix: Vec<crate::ast::Block> = Vec::new();
     let mut missing_params: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut declared_params: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut let_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for stmt in &module.statements {
         match stmt {
@@ -115,6 +122,13 @@ pub fn load(
                 }
             }
             Statement::Let(l) => {
+                if block_names.contains(&l.name) {
+                    return Err(LoadError::DuplicateName {
+                        pos: l.pos.clone(),
+                        name: l.name.clone(),
+                        existing: "block",
+                    });
+                }
                 match expr::eval(&l.value, &scope) {
                     Ok(value) => {
                         if let Some(typ) = &l.typ {
@@ -124,6 +138,7 @@ pub fn load(
                                 message,
                             })?;
                         }
+                        let_names.insert(l.name.clone());
                         scope.set(&l.name, value);
                     }
                     Err(_) => {
@@ -133,6 +148,13 @@ pub fn load(
                 }
             }
             Statement::Block(b) => {
+                if let_names.contains(&b.name) {
+                    return Err(LoadError::DuplicateName {
+                        pos: b.pos.clone(),
+                        name: b.name.clone(),
+                        existing: "variable",
+                    });
+                }
                 if !b.matrix_keys.is_empty() {
                     // Defer matrix blocks — expanded after all statements are collected
                     matrix_blocks.insert(b.name.clone(), b.matrix_keys.clone());

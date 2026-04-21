@@ -1,9 +1,18 @@
-use crate::value::{StructType, Type};
+use crate::value::{Map, StructType, Type};
 
 /// Trait for structs that describe their schema as a `StructType`.
 /// Derived automatically via `#[derive(Schema)]` from `bit-derive`.
 pub trait Schema {
     fn schema() -> StructType;
+}
+
+impl Schema for Map {
+    fn schema() -> StructType {
+        StructType {
+            description: None,
+            fields: vec![],
+        }
+    }
 }
 
 /// Trait for any type — struct, enum, scalar — that can describe itself

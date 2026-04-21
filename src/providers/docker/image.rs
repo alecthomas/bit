@@ -88,6 +88,17 @@ pub struct ImageState {
     pub image_id: String,
     #[serde(default)]
     pub platform: Vec<String>,
+    #[serde(default)]
+    pub pinned_tag: Option<String>,
+}
+
+fn strip_docker_prefix(id: &str) -> &str {
+    id.strip_prefix("sha256:").unwrap_or(id)
+}
+
+fn pinned_tag(tag: &str, image_id: &str) -> String {
+    let name = tag.split(':').next().unwrap_or(tag);
+    format!("{name}:{image_id}")
 }
 
 /// Build the argument list for `docker buildx build`.
@@ -249,16 +260,31 @@ impl Resource for ImageResource {
             .output()
             .map_err(|e| format!("docker inspect failed: {e}"))?;
 
-        let image_id = String::from_utf8_lossy(&digest_output.stdout).trim().to_owned();
+        let raw_id = String::from_utf8_lossy(&digest_output.stdout).trim().to_owned();
+        let image_id = strip_docker_prefix(&raw_id).to_owned();
+
+        let pinned = pinned_tag(&inputs.tag, &image_id);
+        let tag_status = Command::new("docker")
+            .args(["tag", &inputs.tag, &pinned])
+            .output()
+            .map_err(|e| format!("docker tag failed: {e}"))?;
+        if !tag_status.status.success() {
+            return Err(format!(
+                "docker tag failed: {}",
+                String::from_utf8_lossy(&tag_status.stderr).trim()
+            )
+            .into());
+        }
 
         Ok(ApplyResult {
             state: Some(ImageState {
                 tag: inputs.tag.clone(),
                 image_id: image_id.clone(),
                 platform: inputs.platform.clone(),
+                pinned_tag: Some(pinned.clone()),
             }),
             outputs: ImageOutputs {
-                image_ref: inputs.tag.clone(),
+                image_ref: pinned,
                 image_id,
             },
         })
@@ -266,6 +292,10 @@ impl Resource for ImageResource {
 
     fn destroy(&self, prior_state: &ImageState, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
+        if let Some(pinned) = &prior_state.pinned_tag {
+            writer.event(Event::Starting, &format!("docker rmi -f {pinned}"));
+            let _ = Command::new("docker").args(["rmi", "-f", pinned]).output();
+        }
         writer.event(Event::Starting, &format!("docker rmi -f {}", prior_state.image_id));
         let output = Command::new("docker")
             .args(["rmi", "-f", &prior_state.image_id])
@@ -289,17 +319,20 @@ impl Resource for ImageResource {
             return Err(format!("image {} not found", prior_state.tag).into());
         }
 
-        let image_id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let raw_id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let image_id = strip_docker_prefix(&raw_id).to_owned();
+        let pinned = pinned_tag(&prior_state.tag, &image_id);
 
         Ok(ApplyResult {
             outputs: ImageOutputs {
-                image_ref: prior_state.tag.clone(),
+                image_ref: pinned.clone(),
                 image_id: image_id.clone(),
             },
             state: Some(ImageState {
                 tag: prior_state.tag.clone(),
                 image_id,
                 platform: prior_state.platform.clone(),
+                pinned_tag: Some(pinned),
             }),
         })
     }
@@ -335,8 +368,9 @@ mod tests {
         };
         let prior = ImageState {
             tag: "myapp:latest".into(),
-            image_id: "sha256:nonexistent".into(),
+            image_id: "nonexistent".into(),
             platform: vec![],
+            pinned_tag: None,
         };
         let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -353,8 +387,9 @@ mod tests {
         };
         let prior = ImageState {
             tag: "myapp:v1".into(),
-            image_id: "sha256:abc".into(),
+            image_id: "abc".into(),
             platform: vec![],
+            pinned_tag: None,
         };
         let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
@@ -371,8 +406,9 @@ mod tests {
         };
         let prior = ImageState {
             tag: "myapp:latest".into(),
-            image_id: "sha256:abc".into(),
+            image_id: "abc".into(),
             platform: vec!["linux/amd64".into()],
+            pinned_tag: None,
         };
         let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
@@ -424,5 +460,32 @@ mod tests {
         assert_eq!(resolved.len(), 2); // Dockerfile + main.rs
         assert!(resolved.contains(&ResolvedFile::Input(dockerfile)));
         assert!(resolved.contains(&ResolvedFile::Input(src_dir.join("main.rs"))));
+    }
+
+    #[test]
+    fn pinned_tag_uses_full_digest() {
+        assert_eq!(
+            pinned_tag("myapp:latest", "fe98a05f929ea35f5aae13cc82f9bd3b"),
+            "myapp:fe98a05f929ea35f5aae13cc82f9bd3b"
+        );
+    }
+
+    #[test]
+    fn pinned_tag_handles_no_existing_tag() {
+        assert_eq!(pinned_tag("myapp", "abcdef123456789"), "myapp:abcdef123456789");
+    }
+
+    #[test]
+    fn pinned_tag_handles_registry_prefix() {
+        assert_eq!(
+            pinned_tag("registry.example.com/app:v1", "abcdef123456789"),
+            "registry.example.com/app:abcdef123456789"
+        );
+    }
+
+    #[test]
+    fn strip_docker_prefix_removes_sha256() {
+        assert_eq!(strip_docker_prefix("sha256:abc123"), "abc123");
+        assert_eq!(strip_docker_prefix("abc123"), "abc123");
     }
 }
