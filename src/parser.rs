@@ -23,6 +23,7 @@ pub fn parse(input: &str, filename: &str) -> Result<Module, ParseError> {
     // Convert byte offsets to line:col and attach filename
     for stmt in &mut m.statements {
         let pos = match stmt {
+            Statement::Import(i) => &mut i.pos,
             Statement::Block(b) => &mut b.pos,
             Statement::Let(l) => &mut l.pos,
             Statement::Param(p) => &mut p.pos,
@@ -746,6 +747,7 @@ fn module(input: &mut &str) -> ModalResult<Module> {
         // converted to real line:col by parse() after parsing completes).
         let offset = full_len - input.len();
         let mut stmt = alt((
+            import_stmt.map(Statement::Import),
             let_stmt.map(Statement::Let),
             |input: &mut &str| param_stmt(doc.clone(), input).map(Statement::Param),
             |input: &mut &str| target_stmt(doc.clone(), input).map(Statement::Target),
@@ -756,6 +758,7 @@ fn module(input: &mut &str) -> ModalResult<Module> {
         .parse_next(input)?;
         // Stash byte offset in pos.line — parse() will fix up to real line:col
         match &mut stmt {
+            Statement::Import(i) => i.pos.line = offset,
             Statement::Block(b) => b.pos.line = offset,
             Statement::Let(l) => l.pos.line = offset,
             Statement::Param(p) => p.pos.line = offset,
@@ -820,6 +823,17 @@ fn leading_module_doc(input: &mut &str) -> Option<String> {
         *input = saved;
         None
     }
+}
+
+fn import_stmt(input: &mut &str) -> ModalResult<Import> {
+    keyword("import").parse_next(input)?;
+    let url = cut_err(alt((plain_raw_string, plain_string)))
+        .context(StrContext::Label("import URL string"))
+        .parse_next(input)?;
+    Ok(Import {
+        pos: Pos::default(),
+        url,
+    })
 }
 
 fn let_stmt(input: &mut &str) -> ModalResult<Let> {
@@ -1029,6 +1043,56 @@ fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_import() {
+        let result = parse(r#"import "github.com/user/repo""#, "<test>").unwrap();
+        assert_eq!(result.statements.len(), 1);
+        match &result.statements[0] {
+            Statement::Import(i) => {
+                assert_eq!(i.url, "github.com/user/repo");
+            }
+            other => panic!("expected Import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_import_with_ref() {
+        let result = parse(r#"import "github.com/user/repo/path#v1.0""#, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Import(i) => {
+                assert_eq!(i.url, "github.com/user/repo/path#v1.0");
+            }
+            other => panic!("expected Import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_import_raw_string() {
+        let result = parse("import 'github.com/user/repo'", "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Import(i) => {
+                assert_eq!(i.url, "github.com/user/repo");
+            }
+            other => panic!("expected Import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_import_before_blocks() {
+        let input = r#"
+import "github.com/user/repo"
+
+server = exec {
+  command = "build"
+  output = "out"
+}
+"#;
+        let result = parse(input, "<test>").unwrap();
+        assert_eq!(result.statements.len(), 2);
+        assert!(matches!(&result.statements[0], Statement::Import(_)));
+        assert!(matches!(&result.statements[1], Statement::Block(_)));
+    }
 
     #[test]
     fn parse_string_literal() {

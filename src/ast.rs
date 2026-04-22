@@ -26,11 +26,19 @@ pub struct Module {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
+    Import(Import),
     Block(Block),
     Let(Let),
     Param(Param),
     Target(Target),
     Output(Output),
+}
+
+/// `import "github.com/user/repo[/subpath][#ref]"`
+#[derive(Debug, Clone, PartialEq)]
+pub struct Import {
+    pub pos: Pos,
+    pub url: String,
 }
 
 /// Execution phase for a block.

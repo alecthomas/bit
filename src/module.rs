@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::ast::{Block, Expr, Field, Module, Statement, StringPart};
 use crate::dag::{Dag, DagNode, collect_after, collect_block_refs, collect_depends_on};
@@ -83,12 +83,14 @@ impl DynResource for ModuleResource {
 
 /// Resolve a module file path from provider/resource names.
 ///
-/// Checks `.bit/modules/{provider}/{resource}.bit` under the given root.
-/// Returns `None` if no matching module file exists.
-pub fn resolve_module_path(root: &Path, provider: &str, resource: &str) -> Option<std::path::PathBuf> {
-    let path = root.join(".bit/modules").join(provider).join(format!("{resource}.bit"));
-    if path.exists() {
-        return Some(path);
+/// Searches import roots in reverse order (last import wins) for
+/// `{root}/{provider}/{resource}.bit`.
+pub fn resolve_module_path(import_roots: &[PathBuf], provider: &str, resource: &str) -> Option<std::path::PathBuf> {
+    for import_root in import_roots.iter().rev() {
+        let path = import_root.join(provider).join(format!("{resource}.bit"));
+        if path.exists() {
+            return Some(path);
+        }
     }
     None
 }
@@ -112,6 +114,7 @@ fn parse_module_interface(module: &Module) -> ModuleInterface {
     };
     for stmt in &module.statements {
         match stmt {
+            Statement::Import(_) => {}
             Statement::Param(p) => iface.params.push(p.clone()),
             Statement::Let(l) => iface.lets.push(l.clone()),
             Statement::Block(b) => iface.blocks.push(b.clone()),
@@ -128,7 +131,7 @@ pub struct ExpandContext<'a> {
     pub registry: &'a ProviderRegistry,
     pub store: &'a dyn StateStore,
     pub dag: &'a mut Dag,
-    pub root: &'a Path,
+    pub import_roots: &'a [PathBuf],
 }
 
 /// Expand a module block into namespaced inner blocks in the DAG.
@@ -227,7 +230,7 @@ pub fn expand_module(
         let qualified_name = format!("{instance_name}.{}", block.name);
 
         // Check for nested module
-        if let Some(nested_path) = resolve_module_path(ctx.root, &block.provider, &block.resource) {
+        if let Some(nested_path) = resolve_module_path(ctx.import_roots, &block.provider, &block.resource) {
             let rewritten_fields: Vec<Field> = block
                 .fields
                 .iter()
@@ -611,6 +614,42 @@ mod tests {
                 StringPart::Interpolation(Expr::Ref(vec!["staging.app".into(), "name".into(),])),
             ])
         );
+    }
+
+    #[test]
+    fn resolve_from_import_root() {
+        let import_dir = tempfile::tempdir().unwrap();
+        let import_prov = import_dir.path().join("prov");
+        std::fs::create_dir_all(&import_prov).unwrap();
+        std::fs::write(import_prov.join("res.bit"), "").unwrap();
+
+        let import_roots = vec![import_dir.path().to_path_buf()];
+        let result = resolve_module_path(&import_roots, "prov", "res");
+        assert_eq!(result, Some(import_prov.join("res.bit")));
+    }
+
+    #[test]
+    fn resolve_import_roots_reverse_priority() {
+        let first = tempfile::tempdir().unwrap();
+        let first_prov = first.path().join("prov");
+        std::fs::create_dir_all(&first_prov).unwrap();
+        std::fs::write(first_prov.join("res.bit"), "first").unwrap();
+
+        let second = tempfile::tempdir().unwrap();
+        let second_prov = second.path().join("prov");
+        std::fs::create_dir_all(&second_prov).unwrap();
+        std::fs::write(second_prov.join("res.bit"), "second").unwrap();
+
+        let import_roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+        let result = resolve_module_path(&import_roots, "prov", "res");
+        // Last import wins (reverse order)
+        assert_eq!(result, Some(second_prov.join("res.bit")));
+    }
+
+    #[test]
+    fn resolve_no_match_returns_none() {
+        let result = resolve_module_path(&[], "prov", "res");
+        assert_eq!(result, None);
     }
 
     #[test]

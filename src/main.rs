@@ -171,7 +171,14 @@ fn load_module(
             process::exit(1);
         }
     };
-    let (dag, base) = match loader::load(&module, params, registry, store.as_ref(), root) {
+    let import_roots = match bit::import::resolve_imports(&module, root) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
+    let (dag, base) = match loader::load(&module, params, registry, store.as_ref(), &import_roots) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{} {e}", "error:".red().bold());

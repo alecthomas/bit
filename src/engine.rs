@@ -1447,14 +1447,7 @@ mod tests {
     fn load_and_apply(input: &str) -> Result<Vec<BlockPlan>, EngineError> {
         let module = parser::parse(input, "<test>").expect("parse failed");
         let store = MemoryStore::new();
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .expect("load failed");
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).expect("load failed");
         let output = Output::new(&[]);
         apply(&mut dag, &base, &store, &output, &[], 1)
     }
@@ -1503,14 +1496,7 @@ mod tests {
         );
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let out = Output::new(&[]);
         let plans = plan(&mut dag, &base, &store, &out, &[]).unwrap();
         assert_eq!(plans.len(), 1);
@@ -1530,27 +1516,13 @@ mod tests {
         let store = MemoryStore::new();
 
         // Apply first
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
         assert!(!store.list().unwrap().is_empty());
 
         // Reload with state, then destroy
-        let (mut dag, _base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &[], false).unwrap();
         assert!(store.list().unwrap().is_empty());
     }
@@ -1567,25 +1539,11 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
 
-        let (mut dag, _base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &[], false).unwrap();
         // State should still exist — destroy was skipped
         assert!(!store.list().unwrap().is_empty());
@@ -1603,26 +1561,12 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
         assert!(!store.list().unwrap().is_empty());
 
-        let (mut dag, _base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &[], true).unwrap();
         assert!(store.list().unwrap().is_empty());
     }
@@ -1645,36 +1589,15 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
 
-        let (mut dag, _base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         // Without force, first error stops everything
         assert!(destroy(&mut dag, &store, &out, &[], false).is_err());
 
-        let (mut dag, _base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         // With force, still returns error but processes all blocks
         let result = destroy(&mut dag, &store, &out, &[], true);
         assert!(result.is_err());
@@ -1708,14 +1631,7 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
         let mut stored: Vec<String> = store.list().unwrap();
@@ -1723,14 +1639,7 @@ mod tests {
         assert_eq!(stored, vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
 
         // Cleaning "b" should remove b and its dependent c, but leave a alone.
-        let (mut dag, _base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &["b".into()], false).unwrap();
         assert_eq!(store.list().unwrap(), vec!["a".to_owned()]);
     }
@@ -1759,25 +1668,11 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
 
-        let (mut dag, _base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &["c".into()], false).unwrap();
         let mut stored: Vec<String> = store.list().unwrap();
         stored.sort();
@@ -1802,14 +1697,7 @@ mod tests {
         );
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let out = Output::new(&[]);
         let results = apply(&mut dag, &base, &store, &out, &["just_a".into()], 1).unwrap();
         assert_eq!(results.len(), 1);
@@ -1831,14 +1719,7 @@ mod tests {
         let store = MemoryStore::new();
 
         // First apply creates the block
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
 
@@ -1849,14 +1730,7 @@ mod tests {
         assert!(!wrapped.file_timestamps.is_empty());
 
         // Second apply should be a no-op (timestamp fast path)
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let results = apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::None);
@@ -1881,28 +1755,14 @@ mod tests {
         let out = Output::new(&[]);
 
         // First apply
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
 
         // Modify input file (touch with new content to change both mtime and hash)
         std::fs::write(&input_file, "v2").unwrap();
 
         // Second apply should detect the change
-        let (mut dag, base) = loader::load(
-            &module,
-            &Map::new(),
-            &test_registry(),
-            &store,
-            std::path::Path::new("."),
-        )
-        .unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
         let results = apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::Update);

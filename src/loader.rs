@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::PathBuf;
 
 use std::collections::HashMap;
 
@@ -45,6 +45,11 @@ pub enum LoadError {
     ModuleLoad(String, String),
     #[error("failed to parse module {0}: {1}")]
     ModuleParse(String, String),
+    #[error("{pos}: import error: {source}")]
+    Import {
+        pos: crate::ast::Pos,
+        source: crate::import::ImportError,
+    },
     #[error("{pos}: matrix key '{name}' not found in scope")]
     MatrixKeyNotFound { pos: crate::ast::Pos, name: String },
     #[error("{pos}: matrix key '{name}' must be a list")]
@@ -81,7 +86,7 @@ pub fn load(
     params: &Map,
     registry: &ProviderRegistry,
     store: &dyn StateStore,
-    root: &Path,
+    import_roots: &[PathBuf],
 ) -> Result<(Dag, BaseScope), LoadError> {
     let mut scope = Scope::new();
     let mut dag = Dag::new();
@@ -93,6 +98,7 @@ pub fn load(
 
     for stmt in &module.statements {
         match stmt {
+            Statement::Import(_) => {}
             Statement::Param(p) => {
                 declared_params.insert(p.name.clone());
                 let value = if let Some(v) = params.get(&p.name) {
@@ -164,7 +170,7 @@ pub fn load(
                     matrix_blocks.insert(b.name.clone(), b.matrix_keys.clone());
                     deferred_matrix.push(b.clone());
                     block_names.push(b.name.clone());
-                } else if let Some(module_path) = module::resolve_module_path(root, &b.provider, &b.resource) {
+                } else if let Some(module_path) = module::resolve_module_path(import_roots, &b.provider, &b.resource) {
                     // Full define happens in expand_module.
                     // Check here only for conflicts with params/lets.
                     if let Some(existing) = scope.kind(&b.name) {
@@ -179,7 +185,7 @@ pub fn load(
                         registry,
                         store,
                         dag: &mut dag,
-                        root,
+                        import_roots,
                     };
                     module::expand_module(&b.name, &module_path, &b.fields, &mut ctx)?;
                     block_names.push(b.name.clone());
@@ -341,8 +347,6 @@ fn resolve_dep(name: &str, dag: &Dag, matrix_blocks: &HashMap<String, Vec<String
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
     use crate::parser;
     use crate::providers::exec::ExecProvider;
@@ -378,7 +382,7 @@ server = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         let node = dag.get_node("server").unwrap();
         assert_eq!(node.provider, "exec");
         assert_eq!(node.resource_name, "exec");
@@ -395,7 +399,7 @@ server = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         assert!(dag.get_node("server").is_some());
         assert_eq!(scope.scope.get("name").unwrap().as_str(), Some("hello"));
     }
@@ -412,7 +416,7 @@ server = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let mut params = Map::new();
         params.insert("env".into(), Value::Str("prod".into()));
-        let (_dag, scope) = load(&module, &params, &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (_dag, scope) = load(&module, &params, &test_registry(), &EmptyStore, &[]).unwrap();
         assert_eq!(scope.scope.get("env").unwrap().as_str(), Some("prod"));
     }
 
@@ -421,7 +425,7 @@ server = exec {
         // Missing params don't error at load time — they're deferred
         let input = "param env : string\n";
         let module = parser::parse(input, "<test>").unwrap();
-        let (_dag, base) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (_dag, base) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         assert!(base.missing_params.contains("env"));
     }
 
@@ -431,7 +435,7 @@ server = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let mut params = Map::new();
         params.insert("bogus".into(), Value::Str("val".into()));
-        let result = load(&module, &params, &test_registry(), &EmptyStore, Path::new("."));
+        let result = load(&module, &params, &test_registry(), &EmptyStore, &[]);
         let err = result.err().expect("expected error");
         assert!(err.to_string().contains("unknown param: bogus"), "got: {err}");
     }
@@ -449,7 +453,7 @@ b = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         let order = dag.topo_order().unwrap();
         let ai = order.iter().position(|n| n == "a").unwrap();
         let bi = order.iter().position(|n| n == "b").unwrap();
@@ -466,7 +470,7 @@ apple = exec { command = "a" output = "a" }
 mango = exec { command = "m" output = "m" }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         assert_eq!(dag.topo_order().unwrap(), vec!["apple", "mango", "zebra"]);
     }
 
@@ -484,7 +488,7 @@ integration-test = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         assert_eq!(dag.primary_parent("integration-test"), Some("debug".into()));
         assert_eq!(dag.primary_parent("debug"), Some("fmt".into()));
         assert_eq!(dag.primary_parent("fmt"), None);
@@ -500,7 +504,7 @@ server = exec {
 target build = [server]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         let order = dag.target_order("build").unwrap();
         assert_eq!(order, vec!["server"]);
     }
@@ -518,7 +522,7 @@ b = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new("."));
+        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]);
         assert!(matches!(result, Err(LoadError::Dag(DagError::Cycle))));
     }
 
@@ -530,7 +534,7 @@ server = go.binary {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new("."));
+        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]);
         assert!(matches!(result, Err(LoadError::UnknownResource { .. })));
     }
 
@@ -548,7 +552,7 @@ deploy = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         let order = dag.topo_order().unwrap();
         let mi = order.iter().position(|n| n == "migrations").unwrap();
         let di = order.iter().position(|n| n == "deploy").unwrap();
@@ -559,7 +563,7 @@ deploy = exec {
     fn load_target_unknown_block() {
         let input = "target build = [nonexistent]\n";
         let module = parser::parse(input, "<test>").unwrap();
-        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new("."));
+        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]);
         assert!(matches!(result, Err(LoadError::Dag(DagError::UnknownTargetBlock(..)))));
     }
 
@@ -574,14 +578,15 @@ server = exec {
 target build = [server]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         let targets = dag.targets();
         assert_eq!(targets["build"].doc.as_deref(), Some("Build the server"));
     }
 
-    /// Create a temp dir with a module file at .bit/modules/{provider}/{resource}.bit
+    /// Create a module file at {dir}/{provider}/{resource}.bit and return
+    /// the dir as an import root.
     fn write_module(dir: &std::path::Path, provider: &str, resource: &str, content: &str) {
-        let module_dir = dir.join(".bit/modules").join(provider);
+        let module_dir = dir.join(provider);
         std::fs::create_dir_all(&module_dir).unwrap();
         std::fs::write(module_dir.join(format!("{resource}.bit")), content).unwrap();
     }
@@ -611,7 +616,14 @@ inst = mymod {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path()).unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
 
         // Inner block is namespaced
         assert!(dag.has_block("inst.inner"));
@@ -647,7 +659,14 @@ inst = mymod {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path()).unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
 
         let node = dag.get_node("inst.hello").unwrap();
         // The command field should have the substituted literal value
@@ -684,7 +703,14 @@ output result = b.path
 inst = mymod {}
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path()).unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
 
         // b depends on a (both namespaced)
         let order = dag.topo_order().unwrap();
@@ -722,7 +748,14 @@ target build = [a]
 inst = mymod {}
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path()).unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
 
         let targets = dag.targets();
         assert!(targets.contains_key("inst.build"));
@@ -751,7 +784,13 @@ a = exec {
 inst = mymod {}
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path());
+        let result = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &[dir.path().to_path_buf()],
+        );
         assert!(matches!(result, Err(LoadError::MissingParam { .. })));
     }
 
@@ -776,7 +815,14 @@ a = exec {
 inst = mymod {}
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path()).unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
 
         let node = dag.get_node("inst.a").unwrap();
         let cmd_field = node.fields.iter().find(|f| f.name == "command").unwrap();
@@ -811,7 +857,14 @@ inst = mymod {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path()).unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
 
         let node = dag.get_node("inst.a").unwrap();
         let cmd_field = node.fields.iter().find(|f| f.name == "command").unwrap();
@@ -848,7 +901,14 @@ inst2 = mymod {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path()).unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
 
         // Both instances create independent blocks
         assert!(dag.has_block("inst1.a"));
@@ -887,7 +947,14 @@ inst = mymod {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path()).unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
 
         // inst.a should depend on outer (via the deferred param expression)
         let order = dag.topo_order().unwrap();
@@ -916,7 +983,14 @@ a = exec {
 inst = myns.myres {}
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, dir.path()).unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
 
         assert!(dag.has_block("inst.a"));
         assert!(dag.has_block("inst"));
@@ -933,7 +1007,7 @@ build[arch] = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
         assert!(dag.has_block("build[amd64]"));
         assert!(dag.has_block("build[arm64]"));
@@ -951,7 +1025,7 @@ build[arch] = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
         let node = dag.get_node("build[amd64]").unwrap();
         let cmd = node.fields.iter().find(|f| f.name == "command").unwrap();
@@ -977,7 +1051,7 @@ deploy[arch] = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
         // deploy[amd64] should depend on build[amd64], not build[arm64]
         let order = dag.topo_order().unwrap();
@@ -1006,7 +1080,7 @@ build[arch, os] = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
         assert!(dag.has_block("build[amd64, linux]"));
         assert!(dag.has_block("build[amd64, darwin]"));
@@ -1031,7 +1105,7 @@ package = exec {
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
-        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, Path::new(".")).unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
         // package should come after both build slices
         let order = dag.topo_order().unwrap();
