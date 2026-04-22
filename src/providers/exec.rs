@@ -160,7 +160,7 @@ fn run_command(command: &str, dir: Option<&str>, writer: &BlockWriter) -> Result
 /// capture external resource state without streaming through the block writer.
 fn run_capture(command: &str, dir: Option<&str>) -> Result<String, BoxError> {
     let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(command).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.arg("-c").arg(command).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
@@ -168,7 +168,13 @@ fn run_capture(command: &str, dir: Option<&str>) -> Result<String, BoxError> {
         .output()
         .map_err(|e| format!("failed to execute resolve command: {e}"))?;
     if !output.status.success() {
-        return Err(format!("resolve command exited with {}", output.status).into());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        return if detail.is_empty() {
+            Err(format!("resolve command exited with {}", output.status).into())
+        } else {
+            Err(format!("resolve command exited with {}: {detail}", output.status).into())
+        };
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -1091,5 +1097,22 @@ mod tests {
             new_state.outputs_values.get("refreshed").and_then(|v| v.as_bool()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn run_capture_includes_stderr_on_failure() {
+        let err = run_capture("echo 'something went wrong' >&2; exit 1", None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("something went wrong"),
+            "expected stderr in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_capture_omits_stderr_when_empty() {
+        let err = run_capture("exit 1", None).unwrap_err();
+        let msg = err.to_string();
+        assert_eq!(msg, "resolve command exited with exit status: 1");
     }
 }

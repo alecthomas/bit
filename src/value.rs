@@ -89,11 +89,18 @@ impl<'de> Deserialize<'de> for Duration {
 }
 
 /// A named, typed field within a struct — carries all metadata.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StructField {
+    #[serde(rename = "type", serialize_with = "serialize_type")]
     pub typ: Type,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+fn serialize_type<S: Serializer>(typ: &Type, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&typ.to_string())
 }
 
 /// A struct type with an optional description and ordered fields.
@@ -101,6 +108,42 @@ pub struct StructField {
 pub struct StructType {
     pub description: Option<String>,
     pub fields: Vec<(String, StructField)>,
+}
+
+impl Serialize for StructType {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("StructType", 2)?;
+        st.serialize_field("description", &self.description)?;
+        let named: Vec<NamedField<'_>> = self
+            .fields
+            .iter()
+            .map(|(name, field)| NamedField { name, field })
+            .collect();
+        st.serialize_field("fields", &named)?;
+        st.end()
+    }
+}
+
+struct NamedField<'a> {
+    name: &'a str,
+    field: &'a StructField,
+}
+
+impl Serialize for NamedField<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("NamedField", 4)?;
+        st.serialize_field("name", self.name)?;
+        st.serialize_field("type", &self.field.typ.to_string())?;
+        if self.field.default.is_some() {
+            st.serialize_field("default", &self.field.default)?;
+        }
+        if self.field.description.is_some() {
+            st.serialize_field("description", &self.field.description)?;
+        }
+        st.end()
+    }
 }
 
 impl StructType {

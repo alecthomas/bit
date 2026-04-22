@@ -331,6 +331,13 @@ fn builtins() -> &'static HashMap<&'static str, BuiltinDef> {
                     return_type: Type::String,
                 },
             ),
+            (
+                "sha256",
+                BuiltinDef {
+                    func: builtin_sha256,
+                    return_type: Type::String,
+                },
+            ),
         ])
     })
 }
@@ -585,6 +592,18 @@ fn builtin_suffix(args: &[Value]) -> Result<Value, EvalError> {
         }
         _ => Err(EvalError::Type("suffix() requires a string or list".into())),
     }
+}
+
+/// `sha256(value)` — hex-encoded SHA-256 digest of a string
+fn builtin_sha256(args: &[Value]) -> Result<Value, EvalError> {
+    use sha2::{Digest, Sha256};
+    check_arity("sha256", args, 1)?;
+    let s = args[0]
+        .as_str()
+        .ok_or_else(|| EvalError::Type("sha256() requires a string".into()))?;
+    let digest = Sha256::digest(s.as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(Value::Str(hex))
 }
 
 #[cfg(test)]
@@ -1026,6 +1045,20 @@ mod tests {
         assert_eq!(
             eval(&expr, &scope).unwrap(),
             Value::list(vec![Value::Str("app.so".into()), Value::Str("lib.so".into()),])
+        );
+    }
+
+    #[test]
+    fn eval_sha256() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::Str(vec![StringPart::Literal("hello".into())])),
+            "sha256".into(),
+            vec![],
+        );
+        assert_eq!(
+            eval(&expr, &scope).unwrap(),
+            Value::Str("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into())
         );
     }
 }

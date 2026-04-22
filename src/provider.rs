@@ -59,7 +59,7 @@ pub struct FuncSignature {
 }
 
 /// Schema describing a resource's interface.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResourceSchema {
     pub kind: ResourceKind,
     pub inputs: StructType,
@@ -67,7 +67,8 @@ pub struct ResourceSchema {
 }
 
 /// Whether a resource produces build artifacts or test results.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ResourceKind {
     Build,
     Test,
@@ -387,5 +388,58 @@ mod tests {
 
         let plan = resource.plan(&Map::new(), Some(&json_state)).unwrap();
         assert_eq!(plan.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn schema_json_serialization() {
+        use crate::value::{StructField, StructType, Type};
+
+        let schema = ResourceSchema {
+            kind: ResourceKind::Build,
+            inputs: StructType {
+                description: Some("Test resource".into()),
+                fields: vec![
+                    (
+                        "name".into(),
+                        StructField {
+                            typ: Type::String,
+                            default: None,
+                            description: Some("The name".into()),
+                        },
+                    ),
+                    (
+                        "count".into(),
+                        StructField {
+                            typ: Type::Optional(Box::new(Type::Number)),
+                            default: Some(Value::Number(42.into())),
+                            description: None,
+                        },
+                    ),
+                ],
+            },
+            outputs: StructType {
+                description: None,
+                fields: vec![(
+                    "path".into(),
+                    StructField {
+                        typ: Type::String,
+                        default: None,
+                        description: Some("Output path".into()),
+                    },
+                )],
+            },
+        };
+
+        let json = serde_json::to_value(&schema).unwrap();
+        assert_eq!(json["kind"], "build");
+        assert_eq!(json["inputs"]["description"], "Test resource");
+        assert_eq!(json["inputs"]["fields"][0]["name"], "name");
+        assert_eq!(json["inputs"]["fields"][0]["type"], "string");
+        assert_eq!(json["inputs"]["fields"][0]["description"], "The name");
+        assert_eq!(json["inputs"]["fields"][1]["name"], "count");
+        assert_eq!(json["inputs"]["fields"][1]["type"], "number?");
+        assert_eq!(json["inputs"]["fields"][1]["default"], "42");
+        assert_eq!(json["outputs"]["fields"][0]["name"], "path");
+        assert_eq!(json["outputs"]["fields"][0]["type"], "string");
     }
 }

@@ -63,6 +63,10 @@ struct Cli {
     #[arg(short = 's', long, num_args = 0..=1, default_missing_value = "")]
     schema: Option<String>,
 
+    /// Output in JSON format (currently applies to --schema)
+    #[arg(long)]
+    json: bool,
+
     /// Emit verbose debug information through the output system
     #[arg(short = 'D', long)]
     debug: bool,
@@ -229,7 +233,11 @@ fn main() {
         let registry = default_registry();
         find_and_chdir_project_root();
         let filter = if filter.is_empty() { None } else { Some(filter.as_str()) };
-        print_schema(&registry, filter);
+        if cli.json {
+            print_schema_json(&registry, filter);
+        } else {
+            print_schema(&registry, filter);
+        }
         return;
     }
 
@@ -480,12 +488,14 @@ fn print_info() {
     }
 }
 
-fn print_schema(registry: &ProviderRegistry, filter: Option<&str>) {
-    // Also scan .bit/modules/ for module providers
+/// Collect all matching (display_name, schema) pairs from native + module providers.
+fn collect_schema_entries(
+    registry: &ProviderRegistry,
+    filter: Option<&str>,
+) -> Vec<(String, bit::provider::ResourceSchema)> {
     let root = std::path::Path::new(".");
     let module_schemas = scan_module_schemas(root);
 
-    // Collect all matching (display_name, schema) pairs
     let mut entries: Vec<(String, bit::provider::ResourceSchema)> = Vec::new();
 
     let filter_parts = filter.map(|f| match f.split_once('.') {
@@ -493,7 +503,6 @@ fn print_schema(registry: &ProviderRegistry, filter: Option<&str>) {
         None => (f, None),
     });
 
-    // Native providers
     for provider_name in registry.provider_names() {
         if let Some((fp, _)) = filter_parts
             && fp != provider_name
@@ -515,7 +524,6 @@ fn print_schema(registry: &ProviderRegistry, filter: Option<&str>) {
         }
     }
 
-    // Module providers
     for (display_name, mod_resource, schema) in &module_schemas {
         let mod_provider = display_name.split('.').next().unwrap_or(display_name);
         if let Some((fp, _)) = filter_parts
@@ -538,12 +546,35 @@ fn print_schema(registry: &ProviderRegistry, filter: Option<&str>) {
         process::exit(1);
     }
 
+    entries
+}
+
+fn print_schema(registry: &ProviderRegistry, filter: Option<&str>) {
+    let entries = collect_schema_entries(registry, filter);
     for (i, (name, schema)) in entries.iter().enumerate() {
         if i > 0 {
             println!();
         }
         print_resource_schema(name, schema);
     }
+}
+
+fn print_schema_json(registry: &ProviderRegistry, filter: Option<&str>) {
+    let entries = collect_schema_entries(registry, filter);
+    #[derive(serde::Serialize)]
+    struct Entry {
+        name: String,
+        #[serde(flatten)]
+        schema: bit::provider::ResourceSchema,
+    }
+    let json_entries: Vec<Entry> = entries
+        .into_iter()
+        .map(|(name, schema)| Entry { name, schema })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json_entries).expect("JSON serialization failed")
+    );
 }
 
 fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {

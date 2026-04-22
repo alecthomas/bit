@@ -47,5 +47,53 @@ protected sync-zed-rev = exec {
   output = "integrations/zed/extension.toml"
 }
 
+# Regenerate the Providers section of README.md from `bit --schema --json`.
+# Re-runs only when the debug binary changes (i.e. schema may have changed).
+sync-readme = exec {
+  command = <<-EOF
+    export SECTION=$(mktemp)
+    trap 'rm -f "$SECTION"' EXIT
+    ${debug.path} --schema --json | jq -r '
+      def pad($n): . as $s | ([($n - ($s|length)), 2] | max) as $p | $s + (" " * $p);
+      "## Providers\n",
+      (group_by(.name | split(".")[0]) | .[] |
+      (.[0].name | split(".")[0]) as $prov |
+      "### \($prov)\n",
+      (.[] | . as $res |
+        "**`\(.name)`** (\(.kind))\(.inputs.description // "" | if . != "" then " — \(.)" else "" end)\n",
+        (if (.inputs.fields | length) > 0 then
+          ([(.inputs.fields | map("  \(.name) = \(.type)" | length) | max + 2), 40] | min) as $col |
+          "```bit",
+          "block = \($res.name) {",
+          (.inputs.fields[] |
+            ("  \(.name) = \(.type)" | pad($col)) as $left |
+            [(.description // ""), (if .default then "default: \(.default)" else "" end)]
+              | map(select(. != "")) | join(", ") |
+            if . != "" then "\($left)# \(.)" else $left end),
+          "}",
+          "```\n"
+        else empty end),
+        (if (.outputs.fields | length) > 0 then
+          "**Outputs:**\n",
+          "| Field | Type | Description |",
+          "|---|---|---|",
+          (.outputs.fields[] |
+            "| `\(.name)` | `\(.type)` | \(.description // "") |"),
+          ""
+        else empty end)
+      ))
+    ' > "$SECTION"
+    awk '
+      /^## Providers/ { skip=1; system("cat " ENVIRON["SECTION"]); next }
+      /^## How It Works/ { skip=0 }
+      !skip { print }
+    ' README.md > README.md.tmp && mv README.md.tmp README.md
+  EOF
+  depends_on = [debug]
+  resolve = <<EOF
+    echo ${exec("${debug.path} --schema") | sha256}
+  EOF
+}
+
 # Default target: release binary, tests, lints, and Zed rev sync.
 target default = [release, test, clippy, sync-zed-rev]
