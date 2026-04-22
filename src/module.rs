@@ -69,16 +69,6 @@ impl DynResource for ModuleResource {
     fn destroy(&self, _prior_state: &serde_json::Value, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(
-        &self,
-        _prior_state: &serde_json::Value,
-    ) -> Result<ProviderApplyResult<serde_json::Value, Map>, BoxError> {
-        Ok(ProviderApplyResult {
-            outputs: Map::new(),
-            state: Some(serde_json::json!({})),
-        })
-    }
 }
 
 /// Resolve a module file path from provider/resource names.

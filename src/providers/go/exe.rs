@@ -164,15 +164,6 @@ impl Resource for GoExeResource {
         }
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &GoExeState) -> Result<ApplyResult<GoExeState, GoExeOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: GoExeOutputs {
-                path: prior_state.output.clone(),
-            },
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]
@@ -318,18 +309,5 @@ mod tests {
         let writer = out.writer("test");
         Resource::destroy(&resource, &state, &writer).unwrap();
         assert!(!output.exists());
-    }
-
-    #[test]
-    fn refresh_returns_outputs() {
-        let state = GoExeState {
-            package: "./cmd/app".into(),
-            output: "bin/app".into(),
-            flags: vec![],
-            env: GoEnv::default(),
-        };
-        let resource = GoExeResource;
-        let result = Resource::refresh(&resource, &state).unwrap();
-        assert_eq!(result.outputs.path, "bin/app");
     }
 }

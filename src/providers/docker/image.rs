@@ -308,34 +308,6 @@ impl Resource for ImageResource {
         }
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &ImageState) -> Result<ApplyResult<ImageState, ImageOutputs>, BoxError> {
-        let output = Command::new("docker")
-            .args(["inspect", "--format", "{{.Id}}", &prior_state.tag])
-            .output()
-            .map_err(|e| format!("docker inspect failed: {e}"))?;
-
-        if !output.status.success() {
-            return Err(format!("image {} not found", prior_state.tag).into());
-        }
-
-        let raw_id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        let image_id = strip_docker_prefix(&raw_id).to_owned();
-        let pinned = pinned_tag(&prior_state.tag, &image_id);
-
-        Ok(ApplyResult {
-            outputs: ImageOutputs {
-                image_ref: pinned.clone(),
-                image_id: image_id.clone(),
-            },
-            state: Some(ImageState {
-                tag: prior_state.tag.clone(),
-                image_id,
-                platform: prior_state.platform.clone(),
-                pinned_tag: Some(pinned),
-            }),
-        })
-    }
 }
 
 #[cfg(test)]

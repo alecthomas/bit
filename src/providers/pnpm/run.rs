@@ -274,13 +274,6 @@ impl Resource for PnpmRunResource {
         }
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &PnpmRunState) -> Result<ApplyResult<PnpmRunState, PnpmRunOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: PnpmRunOutputs::from_paths(&prior_state.output),
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]

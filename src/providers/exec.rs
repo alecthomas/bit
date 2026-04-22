@@ -349,21 +349,6 @@ impl Resource for ExecResource {
         // (the resource is external and bit doesn't know how to tear it down).
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &ExecState) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
-        let mut state = prior_state.clone();
-        if let Some(resolve) = &prior_state.resolve {
-            state.resolve_output = Some(run_capture(resolve, prior_state.dir.as_deref())?);
-        }
-        if let Some(outputs) = &prior_state.outputs {
-            state.outputs_values = run_outputs(outputs, prior_state.dir.as_deref())?;
-        }
-        let extra = state.outputs_values.clone();
-        Ok(ApplyResult {
-            outputs: ExecOutputs::new(&state.output, extra),
-            state: Some(state),
-        })
-    }
 }
 
 // --- exec.test resource ---
@@ -478,13 +463,6 @@ impl Resource for ExecTestResource {
             return run_command(clean, prior_state.dir.as_deref(), writer);
         }
         Ok(())
-    }
-
-    fn refresh(&self, prior_state: &ExecTestState) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: ExecTestOutputs { passed: true },
-            state: Some(prior_state.clone()),
-        })
     }
 }
 
@@ -1030,24 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn refresh_runs_resolve() {
-        let state = ExecState {
-            command: "true".into(),
-            output: vec![],
-            dir: None,
-            clean: None,
-            resolve: Some("echo refreshed".into()),
-            resolve_output: Some("old\n".into()),
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
-        };
-        let resource = ExecResource;
-        let result = Resource::refresh(&resource, &state).unwrap();
-        let new_state = result.state.unwrap();
-        assert_eq!(new_state.resolve_output.as_deref(), Some("refreshed\n"));
-    }
-
-    #[test]
     fn output_empty_when_no_outputs() {
         let outputs = ExecOutputs::new(&[], crate::value::Map::new());
         assert!(outputs.path.is_none());
@@ -1075,27 +1035,6 @@ mod tests {
         assert_eq!(
             result.outputs.extra.get("version").and_then(|v| v.as_str()),
             Some("1.0")
-        );
-    }
-
-    #[test]
-    fn refresh_reruns_outputs_command() {
-        let state = ExecState {
-            command: "true".into(),
-            output: vec![],
-            dir: None,
-            clean: None,
-            resolve: None,
-            resolve_output: None,
-            outputs: Some("echo '{\"refreshed\":true}'".into()),
-            outputs_values: crate::value::Map::new(),
-        };
-        let resource = ExecResource;
-        let result = Resource::refresh(&resource, &state).unwrap();
-        let new_state = result.state.unwrap();
-        assert_eq!(
-            new_state.outputs_values.get("refreshed").and_then(|v| v.as_bool()),
-            Some(true)
         );
     }
 

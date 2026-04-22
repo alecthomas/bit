@@ -133,13 +133,6 @@ impl Resource for GoLintResource {
     fn destroy(&self, _prior_state: &GoLintState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &GoLintState) -> Result<ApplyResult<GoLintState, GoLintOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: GoLintOutputs { passed: true },
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]

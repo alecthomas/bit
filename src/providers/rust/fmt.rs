@@ -139,13 +139,6 @@ impl Resource for RustFmtResource {
     fn destroy(&self, _prior_state: &RustFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &RustFmtState) -> Result<ApplyResult<RustFmtState, RustFmtOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: RustFmtOutputs {},
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 // -- rust.fmt-check (test) ----------------------------------------------------
@@ -192,13 +185,6 @@ impl Resource for RustFmtCheckResource {
 
     fn destroy(&self, _prior_state: &RustFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
-    }
-
-    fn refresh(&self, prior_state: &RustFmtState) -> Result<ApplyResult<RustFmtState, RustFmtCheckOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: RustFmtCheckOutputs { passed: true },
-            state: Some(prior_state.clone()),
-        })
     }
 }
 

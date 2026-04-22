@@ -112,13 +112,6 @@ impl Resource for RustBuildResource {
     fn destroy(&self, _prior_state: &RustBuildState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &RustBuildState) -> Result<ApplyResult<RustBuildState, RustBuildOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: RustBuildOutputs {},
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]

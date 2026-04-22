@@ -415,13 +415,6 @@ impl Resource for RustTestResource {
     fn destroy(&self, _prior_state: &RustTestState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &RustTestState) -> Result<ApplyResult<RustTestState, RustTestOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: RustTestOutputs { passed: true },
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]

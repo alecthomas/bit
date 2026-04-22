@@ -143,13 +143,6 @@ impl Resource for GoFmtResource {
     fn destroy(&self, _prior_state: &GoFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &GoFmtState) -> Result<ApplyResult<GoFmtState, GoFmtOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: GoFmtOutputs {},
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 // ── go.fmt-l (test) ─────────────────────────────────────────────────────
@@ -239,13 +232,6 @@ impl Resource for GoFmtCheckResource {
 
     fn destroy(&self, _prior_state: &GoFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
-    }
-
-    fn refresh(&self, prior_state: &GoFmtState) -> Result<ApplyResult<GoFmtState, GoFmtCheckOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: GoFmtCheckOutputs { passed: true },
-            state: Some(prior_state.clone()),
-        })
     }
 }
 

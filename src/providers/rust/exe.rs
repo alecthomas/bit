@@ -192,15 +192,6 @@ impl Resource for RustExeResource {
     fn destroy(&self, _prior_state: &RustExeState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &RustExeState) -> Result<ApplyResult<RustExeState, RustExeOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: RustExeOutputs {
-                path: prior_state.path.clone(),
-            },
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]
@@ -332,19 +323,5 @@ mod tests {
         let writer = out.writer("test");
         let result = find_binary_from_json(std::io::Cursor::new(json), &writer);
         assert_eq!(result, None);
-    }
-
-    #[test]
-    fn refresh_returns_outputs() {
-        let state = RustExeState {
-            bin: Some("myapp".into()),
-            package: None,
-            path: "target/debug/myapp".into(),
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
-        let result = Resource::refresh(&RustExeResource, &state).unwrap();
-        assert_eq!(result.outputs.path, "target/debug/myapp");
     }
 }

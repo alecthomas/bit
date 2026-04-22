@@ -278,13 +278,6 @@ impl Resource for GoTestResource {
     fn destroy(&self, _prior_state: &GoTestState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &GoTestState) -> Result<ApplyResult<GoTestState, GoTestOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: GoTestOutputs { passed: true },
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]

@@ -127,13 +127,6 @@ impl Resource for PnpmTestResource {
     fn destroy(&self, _prior_state: &PnpmTestState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &PnpmTestState) -> Result<ApplyResult<PnpmTestState, PnpmTestOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: PnpmTestOutputs { passed: true },
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 fn describe(script: &str, package: Option<&str>, script_args: &[String]) -> String {

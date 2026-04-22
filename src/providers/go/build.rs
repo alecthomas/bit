@@ -123,13 +123,6 @@ impl Resource for GoBuildResource {
     fn destroy(&self, _prior_state: &GoBuildState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &GoBuildState) -> Result<ApplyResult<GoBuildState, GoBuildOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: GoBuildOutputs {},
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]

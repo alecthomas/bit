@@ -162,23 +162,6 @@ impl Resource for NetworkResource {
         writer.event(Event::Starting, &format!("docker network rm {}", prior_state.name));
         remove_network(&prior_state.name)
     }
-
-    fn refresh(&self, prior_state: &NetworkState) -> Result<ApplyResult<NetworkState, NetworkOutputs>, BoxError> {
-        let Some(id) = network_id(&prior_state.name) else {
-            return Err(format!("network {} does not exist", prior_state.name).into());
-        };
-        Ok(ApplyResult {
-            state: Some(NetworkState {
-                name: prior_state.name.clone(),
-                id: id.clone(),
-                driver: prior_state.driver.clone(),
-            }),
-            outputs: NetworkOutputs {
-                name: prior_state.name.clone(),
-                id,
-            },
-        })
-    }
 }
 
 fn remove_network(name: &str) -> Result<(), BoxError> {

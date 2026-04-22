@@ -110,7 +110,6 @@ pub trait Resource {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
     fn destroy(&self, prior_state: &Self::State, writer: &BlockWriter) -> Result<(), BoxError>;
-    fn refresh(&self, prior_state: &Self::State) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
 }
 
 /// Object-safe resource trait used by the registry. Converts between
@@ -128,7 +127,6 @@ pub trait DynResource: Send + Sync {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError>;
-    fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
 }
 
 /// Deserialize a `Map` into a typed struct via serde.
@@ -189,15 +187,6 @@ impl<R: Resource + Send + Sync> DynResource for R {
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError> {
         let state: R::State = serde_json::from_value(prior_state.clone())?;
         Resource::destroy(self, &state, writer)
-    }
-
-    fn refresh(&self, prior_state: &serde_json::Value) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
-        let state: R::State = serde_json::from_value(prior_state.clone())?;
-        let result = Resource::refresh(self, &state)?;
-        Ok(ApplyResult {
-            outputs: serialize_outputs(&result.outputs)?,
-            state: result.state.map(serde_json::to_value).transpose()?,
-        })
     }
 }
 
@@ -331,13 +320,6 @@ mod tests {
 
         fn destroy(&self, _prior_state: &StubState, _writer: &BlockWriter) -> Result<(), BoxError> {
             Ok(())
-        }
-
-        fn refresh(&self, prior_state: &StubState) -> Result<ApplyResult<StubState, StubOutputs>, BoxError> {
-            Ok(ApplyResult {
-                outputs: StubOutputs {},
-                state: Some(prior_state.clone()),
-            })
         }
     }
 

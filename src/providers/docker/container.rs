@@ -379,30 +379,6 @@ impl Resource for ContainerResource {
         writer.event(Event::Starting, &format!("docker rm -f {}", prior_state.name));
         remove_container(&prior_state.name)
     }
-
-    fn refresh(&self, prior_state: &ContainerState) -> Result<ApplyResult<ContainerState, ContainerOutputs>, BoxError> {
-        if !container_running(&prior_state.name) {
-            return Err(format!("container {} is not running", prior_state.name).into());
-        }
-
-        let id_output = Command::new("docker")
-            .args(["inspect", "--format", "{{.Id}}", &prior_state.name])
-            .output()
-            .map_err(|e| format!("docker inspect failed: {e}"))?;
-
-        let container_id = String::from_utf8_lossy(&id_output.stdout).trim().to_owned();
-
-        Ok(ApplyResult {
-            state: Some(ContainerState {
-                name: prior_state.name.clone(),
-                container_id: container_id.clone(),
-            }),
-            outputs: ContainerOutputs {
-                container_id,
-                name: prior_state.name.clone(),
-            },
-        })
-    }
 }
 
 #[cfg(test)]

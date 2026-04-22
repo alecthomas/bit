@@ -156,15 +156,6 @@ impl Resource for PushResource {
         let _ = Command::new("docker").args(["rmi", &prior_state.tag]).output();
         Ok(())
     }
-
-    fn refresh(&self, prior_state: &PushState) -> Result<ApplyResult<PushState, PushOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: PushOutputs {
-                image_ref: prior_state.tag.clone(),
-            },
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]

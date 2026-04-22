@@ -150,20 +150,6 @@ impl Resource for PnpmInstallResource {
         }
         Ok(())
     }
-
-    fn refresh(
-        &self,
-        prior_state: &PnpmInstallState,
-    ) -> Result<ApplyResult<PnpmInstallState, PnpmInstallOutputs>, BoxError> {
-        let path = Path::new(&prior_state.dir)
-            .join("node_modules")
-            .to_string_lossy()
-            .into_owned();
-        Ok(ApplyResult {
-            outputs: PnpmInstallOutputs { path },
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]

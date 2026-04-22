@@ -116,16 +116,6 @@ impl Resource for RustClippyResource {
     fn destroy(&self, _prior_state: &RustClippyState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
-
-    fn refresh(
-        &self,
-        prior_state: &RustClippyState,
-    ) -> Result<ApplyResult<RustClippyState, RustClippyOutputs>, BoxError> {
-        Ok(ApplyResult {
-            outputs: RustClippyOutputs { passed: true },
-            state: Some(prior_state.clone()),
-        })
-    }
 }
 
 #[cfg(test)]
