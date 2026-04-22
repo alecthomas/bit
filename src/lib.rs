@@ -2,6 +2,7 @@ pub mod ast;
 pub mod dag;
 pub mod engine;
 pub mod expr;
+pub mod file_tracker;
 pub mod graph;
 pub mod import;
 pub mod loader;
