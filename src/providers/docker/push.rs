@@ -1,5 +1,6 @@
 use std::io::BufReader;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +44,16 @@ fn inspect_id(image: &str) -> Result<String, BoxError> {
     Ok(raw.strip_prefix("sha256:").unwrap_or(&raw).to_owned())
 }
 
-pub struct PushResource;
+pub struct PushResource {
+    #[allow(dead_code)]
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl PushResource {
+    pub(super) fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Resource for PushResource {
     type State = PushState;
@@ -58,11 +68,7 @@ impl Resource for PushResource {
         ResourceKind::Build
     }
 
-    fn resolve(
-        &self,
-        _inputs: &PushInputs,
-        _tracker: &mut FileTracker,
-    ) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, _inputs: &PushInputs) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
         Ok(std::collections::BTreeMap::new())
     }
 
@@ -174,7 +180,12 @@ mod tests {
             image: "myapp:latest".into(),
             tag: "localhost:5000/myapp:abc123".into(),
         };
-        let result = Resource::plan(&PushResource, &inputs, None).unwrap();
+        let result = Resource::plan(
+            &PushResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+            None,
+        )
+        .unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
@@ -189,7 +200,12 @@ mod tests {
             tag: "localhost:5000/myapp:abc123".into(),
             image_id: "abc".into(),
         };
-        let result = Resource::plan(&PushResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(
+            &PushResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+            Some(&prior),
+        )
+        .unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 }

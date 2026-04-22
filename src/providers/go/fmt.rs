@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -52,7 +53,15 @@ fn go_source_files(package: &str) -> Result<Vec<String>, BoxError> {
 
 // ── go.fmt (build) ──────────────────────────────────────────────────────
 
-pub struct GoFmtResource;
+pub struct GoFmtResource {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl GoFmtResource {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Resource for GoFmtResource {
     type State = GoFmtState;
@@ -67,8 +76,9 @@ impl Resource for GoFmtResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &GoFmtInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        super::resolve_go_inputs(&inputs.package, false, tracker)
+    fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        super::resolve_go_inputs(&inputs.package, false, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -150,7 +160,15 @@ impl Resource for GoFmtResource {
 
 // ── go.fmt-l (test) ─────────────────────────────────────────────────────
 
-pub struct GoFmtCheckResource;
+pub struct GoFmtCheckResource {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl GoFmtCheckResource {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Resource for GoFmtCheckResource {
     type State = GoFmtState;
@@ -165,8 +183,9 @@ impl Resource for GoFmtCheckResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &GoFmtInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        super::resolve_go_inputs(&inputs.package, false, tracker)
+    fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        super::resolve_go_inputs(&inputs.package, false, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -242,14 +261,22 @@ impl Resource for GoFmtCheckResource {
 mod tests {
     use super::*;
 
+    fn test_fmt_resource() -> GoFmtResource {
+        GoFmtResource::new(Arc::new(Mutex::new(FileTracker::default())))
+    }
+
+    fn test_fmt_check_resource() -> GoFmtCheckResource {
+        GoFmtCheckResource::new(Arc::new(Mutex::new(FileTracker::default())))
+    }
+
     #[test]
     fn fmt_resource_kind_is_build() {
-        assert_eq!(Resource::kind(&GoFmtResource), ResourceKind::Build);
+        assert_eq!(Resource::kind(&test_fmt_resource()), ResourceKind::Build);
     }
 
     #[test]
     fn fmt_check_resource_kind_is_test() {
-        assert_eq!(Resource::kind(&GoFmtCheckResource), ResourceKind::Test);
+        assert_eq!(Resource::kind(&test_fmt_check_resource()), ResourceKind::Test);
     }
 
     #[test]
@@ -257,7 +284,7 @@ mod tests {
         let inputs = GoFmtInputs {
             package: "./...".into(),
         };
-        let result = Resource::plan(&GoFmtResource, &inputs, None).unwrap();
+        let result = Resource::plan(&test_fmt_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "gofmt -w ./...");
     }
@@ -267,7 +294,7 @@ mod tests {
         let inputs = GoFmtInputs {
             package: "./...".into(),
         };
-        let result = Resource::plan(&GoFmtCheckResource, &inputs, None).unwrap();
+        let result = Resource::plan(&test_fmt_check_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "gofmt -l ./...");
     }
@@ -280,7 +307,7 @@ mod tests {
         let prior = GoFmtState {
             package: "./...".into(),
         };
-        let result = Resource::plan(&GoFmtResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&test_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }
 
@@ -292,7 +319,7 @@ mod tests {
         let prior = GoFmtState {
             package: "./...".into(),
         };
-        let result = Resource::plan(&GoFmtResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&test_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 

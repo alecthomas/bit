@@ -5,13 +5,23 @@ pub mod workspace;
 
 use std::io::BufReader;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
 use crate::value::Value;
 
 /// pnpm-aware provider with `install`, `run`, and `test` resources.
-pub struct PnpmProvider;
+pub struct PnpmProvider {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl PnpmProvider {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Provider for PnpmProvider {
     fn name(&self) -> &str {
@@ -20,9 +30,15 @@ impl Provider for PnpmProvider {
 
     fn resources(&self) -> Vec<Box<dyn DynResource>> {
         vec![
-            Box::new(install::PnpmInstallResource),
-            Box::new(run::PnpmRunResource),
-            Box::new(test::PnpmTestResource),
+            Box::new(install::PnpmInstallResource {
+                tracker: self.tracker.clone(),
+            }),
+            Box::new(run::PnpmRunResource {
+                tracker: self.tracker.clone(),
+            }),
+            Box::new(test::PnpmTestResource {
+                tracker: self.tracker.clone(),
+            }),
         ]
     }
 
@@ -70,7 +86,7 @@ mod tests {
 
     #[test]
     fn provider_registration() {
-        let provider = PnpmProvider;
+        let provider = PnpmProvider::new(Arc::new(Mutex::new(FileTracker::new())));
         assert_eq!(provider.name(), "pnpm");
         let resources = provider.resources();
         assert_eq!(resources.len(), 3);

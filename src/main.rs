@@ -1,10 +1,12 @@
 use std::fs;
 use std::process;
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use yansi::Paint;
 
 use bit::engine;
+use bit::file_tracker::FileTracker;
 use bit::loader;
 use bit::output::Output;
 use bit::provider::ProviderRegistry;
@@ -79,13 +81,13 @@ struct Cli {
     targets: Vec<String>,
 }
 
-fn default_registry() -> ProviderRegistry {
+fn default_registry(tracker: &Arc<Mutex<FileTracker>>) -> ProviderRegistry {
     let mut reg = ProviderRegistry::new();
-    reg.register(Box::new(ExecProvider));
-    reg.register(Box::new(DockerProvider));
-    reg.register(Box::new(GoProvider));
-    reg.register(Box::new(PnpmProvider));
-    reg.register(Box::new(RustProvider));
+    reg.register(Box::new(ExecProvider::new(tracker.clone())));
+    reg.register(Box::new(DockerProvider::new(tracker.clone())));
+    reg.register(Box::new(GoProvider::new(tracker.clone())));
+    reg.register(Box::new(PnpmProvider::new(tracker.clone())));
+    reg.register(Box::new(RustProvider::new(tracker.clone())));
     reg
 }
 
@@ -205,10 +207,11 @@ fn plan_styles(
     base: &bit::loader::BaseScope,
     store: &dyn bit::state::StateStore,
     targets: &[String],
+    tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<std::collections::HashMap<String, bit::graph::NodeStyle>, engine::EngineError> {
     use yansi::Paint;
     let silent = Output::silent();
-    let plans = engine::plan(dag, base, store, &silent, targets)?;
+    let plans = engine::plan(dag, base, store, &silent, targets, tracker)?;
     Ok(plans
         .into_iter()
         .map(|bp| {
@@ -235,9 +238,11 @@ fn plan_styles(
 fn main() {
     let cli = Cli::parse();
 
+    let tracker = Arc::new(Mutex::new(FileTracker::new()));
+
     // --schema doesn't need the full DAG
     if let Some(ref filter) = cli.schema {
-        let registry = default_registry();
+        let registry = default_registry(&tracker);
         find_and_chdir_project_root();
         let filter = if filter.is_empty() { None } else { Some(filter.as_str()) };
         if cli.json {
@@ -275,7 +280,7 @@ fn main() {
     }
 
     find_and_chdir_project_root();
-    let registry = default_registry();
+    let registry = default_registry(&tracker);
     let params = parse_params(&cli.params);
     let jobs = cli
         .jobs
@@ -292,7 +297,7 @@ fn main() {
             }
         };
         let styles = if cli.plan {
-            match plan_styles(&mut dag, &base, store.as_ref(), targets) {
+            match plan_styles(&mut dag, &base, store.as_ref(), targets, &tracker) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
@@ -306,7 +311,7 @@ fn main() {
     } else if cli.plan {
         let (_module, mut dag, base, store) = load_module(&registry, &params);
         let output = make_output(&dag, targets, cli.debug, cli.long);
-        if let Err(e) = engine::plan(&mut dag, &base, store.as_ref(), &output, targets) {
+        if let Err(e) = engine::plan(&mut dag, &base, store.as_ref(), &output, targets, &tracker) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
@@ -322,7 +327,7 @@ fn main() {
         let names = dag.test_order().unwrap_or_default();
         let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let output = Output::new(&name_refs).with_debug(cli.debug).with_long(cli.long);
-        if let Err(e) = engine::test(&mut dag, &base, store.as_ref(), &output, jobs) {
+        if let Err(e) = engine::test(&mut dag, &base, store.as_ref(), &output, jobs, &tracker) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
@@ -345,7 +350,7 @@ fn main() {
         // Default: apply
         let (_module, mut dag, base, store) = load_module(&registry, &params);
         let output = make_output(&dag, targets, cli.debug, cli.long);
-        if let Err(e) = engine::apply(&mut dag, &base, store.as_ref(), &output, targets, jobs) {
+        if let Err(e) = engine::apply(&mut dag, &base, store.as_ref(), &output, targets, jobs, &tracker) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }

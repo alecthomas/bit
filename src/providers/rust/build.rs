@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +39,9 @@ pub struct RustBuildState {
     pub env: RustEnv,
 }
 
-pub struct RustBuildResource;
+pub struct RustBuildResource {
+    pub tracker: Arc<Mutex<FileTracker>>,
+}
 
 fn build_command(inputs: &RustBuildInputs) -> CargoCommand {
     let mut cargo = inputs.env.cargo("build");
@@ -62,12 +65,9 @@ impl Resource for RustBuildResource {
         ResourceKind::Build
     }
 
-    fn resolve(
-        &self,
-        _inputs: &RustBuildInputs,
-        tracker: &mut FileTracker,
-    ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        super::resolve_rust_inputs(tracker)
+    fn resolve(&self, _inputs: &RustBuildInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
+        super::resolve_rust_inputs(&mut tracker)
     }
 
     fn plan(&self, inputs: &RustBuildInputs, prior_state: Option<&RustBuildState>) -> Result<PlanResult, BoxError> {
@@ -127,9 +127,15 @@ mod tests {
     use super::*;
     use crate::schema::Schema;
 
+    fn make_resource() -> RustBuildResource {
+        RustBuildResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+        }
+    }
+
     #[test]
     fn resource_kind_is_build() {
-        assert_eq!(Resource::kind(&RustBuildResource), ResourceKind::Build);
+        assert_eq!(Resource::kind(&make_resource()), ResourceKind::Build);
     }
 
     #[test]
@@ -161,7 +167,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustBuildResource, &inputs, None).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo build");
     }
@@ -174,7 +180,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustBuildResource, &inputs, None).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo build -p my-crate");
     }
@@ -193,7 +199,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustBuildResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }
 
@@ -211,7 +217,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustBuildResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 
@@ -232,7 +238,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustBuildResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 }

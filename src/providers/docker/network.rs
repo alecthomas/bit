@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +47,16 @@ fn network_id(name: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
-pub struct NetworkResource;
+pub struct NetworkResource {
+    #[allow(dead_code)]
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl NetworkResource {
+    pub(super) fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Resource for NetworkResource {
     type State = NetworkState;
@@ -61,11 +71,7 @@ impl Resource for NetworkResource {
         ResourceKind::Build
     }
 
-    fn resolve(
-        &self,
-        _inputs: &NetworkInputs,
-        _tracker: &mut FileTracker,
-    ) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, _inputs: &NetworkInputs) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
         Ok(std::collections::BTreeMap::new())
     }
 
@@ -201,7 +207,12 @@ mod tests {
             name: "test-net".into(),
             driver: None,
         };
-        let result = Resource::plan(&NetworkResource, &inputs, None).unwrap();
+        let result = Resource::plan(
+            &NetworkResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+            None,
+        )
+        .unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
@@ -216,7 +227,12 @@ mod tests {
             id: "abc".into(),
             driver: None,
         };
-        let result = Resource::plan(&NetworkResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(
+            &NetworkResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+            Some(&prior),
+        )
+        .unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.reason.as_deref(), Some("network missing"));
     }

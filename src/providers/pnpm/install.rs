@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +48,9 @@ pub struct PnpmInstallState {
     pub node_modules_dirs: Vec<String>,
 }
 
-pub struct PnpmInstallResource;
+pub struct PnpmInstallResource {
+    pub(super) tracker: Arc<Mutex<FileTracker>>,
+}
 
 impl Resource for PnpmInstallResource {
     type State = PnpmInstallState;
@@ -62,11 +65,8 @@ impl Resource for PnpmInstallResource {
         ResourceKind::Build
     }
 
-    fn resolve(
-        &self,
-        inputs: &PnpmInstallInputs,
-        tracker: &mut FileTracker,
-    ) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &PnpmInstallInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("FileTracker mutex poisoned");
         workspace::with_workspace(Path::new(&inputs.dir), |ws| {
             let mut files = BTreeMap::new();
             files.insert(
@@ -170,9 +170,15 @@ impl Resource for PnpmInstallResource {
 mod tests {
     use super::*;
 
+    fn test_resource() -> PnpmInstallResource {
+        PnpmInstallResource {
+            tracker: Arc::new(Mutex::new(FileTracker::new())),
+        }
+    }
+
     #[test]
     fn resource_kind_is_build() {
-        assert_eq!(Resource::kind(&PnpmInstallResource), ResourceKind::Build);
+        assert_eq!(Resource::kind(&test_resource()), ResourceKind::Build);
     }
 
     #[test]
@@ -181,7 +187,7 @@ mod tests {
             dir: ".".into(),
             frozen: true,
         };
-        let result = Resource::plan(&PnpmInstallResource, &inputs, None).unwrap();
+        let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "pnpm install --frozen-lockfile");
     }
@@ -197,7 +203,7 @@ mod tests {
             frozen: true,
             node_modules_dirs: vec![],
         };
-        let result = Resource::plan(&PnpmInstallResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 
@@ -218,7 +224,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        Resource::destroy(&PnpmInstallResource, &state, &writer).unwrap();
+        Resource::destroy(&test_resource(), &state, &writer).unwrap();
         assert!(!root.join("node_modules").exists());
         assert!(!root.join("pkg/node_modules").exists());
     }

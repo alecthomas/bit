@@ -2,6 +2,9 @@ use std::fs;
 
 use bit::engine;
 use bit::loader;
+use std::sync::{Arc, Mutex};
+
+use bit::file_tracker::FileTracker;
 use bit::output::Output;
 use bit::parser;
 use bit::provider::ProviderRegistry;
@@ -9,9 +12,13 @@ use bit::providers::exec::ExecProvider;
 use bit::state::{StateError, StateStore};
 use bit::value::Map;
 
-fn registry() -> ProviderRegistry {
+fn test_tracker() -> Arc<Mutex<FileTracker>> {
+    Arc::new(Mutex::new(FileTracker::new()))
+}
+
+fn registry(tracker: &Arc<Mutex<FileTracker>>) -> ProviderRegistry {
     let mut reg = ProviderRegistry::new();
-    reg.register(Box::new(ExecProvider));
+    reg.register(Box::new(ExecProvider::new(tracker.clone())));
     reg
 }
 
@@ -45,26 +52,30 @@ impl StateStore for MemoryStore {
 }
 
 fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
+    let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store, &[]).expect("load failed");
-    engine::apply(&mut dag, &base, store, &Output::new(&[]), &[], 1).expect("apply failed")
+    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
+    engine::apply(&mut dag, &base, store, &Output::new(&[]), &[], 1, &tracker).expect("apply failed")
 }
 
 fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
+    let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store, &[]).expect("load failed");
-    engine::plan(&mut dag, &base, store, &Output::new(&[]), &[]).expect("plan failed")
+    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
+    engine::plan(&mut dag, &base, store, &Output::new(&[]), &[], &tracker).expect("plan failed")
 }
 
 fn run_dump(input: &str, store: &MemoryStore, targets: &[String]) {
+    let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store, &[]).expect("load failed");
+    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
     engine::dump(&mut dag, &base, targets).expect("dump failed");
 }
 
 fn run_destroy(input: &str, store: &MemoryStore) {
+    let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, _base) = loader::load(&module, &Map::new(), &registry(), store, &[]).expect("load failed");
+    let (mut dag, _base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
     engine::destroy(&mut dag, store, &Output::new(&[]), &[], false).expect("destroy failed");
 }
 
@@ -194,9 +205,19 @@ fn target_filters_execution() {
         out_b.display(),
     );
     let store = MemoryStore::new();
+    let tracker = test_tracker();
     let module = parser::parse(&input, "<test>").unwrap();
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), &store, &[]).unwrap();
-    let results = engine::apply(&mut dag, &base, &store, &Output::new(&[]), &["just_a".into()], 1).unwrap();
+    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), &store, &[]).unwrap();
+    let results = engine::apply(
+        &mut dag,
+        &base,
+        &store,
+        &Output::new(&[]),
+        &["just_a".into()],
+        1,
+        &tracker,
+    )
+    .unwrap();
     assert_eq!(results.len(), 1);
     assert!(out_a.exists());
     assert!(!out_b.exists());
@@ -419,9 +440,10 @@ fn doc_comments_preserved() {
         "# Build everything\n",
         "target build = [server]\n",
     );
+    let tracker = test_tracker();
     let module = parser::parse(input, "<test>").unwrap();
     let store = MemoryStore::new();
-    let (dag, _base) = loader::load(&module, &Map::new(), &registry(), &store, &[]).unwrap();
+    let (dag, _base) = loader::load(&module, &Map::new(), &registry(&tracker), &store, &[]).unwrap();
     let node = dag.get_node("server").unwrap();
     assert_eq!(node.fields.len(), 3);
     let targets = dag.targets();
@@ -487,10 +509,12 @@ fn write_module(dir: &std::path::Path, provider: &str, resource: &str, content: 
 }
 
 fn run_apply_in_dir(dir: &std::path::Path, input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
+    let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
     let import_roots = vec![dir.to_path_buf()];
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(), store, &import_roots).expect("load failed");
-    engine::apply(&mut dag, &base, store, &Output::new(&[]), &[], 1).expect("apply failed")
+    let (mut dag, base) =
+        loader::load(&module, &Map::new(), &registry(&tracker), store, &import_roots).expect("load failed");
+    engine::apply(&mut dag, &base, store, &Output::new(&[]), &[], 1, &tracker).expect("apply failed")
 }
 
 #[test]

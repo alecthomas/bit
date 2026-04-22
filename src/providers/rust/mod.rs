@@ -7,7 +7,7 @@ pub mod test;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -282,7 +282,15 @@ fn discover_source_dirs(cwd: &Path) -> Result<HashSet<PathBuf>, BoxError> {
 }
 
 /// Rust provider with `build`, `exe`, `test`, `clippy`, and `fmt` resources.
-pub struct RustProvider;
+pub struct RustProvider {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl RustProvider {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Provider for RustProvider {
     fn name(&self) -> &str {
@@ -291,12 +299,24 @@ impl Provider for RustProvider {
 
     fn resources(&self) -> Vec<Box<dyn DynResource>> {
         vec![
-            Box::new(build::RustBuildResource),
-            Box::new(exe::RustExeResource),
-            Box::new(test::RustTestResource),
-            Box::new(clippy::RustClippyResource),
-            Box::new(fmt::RustFmtResource),
-            Box::new(fmt::RustFmtCheckResource),
+            Box::new(build::RustBuildResource {
+                tracker: Arc::clone(&self.tracker),
+            }),
+            Box::new(exe::RustExeResource {
+                tracker: Arc::clone(&self.tracker),
+            }),
+            Box::new(test::RustTestResource {
+                tracker: Arc::clone(&self.tracker),
+            }),
+            Box::new(clippy::RustClippyResource {
+                tracker: Arc::clone(&self.tracker),
+            }),
+            Box::new(fmt::RustFmtResource {
+                tracker: Arc::clone(&self.tracker),
+            }),
+            Box::new(fmt::RustFmtCheckResource {
+                tracker: Arc::clone(&self.tracker),
+            }),
         ]
     }
 
@@ -315,7 +335,8 @@ mod tests {
 
     #[test]
     fn provider_registration() {
-        let provider = RustProvider;
+        let tracker = Arc::new(Mutex::new(FileTracker::default()));
+        let provider = RustProvider::new(tracker);
         assert_eq!(provider.name(), "rust");
         let resources = provider.resources();
         assert_eq!(resources.len(), 6);

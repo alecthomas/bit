@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -176,7 +177,15 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, verbose: boo
     }
 }
 
-pub struct GoTestResource;
+pub struct GoTestResource {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl GoTestResource {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Resource for GoTestResource {
     type State = GoTestState;
@@ -191,8 +200,9 @@ impl Resource for GoTestResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &GoTestInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        super::resolve_go_inputs(&inputs.package, true, tracker)
+    fn resolve(&self, inputs: &GoTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        super::resolve_go_inputs(&inputs.package, true, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
@@ -287,9 +297,13 @@ mod tests {
     use super::*;
     use crate::output::Output;
 
+    fn test_resource() -> GoTestResource {
+        GoTestResource::new(Arc::new(Mutex::new(FileTracker::default())))
+    }
+
     #[test]
     fn resource_kind_is_test() {
-        let resource = GoTestResource;
+        let resource = test_resource();
         assert_eq!(Resource::kind(&resource), ResourceKind::Test);
     }
 
@@ -301,7 +315,7 @@ mod tests {
             verbose: false,
             env: GoEnv::default(),
         };
-        let resource = GoTestResource;
+        let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
@@ -322,7 +336,7 @@ mod tests {
             ]),
         );
 
-        let resource: Box<dyn DynResource> = Box::new(GoTestResource);
+        let resource: Box<dyn DynResource> = Box::new(test_resource());
         let result = resource.plan(&inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
@@ -340,7 +354,7 @@ mod tests {
             flags: vec![],
             env: GoEnv::default(),
         };
-        let resource = GoTestResource;
+        let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }

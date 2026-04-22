@@ -4,7 +4,6 @@ use std::error::Error;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::schema::Schema;
 use crate::sha256::SHA256;
@@ -92,8 +91,7 @@ pub trait Resource {
     /// Derive additional tracked inputs from the seed inputs and return a map
     /// of key -> SHA256 hash. The engine uses this map for change detection:
     /// if any hash differs from the prior run, the block is re-applied.
-    /// The `tracker` provides cached file hashing and glob expansion.
-    fn resolve(&self, inputs: &Self::Inputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError>;
+    fn resolve(&self, inputs: &Self::Inputs) -> Result<BTreeMap<String, SHA256>, BoxError>;
     fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -110,7 +108,7 @@ pub trait DynResource: Send + Sync {
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
     fn schema(&self) -> ResourceSchema;
-    fn resolve(&self, inputs: &Map, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError>;
+    fn resolve(&self, inputs: &Map) -> Result<BTreeMap<String, SHA256>, BoxError>;
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -148,9 +146,9 @@ impl<R: Resource + Send + Sync> DynResource for R {
         Resource::schema(self)
     }
 
-    fn resolve(&self, inputs: &Map, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Map) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
-        Resource::resolve(self, &typed, tracker)
+        Resource::resolve(self, &typed)
     }
 
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError> {
@@ -281,11 +279,7 @@ mod tests {
             ResourceKind::Build
         }
 
-        fn resolve(
-            &self,
-            _inputs: &StubInputs,
-            _tracker: &mut FileTracker,
-        ) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        fn resolve(&self, _inputs: &StubInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
             Ok(BTreeMap::new())
         }
 

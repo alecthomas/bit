@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +54,9 @@ pub struct PnpmTestState {
     pub dir: String,
 }
 
-pub struct PnpmTestResource;
+pub struct PnpmTestResource {
+    pub(super) tracker: Arc<Mutex<FileTracker>>,
+}
 
 impl Resource for PnpmTestResource {
     type State = PnpmTestState;
@@ -68,12 +71,15 @@ impl Resource for PnpmTestResource {
         ResourceKind::Test
     }
 
-    fn resolve(
-        &self,
-        inputs: &PnpmTestInputs,
-        tracker: &mut FileTracker,
-    ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        resolve_inputs(&inputs.dir, inputs.package.as_deref(), &[], &inputs.inputs, tracker)
+    fn resolve(&self, inputs: &PnpmTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("FileTracker mutex poisoned");
+        resolve_inputs(
+            &inputs.dir,
+            inputs.package.as_deref(),
+            &[],
+            &inputs.inputs,
+            &mut tracker,
+        )
     }
 
     fn plan(&self, inputs: &PnpmTestInputs, prior_state: Option<&PnpmTestState>) -> Result<PlanResult, BoxError> {
@@ -156,9 +162,15 @@ fn describe(script: &str, package: Option<&str>, script_args: &[String]) -> Stri
 mod tests {
     use super::*;
 
+    fn test_resource() -> PnpmTestResource {
+        PnpmTestResource {
+            tracker: Arc::new(Mutex::new(FileTracker::new())),
+        }
+    }
+
     #[test]
     fn resource_kind_is_test() {
-        assert_eq!(Resource::kind(&PnpmTestResource), ResourceKind::Test);
+        assert_eq!(Resource::kind(&test_resource()), ResourceKind::Test);
     }
 
     #[test]
@@ -170,7 +182,7 @@ mod tests {
             inputs: vec![],
             dir: ".".into(),
         };
-        let result = Resource::plan(&PnpmTestResource, &inputs, None).unwrap();
+        let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "pnpm --filter bff run test");
     }
@@ -190,7 +202,7 @@ mod tests {
             args: vec![],
             dir: ".".into(),
         };
-        let result = Resource::plan(&PnpmTestResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 }

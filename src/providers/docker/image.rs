@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::BufReader;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -132,7 +133,15 @@ fn build_args(inputs: &ImageInputs) -> Vec<String> {
     args
 }
 
-pub struct ImageResource;
+pub struct ImageResource {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl ImageResource {
+    pub(super) fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Resource for ImageResource {
     type State = ImageState;
@@ -147,11 +156,12 @@ impl Resource for ImageResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &ImageInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &ImageInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let context = Path::new(&inputs.context);
         let dockerfile = context.join(&inputs.dockerfile);
         let dockerignore = parse::DockerIgnore::load(context);
 
+        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let mut files = BTreeMap::new();
 
         if dockerfile.is_file() {
@@ -326,7 +336,12 @@ mod tests {
             build_args: HashMap::new(),
             platform: vec![],
         };
-        let result = Resource::plan(&ImageResource, &inputs, None).unwrap();
+        let result = Resource::plan(
+            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+            None,
+        )
+        .unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert!(result.description.contains("myapp:latest"));
     }
@@ -346,7 +361,12 @@ mod tests {
             platform: vec![],
             pinned_tag: None,
         };
-        let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(
+            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+            Some(&prior),
+        )
+        .unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
@@ -365,7 +385,12 @@ mod tests {
             platform: vec![],
             pinned_tag: None,
         };
-        let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(
+            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+            Some(&prior),
+        )
+        .unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 
@@ -384,7 +409,12 @@ mod tests {
             platform: vec!["linux/amd64".into()],
             pinned_tag: None,
         };
-        let result = Resource::plan(&ImageResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(
+            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+            Some(&prior),
+        )
+        .unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 
@@ -403,8 +433,11 @@ mod tests {
             build_args: HashMap::new(),
             platform: vec![],
         };
-        let mut tracker = FileTracker::default();
-        let resolved = Resource::resolve(&ImageResource, &inputs, &mut tracker).unwrap();
+        let resolved = Resource::resolve(
+            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+        )
+        .unwrap();
         assert_eq!(resolved.len(), 2);
         assert!(resolved.contains_key(&dockerfile.to_string_lossy().into_owned()));
         assert!(resolved.contains_key(&src_file.to_string_lossy().into_owned()));
@@ -427,13 +460,19 @@ mod tests {
             build_args: HashMap::new(),
             platform: vec![],
         };
-        let mut tracker = FileTracker::default();
-        let resolved = Resource::resolve(&ImageResource, &inputs, &mut tracker).unwrap();
+        let resolved = Resource::resolve(
+            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+        )
+        .unwrap();
         assert_eq!(resolved.len(), 3); // Dockerfile + main.rs + test.log
 
         std::fs::write(dir.path().join(".dockerignore"), "*.log\n").unwrap();
-        let mut tracker = FileTracker::default();
-        let resolved = Resource::resolve(&ImageResource, &inputs, &mut tracker).unwrap();
+        let resolved = Resource::resolve(
+            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+        )
+        .unwrap();
         assert_eq!(resolved.len(), 2); // Dockerfile + main.rs
         assert!(resolved.contains_key(&dockerfile.to_string_lossy().into_owned()));
         assert!(resolved.contains_key(&src_dir.join("main.rs").to_string_lossy().into_owned()));

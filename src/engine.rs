@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::dag::{self, Dag, DagError};
 use crate::expr::{self, EvalError, Scope};
@@ -272,7 +272,9 @@ pub fn plan(
     store: &dyn StateStore,
     output: &Output,
     targets: &[String],
+    tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
+    tracker.lock().expect("tracker lock").reset();
     let order = resolve_order(dag, targets)?;
     validate_active_params(dag, &order, base)?;
     crate::debug!(output, "plan: {} block(s) in order: {}", order.len(), order.join(", "));
@@ -280,7 +282,6 @@ pub fn plan(
     let mut scope = base.scope.clone();
     let mut plans = Vec::new();
     let mut dirty: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut tracker = FileTracker::new();
 
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
@@ -294,15 +295,12 @@ pub fn plan(
 
         let prior = restore_prior(&writer, node.prior_state.as_ref());
 
-        let resolve_map = node
-            .resource
-            .resolve(&inputs, &mut tracker)
-            .map_err(|e| EngineError::Provider {
-                pos: node.pos.clone(),
-                block: name.clone(),
-                phase: "resolve",
-                source: e,
-            })?;
+        let resolve_map = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+            pos: node.pos.clone(),
+            block: name.clone(),
+            phase: "resolve",
+            source: e,
+        })?;
 
         let has_dirty_dep = dag.content_deps(name).iter().any(|d| dirty.contains(d));
         let input_hash = hash_inputs(&inputs);
@@ -373,7 +371,9 @@ pub fn apply(
     output: &Output,
     targets: &[String],
     jobs: usize,
+    tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
+    tracker.lock().expect("tracker lock").reset();
     let order = resolve_order(dag, targets)?;
     validate_active_params(dag, &order, base)?;
     crate::debug!(
@@ -384,9 +384,9 @@ pub fn apply(
         order.join(", ")
     );
     if jobs <= 1 {
-        apply_order(dag, base, store, output, &order)
+        apply_order(dag, base, store, output, &order, tracker)
     } else {
-        apply_order_parallel(dag, base, store, output, &order, jobs)
+        apply_order_parallel(dag, base, store, output, &order, jobs, tracker)
     }
 }
 
@@ -397,6 +397,7 @@ pub fn test(
     store: &dyn StateStore,
     output: &Output,
     jobs: usize,
+    tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = dag.test_order()?;
     crate::debug!(
@@ -407,9 +408,9 @@ pub fn test(
         order.join(", ")
     );
     if jobs <= 1 {
-        apply_order(dag, base, store, output, &order)
+        apply_order(dag, base, store, output, &order, tracker)
     } else {
-        apply_order_parallel(dag, base, store, output, &order, jobs)
+        apply_order_parallel(dag, base, store, output, &order, jobs, tracker)
     }
 }
 
@@ -420,10 +421,10 @@ fn apply_order(
     store: &dyn StateStore,
     output: &Output,
     order: &[String],
+    tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let mut scope = base.scope.clone();
     let mut results = Vec::new();
-    let mut tracker = FileTracker::new();
 
     for name in order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
@@ -437,15 +438,12 @@ fn apply_order(
 
         let prior = restore_prior(&writer, node.prior_state.as_ref());
 
-        let resolve_map = node
-            .resource
-            .resolve(&inputs, &mut tracker)
-            .map_err(|e| EngineError::Provider {
-                pos: node.pos.clone(),
-                block: name.clone(),
-                phase: "resolve",
-                source: e,
-            })?;
+        let resolve_map = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+            pos: node.pos.clone(),
+            block: name.clone(),
+            phase: "resolve",
+            source: e,
+        })?;
         let input_hash = hash_inputs(&inputs);
         let dep_hashes = collect_dep_hashes(dag, name, store);
         let content_hash = compute_content_hash(&input_hash, &resolve_map, &dep_hashes);
@@ -524,8 +522,8 @@ fn apply_order(
             })?;
 
         if let Some(new_state) = &apply_result.state {
-            tracker.clear_hash_cache();
-            let post_resolve = node.resource.resolve(&inputs, &mut tracker).unwrap_or_default();
+            tracker.lock().expect("tracker lock").clear_hash_cache();
+            let post_resolve = node.resource.resolve(&inputs).unwrap_or_default();
             let post_hash = compute_content_hash(&input_hash, &post_resolve, &dep_hashes);
             let wrapped = WrappedState {
                 state: new_state.clone(),
@@ -583,11 +581,11 @@ fn apply_order_parallel(
     output: &Output,
     order: &[String],
     jobs: usize,
+    tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     use std::collections::{HashSet, VecDeque};
     use std::sync::mpsc;
 
-    let tracker = Mutex::new(FileTracker::new());
     let order_set: HashSet<&str> = order.iter().map(|s| s.as_str()).collect();
 
     // Compute initial dep counts (only counting deps within the execution order)
@@ -623,7 +621,7 @@ fn apply_order_parallel(
                 let scope_snapshot = scope.clone();
                 let tx = result_tx.clone();
 
-                let tracker_ref = &tracker;
+                let tracker_ref: &Mutex<FileTracker> = tracker;
                 s.spawn(move || {
                     let result = execute_block(&name, node, dag, store, &scope_snapshot, &writer, tracker_ref);
                     let _ = tx.send(result);
@@ -720,15 +718,12 @@ fn execute_block(
 
     let prior = restore_prior(writer, node.prior_state.as_ref());
 
-    let resolve_map = node
-        .resource
-        .resolve(&inputs, &mut tracker.lock().expect("tracker lock"))
-        .map_err(|e| EngineError::Provider {
-            pos: node.pos.clone(),
-            block: name.to_owned(),
-            phase: "resolve",
-            source: e,
-        })?;
+    let resolve_map = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
+        pos: node.pos.clone(),
+        block: name.to_owned(),
+        phase: "resolve",
+        source: e,
+    })?;
     let input_hash = hash_inputs(&inputs);
     let dep_hashes = collect_dep_hashes(dag, name, store);
     let content_hash = compute_content_hash(&input_hash, &resolve_map, &dep_hashes);
@@ -822,10 +817,8 @@ fn execute_block(
         })?;
 
     let wrapped_state = if let Some(new_state) = &apply_result.state {
-        let mut t = tracker.lock().expect("tracker lock");
-        t.clear_hash_cache();
-        let post_resolve = node.resource.resolve(&inputs, &mut t).unwrap_or_default();
-        drop(t);
+        tracker.lock().expect("tracker lock").clear_hash_cache();
+        let post_resolve = node.resource.resolve(&inputs).unwrap_or_default();
         let post_hash = compute_content_hash(&input_hash, &post_resolve, &dep_hashes);
         crate::debug!(writer, "post-apply hash={}", short_hash(&post_hash));
         let wrapped = WrappedState {
@@ -1086,15 +1079,22 @@ fn eval_fields_lenient(fields: &[crate::ast::Field], scope: &Scope) -> Result<Ma
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use crate::file_tracker::FileTracker;
     use crate::loader;
     use crate::parser;
     use crate::provider::ProviderRegistry;
     use crate::providers::exec::ExecProvider;
     use crate::state::StateStore;
 
-    fn test_registry() -> ProviderRegistry {
+    fn test_tracker() -> Arc<Mutex<FileTracker>> {
+        Arc::new(Mutex::new(FileTracker::new()))
+    }
+
+    fn test_registry(tracker: &Arc<Mutex<FileTracker>>) -> ProviderRegistry {
         let mut reg = ProviderRegistry::new();
-        reg.register(Box::new(ExecProvider));
+        reg.register(Box::new(ExecProvider::new(tracker.clone())));
         reg
     }
 
@@ -1128,11 +1128,13 @@ mod tests {
     }
 
     fn load_and_apply(input: &str) -> Result<Vec<BlockPlan>, EngineError> {
+        let tracker = test_tracker();
         let module = parser::parse(input, "<test>").expect("parse failed");
         let store = MemoryStore::new();
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).expect("load failed");
+        let (mut dag, base) =
+            loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).expect("load failed");
         let output = Output::new(&[]);
-        apply(&mut dag, &base, &store, &output, &[], 1)
+        apply(&mut dag, &base, &store, &output, &[], 1, &tracker)
     }
 
     #[test]
@@ -1171,6 +1173,7 @@ mod tests {
 
     #[test]
     fn plan_shows_actions() {
+        let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
@@ -1179,15 +1182,16 @@ mod tests {
         );
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
-        let plans = plan(&mut dag, &base, &store, &out, &[]).unwrap();
+        let plans = plan(&mut dag, &base, &store, &out, &[], &tracker).unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].plan.action, PlanAction::Create);
     }
 
     #[test]
     fn destroy_removes_state() {
+        let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
@@ -1199,19 +1203,20 @@ mod tests {
         let store = MemoryStore::new();
 
         // Apply first
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1, &tracker).unwrap();
         assert!(!store.list().unwrap().is_empty());
 
         // Reload with state, then destroy
-        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &[], false).unwrap();
         assert!(store.list().unwrap().is_empty());
     }
 
     #[test]
     fn protected_block_skips_destroy() {
+        let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
@@ -1222,11 +1227,11 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1, &tracker).unwrap();
 
-        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &[], false).unwrap();
         // State should still exist — destroy was skipped
         assert!(!store.list().unwrap().is_empty());
@@ -1234,6 +1239,7 @@ mod tests {
 
     #[test]
     fn force_destroys_protected_block() {
+        let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
@@ -1244,18 +1250,19 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1, &tracker).unwrap();
         assert!(!store.list().unwrap().is_empty());
 
-        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &[], true).unwrap();
         assert!(store.list().unwrap().is_empty());
     }
 
     #[test]
     fn force_continues_past_destroy_errors() {
+        let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let out_a = dir.path().join("a.txt");
         let out_b = dir.path().join("b.txt");
@@ -1272,15 +1279,15 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1, &tracker).unwrap();
 
-        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         // Without force, first error stops everything
         assert!(destroy(&mut dag, &store, &out, &[], false).is_err());
 
-        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         // With force, still returns error but processes all blocks
         let result = destroy(&mut dag, &store, &out, &[], true);
         assert!(result.is_err());
@@ -1292,6 +1299,7 @@ mod tests {
 
     #[test]
     fn destroy_target_removes_only_target_and_dependents() {
+        let tracker = test_tracker();
         // Build a chain a -> b -> c (c depends on b depends on a), apply all,
         // then destroy "b" and assert a survives while b and c are removed.
         let dir = tempfile::tempdir().unwrap();
@@ -1314,21 +1322,22 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1, &tracker).unwrap();
         let mut stored: Vec<String> = store.list().unwrap();
         stored.sort();
         assert_eq!(stored, vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
 
         // Cleaning "b" should remove b and its dependent c, but leave a alone.
-        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &["b".into()], false).unwrap();
         assert_eq!(store.list().unwrap(), vec!["a".to_owned()]);
     }
 
     #[test]
     fn destroy_leaf_target_does_not_touch_dependencies() {
+        let tracker = test_tracker();
         // Destroying the leaf c must leave both a and b intact — the old
         // behaviour walked dependencies and would have removed them too.
         let dir = tempfile::tempdir().unwrap();
@@ -1351,11 +1360,11 @@ mod tests {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1, &tracker).unwrap();
 
-        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &["c".into()], false).unwrap();
         let mut stored: Vec<String> = store.list().unwrap();
         stored.sort();
@@ -1364,6 +1373,7 @@ mod tests {
 
     #[test]
     fn target_filters_blocks() {
+        let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let out_a = dir.path().join("a.txt");
         let out_b = dir.path().join("b.txt");
@@ -1380,9 +1390,9 @@ mod tests {
         );
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
-        let results = apply(&mut dag, &base, &store, &out, &["just_a".into()], 1).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, &["just_a".into()], 1, &tracker).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "a");
         assert!(out_a.exists());
@@ -1391,6 +1401,7 @@ mod tests {
 
     #[test]
     fn timestamp_fast_path_persisted() {
+        let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
@@ -1402,9 +1413,9 @@ mod tests {
         let store = MemoryStore::new();
 
         // First apply creates the block
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
-        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1, &tracker).unwrap();
 
         // Verify persisted state has timestamps
         let stored = store.load("build").unwrap().unwrap();
@@ -1413,14 +1424,15 @@ mod tests {
         assert!(!wrapped.resolve_map.is_empty());
 
         // Second apply should be a no-op (timestamp fast path)
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
-        let results = apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, &[], 1, &tracker).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::None);
     }
 
     #[test]
     fn timestamp_detects_file_change() {
+        let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let input_file = dir.path().join("src.txt");
         let output_file = dir.path().join("out.txt");
@@ -1438,15 +1450,15 @@ mod tests {
         let out = Output::new(&[]);
 
         // First apply
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
-        apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        apply(&mut dag, &base, &store, &out, &[], 1, &tracker).unwrap();
 
         // Modify input file (touch with new content to change both mtime and hash)
         std::fs::write(&input_file, "v2").unwrap();
 
         // Second apply should detect the change
-        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
-        let results = apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        let results = apply(&mut dag, &base, &store, &out, &[], 1, &tracker).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::Update);
     }

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +40,15 @@ pub struct GoLintState {
     pub flags: Vec<String>,
 }
 
-pub struct GoLintResource;
+pub struct GoLintResource {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl GoLintResource {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Resource for GoLintResource {
     type State = GoLintState;
@@ -54,8 +63,9 @@ impl Resource for GoLintResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &GoLintInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut files = super::resolve_go_inputs(&inputs.package, false, tracker)?;
+    fn resolve(&self, inputs: &GoLintInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        let mut files = super::resolve_go_inputs(&inputs.package, false, &mut tracker)?;
         // Include golangci-lint config if present.
         for name in [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"] {
             let path = Path::new(name);
@@ -142,9 +152,13 @@ impl Resource for GoLintResource {
 mod tests {
     use super::*;
 
+    fn test_resource() -> GoLintResource {
+        GoLintResource::new(Arc::new(Mutex::new(FileTracker::default())))
+    }
+
     #[test]
     fn resource_kind_is_test() {
-        assert_eq!(Resource::kind(&GoLintResource), ResourceKind::Test);
+        assert_eq!(Resource::kind(&test_resource()), ResourceKind::Test);
     }
 
     #[test]
@@ -153,7 +167,7 @@ mod tests {
             package: "./...".into(),
             flags: vec![],
         };
-        let result = Resource::plan(&GoLintResource, &inputs, None).unwrap();
+        let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
@@ -167,7 +181,7 @@ mod tests {
             package: "./...".into(),
             flags: vec![],
         };
-        let result = Resource::plan(&GoLintResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }
 
@@ -181,7 +195,7 @@ mod tests {
             package: "./...".into(),
             flags: vec![],
         };
-        let result = Resource::plan(&GoLintResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 

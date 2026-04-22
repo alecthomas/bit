@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +43,9 @@ pub struct RustClippyState {
     pub env: RustEnv,
 }
 
-pub struct RustClippyResource;
+pub struct RustClippyResource {
+    pub tracker: Arc<Mutex<FileTracker>>,
+}
 
 fn clippy_command(inputs: &RustClippyInputs) -> CargoCommand {
     let mut cargo = inputs.env.cargo("clippy");
@@ -66,12 +69,9 @@ impl Resource for RustClippyResource {
         ResourceKind::Test
     }
 
-    fn resolve(
-        &self,
-        _inputs: &RustClippyInputs,
-        tracker: &mut FileTracker,
-    ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        super::resolve_rust_inputs(tracker)
+    fn resolve(&self, _inputs: &RustClippyInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
+        super::resolve_rust_inputs(&mut tracker)
     }
 
     fn plan(&self, inputs: &RustClippyInputs, prior_state: Option<&RustClippyState>) -> Result<PlanResult, BoxError> {
@@ -130,9 +130,15 @@ impl Resource for RustClippyResource {
 mod tests {
     use super::*;
 
+    fn make_resource() -> RustClippyResource {
+        RustClippyResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+        }
+    }
+
     #[test]
     fn resource_kind_is_test() {
-        assert_eq!(Resource::kind(&RustClippyResource), ResourceKind::Test);
+        assert_eq!(Resource::kind(&make_resource()), ResourceKind::Test);
     }
 
     #[test]
@@ -143,7 +149,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustClippyResource, &inputs, None).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo clippy");
     }
@@ -156,7 +162,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustClippyResource, &inputs, None).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.description, "cargo clippy -p my-crate");
     }
 
@@ -174,7 +180,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustClippyResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }
 
@@ -192,7 +198,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustClippyResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 }

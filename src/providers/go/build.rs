@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +37,15 @@ pub struct GoBuildState {
     pub env: GoEnv,
 }
 
-pub struct GoBuildResource;
+pub struct GoBuildResource {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl GoBuildResource {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Resource for GoBuildResource {
     type State = GoBuildState;
@@ -51,8 +60,9 @@ impl Resource for GoBuildResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &GoBuildInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        super::resolve_go_inputs(&inputs.package, false, tracker)
+    fn resolve(&self, inputs: &GoBuildInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        super::resolve_go_inputs(&inputs.package, false, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoBuildInputs, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
@@ -132,9 +142,13 @@ impl Resource for GoBuildResource {
 mod tests {
     use super::*;
 
+    fn test_resource() -> GoBuildResource {
+        GoBuildResource::new(Arc::new(Mutex::new(FileTracker::default())))
+    }
+
     #[test]
     fn resource_kind_is_build() {
-        let resource = GoBuildResource;
+        let resource = test_resource();
         assert_eq!(Resource::kind(&resource), ResourceKind::Build);
     }
 
@@ -145,7 +159,7 @@ mod tests {
             flags: vec![],
             env: GoEnv::default(),
         };
-        let resource = GoBuildResource;
+        let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
@@ -162,7 +176,7 @@ mod tests {
             flags: vec![],
             env: GoEnv::default(),
         };
-        let resource = GoBuildResource;
+        let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -193,7 +194,9 @@ pub struct PnpmRunState {
     pub dir: String,
 }
 
-pub struct PnpmRunResource;
+pub struct PnpmRunResource {
+    pub(super) tracker: Arc<Mutex<FileTracker>>,
+}
 
 impl Resource for PnpmRunResource {
     type State = PnpmRunState;
@@ -208,13 +211,14 @@ impl Resource for PnpmRunResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &PnpmRunInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &PnpmRunInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("FileTracker mutex poisoned");
         resolve_inputs(
             &inputs.dir,
             inputs.package.as_deref(),
             &inputs.output,
             &inputs.inputs,
-            tracker,
+            &mut tracker,
         )
     }
 
@@ -295,9 +299,15 @@ impl Resource for PnpmRunResource {
 mod tests {
     use super::*;
 
+    fn test_resource() -> PnpmRunResource {
+        PnpmRunResource {
+            tracker: Arc::new(Mutex::new(FileTracker::new())),
+        }
+    }
+
     #[test]
     fn resource_kind_is_build() {
-        assert_eq!(Resource::kind(&PnpmRunResource), ResourceKind::Build);
+        assert_eq!(Resource::kind(&test_resource()), ResourceKind::Build);
     }
 
     #[test]
@@ -331,7 +341,7 @@ mod tests {
             inputs: vec![],
             dir: ".".into(),
         };
-        let result = Resource::plan(&PnpmRunResource, &inputs, None).unwrap();
+        let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
@@ -352,7 +362,7 @@ mod tests {
             output: vec![],
             dir: ".".into(),
         };
-        let result = Resource::plan(&PnpmRunResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 

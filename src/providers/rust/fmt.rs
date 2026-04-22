@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -100,7 +101,9 @@ fn save_state(inputs: &RustFmtInputs) -> RustFmtState {
 
 // -- rust.fmt (build) ---------------------------------------------------------
 
-pub struct RustFmtResource;
+pub struct RustFmtResource {
+    pub tracker: Arc<Mutex<FileTracker>>,
+}
 
 impl Resource for RustFmtResource {
     type State = RustFmtState;
@@ -115,8 +118,9 @@ impl Resource for RustFmtResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &RustFmtInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        resolve(inputs, tracker)
+    fn resolve(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
+        resolve(inputs, &mut tracker)
     }
 
     fn plan(&self, inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
@@ -147,7 +151,9 @@ impl Resource for RustFmtResource {
 
 // -- rust.fmt-check (test) ----------------------------------------------------
 
-pub struct RustFmtCheckResource;
+pub struct RustFmtCheckResource {
+    pub tracker: Arc<Mutex<FileTracker>>,
+}
 
 impl Resource for RustFmtCheckResource {
     type State = RustFmtState;
@@ -162,8 +168,9 @@ impl Resource for RustFmtCheckResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &RustFmtInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        resolve(inputs, tracker)
+    fn resolve(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
+        resolve(inputs, &mut tracker)
     }
 
     fn plan(&self, inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
@@ -196,14 +203,26 @@ impl Resource for RustFmtCheckResource {
 mod tests {
     use super::*;
 
+    fn make_fmt_resource() -> RustFmtResource {
+        RustFmtResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+        }
+    }
+
+    fn make_fmt_check_resource() -> RustFmtCheckResource {
+        RustFmtCheckResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+        }
+    }
+
     #[test]
     fn fmt_resource_kind_is_build() {
-        assert_eq!(Resource::kind(&RustFmtResource), ResourceKind::Build);
+        assert_eq!(Resource::kind(&make_fmt_resource()), ResourceKind::Build);
     }
 
     #[test]
     fn fmt_check_resource_kind_is_test() {
-        assert_eq!(Resource::kind(&RustFmtCheckResource), ResourceKind::Test);
+        assert_eq!(Resource::kind(&make_fmt_check_resource()), ResourceKind::Test);
     }
 
     #[test]
@@ -213,7 +232,7 @@ mod tests {
             flags: vec![],
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustFmtResource, &inputs, None).unwrap();
+        let result = Resource::plan(&make_fmt_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo fmt");
     }
@@ -225,7 +244,7 @@ mod tests {
             flags: vec![],
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustFmtCheckResource, &inputs, None).unwrap();
+        let result = Resource::plan(&make_fmt_check_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo fmt --check");
     }
@@ -237,7 +256,7 @@ mod tests {
             flags: vec![],
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustFmtResource, &inputs, None).unwrap();
+        let result = Resource::plan(&make_fmt_resource(), &inputs, None).unwrap();
         assert_eq!(result.description, "cargo fmt -p my-crate");
     }
 
@@ -251,7 +270,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        let result = Resource::plan(&RustFmtCheckResource, &inputs, None).unwrap();
+        let result = Resource::plan(&make_fmt_check_resource(), &inputs, None).unwrap();
         assert_eq!(result.description, "cargo+nightly fmt --check");
     }
 
@@ -267,7 +286,7 @@ mod tests {
             flags: vec![],
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustFmtResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&make_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }
 
@@ -283,7 +302,7 @@ mod tests {
             flags: vec![],
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustFmtResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&make_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 }

@@ -74,6 +74,12 @@ impl FileTracker {
     pub fn clear_hash_cache(&mut self) {
         self.hash_cache.clear();
     }
+
+    /// Reset all caches for a new engine run.
+    pub fn reset(&mut self) {
+        self.hash_cache.clear();
+        self.glob_cache.clear();
+    }
 }
 
 impl Default for FileTracker {

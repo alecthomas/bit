@@ -347,13 +347,17 @@ fn resolve_dep(name: &str, dag: &Dag, matrix_blocks: &HashMap<String, Vec<String
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+    use crate::file_tracker::FileTracker;
     use crate::parser;
     use crate::providers::exec::ExecProvider;
 
     fn test_registry() -> ProviderRegistry {
         let mut reg = ProviderRegistry::new();
-        reg.register(Box::new(ExecProvider));
+        let tracker = Arc::new(Mutex::new(FileTracker::new()));
+        reg.register(Box::new(ExecProvider::new(tracker)));
         reg
     }
 

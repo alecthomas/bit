@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -224,7 +225,16 @@ fn wait_healthy(name: &str, hc: &Healthcheck, writer: &BlockWriter) -> Result<()
     }
 }
 
-pub struct ContainerResource;
+pub struct ContainerResource {
+    #[allow(dead_code)]
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl ContainerResource {
+    pub(super) fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Resource for ContainerResource {
     type State = ContainerState;
@@ -239,11 +249,7 @@ impl Resource for ContainerResource {
         ResourceKind::Build
     }
 
-    fn resolve(
-        &self,
-        _inputs: &ContainerInputs,
-        _tracker: &mut FileTracker,
-    ) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, _inputs: &ContainerInputs) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
         Ok(std::collections::BTreeMap::new())
     }
 
@@ -412,7 +418,12 @@ mod tests {
     #[test]
     fn plan_create_when_no_state() {
         let inputs = test_inputs();
-        let result = Resource::plan(&ContainerResource, &inputs, None).unwrap();
+        let result = Resource::plan(
+            &ContainerResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+            None,
+        )
+        .unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert!(result.description.contains("nginx:latest"));
     }
@@ -424,7 +435,12 @@ mod tests {
             name: "nonexistent-container-bit-test".into(),
             container_id: "abc123".into(),
         };
-        let result = Resource::plan(&ContainerResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(
+            &ContainerResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &inputs,
+            Some(&prior),
+        )
+        .unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 

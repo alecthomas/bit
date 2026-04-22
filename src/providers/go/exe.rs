@@ -3,6 +3,7 @@ use std::fs;
 use std::io::BufReader;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,9 +46,15 @@ pub struct GoExeState {
     pub env: GoEnv,
 }
 
-pub struct GoExeResource;
+pub struct GoExeResource {
+    tracker: Arc<Mutex<FileTracker>>,
+}
 
 impl GoExeResource {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+
     fn output_path(inputs: &GoExeInputs) -> String {
         inputs.output.clone().unwrap_or_else(|| {
             let base = inputs.package.rsplit('/').next().unwrap_or(&inputs.package);
@@ -69,8 +76,9 @@ impl Resource for GoExeResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &GoExeInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut files = super::resolve_go_inputs(&inputs.package, false, tracker)?;
+    fn resolve(&self, inputs: &GoExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        let mut files = super::resolve_go_inputs(&inputs.package, false, &mut tracker)?;
         let output = GoExeResource::output_path(inputs);
         let output_path = Path::new(&output);
         if output_path.exists() {
@@ -177,9 +185,13 @@ impl Resource for GoExeResource {
 mod tests {
     use super::*;
 
+    fn test_resource() -> GoExeResource {
+        GoExeResource::new(Arc::new(Mutex::new(FileTracker::default())))
+    }
+
     #[test]
     fn resource_kind_is_build() {
-        let resource = GoExeResource;
+        let resource = test_resource();
         assert_eq!(Resource::kind(&resource), ResourceKind::Build);
     }
 
@@ -191,7 +203,7 @@ mod tests {
             flags: vec![],
             env: GoEnv::default(),
         };
-        let resource = GoExeResource;
+        let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
@@ -210,7 +222,7 @@ mod tests {
             flags: vec![],
             env: GoEnv::default(),
         };
-        let resource = GoExeResource;
+        let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }
@@ -229,7 +241,7 @@ mod tests {
             flags: vec![],
             env: GoEnv::default(),
         };
-        let resource = GoExeResource;
+        let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
@@ -248,7 +260,7 @@ mod tests {
             flags: vec![],
             env: GoEnv::default(),
         };
-        let resource = GoExeResource;
+        let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
@@ -271,7 +283,7 @@ mod tests {
             flags: vec![],
             env: GoEnv::default(),
         };
-        let resource = GoExeResource;
+        let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
@@ -311,7 +323,7 @@ mod tests {
             env: GoEnv::default(),
         };
 
-        let resource = GoExeResource;
+        let resource = test_resource();
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         Resource::destroy(&resource, &state, &writer).unwrap();

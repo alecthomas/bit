@@ -7,6 +7,7 @@ pub mod test;
 
 use std::collections::BTreeMap;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +55,15 @@ pub fn resolve_go_inputs(
 }
 
 /// Go provider with `exe`, `build`, and `test` resources.
-pub struct GoProvider;
+pub struct GoProvider {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl GoProvider {
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Provider for GoProvider {
     fn name(&self) -> &str {
@@ -63,12 +72,12 @@ impl Provider for GoProvider {
 
     fn resources(&self) -> Vec<Box<dyn DynResource>> {
         vec![
-            Box::new(exe::GoExeResource),
-            Box::new(build::GoBuildResource),
-            Box::new(test::GoTestResource),
-            Box::new(lint::GoLintResource),
-            Box::new(fmt::GoFmtResource),
-            Box::new(fmt::GoFmtCheckResource),
+            Box::new(exe::GoExeResource::new(self.tracker.clone())),
+            Box::new(build::GoBuildResource::new(self.tracker.clone())),
+            Box::new(test::GoTestResource::new(self.tracker.clone())),
+            Box::new(lint::GoLintResource::new(self.tracker.clone())),
+            Box::new(fmt::GoFmtResource::new(self.tracker.clone())),
+            Box::new(fmt::GoFmtCheckResource::new(self.tracker.clone())),
         ]
     }
 
@@ -87,7 +96,7 @@ mod tests {
 
     #[test]
     fn provider_registration() {
-        let provider = GoProvider;
+        let provider = GoProvider::new(Arc::new(Mutex::new(FileTracker::default())));
         assert_eq!(provider.name(), "go");
         let resources = provider.resources();
         assert_eq!(resources.len(), 6);

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -292,7 +293,9 @@ fn process_test_output(lines: impl IntoIterator<Item = String>, writer: &BlockWr
     }
 }
 
-pub struct RustTestResource;
+pub struct RustTestResource {
+    pub tracker: Arc<Mutex<FileTracker>>,
+}
 
 fn test_command(inputs: &RustTestInputs) -> CargoCommand {
     let mut cargo = inputs.env.cargo("test");
@@ -316,12 +319,9 @@ impl Resource for RustTestResource {
         ResourceKind::Test
     }
 
-    fn resolve(
-        &self,
-        _inputs: &RustTestInputs,
-        tracker: &mut FileTracker,
-    ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        super::resolve_rust_inputs(tracker)
+    fn resolve(&self, _inputs: &RustTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
+        super::resolve_rust_inputs(&mut tracker)
     }
 
     fn plan(&self, inputs: &RustTestInputs, prior_state: Option<&RustTestState>) -> Result<PlanResult, BoxError> {
@@ -429,9 +429,15 @@ mod tests {
     use super::*;
     use crate::output::Output;
 
+    fn make_resource() -> RustTestResource {
+        RustTestResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+        }
+    }
+
     #[test]
     fn resource_kind_is_test() {
-        assert_eq!(Resource::kind(&RustTestResource), ResourceKind::Test);
+        assert_eq!(Resource::kind(&make_resource()), ResourceKind::Test);
     }
 
     #[test]
@@ -443,7 +449,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustTestResource, &inputs, None).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo test");
     }
@@ -457,7 +463,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustTestResource, &inputs, None).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.description, "cargo test -p my-crate");
     }
 
@@ -476,7 +482,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustTestResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }
 
@@ -495,7 +501,7 @@ mod tests {
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
-        let result = Resource::plan(&RustTestResource, &inputs, Some(&prior)).unwrap();
+        let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 

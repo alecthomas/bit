@@ -37,11 +37,7 @@ impl DynResource for ModuleResource {
         self.resource_schema.clone()
     }
 
-    fn resolve(
-        &self,
-        _inputs: &Map,
-        _tracker: &mut crate::file_tracker::FileTracker,
-    ) -> Result<std::collections::BTreeMap<String, crate::sha256::SHA256>, BoxError> {
+    fn resolve(&self, _inputs: &Map) -> Result<std::collections::BTreeMap<String, crate::sha256::SHA256>, BoxError> {
         Ok(std::collections::BTreeMap::new())
     }
 

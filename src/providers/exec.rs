@@ -3,6 +3,7 @@ use std::fs;
 use std::io::BufReader;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -192,7 +193,17 @@ fn run_outputs(command: &str, dir: Option<&str>) -> Result<crate::value::Map, Bo
     Ok(map)
 }
 
-pub struct ExecProvider;
+/// Provider for running arbitrary shell commands.
+pub struct ExecProvider {
+    tracker: Arc<Mutex<FileTracker>>,
+}
+
+impl ExecProvider {
+    /// Create a new exec provider with a shared file tracker.
+    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+        Self { tracker }
+    }
+}
 
 impl Provider for ExecProvider {
     fn name(&self) -> &str {
@@ -200,7 +211,14 @@ impl Provider for ExecProvider {
     }
 
     fn resources(&self) -> Vec<Box<dyn DynResource>> {
-        vec![Box::new(ExecResource), Box::new(ExecTestResource)]
+        vec![
+            Box::new(ExecResource {
+                tracker: self.tracker.clone(),
+            }),
+            Box::new(ExecTestResource {
+                tracker: self.tracker.clone(),
+            }),
+        ]
     }
 
     fn functions(&self) -> Vec<FuncSignature> {
@@ -212,7 +230,9 @@ impl Provider for ExecProvider {
     }
 }
 
-struct ExecResource;
+struct ExecResource {
+    tracker: Arc<Mutex<FileTracker>>,
+}
 
 impl Resource for ExecResource {
     type State = ExecState;
@@ -227,7 +247,8 @@ impl Resource for ExecResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &ExecInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &ExecInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("tracker lock");
         let mut files = BTreeMap::new();
         for pattern in &inputs.inputs {
             files.extend(tracker.hash_glob(pattern)?);
@@ -392,7 +413,9 @@ pub struct ExecTestState {
     pub clean: Option<String>,
 }
 
-struct ExecTestResource;
+struct ExecTestResource {
+    tracker: Arc<Mutex<FileTracker>>,
+}
 
 impl Resource for ExecTestResource {
     type State = ExecTestState;
@@ -407,11 +430,8 @@ impl Resource for ExecTestResource {
         ResourceKind::Test
     }
 
-    fn resolve(
-        &self,
-        inputs: &ExecTestInputs,
-        tracker: &mut FileTracker,
-    ) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &ExecTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut tracker = self.tracker.lock().expect("tracker lock");
         let mut files = BTreeMap::new();
         for pattern in &inputs.inputs {
             files.extend(tracker.hash_glob(pattern)?);
@@ -481,6 +501,10 @@ mod tests {
     use crate::value::Map;
     use std::fs;
 
+    fn test_tracker() -> Arc<Mutex<FileTracker>> {
+        Arc::new(Mutex::new(FileTracker::new()))
+    }
+
     #[test]
     fn resolve_returns_globs_and_outputs() {
         let dir = tempfile::tempdir().unwrap();
@@ -501,9 +525,11 @@ mod tests {
             outputs: None,
         };
 
-        let resource = ExecResource;
-        let mut tracker = crate::file_tracker::FileTracker::new();
-        let result = Resource::resolve(&resource, &inputs, &mut tracker).unwrap();
+        let tracker = test_tracker();
+        let resource = ExecResource {
+            tracker: tracker.clone(),
+        };
+        let result = Resource::resolve(&resource, &inputs).unwrap();
         assert!(result.contains_key(&file.to_string_lossy().into_owned()));
         assert!(result.contains_key(&out_file.to_string_lossy().into_owned()));
     }
@@ -519,7 +545,9 @@ mod tests {
             resolve: None,
             outputs: None,
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
@@ -545,7 +573,9 @@ mod tests {
             outputs: None,
             outputs_values: crate::value::Map::new(),
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }
@@ -571,7 +601,9 @@ mod tests {
             outputs: None,
             outputs_values: crate::value::Map::new(),
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
@@ -589,7 +621,9 @@ mod tests {
             resolve: None,
             outputs: None,
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
@@ -609,7 +643,9 @@ mod tests {
             resolve: None,
             outputs: None,
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         assert!(Resource::apply(&resource, &inputs, None, &writer).is_err());
@@ -633,7 +669,9 @@ mod tests {
             outputs_values: crate::value::Map::new(),
         };
 
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         Resource::destroy(&resource, &state, &writer).unwrap();
@@ -642,7 +680,7 @@ mod tests {
 
     #[test]
     fn provider_registration() {
-        let provider = ExecProvider;
+        let provider = ExecProvider::new(test_tracker());
         assert_eq!(provider.name(), "exec");
         let resources = provider.resources();
         assert_eq!(resources.len(), 2);
@@ -661,7 +699,9 @@ mod tests {
         );
         inputs.insert("output".into(), Value::Str(output.to_string_lossy().into_owned()));
 
-        let resource: Box<dyn DynResource> = Box::new(ExecResource);
+        let resource: Box<dyn DynResource> = Box::new(ExecResource {
+            tracker: test_tracker(),
+        });
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = resource.apply(&inputs, None, &writer).unwrap();
@@ -681,7 +721,9 @@ mod tests {
             dir: None,
             clean: None,
         };
-        let resource = ExecTestResource;
+        let resource = ExecTestResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
@@ -697,7 +739,9 @@ mod tests {
             dir: None,
             clean: None,
         };
-        let resource = ExecTestResource;
+        let resource = ExecTestResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
@@ -706,7 +750,9 @@ mod tests {
 
     #[test]
     fn test_resource_kind_is_test() {
-        let resource = ExecTestResource;
+        let resource = ExecTestResource {
+            tracker: test_tracker(),
+        };
         assert_eq!(Resource::kind(&resource), ResourceKind::Test);
     }
 
@@ -731,7 +777,9 @@ mod tests {
             outputs: None,
             outputs_values: crate::value::Map::new(),
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
@@ -750,7 +798,9 @@ mod tests {
             resolve: None,
             outputs: None,
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
@@ -772,7 +822,9 @@ mod tests {
             dir: Some(canon.to_string_lossy().into_owned()),
             clean: None,
         };
-        let resource = ExecTestResource;
+        let resource = ExecTestResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
@@ -802,7 +854,9 @@ mod tests {
             outputs_values: crate::value::Map::new(),
         };
 
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         Resource::destroy(&resource, &state, &writer).unwrap();
@@ -823,7 +877,9 @@ mod tests {
             outputs: None,
             outputs_values: crate::value::Map::new(),
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         assert!(Resource::destroy(&resource, &state, &writer).is_err());
@@ -850,7 +906,9 @@ mod tests {
             outputs: None,
             outputs_values: crate::value::Map::new(),
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
@@ -864,7 +922,9 @@ mod tests {
             dir: None,
             clean: Some(format!("touch {}", marker.display())),
         };
-        let resource = ExecTestResource;
+        let resource = ExecTestResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         Resource::destroy(&resource, &state, &writer).unwrap();
@@ -878,7 +938,9 @@ mod tests {
             dir: None,
             clean: None,
         };
-        let resource = ExecTestResource;
+        let resource = ExecTestResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         Resource::destroy(&resource, &state, &writer).unwrap();
@@ -898,7 +960,9 @@ mod tests {
             dir: None,
             clean: None,
         };
-        let resource = ExecTestResource;
+        let resource = ExecTestResource {
+            tracker: test_tracker(),
+        };
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
@@ -924,7 +988,9 @@ mod tests {
             outputs: None,
             outputs_values: crate::value::Map::new(),
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
@@ -950,7 +1016,9 @@ mod tests {
             outputs: None,
             outputs_values: crate::value::Map::new(),
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
@@ -976,7 +1044,9 @@ mod tests {
             outputs: None,
             outputs_values: crate::value::Map::new(),
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }
@@ -992,7 +1062,9 @@ mod tests {
             resolve: Some("echo captured".into()),
             outputs: None,
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
@@ -1013,7 +1085,9 @@ mod tests {
             resolve: None,
             outputs: None,
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
@@ -1039,7 +1113,9 @@ mod tests {
             resolve: None,
             outputs: Some("echo '{\"name\":\"test\",\"version\":\"1.0\"}'".into()),
         };
-        let resource = ExecResource;
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
