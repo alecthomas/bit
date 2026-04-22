@@ -1,7 +1,11 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 use super::{run::resolve_inputs, run_pnpm};
 
@@ -64,8 +68,12 @@ impl Resource for PnpmTestResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &PnpmTestInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-        resolve_inputs(&inputs.dir, inputs.package.as_deref(), &[], &inputs.inputs)
+    fn resolve(
+        &self,
+        inputs: &PnpmTestInputs,
+        tracker: &mut FileTracker,
+    ) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        resolve_inputs(&inputs.dir, inputs.package.as_deref(), &[], &inputs.inputs, tracker)
     }
 
     fn plan(&self, inputs: &PnpmTestInputs, prior_state: Option<&PnpmTestState>) -> Result<PlanResult, BoxError> {

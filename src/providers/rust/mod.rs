@@ -4,14 +4,16 @@ pub mod exe;
 pub mod fmt;
 pub mod test;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{BoxError, DynResource, FuncSignature, Provider, ResolvedFile};
+use crate::file_tracker::FileTracker;
+use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
+use crate::sha256::SHA256;
 use crate::value::Value;
 
 /// Shared Rust environment/config fields flattened into all rust resources.
@@ -148,58 +150,82 @@ impl CargoCommand {
     }
 }
 
-/// Cached resolved inputs, shared across all rust resources in a run.
-static RESOLVED_CACHE: Mutex<Option<Vec<ResolvedFile>>> = Mutex::new(None);
+/// Cached source directories and individual files discovered by `cargo metadata`.
+/// The cache avoids re-running the expensive metadata call on every resolve.
+struct DiscoveredPaths {
+    globs: Vec<String>,
+    files: Vec<PathBuf>,
+}
+
+static DISCOVERED_CACHE: Mutex<Option<DiscoveredPaths>> = Mutex::new(None);
 
 /// Resolve Rust source files for change detection.
 ///
 /// Uses `cargo metadata` to discover local package source directories,
-/// then globs for `.rs` files within them. Results are cached so the
-/// metadata call only happens once per run.
-pub fn resolve_rust_inputs() -> Result<Vec<ResolvedFile>, BoxError> {
-    let mut guard = RESOLVED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(cached) = &*guard {
-        return Ok(cached.clone());
-    }
+/// then hashes `.rs` files within them via the tracker. The metadata
+/// discovery is cached so the call only happens once per run.
+pub fn resolve_rust_inputs(tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let discovered = {
+        let mut guard = DISCOVERED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(discover_paths()?);
+        }
+        // Clone the discovered paths so we can release the lock before hashing.
+        let d = guard.as_ref().expect("just populated");
+        DiscoveredPaths {
+            globs: d.globs.clone(),
+            files: d.files.clone(),
+        }
+    };
 
-    let files = resolve_rust_inputs_uncached()?;
-    *guard = Some(files.clone());
-    Ok(files)
+    let mut result = BTreeMap::new();
+    for pattern in &discovered.globs {
+        result.extend(tracker.hash_glob(pattern)?);
+    }
+    for path in &discovered.files {
+        if path.is_file() {
+            let key = path.display().to_string();
+            result.insert(key, tracker.hash_file(path)?);
+        }
+    }
+    Ok(result)
 }
 
-fn resolve_rust_inputs_uncached() -> Result<Vec<ResolvedFile>, BoxError> {
+/// Discover source globs and individual files from `cargo metadata`.
+fn discover_paths() -> Result<DiscoveredPaths, BoxError> {
     let cwd = std::env::current_dir()?;
     let source_dirs = discover_source_dirs(&cwd)?;
 
-    let mut files = Vec::new();
+    let mut globs = Vec::new();
     for dir in &source_dirs {
         let rel = dir.strip_prefix(&cwd).unwrap_or(dir);
         if rel.as_os_str().is_empty() {
             continue;
         }
-        files.push(ResolvedFile::InputGlob(format!("{}/**/*.rs", rel.display())));
+        globs.push(format!("{}/**/*.rs", rel.display()));
     }
 
+    let mut files = Vec::new();
     // Include Cargo.toml files for all workspace members.
     for dir in &source_dirs {
         let cargo_toml = dir.join("Cargo.toml");
         if cargo_toml.exists() {
             let rel = cargo_toml.strip_prefix(&cwd).unwrap_or(&cargo_toml);
-            files.push(ResolvedFile::Input(rel.to_path_buf()));
+            files.push(rel.to_path_buf());
         }
     }
 
     // Root manifest and lock file.
     let cargo_toml = PathBuf::from("Cargo.toml");
     if cargo_toml.exists() {
-        files.push(ResolvedFile::Input(cargo_toml));
+        files.push(cargo_toml);
     }
     let cargo_lock = PathBuf::from("Cargo.lock");
     if cargo_lock.exists() {
-        files.push(ResolvedFile::Input(cargo_lock));
+        files.push(cargo_lock);
     }
 
-    Ok(files)
+    Ok(DiscoveredPaths { globs, files })
 }
 
 /// Run `cargo metadata --no-deps` and return the set of directories

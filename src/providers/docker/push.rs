@@ -3,8 +3,10 @@ use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 /// Push a Docker image to a registry
 #[derive(Debug, Deserialize, bit_derive::Schema)]
@@ -56,8 +58,12 @@ impl Resource for PushResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, _inputs: &PushInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
-        Ok(vec![])
+    fn resolve(
+        &self,
+        _inputs: &PushInputs,
+        _tracker: &mut FileTracker,
+    ) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+        Ok(std::collections::BTreeMap::new())
     }
 
     fn plan(&self, inputs: &PushInputs, prior_state: Option<&PushState>) -> Result<PlanResult, BoxError> {

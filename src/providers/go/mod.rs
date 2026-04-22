@@ -5,11 +5,14 @@ pub mod lint;
 pub mod scanner;
 pub mod test;
 
+use std::collections::BTreeMap;
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{BoxError, DynResource, FuncSignature, Provider, ResolvedFile};
+use crate::file_tracker::FileTracker;
+use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
+use crate::sha256::SHA256;
 use crate::value::Value;
 
 /// First-class Go environment variables shared across all go resources.
@@ -40,10 +43,14 @@ impl GoEnv {
     }
 }
 
-/// Scan Go source files for a package pattern and return resolved inputs.
-pub fn resolve_go_inputs(pkg: &str, include_tests: bool) -> Result<Vec<ResolvedFile>, BoxError> {
-    let files = scanner::scan(pkg, include_tests)?;
-    Ok(files.into_iter().map(ResolvedFile::Input).collect())
+/// Scan Go source files for a package pattern and return hashed inputs.
+pub fn resolve_go_inputs(
+    pkg: &str,
+    include_tests: bool,
+    tracker: &mut FileTracker,
+) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let files: Vec<_> = scanner::scan(pkg, include_tests)?.into_iter().collect();
+    tracker.hash_files(&files)
 }
 
 /// Go provider with `exe`, `build`, and `test` resources.

@@ -1,10 +1,13 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 use super::{run_pnpm, workspace};
 
@@ -87,12 +90,13 @@ pub(super) fn resolve_inputs(
     package: Option<&str>,
     output: &[String],
     extra_globs: &[String],
-) -> Result<Vec<ResolvedFile>, BoxError> {
+    tracker: &mut FileTracker,
+) -> Result<BTreeMap<String, SHA256>, BoxError> {
     workspace::with_workspace(Path::new(dir), |ws| {
-        let mut files: Vec<ResolvedFile> = Vec::new();
+        let mut files = BTreeMap::new();
 
         if let Some(lf) = &ws.lockfile {
-            files.push(ResolvedFile::Input(lf.clone()));
+            files.insert(lf.to_string_lossy().into_owned(), tracker.hash_file(lf)?);
         }
 
         match package {
@@ -102,20 +106,25 @@ pub(super) fn resolve_inputs(
                     .ok_or_else(|| format!("pnpm: package '{pkg}' not found in workspace"))?
                     .to_path_buf();
                 let exclude_outputs: Vec<PathBuf> = output.iter().map(PathBuf::from).collect();
-                for f in workspace::scan_sources(&pkg_dir, &exclude_outputs) {
-                    files.push(ResolvedFile::Input(f));
-                }
+                let sources = workspace::scan_sources(&pkg_dir, &exclude_outputs);
+                files.extend(tracker.hash_files(&sources)?);
             }
             None => {
-                files.push(ResolvedFile::Input(ws.root_package_json.clone()));
+                files.insert(
+                    ws.root_package_json.to_string_lossy().into_owned(),
+                    tracker.hash_file(&ws.root_package_json)?,
+                );
             }
         }
 
         for glob in extra_globs {
-            files.push(ResolvedFile::InputGlob(glob.clone()));
+            files.extend(tracker.hash_glob(glob)?);
         }
         for path in output {
-            files.push(ResolvedFile::Output(PathBuf::from(path)));
+            let p = Path::new(path);
+            if p.is_file() {
+                files.insert(path.clone(), tracker.hash_file(p)?);
+            }
         }
 
         Ok(files)
@@ -199,8 +208,14 @@ impl Resource for PnpmRunResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &PnpmRunInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-        resolve_inputs(&inputs.dir, inputs.package.as_deref(), &inputs.output, &inputs.inputs)
+    fn resolve(&self, inputs: &PnpmRunInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        resolve_inputs(
+            &inputs.dir,
+            inputs.package.as_deref(),
+            &inputs.output,
+            &inputs.inputs,
+            tracker,
+        )
     }
 
     fn plan(&self, inputs: &PnpmRunInputs, prior_state: Option<&PnpmRunState>) -> Result<PlanResult, BoxError> {

@@ -1,10 +1,13 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 use super::{run_pnpm, workspace};
 
@@ -59,22 +62,33 @@ impl Resource for PnpmInstallResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &PnpmInstallInputs) -> Result<Vec<ResolvedFile>, BoxError> {
+    fn resolve(
+        &self,
+        inputs: &PnpmInstallInputs,
+        tracker: &mut FileTracker,
+    ) -> Result<BTreeMap<String, SHA256>, BoxError> {
         workspace::with_workspace(Path::new(&inputs.dir), |ws| {
-            let mut files = vec![ResolvedFile::Input(ws.root_package_json.clone())];
+            let mut files = BTreeMap::new();
+            files.insert(
+                ws.root_package_json.to_string_lossy().into_owned(),
+                tracker.hash_file(&ws.root_package_json)?,
+            );
             if let Some(lf) = &ws.lockfile {
-                files.push(ResolvedFile::Input(lf.clone()));
+                files.insert(lf.to_string_lossy().into_owned(), tracker.hash_file(lf)?);
             }
             if let Some(y) = &ws.workspace_yaml {
-                files.push(ResolvedFile::Input(y.clone()));
+                files.insert(y.to_string_lossy().into_owned(), tracker.hash_file(y)?);
             }
             for pkg_dir in ws.packages.values() {
                 let pj = pkg_dir.join("package.json");
                 if pj.exists() {
-                    files.push(ResolvedFile::Input(pj));
+                    files.insert(pj.to_string_lossy().into_owned(), tracker.hash_file(&pj)?);
                 }
             }
-            files.push(ResolvedFile::Output(ws.root.join("node_modules").join(".modules.yaml")));
+            let marker = ws.root.join("node_modules").join(".modules.yaml");
+            if marker.is_file() {
+                files.insert(marker.to_string_lossy().into_owned(), tracker.hash_file(&marker)?);
+            }
             Ok(files)
         })
     }

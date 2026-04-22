@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufReader;
 use std::path::Path;
@@ -5,10 +6,12 @@ use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
     ApplyResult, BoxError, DynResource, FuncSignature, PlanAction, PlanResult, Provider, Resource, ResourceKind,
 };
+use crate::sha256::SHA256;
 use crate::value::Value;
 
 /// Run a shell command, track inputs and outputs
@@ -224,15 +227,16 @@ impl Resource for ExecResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &ExecInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
-        use crate::provider::ResolvedFile;
-        let mut files: Vec<ResolvedFile> = inputs
-            .inputs
-            .iter()
-            .map(|p| ResolvedFile::InputGlob(p.clone()))
-            .collect();
+    fn resolve(&self, inputs: &ExecInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut files = BTreeMap::new();
+        for pattern in &inputs.inputs {
+            files.extend(tracker.hash_glob(pattern)?);
+        }
         for output in &inputs.output {
-            files.push(ResolvedFile::Output(Path::new(output).to_path_buf()));
+            let path = Path::new(output);
+            if path.is_file() {
+                files.insert(output.clone(), tracker.hash_file(path)?);
+            }
         }
         Ok(files)
     }
@@ -403,15 +407,20 @@ impl Resource for ExecTestResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &ExecTestInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
-        use crate::provider::ResolvedFile;
-        let mut files: Vec<ResolvedFile> = inputs
-            .inputs
-            .iter()
-            .map(|p| ResolvedFile::InputGlob(p.clone()))
-            .collect();
+    fn resolve(
+        &self,
+        inputs: &ExecTestInputs,
+        tracker: &mut FileTracker,
+    ) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut files = BTreeMap::new();
+        for pattern in &inputs.inputs {
+            files.extend(tracker.hash_glob(pattern)?);
+        }
         for output in &inputs.output {
-            files.push(ResolvedFile::Output(Path::new(output).to_path_buf()));
+            let path = Path::new(output);
+            if path.is_file() {
+                files.insert(output.clone(), tracker.hash_file(path)?);
+            }
         }
         Ok(files)
     }
@@ -471,16 +480,21 @@ mod tests {
     use super::*;
     use crate::value::Map;
     use std::fs;
-    use std::path::PathBuf;
 
     #[test]
     fn resolve_returns_globs_and_outputs() {
-        use crate::provider::ResolvedFile;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        let file = src.join("main.rs");
+        fs::write(&file, "fn main() {}").unwrap();
+        let out_file = dir.path().join("out");
+        fs::write(&out_file, "output").unwrap();
 
         let inputs = ExecInputs {
             command: "echo".into(),
-            output: vec!["out".into()],
-            inputs: vec!["src/**/*.rs".into()],
+            output: vec![out_file.to_string_lossy().into_owned()],
+            inputs: vec![format!("{}/**/*.rs", dir.path().display())],
             dir: None,
             clean: None,
             resolve: None,
@@ -488,10 +502,10 @@ mod tests {
         };
 
         let resource = ExecResource;
-        let result = Resource::resolve(&resource, &inputs).unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], ResolvedFile::InputGlob("src/**/*.rs".into()));
-        assert_eq!(result[1], ResolvedFile::Output(PathBuf::from("out")));
+        let mut tracker = crate::file_tracker::FileTracker::new();
+        let result = Resource::resolve(&resource, &inputs, &mut tracker).unwrap();
+        assert!(result.contains_key(&file.to_string_lossy().into_owned()));
+        assert!(result.contains_key(&out_file.to_string_lossy().into_owned()));
     }
 
     #[test]

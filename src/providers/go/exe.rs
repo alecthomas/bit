@@ -1,12 +1,15 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 use super::GoEnv;
 
@@ -66,10 +69,14 @@ impl Resource for GoExeResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &GoExeInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-        let mut files = super::resolve_go_inputs(&inputs.package, false)?;
+    fn resolve(&self, inputs: &GoExeInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut files = super::resolve_go_inputs(&inputs.package, false, tracker)?;
         let output = GoExeResource::output_path(inputs);
-        files.push(ResolvedFile::Output(PathBuf::from(&output)));
+        let output_path = Path::new(&output);
+        if output_path.exists() {
+            let hash = tracker.hash_file(output_path)?;
+            files.insert(output, hash);
+        }
         Ok(files)
     }
 

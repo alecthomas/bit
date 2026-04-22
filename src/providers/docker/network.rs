@@ -2,8 +2,10 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
 use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 /// Create a Docker network (Terraform-style: tracked state, drift detection)
 #[derive(Debug, Deserialize, bit_derive::Schema)]
@@ -59,8 +61,12 @@ impl Resource for NetworkResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, _inputs: &NetworkInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
-        Ok(vec![])
+    fn resolve(
+        &self,
+        _inputs: &NetworkInputs,
+        _tracker: &mut FileTracker,
+    ) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+        Ok(std::collections::BTreeMap::new())
     }
 
     fn plan(&self, inputs: &NetworkInputs, prior_state: Option<&NetworkState>) -> Result<PlanResult, BoxError> {

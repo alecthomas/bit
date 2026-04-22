@@ -1,29 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::schema::Schema;
+use crate::sha256::SHA256;
 use crate::value::{Map, Value};
 pub use crate::value::{StructField, StructType};
 
 /// Shorthand for the boxed error type used at provider boundaries.
 pub type BoxError = Box<dyn Error + Send + Sync>;
-
-use std::path::PathBuf;
-
-/// A file or glob pattern returned by a provider's `resolve()`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ResolvedFile {
-    /// A specific input file.
-    Input(PathBuf),
-    /// A glob pattern that expands to input files. The engine handles expansion.
-    InputGlob(String),
-    /// A specific output file (binary, artifact, etc.)
-    Output(PathBuf),
-}
 
 /// What action the plan phase determined is needed.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,8 +89,11 @@ pub trait Resource {
             outputs: Self::Outputs::schema(),
         }
     }
-    /// Return the input files, input globs, and output files for this block.
-    fn resolve(&self, inputs: &Self::Inputs) -> Result<Vec<ResolvedFile>, BoxError>;
+    /// Derive additional tracked inputs from the seed inputs and return a map
+    /// of key -> SHA256 hash. The engine uses this map for change detection:
+    /// if any hash differs from the prior run, the block is re-applied.
+    /// The `tracker` provides cached file hashing and glob expansion.
+    fn resolve(&self, inputs: &Self::Inputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError>;
     fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -118,7 +110,7 @@ pub trait DynResource: Send + Sync {
     fn name(&self) -> &str;
     fn kind(&self) -> ResourceKind;
     fn schema(&self) -> ResourceSchema;
-    fn resolve(&self, inputs: &Map) -> Result<Vec<ResolvedFile>, BoxError>;
+    fn resolve(&self, inputs: &Map, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError>;
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -156,9 +148,9 @@ impl<R: Resource + Send + Sync> DynResource for R {
         Resource::schema(self)
     }
 
-    fn resolve(&self, inputs: &Map) -> Result<Vec<ResolvedFile>, BoxError> {
+    fn resolve(&self, inputs: &Map, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
-        Resource::resolve(self, &typed)
+        Resource::resolve(self, &typed, tracker)
     }
 
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError> {
@@ -289,8 +281,12 @@ mod tests {
             ResourceKind::Build
         }
 
-        fn resolve(&self, _inputs: &StubInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-            Ok(vec![])
+        fn resolve(
+            &self,
+            _inputs: &StubInputs,
+            _tracker: &mut FileTracker,
+        ) -> Result<BTreeMap<String, SHA256>, BoxError> {
+            Ok(BTreeMap::new())
         }
 
         fn plan(&self, _inputs: &StubInputs, prior_state: Option<&StubState>) -> Result<PlanResult, BoxError> {

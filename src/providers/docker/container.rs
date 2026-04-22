@@ -5,8 +5,10 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 use crate::value::Duration;
 
 /// Healthcheck config — either a bare command string or a full object
@@ -237,8 +239,12 @@ impl Resource for ContainerResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, _inputs: &ContainerInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
-        Ok(vec![])
+    fn resolve(
+        &self,
+        _inputs: &ContainerInputs,
+        _tracker: &mut FileTracker,
+    ) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+        Ok(std::collections::BTreeMap::new())
     }
 
     fn plan(&self, inputs: &ContainerInputs, prior_state: Option<&ContainerState>) -> Result<PlanResult, BoxError> {

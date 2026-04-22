@@ -1,10 +1,14 @@
+use std::collections::BTreeMap;
 use std::io::BufReader;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 /// Run golangci-lint
 #[derive(Debug, Deserialize, bit_derive::Schema)]
@@ -50,15 +54,14 @@ impl Resource for GoLintResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &GoLintInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-        use std::path::Path;
-
-        let mut files = super::resolve_go_inputs(&inputs.package, false)?;
+    fn resolve(&self, inputs: &GoLintInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let mut files = super::resolve_go_inputs(&inputs.package, false, tracker)?;
         // Include golangci-lint config if present.
         for name in [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"] {
             let path = Path::new(name);
             if path.exists() {
-                files.push(ResolvedFile::Input(path.to_path_buf()));
+                let hash = tracker.hash_file(path)?;
+                files.insert(name.to_owned(), hash);
             }
         }
         Ok(files)

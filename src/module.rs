@@ -7,8 +7,8 @@ use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult as ProviderApplyResult, BoxError, DynResource, PlanAction, PlanResult, ProviderRegistry, ResolvedFile,
-    ResourceKind, ResourceSchema, StructField, StructType,
+    ApplyResult as ProviderApplyResult, BoxError, DynResource, PlanAction, PlanResult, ProviderRegistry, ResourceKind,
+    ResourceSchema, StructField, StructType,
 };
 use crate::state::StateStore;
 use crate::value::{Map, Value, validate_type};
@@ -37,8 +37,12 @@ impl DynResource for ModuleResource {
         self.resource_schema.clone()
     }
 
-    fn resolve(&self, _inputs: &Map) -> Result<Vec<ResolvedFile>, BoxError> {
-        Ok(vec![])
+    fn resolve(
+        &self,
+        _inputs: &Map,
+        _tracker: &mut crate::file_tracker::FileTracker,
+    ) -> Result<std::collections::BTreeMap<String, crate::sha256::SHA256>, BoxError> {
+        Ok(std::collections::BTreeMap::new())
     }
 
     fn plan(&self, _inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError> {

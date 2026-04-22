@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::BufReader;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 use super::parse;
 
@@ -145,21 +147,22 @@ impl Resource for ImageResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &ImageInputs) -> Result<Vec<crate::provider::ResolvedFile>, BoxError> {
-        use crate::provider::ResolvedFile;
+    fn resolve(&self, inputs: &ImageInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let context = Path::new(&inputs.context);
         let dockerfile = context.join(&inputs.dockerfile);
         let dockerignore = parse::DockerIgnore::load(context);
 
-        let mut files = Vec::new();
+        let mut files = BTreeMap::new();
 
         if dockerfile.is_file() {
-            files.push(ResolvedFile::Input(dockerfile.clone()));
+            let hash = tracker.hash_file(&dockerfile)?;
+            files.insert(dockerfile.to_string_lossy().into_owned(), hash);
         }
 
         for src in &parse::dockerfile_sources(&dockerfile, context, &inputs.build_args)? {
             for path in parse::expand_path(src, &dockerignore) {
-                files.push(ResolvedFile::Input(path));
+                let hash = tracker.hash_file(&path)?;
+                files.insert(path.to_string_lossy().into_owned(), hash);
             }
         }
 
@@ -313,7 +316,6 @@ impl Resource for ImageResource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ResolvedFile;
 
     #[test]
     fn plan_create_when_no_state() {
@@ -401,10 +403,11 @@ mod tests {
             build_args: HashMap::new(),
             platform: vec![],
         };
-        let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
+        let mut tracker = FileTracker::default();
+        let resolved = Resource::resolve(&ImageResource, &inputs, &mut tracker).unwrap();
         assert_eq!(resolved.len(), 2);
-        assert!(resolved.contains(&ResolvedFile::Input(dockerfile)));
-        assert!(resolved.contains(&ResolvedFile::Input(src_file)));
+        assert!(resolved.contains_key(&dockerfile.to_string_lossy().into_owned()));
+        assert!(resolved.contains_key(&src_file.to_string_lossy().into_owned()));
     }
 
     #[test]
@@ -424,14 +427,16 @@ mod tests {
             build_args: HashMap::new(),
             platform: vec![],
         };
-        let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
+        let mut tracker = FileTracker::default();
+        let resolved = Resource::resolve(&ImageResource, &inputs, &mut tracker).unwrap();
         assert_eq!(resolved.len(), 3); // Dockerfile + main.rs + test.log
 
         std::fs::write(dir.path().join(".dockerignore"), "*.log\n").unwrap();
-        let resolved = Resource::resolve(&ImageResource, &inputs).unwrap();
+        let mut tracker = FileTracker::default();
+        let resolved = Resource::resolve(&ImageResource, &inputs, &mut tracker).unwrap();
         assert_eq!(resolved.len(), 2); // Dockerfile + main.rs
-        assert!(resolved.contains(&ResolvedFile::Input(dockerfile)));
-        assert!(resolved.contains(&ResolvedFile::Input(src_dir.join("main.rs"))));
+        assert!(resolved.contains_key(&dockerfile.to_string_lossy().into_owned()));
+        assert!(resolved.contains_key(&src_dir.join("main.rs").to_string_lossy().into_owned()));
     }
 
     #[test]

@@ -1,12 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 use super::GoEnv;
 
@@ -189,8 +191,8 @@ impl Resource for GoTestResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &GoTestInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-        super::resolve_go_inputs(&inputs.package, true)
+    fn resolve(&self, inputs: &GoTestInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        super::resolve_go_inputs(&inputs.package, true, tracker)
     }
 
     fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {

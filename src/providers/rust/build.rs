@@ -1,7 +1,11 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv, RustFeatures};
 
@@ -58,8 +62,12 @@ impl Resource for RustBuildResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, _inputs: &RustBuildInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-        super::resolve_rust_inputs()
+    fn resolve(
+        &self,
+        _inputs: &RustBuildInputs,
+        tracker: &mut FileTracker,
+    ) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        super::resolve_rust_inputs(tracker)
     }
 
     fn plan(&self, inputs: &RustBuildInputs, prior_state: Option<&RustBuildState>) -> Result<PlanResult, BoxError> {

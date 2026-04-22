@@ -1,7 +1,11 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
+use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, ResolvedFile, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv};
 
@@ -64,12 +68,12 @@ fn fmt_check_command(inputs: &RustFmtInputs) -> CargoCommand {
     cargo
 }
 
-fn resolve(_inputs: &RustFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-    let mut files = super::resolve_rust_inputs()?;
+fn resolve(_inputs: &RustFmtInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let mut files = super::resolve_rust_inputs(tracker)?;
     for name in ["rustfmt.toml", ".rustfmt.toml"] {
         let path = std::path::Path::new(name);
-        if path.exists() {
-            files.push(ResolvedFile::Input(path.to_path_buf()));
+        if path.is_file() {
+            files.insert(name.to_owned(), tracker.hash_file(path)?);
         }
     }
     Ok(files)
@@ -111,8 +115,8 @@ impl Resource for RustFmtResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &RustFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-        resolve(inputs)
+    fn resolve(&self, inputs: &RustFmtInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        resolve(inputs, tracker)
     }
 
     fn plan(&self, inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
@@ -158,8 +162,8 @@ impl Resource for RustFmtCheckResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &RustFmtInputs) -> Result<Vec<ResolvedFile>, BoxError> {
-        resolve(inputs)
+    fn resolve(&self, inputs: &RustFmtInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        resolve(inputs, tracker)
     }
 
     fn plan(&self, inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {

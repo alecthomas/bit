@@ -1,13 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use crate::dag::{self, Dag, DagError};
 use crate::expr::{self, EvalError, Scope};
-use crate::file_tracker::{FileTracker, PriorFileState, hash_inputs};
+use crate::file_tracker::FileTracker;
 use crate::loader::BaseScope;
 use crate::output::{Event, Output};
 use crate::provider::{BoxError, PlanAction, PlanResult, ResourceKind};
-use crate::sha256::SHA256;
+use crate::sha256::{Hasher, SHA256};
 use crate::state::{StateError, StateStore};
 use crate::value::{Map, Type, Value};
 
@@ -46,8 +46,6 @@ pub struct BlockPlan {
     pub plan: PlanResult,
 }
 
-use crate::file_tracker::FileTimestamp;
-
 /// Truncate a SHA256 for compact debug output.
 fn short_hash(h: &SHA256) -> String {
     if h.is_zero() {
@@ -57,9 +55,7 @@ fn short_hash(h: &SHA256) -> String {
     s[..8].to_owned()
 }
 
-/// Wrapped state persisted by the engine. Contains the provider's own state,
-/// outputs, and the combined hash covering resolved files, parent states, and
-/// evaluated input fields.
+/// Wrapped state persisted by the engine.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct WrappedState {
     state: serde_json::Value,
@@ -68,45 +64,37 @@ struct WrappedState {
     #[serde(default)]
     input_hash: SHA256,
     #[serde(default)]
-    file_timestamps: HashMap<String, FileTimestamp>,
+    resolve_map: BTreeMap<String, SHA256>,
     #[serde(default)]
-    dep_hashes: HashMap<String, SHA256>,
+    dep_hashes: BTreeMap<String, SHA256>,
 }
 
-/// Extracted prior state fields returned by `unwrap_state`.
+/// Extracted prior state fields.
 struct PriorState {
     provider_state: Option<serde_json::Value>,
     outputs: Map,
-    file_state: PriorFileState,
+    content_hash: SHA256,
+    input_hash: SHA256,
+    resolve_map: BTreeMap<String, SHA256>,
 }
 
-/// Extract the provider state, outputs, and stored content hash from persisted state.
 fn unwrap_state(stored: &serde_json::Value) -> PriorState {
     let wrapped: WrappedState =
         serde_json::from_value(stored.clone()).expect("corrupted state: not a valid WrappedState");
     PriorState {
         provider_state: Some(wrapped.state),
         outputs: wrapped.outputs,
-        file_state: PriorFileState {
-            content_hash: wrapped.content_hash,
-            input_hash: wrapped.input_hash,
-            file_timestamps: wrapped.file_timestamps,
-            dep_hashes: wrapped.dep_hashes,
-        },
+        content_hash: wrapped.content_hash,
+        input_hash: wrapped.input_hash,
+        resolve_map: wrapped.resolve_map,
     }
 }
 
-/// Resolve a block's prior state from its persisted representation, emitting
-/// a debug line describing whether state was restored.
 fn restore_prior(writer: &crate::output::BlockWriter, prior_state: Option<&serde_json::Value>) -> PriorState {
     match prior_state {
         Some(s) => {
             let prior = unwrap_state(s);
-            crate::debug!(
-                writer,
-                "restored state from store (hash={})",
-                short_hash(&prior.file_state.content_hash)
-            );
+            crate::debug!(writer, "restored state (hash={})", short_hash(&prior.content_hash));
             prior
         }
         None => {
@@ -120,8 +108,102 @@ fn default_prior() -> PriorState {
     PriorState {
         provider_state: None,
         outputs: Map::new(),
-        file_state: PriorFileState::default(),
+        content_hash: SHA256::ZERO,
+        input_hash: SHA256::ZERO,
+        resolve_map: BTreeMap::new(),
     }
+}
+
+/// Hash the block's evaluated input fields in canonical (key-sorted) JSON form.
+fn hash_inputs(inputs: &Map) -> SHA256 {
+    let canonical = serde_json::to_value(inputs)
+        .and_then(|v| serde_json::to_string(&v))
+        .unwrap_or_default();
+    SHA256::digest(canonical.as_bytes())
+}
+
+/// Compute a content hash from input hash, resolve map, and dependency hashes.
+fn compute_content_hash(
+    input_hash: &SHA256,
+    resolve_map: &BTreeMap<String, SHA256>,
+    dep_hashes: &BTreeMap<String, SHA256>,
+) -> SHA256 {
+    let mut hasher = Hasher::new();
+    hasher.update(input_hash.to_string().as_bytes());
+    for (key, hash) in resolve_map {
+        hasher.update(key.as_bytes());
+        hasher.update(hash.to_string().as_bytes());
+    }
+    for (dep, hash) in dep_hashes {
+        hasher.update(dep.as_bytes());
+        hasher.update(hash.to_string().as_bytes());
+    }
+    hasher.finalize()
+}
+
+/// Collect current dependency content hashes from the state store.
+fn collect_dep_hashes(dag: &Dag, block_name: &str, store: &dyn StateStore) -> BTreeMap<String, SHA256> {
+    let mut dep_hashes = BTreeMap::new();
+    let mut deps = dag.content_deps(block_name);
+    deps.sort();
+    for dep in deps {
+        if let Ok(Some(state)) = store.load(&dep) {
+            let parent = unwrap_state(&state);
+            dep_hashes.insert(dep, parent.content_hash);
+        }
+    }
+    dep_hashes
+}
+
+/// Describe why a block's content hash changed compared to its prior state.
+fn change_reason(
+    prior: &PriorState,
+    new_resolve_map: &BTreeMap<String, SHA256>,
+    new_input_hash: &SHA256,
+    dag: &Dag,
+    block_name: &str,
+    dirty_deps: &std::collections::HashSet<String>,
+) -> Option<String> {
+    // Check for dirty dependency blocks.
+    let mut dirty: Vec<_> = dag
+        .content_deps(block_name)
+        .into_iter()
+        .filter(|d| dirty_deps.contains(d))
+        .collect();
+    dirty.dedup();
+    if !dirty.is_empty() {
+        let quoted: Vec<_> = dirty.iter().map(|d| format!("'{d}'")).collect();
+        return Some(quoted.join(", ") + " changed");
+    }
+
+    // Diff resolve maps.
+    let mut changed = Vec::new();
+    for (key, hash) in new_resolve_map {
+        match prior.resolve_map.get(key) {
+            Some(prior_hash) if prior_hash != hash => changed.push(format!("'{key}'")),
+            None => changed.push(format!("'{key}' (new)")),
+            _ => {}
+        }
+    }
+    for key in prior.resolve_map.keys() {
+        if !new_resolve_map.contains_key(key) {
+            changed.push(format!("'{key}' (removed)"));
+        }
+    }
+    if !changed.is_empty() {
+        let count = changed.len();
+        if count <= 3 {
+            return Some(changed.join(", ") + " changed");
+        }
+        return Some(format!("{count} inputs changed"));
+    }
+
+    // Fall back to input field changes.
+    if !prior.input_hash.is_zero() && prior.input_hash != *new_input_hash {
+        return Some("inputs changed".into());
+    }
+
+    None
 }
 
 pub fn plan_action_to_event(action: &PlanAction) -> Event {
@@ -212,24 +294,27 @@ pub fn plan(
 
         let prior = restore_prior(&writer, node.prior_state.as_ref());
 
-        let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
-            pos: node.pos.clone(),
-            block: name.clone(),
-            phase: "resolve",
-            source: e,
-        })?;
+        let resolve_map = node
+            .resource
+            .resolve(&inputs, &mut tracker)
+            .map_err(|e| EngineError::Provider {
+                pos: node.pos.clone(),
+                block: name.clone(),
+                phase: "resolve",
+                source: e,
+            })?;
 
-        let all_files = tracker.expand_resolved(&resolved);
         let has_dirty_dep = dag.content_deps(name).iter().any(|d| dirty.contains(d));
         let input_hash = hash_inputs(&inputs);
-        let hash_result = tracker.compute_content_hash(&all_files, dag, name, store, &input_hash, &prior.file_state);
-        let inputs_changed = has_dirty_dep || hash_result.hash != prior.file_state.content_hash;
+        let dep_hashes = collect_dep_hashes(dag, name, store);
+        let content_hash = compute_content_hash(&input_hash, &resolve_map, &dep_hashes);
+        let inputs_changed = has_dirty_dep || content_hash != prior.content_hash;
         crate::debug!(
             writer,
-            "resolved {} file(s), hash={} prior_hash={} dirty_dep={} inputs_changed={}",
-            all_files.len(),
-            short_hash(&hash_result.hash),
-            short_hash(&prior.file_state.content_hash),
+            "resolved {} key(s), hash={} prior_hash={} dirty_dep={} inputs_changed={}",
+            resolve_map.len(),
+            short_hash(&content_hash),
+            short_hash(&prior.content_hash),
             has_dirty_dep,
             inputs_changed,
         );
@@ -247,7 +332,7 @@ pub fn plan(
         if result.action == PlanAction::None && inputs_changed && prior.provider_state.is_some() {
             result.action = PlanAction::Update;
             if result.reason.is_none() {
-                result.reason = tracker.change_reason(&resolved, &prior.file_state, dag, name, &dirty, &input_hash);
+                result.reason = change_reason(&prior, &resolve_map, &input_hash, dag, name, &dirty);
             }
         }
 
@@ -352,16 +437,19 @@ fn apply_order(
 
         let prior = restore_prior(&writer, node.prior_state.as_ref());
 
-        let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
-            pos: node.pos.clone(),
-            block: name.clone(),
-            phase: "resolve",
-            source: e,
-        })?;
-        let all_files = tracker.expand_resolved(&resolved);
+        let resolve_map = node
+            .resource
+            .resolve(&inputs, &mut tracker)
+            .map_err(|e| EngineError::Provider {
+                pos: node.pos.clone(),
+                block: name.clone(),
+                phase: "resolve",
+                source: e,
+            })?;
         let input_hash = hash_inputs(&inputs);
-        let hash_result = tracker.compute_content_hash(&all_files, dag, name, store, &input_hash, &prior.file_state);
-        let inputs_changed = hash_result.hash != prior.file_state.content_hash;
+        let dep_hashes = collect_dep_hashes(dag, name, store);
+        let content_hash = compute_content_hash(&input_hash, &resolve_map, &dep_hashes);
+        let inputs_changed = content_hash != prior.content_hash;
 
         let previously_failed = node.resource.kind() == ResourceKind::Test
             && prior.outputs.get("passed").and_then(|v| v.as_bool()) == Some(false);
@@ -385,13 +473,13 @@ fn apply_order(
                 plan_result.reason = if previously_failed {
                     Some("previously failed".into())
                 } else {
-                    tracker.change_reason(
-                        &resolved,
-                        &prior.file_state,
+                    change_reason(
+                        &prior,
+                        &resolve_map,
+                        &input_hash,
                         dag,
                         name,
                         &std::collections::HashSet::new(),
-                        &input_hash,
                     )
                 };
             }
@@ -436,18 +524,16 @@ fn apply_order(
             })?;
 
         if let Some(new_state) = &apply_result.state {
-            let post_entries = node.resource.resolve(&inputs).unwrap_or_default();
-            tracker.invalidate_outputs(&post_entries);
-            let post_files = tracker.expand_resolved(&post_entries);
-            let empty_prior = PriorFileState::default();
-            let post_hash = tracker.compute_content_hash(&post_files, dag, name, store, &input_hash, &empty_prior);
+            tracker.clear_hash_cache();
+            let post_resolve = node.resource.resolve(&inputs, &mut tracker).unwrap_or_default();
+            let post_hash = compute_content_hash(&input_hash, &post_resolve, &dep_hashes);
             let wrapped = WrappedState {
                 state: new_state.clone(),
                 outputs: apply_result.outputs.clone(),
-                content_hash: post_hash.hash,
-                input_hash: post_hash.input_hash,
-                file_timestamps: post_hash.file_timestamps,
-                dep_hashes: post_hash.dep_hashes,
+                content_hash: post_hash,
+                input_hash,
+                resolve_map: post_resolve,
+                dep_hashes,
             };
             store.save(name, &serde_json::to_value(&wrapped).unwrap())?;
             crate::debug!(writer, "saved state (hash={})", short_hash(&wrapped.content_hash));
@@ -634,29 +720,25 @@ fn execute_block(
 
     let prior = restore_prior(writer, node.prior_state.as_ref());
 
-    let resolved = node.resource.resolve(&inputs).map_err(|e| EngineError::Provider {
-        pos: node.pos.clone(),
-        block: name.to_owned(),
-        phase: "resolve",
-        source: e,
-    })?;
-    let all_files = tracker.lock().expect("tracker lock").expand_resolved(&resolved);
+    let resolve_map = node
+        .resource
+        .resolve(&inputs, &mut tracker.lock().expect("tracker lock"))
+        .map_err(|e| EngineError::Provider {
+            pos: node.pos.clone(),
+            block: name.to_owned(),
+            phase: "resolve",
+            source: e,
+        })?;
     let input_hash = hash_inputs(&inputs);
-    let hash_result = tracker.lock().expect("tracker lock").compute_content_hash(
-        &all_files,
-        dag,
-        name,
-        store,
-        &input_hash,
-        &prior.file_state,
-    );
-    let inputs_changed = hash_result.hash != prior.file_state.content_hash;
+    let dep_hashes = collect_dep_hashes(dag, name, store);
+    let content_hash = compute_content_hash(&input_hash, &resolve_map, &dep_hashes);
+    let inputs_changed = content_hash != prior.content_hash;
     crate::debug!(
         writer,
-        "resolved {} file(s), hash={} prior_hash={} inputs_changed={}",
-        all_files.len(),
-        short_hash(&hash_result.hash),
-        short_hash(&prior.file_state.content_hash),
+        "resolved {} key(s), hash={} prior_hash={} inputs_changed={}",
+        resolve_map.len(),
+        short_hash(&content_hash),
+        short_hash(&prior.content_hash),
         inputs_changed,
     );
 
@@ -680,13 +762,13 @@ fn execute_block(
             plan_result.reason = if previously_failed {
                 Some("previously failed".into())
             } else {
-                tracker.lock().expect("tracker lock").change_reason(
-                    &resolved,
-                    &prior.file_state,
+                change_reason(
+                    &prior,
+                    &resolve_map,
+                    &input_hash,
                     dag,
                     name,
                     &std::collections::HashSet::new(),
-                    &input_hash,
                 )
             };
         }
@@ -740,21 +822,19 @@ fn execute_block(
         })?;
 
     let wrapped_state = if let Some(new_state) = &apply_result.state {
-        let post_entries = node.resource.resolve(&inputs).unwrap_or_default();
         let mut t = tracker.lock().expect("tracker lock");
-        t.invalidate_outputs(&post_entries);
-        let post_files = t.expand_resolved(&post_entries);
-        let empty_prior = PriorFileState::default();
-        let post_hash = t.compute_content_hash(&post_files, dag, name, store, &input_hash, &empty_prior);
+        t.clear_hash_cache();
+        let post_resolve = node.resource.resolve(&inputs, &mut t).unwrap_or_default();
         drop(t);
-        crate::debug!(writer, "post-apply hash={}", short_hash(&post_hash.hash));
+        let post_hash = compute_content_hash(&input_hash, &post_resolve, &dep_hashes);
+        crate::debug!(writer, "post-apply hash={}", short_hash(&post_hash));
         let wrapped = WrappedState {
             state: new_state.clone(),
             outputs: apply_result.outputs.clone(),
-            content_hash: post_hash.hash,
-            input_hash: post_hash.input_hash,
-            file_timestamps: post_hash.file_timestamps,
-            dep_hashes: post_hash.dep_hashes,
+            content_hash: post_hash,
+            input_hash,
+            resolve_map: post_resolve,
+            dep_hashes,
         };
         Some(serde_json::to_value(&wrapped).expect("serialize wrapped state"))
     } else {
@@ -1330,7 +1410,7 @@ mod tests {
         let stored = store.load("build").unwrap().unwrap();
         let wrapped: WrappedState = serde_json::from_value(stored).unwrap();
         assert!(!wrapped.content_hash.is_zero());
-        assert!(!wrapped.file_timestamps.is_empty());
+        assert!(!wrapped.resolve_map.is_empty());
 
         // Second apply should be a no-op (timestamp fast path)
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(), &store, &[]).unwrap();
@@ -1369,23 +1449,5 @@ mod tests {
         let results = apply(&mut dag, &base, &store, &out, &[], 1).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::Update);
-    }
-
-    #[test]
-    fn test_relative_display() {
-        use std::path::Path;
-
-        use crate::file_tracker::relative_display;
-
-        let cwd = Path::new("/home/user/project");
-        assert_eq!(
-            relative_display(Path::new("/home/user/project/src/main.rs"), cwd),
-            "src/main.rs"
-        );
-        assert_eq!(
-            relative_display(Path::new("/other/path/file.rs"), cwd),
-            "/other/path/file.rs"
-        );
-        assert_eq!(relative_display(Path::new("/home/user/project"), cwd), "");
     }
 }
