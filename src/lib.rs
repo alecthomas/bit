@@ -13,5 +13,6 @@ pub mod parser;
 pub mod provider;
 pub mod providers;
 pub mod schema;
+pub mod sha256;
 pub mod state;
 pub mod value;

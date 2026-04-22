@@ -1,8 +1,7 @@
 use std::path::Path;
 
-use sha2::Digest;
-
 use crate::provider::BoxError;
+use crate::sha256::SHA256;
 
 pub mod docker;
 pub mod exec;
@@ -11,9 +10,7 @@ pub mod pnpm;
 pub mod rust;
 
 /// Compute a SHA256 content hash for a file.
-pub fn hash_file(path: &Path) -> Result<String, BoxError> {
+pub fn hash_file(path: &Path) -> Result<SHA256, BoxError> {
     let contents = std::fs::read(path)?;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(&contents);
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(SHA256::digest(&contents))
 }

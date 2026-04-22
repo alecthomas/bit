@@ -2,11 +2,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use sha2::{Digest, Sha256};
-
 use crate::dag::Dag;
 use crate::provider::ResolvedFile;
 use crate::providers::hash_file;
+use crate::sha256::{Hasher, SHA256};
 use crate::state::StateStore;
 use crate::value::Map;
 
@@ -22,19 +21,19 @@ fn timestamp_from_system_time(t: SystemTime) -> FileTimestamp {
 
 /// Result of content hash computation, including metadata for fast-path caching.
 pub struct ContentHashResult {
-    pub hash: String,
-    pub input_hash: String,
+    pub hash: SHA256,
+    pub input_hash: SHA256,
     pub file_timestamps: HashMap<String, FileTimestamp>,
-    pub dep_hashes: HashMap<String, String>,
+    pub dep_hashes: HashMap<String, SHA256>,
 }
 
 /// Prior state fields relevant to file tracking.
 #[derive(Default)]
 pub struct PriorFileState {
-    pub content_hash: String,
-    pub input_hash: String,
+    pub content_hash: SHA256,
+    pub input_hash: SHA256,
     pub file_timestamps: HashMap<String, FileTimestamp>,
-    pub dep_hashes: HashMap<String, String>,
+    pub dep_hashes: HashMap<String, SHA256>,
 }
 
 /// Shared cache for filesystem operations within a single engine run.
@@ -42,7 +41,7 @@ pub struct PriorFileState {
 /// Caches glob expansion, file modification times, and content hashes so
 /// that multiple blocks referencing the same files avoid redundant I/O.
 pub struct FileTracker {
-    hash_cache: HashMap<PathBuf, String>,
+    hash_cache: HashMap<PathBuf, SHA256>,
     mtime_cache: HashMap<PathBuf, FileTimestamp>,
     glob_cache: HashMap<String, Vec<PathBuf>>,
 }
@@ -117,7 +116,7 @@ impl FileTracker {
         dag: &Dag,
         block_name: &str,
         store: &dyn StateStore,
-        stored_dep_hashes: &HashMap<String, String>,
+        stored_dep_hashes: &HashMap<String, SHA256>,
     ) -> bool {
         if files.len() != stored_timestamps.len() {
             return false;
@@ -161,38 +160,38 @@ impl FileTracker {
         dag: &Dag,
         block_name: &str,
         store: &dyn StateStore,
-        input_hash: &str,
+        input_hash: &SHA256,
         prior: &PriorFileState,
     ) -> ContentHashResult {
         // Fast path: reuse stored hash if nothing changed.
-        if !prior.content_hash.is_empty()
-            && prior.input_hash == input_hash
+        if !prior.content_hash.is_zero()
+            && prior.input_hash == *input_hash
             && self.timestamps_unchanged(files, &prior.file_timestamps, dag, block_name, store, &prior.dep_hashes)
         {
             return ContentHashResult {
-                hash: prior.content_hash.clone(),
-                input_hash: input_hash.to_owned(),
+                hash: prior.content_hash,
+                input_hash: *input_hash,
                 file_timestamps: prior.file_timestamps.clone(),
                 dep_hashes: prior.dep_hashes.clone(),
             };
         }
 
         // Slow path: full content hash.
-        let mut hasher = Sha256::new();
+        let mut hasher = Hasher::new();
         let mut new_timestamps = HashMap::with_capacity(files.len());
 
-        hasher.update(input_hash.as_bytes());
+        hasher.update(input_hash.to_string().as_bytes());
 
         let mut sorted = files.to_vec();
         sorted.sort();
         for file in &sorted {
-            let hash = self
+            let hash = *self
                 .hash_cache
                 .entry(file.clone())
                 .or_insert_with(|| hash_file(file).unwrap_or_default());
-            if !hash.is_empty() {
+            if !hash.is_zero() {
                 hasher.update(file.to_string_lossy().as_bytes());
-                hasher.update(hash.as_bytes());
+                hasher.update(hash.to_string().as_bytes());
             }
             if let Some(ts) = self.mtime(file) {
                 new_timestamps.insert(file.to_string_lossy().into_owned(), ts);
@@ -212,8 +211,8 @@ impl FileTracker {
         }
 
         ContentHashResult {
-            hash: format!("{:x}", hasher.finalize()),
-            input_hash: input_hash.to_owned(),
+            hash: hasher.finalize(),
+            input_hash: *input_hash,
             file_timestamps: new_timestamps,
             dep_hashes: new_dep_hashes,
         }
@@ -227,7 +226,7 @@ impl FileTracker {
         dag: &Dag,
         block_name: &str,
         dirty_deps: &std::collections::HashSet<String>,
-        input_hash: &str,
+        input_hash: &SHA256,
     ) -> Option<String> {
         let cwd = std::env::current_dir().unwrap_or_default();
 
@@ -301,7 +300,7 @@ impl FileTracker {
             return Some("file set changed".into());
         }
 
-        if !prior.input_hash.is_empty() && prior.input_hash != input_hash {
+        if !prior.input_hash.is_zero() && prior.input_hash != *input_hash {
             return Some("inputs changed".into());
         }
 
@@ -320,20 +319,18 @@ pub(crate) fn relative_display(path: &Path, cwd: &Path) -> String {
 }
 
 /// Hash the block's evaluated input fields in canonical (key-sorted) JSON form.
-pub fn hash_inputs(inputs: &Map) -> String {
+pub fn hash_inputs(inputs: &Map) -> SHA256 {
     let canonical = serde_json::to_value(inputs)
         .and_then(|v| serde_json::to_string(&v))
         .unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    format!("{:x}", hasher.finalize())
+    SHA256::digest(canonical.as_bytes())
 }
 
 /// Extract just the content_hash from a persisted wrapped state.
-fn unwrap_content_hash(stored: &serde_json::Value) -> String {
+fn unwrap_content_hash(stored: &serde_json::Value) -> SHA256 {
     stored
         .get("content_hash")
         .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_owned())).ok())
         .unwrap_or_default()
-        .to_owned()
 }

@@ -7,6 +7,7 @@ use crate::file_tracker::{FileTracker, PriorFileState, hash_inputs};
 use crate::loader::BaseScope;
 use crate::output::{Event, Output};
 use crate::provider::{BoxError, PlanAction, PlanResult, ResourceKind};
+use crate::sha256::SHA256;
 use crate::state::{StateError, StateStore};
 use crate::value::{Map, Type, Value};
 
@@ -47,14 +48,13 @@ pub struct BlockPlan {
 
 use crate::file_tracker::FileTimestamp;
 
-/// Truncate a hash string for compact debug output. Takes the first 8 hex
-/// chars. Returns `"<none>"` for an empty string so "no prior hash" is
-/// distinguishable from a real hash.
-fn short_hash(h: &str) -> &str {
-    if h.is_empty() {
-        return "<none>";
+/// Truncate a SHA256 for compact debug output.
+fn short_hash(h: &SHA256) -> String {
+    if h.is_zero() {
+        return "<none>".to_owned();
     }
-    if h.len() > 8 { &h[..8] } else { h }
+    let s = h.to_string();
+    s[..8].to_owned()
 }
 
 /// Wrapped state persisted by the engine. Contains the provider's own state,
@@ -64,13 +64,13 @@ fn short_hash(h: &str) -> &str {
 struct WrappedState {
     state: serde_json::Value,
     outputs: Map,
-    content_hash: String,
+    content_hash: SHA256,
     #[serde(default)]
-    input_hash: String,
+    input_hash: SHA256,
     #[serde(default)]
     file_timestamps: HashMap<String, FileTimestamp>,
     #[serde(default)]
-    dep_hashes: HashMap<String, String>,
+    dep_hashes: HashMap<String, SHA256>,
 }
 
 /// Extracted prior state fields returned by `unwrap_state`.
@@ -120,12 +120,7 @@ fn default_prior() -> PriorState {
     PriorState {
         provider_state: None,
         outputs: Map::new(),
-        file_state: PriorFileState {
-            content_hash: String::new(),
-            input_hash: String::new(),
-            file_timestamps: HashMap::new(),
-            dep_hashes: HashMap::new(),
-        },
+        file_state: PriorFileState::default(),
     }
 }
 
@@ -1334,7 +1329,7 @@ mod tests {
         // Verify persisted state has timestamps
         let stored = store.load("build").unwrap().unwrap();
         let wrapped: WrappedState = serde_json::from_value(stored).unwrap();
-        assert!(!wrapped.content_hash.is_empty());
+        assert!(!wrapped.content_hash.is_zero());
         assert!(!wrapped.file_timestamps.is_empty());
 
         // Second apply should be a no-op (timestamp fast path)
