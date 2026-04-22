@@ -90,7 +90,6 @@ pub fn load(
     let mut deferred_matrix: Vec<crate::ast::Block> = Vec::new();
     let mut missing_params: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut declared_params: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut let_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for stmt in &module.statements {
         match stmt {
@@ -118,17 +117,16 @@ pub fn load(
                         name: p.name.clone(),
                         message,
                     })?;
-                    scope.set(&p.name, value);
+                    scope
+                        .define(&p.name, expr::SymbolKind::Param, value)
+                        .map_err(|existing| LoadError::DuplicateName {
+                            pos: p.pos.clone(),
+                            name: p.name.clone(),
+                            existing: existing.as_str(),
+                        })?;
                 }
             }
             Statement::Let(l) => {
-                if block_names.contains(&l.name) {
-                    return Err(LoadError::DuplicateName {
-                        pos: l.pos.clone(),
-                        name: l.name.clone(),
-                        existing: "block",
-                    });
-                }
                 match expr::eval(&l.value, &scope) {
                     Ok(value) => {
                         if let Some(typ) = &l.typ {
@@ -138,8 +136,13 @@ pub fn load(
                                 message,
                             })?;
                         }
-                        let_names.insert(l.name.clone());
-                        scope.set(&l.name, value);
+                        scope
+                            .define(&l.name, expr::SymbolKind::Let, value)
+                            .map_err(|existing| LoadError::DuplicateName {
+                                pos: l.pos.clone(),
+                                name: l.name.clone(),
+                                existing: existing.as_str(),
+                            })?;
                     }
                     Err(_) => {
                         // Let depends on a missing param — defer
@@ -148,19 +151,29 @@ pub fn load(
                 }
             }
             Statement::Block(b) => {
-                if let_names.contains(&b.name) {
-                    return Err(LoadError::DuplicateName {
-                        pos: b.pos.clone(),
-                        name: b.name.clone(),
-                        existing: "variable",
-                    });
-                }
                 if !b.matrix_keys.is_empty() {
-                    // Defer matrix blocks — expanded after all statements are collected
+                    // Defer matrix blocks — full define happens in expand_matrix.
+                    // Check here only for conflicts with params/lets.
+                    if let Some(existing) = scope.kind(&b.name) {
+                        return Err(LoadError::DuplicateName {
+                            pos: b.pos.clone(),
+                            name: b.name.clone(),
+                            existing: existing.as_str(),
+                        });
+                    }
                     matrix_blocks.insert(b.name.clone(), b.matrix_keys.clone());
                     deferred_matrix.push(b.clone());
                     block_names.push(b.name.clone());
                 } else if let Some(module_path) = module::resolve_module_path(root, &b.provider, &b.resource) {
+                    // Full define happens in expand_module.
+                    // Check here only for conflicts with params/lets.
+                    if let Some(existing) = scope.kind(&b.name) {
+                        return Err(LoadError::DuplicateName {
+                            pos: b.pos.clone(),
+                            name: b.name.clone(),
+                            existing: existing.as_str(),
+                        });
+                    }
                     let mut ctx = module::ExpandContext {
                         scope: &mut scope,
                         registry,
@@ -196,7 +209,13 @@ pub fn load(
                     })?;
 
                     block_names.push(b.name.clone());
-                    scope.set(&b.name, Value::strct(Map::new()));
+                    scope
+                        .define(&b.name, expr::SymbolKind::Block, Value::strct(Map::new()))
+                        .map_err(|existing| LoadError::DuplicateName {
+                            pos: b.pos.clone(),
+                            name: b.name.clone(),
+                            existing: existing.as_str(),
+                        })?;
                 }
             }
             Statement::Target(t) => {

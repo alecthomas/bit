@@ -22,10 +22,37 @@ pub enum EvalError {
     Glob(String),
 }
 
+/// What kind of symbol a name represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolKind {
+    Param,
+    Let,
+    Block,
+}
+
+impl SymbolKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SymbolKind::Param => "param",
+            SymbolKind::Let => "variable",
+            SymbolKind::Block => "block",
+        }
+    }
+}
+
+impl std::fmt::Display for SymbolKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Scope for variable lookups during expression evaluation.
+///
+/// Each name carries a [`SymbolKind`] so the loader can detect collisions
+/// between params, let bindings, and blocks that share a flat namespace.
 #[derive(Clone)]
 pub struct Scope {
-    vars: HashMap<String, Value>,
+    vars: HashMap<String, (SymbolKind, Value)>,
 }
 
 impl Scope {
@@ -33,12 +60,31 @@ impl Scope {
         Self { vars: HashMap::new() }
     }
 
+    /// Define a new symbol. Returns `Err(existing_kind)` if the name is
+    /// already taken by a different kind of symbol.
+    pub fn define(&mut self, name: impl Into<String>, kind: SymbolKind, value: Value) -> Result<(), SymbolKind> {
+        let name = name.into();
+        if let Some((existing_kind, _)) = self.vars.get(&name) {
+            return Err(*existing_kind);
+        }
+        self.vars.insert(name, (kind, value));
+        Ok(())
+    }
+
+    /// Overwrite an existing symbol's value without conflict checking.
+    /// Used by the engine to fill block placeholders with real outputs.
     pub fn set(&mut self, name: impl Into<String>, value: Value) {
-        self.vars.insert(name.into(), value);
+        let name = name.into();
+        let kind = self.vars.get(&name).map(|(k, _)| *k).unwrap_or(SymbolKind::Block);
+        self.vars.insert(name, (kind, value));
     }
 
     pub fn get(&self, name: &str) -> Option<&Value> {
-        self.vars.get(name)
+        self.vars.get(name).map(|(_, v)| v)
+    }
+
+    pub fn kind(&self, name: &str) -> Option<SymbolKind> {
+        self.vars.get(name).map(|(k, _)| *k)
     }
 }
 

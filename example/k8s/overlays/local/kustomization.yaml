@@ -6,7 +6,7 @@ resources:
 images:
 - name: example-backend
   newName: localhost:5000/example-backend
-  newTag: 947172c75500a8478d41ac63d43b0542f2453e8a7d7feadf47e65a2a02f1d45f
+  newTag: 557c69de2353c9a761c3559b56a49daad58427d4e839219b775a1d439ab6bb0b
 - name: example-bff
   newName: localhost:5000/example-bff
   newTag: c08747125d26f532960019c4957ac7427b864d2ada6564e79418fbcdeb6eda38

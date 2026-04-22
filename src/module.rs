@@ -273,7 +273,17 @@ pub fn expand_module(
             prior_state,
         })?;
 
-        ctx.scope.set(&qualified_name, Value::strct(Map::new()));
+        ctx.scope
+            .define(
+                &qualified_name,
+                crate::expr::SymbolKind::Block,
+                Value::strct(Map::new()),
+            )
+            .map_err(|existing| LoadError::DuplicateName {
+                pos: block.pos.clone(),
+                name: qualified_name.clone(),
+                existing: existing.as_str(),
+            })?;
     }
 
     // Wire internal dependency edges for inner blocks
@@ -445,7 +455,17 @@ pub fn expand_module(
         );
     }
 
-    ctx.scope.set(instance_name, Value::strct(Map::new()));
+    ctx.scope
+        .define(instance_name, crate::expr::SymbolKind::Block, Value::strct(Map::new()))
+        .map_err(|existing| LoadError::DuplicateName {
+            pos: crate::ast::Pos {
+                file: module_path.to_string_lossy().into_owned(),
+                line: 0,
+                col: 0,
+            },
+            name: instance_name.to_owned(),
+            existing: existing.as_str(),
+        })?;
 
     Ok(())
 }

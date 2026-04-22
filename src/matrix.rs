@@ -168,11 +168,22 @@ pub fn expand_matrix(
         };
         matrix_map.insert(key, Value::strct(Map::new()));
     }
-    scope.set(&block.name, Value::strct(matrix_map));
+    scope
+        .define(&block.name, crate::expr::SymbolKind::Block, Value::strct(matrix_map))
+        .map_err(|existing| LoadError::DuplicateName {
+            pos: block.pos.clone(),
+            name: block.name.clone(),
+            existing: existing.as_str(),
+        })?;
 
-    // Also register each expanded node in scope as placeholder
     for expanded in &expanded_names {
-        scope.set(expanded, Value::strct(Map::new()));
+        scope
+            .define(expanded, crate::expr::SymbolKind::Block, Value::strct(Map::new()))
+            .map_err(|existing| LoadError::DuplicateName {
+                pos: block.pos.clone(),
+                name: expanded.clone(),
+                existing: existing.as_str(),
+            })?;
     }
 
     Ok(())
