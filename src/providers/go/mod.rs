@@ -1,6 +1,7 @@
 pub mod build;
 pub mod exe;
 pub mod fmt;
+pub mod generate;
 pub mod lint;
 pub mod scanner;
 pub mod test;
@@ -74,6 +75,7 @@ impl Provider for GoProvider {
         vec![
             Box::new(exe::GoExeResource::new(self.tracker.clone())),
             Box::new(build::GoBuildResource::new(self.tracker.clone())),
+            Box::new(generate::GoGenerateResource::new(self.tracker.clone())),
             Box::new(test::GoTestResource::new(self.tracker.clone())),
             Box::new(lint::GoLintResource::new(self.tracker.clone())),
             Box::new(fmt::GoFmtResource::new(self.tracker.clone())),
@@ -99,12 +101,13 @@ mod tests {
         let provider = GoProvider::new(Arc::new(Mutex::new(FileTracker::default())));
         assert_eq!(provider.name(), "go");
         let resources = provider.resources();
-        assert_eq!(resources.len(), 6);
+        assert_eq!(resources.len(), 7);
         assert_eq!(resources[0].name(), "exe");
         assert_eq!(resources[1].name(), "build");
-        assert_eq!(resources[2].name(), "test");
-        assert_eq!(resources[3].name(), "lint");
-        assert_eq!(resources[4].name(), "fmt");
-        assert_eq!(resources[5].name(), "fmt-l");
+        assert_eq!(resources[2].name(), "generate");
+        assert_eq!(resources[3].name(), "test");
+        assert_eq!(resources[4].name(), "lint");
+        assert_eq!(resources[5].name(), "fmt");
+        assert_eq!(resources[6].name(), "fmt-l");
     }
 }
