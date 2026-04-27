@@ -129,13 +129,20 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
         Expr::Ref(parts) => eval_ref(parts, scope, mode),
         Expr::Call(name, args) => {
             let values: Result<Vec<_>, _> = args.iter().map(|e| eval_inner(e, scope, mode)).collect();
-            call_builtin(name, &values?)
+            let values = values?;
+            if mode == EvalMode::Lenient && values.iter().any(has_placeholder) {
+                return Ok(values.into_iter().find(has_placeholder).unwrap());
+            }
+            call_builtin(name, &values)
         }
         Expr::Pipe(inner, name, args) => {
             let lhs = eval_inner(inner, scope, mode)?;
             let mut all_args = vec![lhs];
             for arg in args {
                 all_args.push(eval_inner(arg, scope, mode)?);
+            }
+            if mode == EvalMode::Lenient && all_args.iter().any(has_placeholder) {
+                return Ok(all_args.into_iter().find(has_placeholder).unwrap());
             }
             call_builtin(name, &all_args)
         }
@@ -222,6 +229,10 @@ fn eval_ref(parts: &[String], scope: &Scope, mode: EvalMode) -> Result<Value, Ev
         }
     }
     Ok(current)
+}
+
+fn has_placeholder(v: &Value) -> bool {
+    matches!(v, Value::Str(s) if s.contains("${"))
 }
 
 fn check_arity(name: &str, args: &[Value], expected: usize) -> Result<(), EvalError> {
@@ -705,6 +716,40 @@ mod tests {
             eval_lenient(&expr, &scope).unwrap(),
             Value::Str("docker run ${image.ref}".into())
         );
+    }
+
+    #[test]
+    fn eval_call_with_placeholder_lenient_propagates() {
+        let mut scope = Scope::new();
+        scope.set("debug", Value::strct(Map::new()));
+        let expr = Expr::Call(
+            "exec".into(),
+            vec![Expr::Str(vec![
+                StringPart::Interpolation(Expr::Ref(vec!["debug".into(), "path".into()])),
+                StringPart::Literal(" --schema".into()),
+            ])],
+        );
+        let result = eval_lenient(&expr, &scope).unwrap();
+        assert_eq!(result, Value::Str("${debug.path} --schema".into()));
+    }
+
+    #[test]
+    fn eval_pipe_with_placeholder_lenient_propagates() {
+        let mut scope = Scope::new();
+        scope.set("debug", Value::strct(Map::new()));
+        let expr = Expr::Pipe(
+            Box::new(Expr::Call(
+                "exec".into(),
+                vec![Expr::Str(vec![
+                    StringPart::Interpolation(Expr::Ref(vec!["debug".into(), "path".into()])),
+                    StringPart::Literal(" --schema".into()),
+                ])],
+            )),
+            "sha256".into(),
+            vec![],
+        );
+        let result = eval_lenient(&expr, &scope).unwrap();
+        assert_eq!(result, Value::Str("${debug.path} --schema".into()));
     }
 
     #[test]
