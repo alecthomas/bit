@@ -24,6 +24,9 @@ pub struct GoTestInputs {
     /// Show individual test results
     #[serde(default)]
     pub verbose: bool,
+    /// Working directory for the command
+    #[serde(default)]
+    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -40,6 +43,8 @@ pub struct GoTestOutputs {
 pub struct GoTestState {
     pub package: String,
     pub flags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -241,6 +246,9 @@ impl Resource for GoTestResource {
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(dir) = &inputs.dir {
+            cmd.current_dir(dir);
+        }
         inputs.env.apply_to(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to execute `go test`: {e}"))?;
@@ -282,6 +290,7 @@ impl Resource for GoTestResource {
             state: Some(GoTestState {
                 package: inputs.package.clone(),
                 flags: inputs.flags.clone(),
+                dir: inputs.dir.clone(),
                 env: inputs.env.clone(),
             }),
         })
@@ -313,6 +322,7 @@ mod tests {
             package: "./...".into(),
             flags: vec![],
             verbose: false,
+            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -347,11 +357,13 @@ mod tests {
             package: "./...".into(),
             flags: vec!["-v".into()],
             verbose: false,
+            dir: None,
             env: GoEnv::default(),
         };
         let prior = GoTestState {
             package: "./...".into(),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();

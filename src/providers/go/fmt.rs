@@ -20,6 +20,9 @@ pub struct GoFmtInputs {
     /// Go package pattern
     #[serde(default = "default_package")]
     pub package: String,
+    /// Working directory for the command
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 /// Outputs from a `go.fmt` block.
@@ -37,6 +40,8 @@ pub struct GoFmtCheckOutputs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoFmtState {
     pub package: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 /// Collect `.go` file paths (excluding test files) for the given package pattern.
@@ -117,17 +122,17 @@ impl Resource for GoFmtResource {
                 outputs: GoFmtOutputs {},
                 state: Some(GoFmtState {
                     package: inputs.package.clone(),
+                    dir: inputs.dir.clone(),
                 }),
             });
         }
 
-        let mut child = Command::new("gofmt")
-            .arg("-w")
-            .args(&files)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to execute `gofmt`: {e}"))?;
+        let mut cmd = Command::new("gofmt");
+        cmd.arg("-w").args(&files).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(dir) = &inputs.dir {
+            cmd.current_dir(dir);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("failed to execute `gofmt`: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -149,6 +154,7 @@ impl Resource for GoFmtResource {
             outputs: GoFmtOutputs {},
             state: Some(GoFmtState {
                 package: inputs.package.clone(),
+                dir: inputs.dir.clone(),
             }),
         })
     }
@@ -224,15 +230,17 @@ impl Resource for GoFmtCheckResource {
                 outputs: GoFmtCheckOutputs { passed: true },
                 state: Some(GoFmtState {
                     package: inputs.package.clone(),
+                    dir: inputs.dir.clone(),
                 }),
             });
         }
 
-        let output = Command::new("gofmt")
-            .arg("-l")
-            .args(&files)
-            .output()
-            .map_err(|e| format!("failed to execute `gofmt`: {e}"))?;
+        let mut cmd = Command::new("gofmt");
+        cmd.arg("-l").args(&files);
+        if let Some(dir) = &inputs.dir {
+            cmd.current_dir(dir);
+        }
+        let output = cmd.output().map_err(|e| format!("failed to execute `gofmt`: {e}"))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let unformatted: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
@@ -248,6 +256,7 @@ impl Resource for GoFmtCheckResource {
             outputs: GoFmtCheckOutputs { passed },
             state: Some(GoFmtState {
                 package: inputs.package.clone(),
+                dir: inputs.dir.clone(),
             }),
         })
     }
@@ -283,6 +292,7 @@ mod tests {
     fn fmt_plan_create_when_no_prior_state() {
         let inputs = GoFmtInputs {
             package: "./...".into(),
+            dir: None,
         };
         let result = Resource::plan(&test_fmt_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -293,6 +303,7 @@ mod tests {
     fn fmt_check_plan_create_when_no_prior_state() {
         let inputs = GoFmtInputs {
             package: "./...".into(),
+            dir: None,
         };
         let result = Resource::plan(&test_fmt_check_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -303,9 +314,11 @@ mod tests {
     fn fmt_plan_none_when_unchanged() {
         let inputs = GoFmtInputs {
             package: "./...".into(),
+            dir: None,
         };
         let prior = GoFmtState {
             package: "./...".into(),
+            dir: None,
         };
         let result = Resource::plan(&test_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -315,9 +328,11 @@ mod tests {
     fn fmt_plan_update_when_package_changed() {
         let inputs = GoFmtInputs {
             package: "./cmd/...".into(),
+            dir: None,
         };
         let prior = GoFmtState {
             package: "./...".into(),
+            dir: None,
         };
         let result = Resource::plan(&test_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);

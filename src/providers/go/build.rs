@@ -20,6 +20,9 @@ pub struct GoBuildInputs {
     /// Extra flags passed to go build
     #[serde(default)]
     pub flags: Vec<String>,
+    /// Working directory for the command
+    #[serde(default)]
+    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -33,6 +36,8 @@ pub struct GoBuildOutputs {}
 pub struct GoBuildState {
     pub package: String,
     pub flags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -101,6 +106,9 @@ impl Resource for GoBuildResource {
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(dir) = &inputs.dir {
+            cmd.current_dir(dir);
+        }
         inputs.env.apply_to(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to execute `go build`: {e}"))?;
@@ -128,6 +136,7 @@ impl Resource for GoBuildResource {
             state: Some(GoBuildState {
                 package: inputs.package.clone(),
                 flags: inputs.flags.clone(),
+                dir: inputs.dir.clone(),
                 env: inputs.env.clone(),
             }),
         })
@@ -157,6 +166,7 @@ mod tests {
         let inputs = GoBuildInputs {
             package: "./...".into(),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -169,11 +179,13 @@ mod tests {
         let inputs = GoBuildInputs {
             package: "./...".into(),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let prior = GoBuildState {
             package: "./...".into(),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();

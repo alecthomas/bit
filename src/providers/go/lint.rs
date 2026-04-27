@@ -20,6 +20,9 @@ pub struct GoLintInputs {
     /// Extra flags passed to golangci-lint run
     #[serde(default)]
     pub flags: Vec<String>,
+    /// Working directory for the command
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 fn default_package() -> String {
@@ -38,6 +41,8 @@ pub struct GoLintOutputs {
 pub struct GoLintState {
     pub package: String,
     pub flags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
 }
 
 pub struct GoLintResource {
@@ -111,10 +116,12 @@ impl Resource for GoLintResource {
         args.extend(inputs.flags.iter().cloned());
         args.push(inputs.package.clone());
 
-        let mut child = Command::new("golangci-lint")
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+        let mut cmd = Command::new("golangci-lint");
+        cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(dir) = &inputs.dir {
+            cmd.current_dir(dir);
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to execute `golangci-lint`: {e}"))?;
 
@@ -139,6 +146,7 @@ impl Resource for GoLintResource {
             state: Some(GoLintState {
                 package: inputs.package.clone(),
                 flags: inputs.flags.clone(),
+                dir: inputs.dir.clone(),
             }),
         })
     }
@@ -166,6 +174,7 @@ mod tests {
         let inputs = GoLintInputs {
             package: "./...".into(),
             flags: vec![],
+            dir: None,
         };
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -176,10 +185,12 @@ mod tests {
         let inputs = GoLintInputs {
             package: "./...".into(),
             flags: vec![],
+            dir: None,
         };
         let prior = GoLintState {
             package: "./...".into(),
             flags: vec![],
+            dir: None,
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -190,10 +201,12 @@ mod tests {
         let inputs = GoLintInputs {
             package: "./...".into(),
             flags: vec!["--fast".into()],
+            dir: None,
         };
         let prior = GoLintState {
             package: "./...".into(),
             flags: vec![],
+            dir: None,
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);

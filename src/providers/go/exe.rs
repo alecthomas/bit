@@ -25,6 +25,9 @@ pub struct GoExeInputs {
     /// Extra flags passed to go build
     #[serde(default)]
     pub flags: Vec<String>,
+    /// Working directory for the command
+    #[serde(default)]
+    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -42,6 +45,8 @@ pub struct GoExeState {
     pub package: String,
     pub output: String,
     pub flags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -137,6 +142,9 @@ impl Resource for GoExeResource {
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(dir) = &inputs.dir {
+            cmd.current_dir(dir);
+        }
         inputs.env.apply_to(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to execute `go build`: {e}"))?;
@@ -165,6 +173,7 @@ impl Resource for GoExeResource {
                 package: inputs.package.clone(),
                 output,
                 flags: inputs.flags.clone(),
+                dir: inputs.dir.clone(),
                 env: inputs.env.clone(),
             }),
         })
@@ -201,6 +210,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: Some("bin/app".into()),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -214,12 +224,14 @@ mod tests {
             package: "./cmd/app".into(),
             output: Some("bin/app".into()),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let prior = GoExeState {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -233,12 +245,14 @@ mod tests {
             package: "./cmd/other".into(),
             output: Some("bin/app".into()),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let prior = GoExeState {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -252,12 +266,14 @@ mod tests {
             package: "./cmd/app".into(),
             output: Some("bin/app".into()),
             flags: vec!["-ldflags=-s".into()],
+            dir: None,
             env: GoEnv::default(),
         };
         let prior = GoExeState {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -271,6 +287,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: Some("bin/app".into()),
             flags: vec![],
+            dir: None,
             env: GoEnv {
                 goos: Some("linux".into()),
                 goarch: Some("arm64".into()),
@@ -281,6 +298,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -294,6 +312,7 @@ mod tests {
             package: "./cmd/foo".into(),
             output: None,
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         assert_eq!(GoExeResource::output_path(&inputs), "foo");
@@ -305,6 +324,7 @@ mod tests {
             package: "./cmd/foo".into(),
             output: Some("bin/foo".into()),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
         assert_eq!(GoExeResource::output_path(&inputs), "bin/foo");
@@ -320,6 +340,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: output.to_string_lossy().into_owned(),
             flags: vec![],
+            dir: None,
             env: GoEnv::default(),
         };
 
