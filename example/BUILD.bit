@@ -194,6 +194,14 @@ protected k3d = exec {
   clean      = "k3d cluster delete ${k3d_cluster}"
 }
 
+# Attach the registry container to the k3d cluster's Docker network so the
+# in-cluster containerd can resolve "example-registry" via Docker's embedded DNS.
+registry-on-k3d-net = docker.network_attach {
+  network    = "k3d-${k3d_cluster}"
+  container  = registry.name
+  depends_on = [registry, k3d]
+}
+
 let k3d_ctx = "k3d-${k3d_cluster}"
 
 # Render the kustomize overlay; per-component blocks filter by label.
@@ -206,7 +214,7 @@ k8s-namespace = exec {
   command    = "kubectl apply -f k8s/base/namespace.yaml --context ${k3d_ctx}"
   resolve    = "kubectl get ns example --context ${k3d_ctx} -o name 2>/dev/null"
   inputs     = ["k8s/base/namespace.yaml"]
-  depends_on = [k3d]
+  depends_on = [k3d, registry-on-k3d-net]
   clean      = "kubectl delete ns example --context ${k3d_ctx}"
 }
 

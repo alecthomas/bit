@@ -339,6 +339,29 @@ block = docker.network {
 | `name` | `string` | Network name |
 | `id` | `string` | Docker network ID |
 
+**`docker.network_attach`** (build) — Attach a container to a Docker network (equivalent of `docker network connect`). Mirrors every flag of the CLI; idempotent and drift-detected.
+
+```bit
+block = docker.network_attach {
+  network = string                  # Network name or ID
+  container = string                # Container name or ID
+  aliases = [string]?               # --alias
+  driver_opts = {string = string}?  # --driver-opt
+  gw_priority = number?             # --gw-priority
+  ip = string?                      # --ip
+  ip6 = string?                     # --ip6
+  links = [string]?                 # --link (name:alias)
+  link_local_ips = [string]?        # --link-local-ip
+}
+```
+
+**Outputs:**
+
+| Field | Type | Description |
+|---|---|---|
+| `ip_address` | `string?` | IPv4 address Docker assigned to the endpoint, if any |
+| `ip6_address` | `string?` | IPv6 address Docker assigned to the endpoint, if any |
+
 ### exec
 
 **`exec`** (build) — Run a shell command, track inputs and outputs
@@ -389,6 +412,7 @@ block = go.exe {
   package = string   # Go package to build (e.g. "./cmd/myapp")
   output = string?   # Output binary path (defaults to package base name)
   flags = [string]?  # Extra flags passed to go build
+  dir = string?      # Working directory for the command
   goos = string?     # Target OS
   goarch = string?   # Target architecture
   cgo = bool?        # Enable cgo
@@ -407,9 +431,25 @@ block = go.exe {
 block = go.build {
   package = string   # Go package pattern (e.g. "./...")
   flags = [string]?  # Extra flags passed to go build
+  dir = string?      # Working directory for the command
   goos = string?     # Target OS
   goarch = string?   # Target architecture
   cgo = bool?        # Enable cgo
+}
+```
+
+**`go.generate`** (build) — Run go generate
+
+```bit
+block = go.generate {
+  package = string     # Go package pattern (e.g. "./...")
+  flags = [string]?    # Extra flags passed to go generate
+  inputs = [string]?   # Input file glob patterns (in addition to Go sources)
+  outputs = [string]?  # Output file paths produced by generate commands
+  dir = string?        # Working directory for the command
+  goos = string?       # Target OS
+  goarch = string?     # Target architecture
+  cgo = bool?          # Enable cgo
 }
 ```
 
@@ -420,6 +460,7 @@ block = go.test {
   package = string   # Go package pattern (e.g. "./...")
   flags = [string]?  # Extra flags passed to go test
   verbose = bool?    # Show individual test results
+  dir = string?      # Working directory for the command
   goos = string?     # Target OS
   goarch = string?   # Target architecture
   cgo = bool?        # Enable cgo
@@ -438,6 +479,7 @@ block = go.test {
 block = go.lint {
   package = string   # Go package pattern
   flags = [string]?  # Extra flags passed to golangci-lint run
+  dir = string?      # Working directory for the command
 }
 ```
 
@@ -452,6 +494,7 @@ block = go.lint {
 ```bit
 block = go.fmt {
   package = string  # Go package pattern
+  dir = string?     # Working directory for the command
 }
 ```
 
@@ -460,6 +503,7 @@ block = go.fmt {
 ```bit
 block = go.fmt-l {
   package = string  # Go package pattern
+  dir = string?     # Working directory for the command
 }
 ```
 

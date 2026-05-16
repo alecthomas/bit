@@ -1,6 +1,7 @@
 pub mod container;
 pub mod image;
 pub mod network;
+pub mod network_attach;
 pub mod parse;
 pub mod push;
 
@@ -31,6 +32,7 @@ impl Provider for DockerProvider {
             Box::new(push::PushResource::new(self.tracker.clone())),
             Box::new(container::ContainerResource::new(self.tracker.clone())),
             Box::new(network::NetworkResource::new(self.tracker.clone())),
+            Box::new(network_attach::NetworkAttachResource::new(self.tracker.clone())),
         ]
     }
 

@@ -13,7 +13,7 @@ registries:
     mirrors:
       "localhost:5000":
         endpoint:
-          - http://host.k3d.internal:5000
+          - http://example-registry:5000
 options:
   k3d:
     wait: true
