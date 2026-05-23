@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::ast::{Block, Expr, Field, Module, Statement, StringPart};
 use crate::dag::{Dag, DagNode, collect_after, collect_block_refs, collect_depends_on};
@@ -73,16 +73,17 @@ impl DynResource for ModuleResource {
 
 /// Resolve a module file path from provider/resource names.
 ///
-/// Searches import roots in reverse order (last import wins) for
-/// `{root}/{provider}/{resource}.bit`.
-pub fn resolve_module_path(import_roots: &[PathBuf], provider: &str, resource: &str) -> Option<std::path::PathBuf> {
-    for import_root in import_roots.iter().rev() {
-        let path = import_root.join(provider).join(format!("{resource}.bit"));
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
+/// With one provider per import root, lookup is by exact match on the
+/// provider name; the resource is `<root.path>/<resource>.bit`. Provider
+/// uniqueness is enforced at import resolution time (`ImportError::ProviderConflict`).
+pub fn resolve_module_path(
+    import_roots: &[crate::import::ImportRoot],
+    provider: &str,
+    resource: &str,
+) -> Option<std::path::PathBuf> {
+    let root = import_roots.iter().find(|r| r.provider == provider)?;
+    let path = root.path.join(format!("{resource}.bit"));
+    if path.exists() { Some(path) } else { None }
 }
 
 /// Parsed interface of a module file.
@@ -121,7 +122,7 @@ pub struct ExpandContext<'a> {
     pub registry: &'a ProviderRegistry,
     pub store: &'a dyn StateStore,
     pub dag: &'a mut Dag,
-    pub import_roots: &'a [PathBuf],
+    pub import_roots: &'a [crate::import::ImportRoot],
 }
 
 /// Expand a module block into namespaced inner blocks in the DAG.
@@ -608,32 +609,36 @@ mod tests {
 
     #[test]
     fn resolve_from_import_root() {
-        let import_dir = tempfile::tempdir().unwrap();
-        let import_prov = import_dir.path().join("prov");
-        std::fs::create_dir_all(&import_prov).unwrap();
-        std::fs::write(import_prov.join("res.bit"), "").unwrap();
-
-        let import_roots = vec![import_dir.path().to_path_buf()];
-        let result = resolve_module_path(&import_roots, "prov", "res");
-        assert_eq!(result, Some(import_prov.join("res.bit")));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("res.bit"), "").unwrap();
+        let roots = vec![crate::import::ImportRoot {
+            provider: "prov".into(),
+            path: dir.path().to_path_buf(),
+        }];
+        let result = resolve_module_path(&roots, "prov", "res");
+        assert_eq!(result, Some(dir.path().join("res.bit")));
     }
 
     #[test]
-    fn resolve_import_roots_reverse_priority() {
-        let first = tempfile::tempdir().unwrap();
-        let first_prov = first.path().join("prov");
-        std::fs::create_dir_all(&first_prov).unwrap();
-        std::fs::write(first_prov.join("res.bit"), "first").unwrap();
-
-        let second = tempfile::tempdir().unwrap();
-        let second_prov = second.path().join("prov");
-        std::fs::create_dir_all(&second_prov).unwrap();
-        std::fs::write(second_prov.join("res.bit"), "second").unwrap();
-
-        let import_roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
-        let result = resolve_module_path(&import_roots, "prov", "res");
-        // Last import wins (reverse order)
-        assert_eq!(result, Some(second_prov.join("res.bit")));
+    fn resolve_distinct_providers() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("x.bit"), "").unwrap();
+        std::fs::write(b.path().join("y.bit"), "").unwrap();
+        let roots = vec![
+            crate::import::ImportRoot {
+                provider: "alpha".into(),
+                path: a.path().to_path_buf(),
+            },
+            crate::import::ImportRoot {
+                provider: "beta".into(),
+                path: b.path().to_path_buf(),
+            },
+        ];
+        assert_eq!(resolve_module_path(&roots, "alpha", "x"), Some(a.path().join("x.bit")));
+        assert_eq!(resolve_module_path(&roots, "beta", "y"), Some(b.path().join("y.bit")));
+        // Wrong provider name yields nothing even if a file by that name exists.
+        assert_eq!(resolve_module_path(&roots, "alpha", "y"), None);
     }
 
     #[test]

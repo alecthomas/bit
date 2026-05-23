@@ -830,9 +830,18 @@ fn import_stmt(input: &mut &str) -> ModalResult<Import> {
     let url = cut_err(alt((plain_raw_string, plain_string)))
         .context(StrContext::Label("import URL string"))
         .parse_next(input)?;
+    // `plain_string` / `plain_raw_string` don't eat trailing whitespace, so
+    // do it here before probing for the optional `as <ident>` clause.
+    ws(input)?;
+    let alias = opt(preceded(
+        keyword("as"),
+        cut_err(ident_string).context(StrContext::Label("import alias")),
+    ))
+    .parse_next(input)?;
     Ok(Import {
         pos: Pos::default(),
         url,
+        alias,
     })
 }
 
@@ -1051,9 +1060,32 @@ mod tests {
         match &result.statements[0] {
             Statement::Import(i) => {
                 assert_eq!(i.url, "github.com/user/repo");
+                assert_eq!(i.alias, None);
             }
             other => panic!("expected Import, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_import_with_alias() {
+        let result = parse(r#"import "github.com/user/repo" as bm"#, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Import(i) => {
+                assert_eq!(i.url, "github.com/user/repo");
+                assert_eq!(i.alias.as_deref(), Some("bm"));
+            }
+            other => panic!("expected Import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_import_alias_requires_identifier() {
+        // Missing identifier after `as` is a hard error.
+        let err = parse(r#"import "github.com/user/repo" as"#, "<test>").unwrap_err();
+        assert!(
+            err.message.contains("import alias") || err.message.contains("alias"),
+            "got: {err:?}"
+        );
     }
 
     #[test]

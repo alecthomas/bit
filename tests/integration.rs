@@ -511,7 +511,12 @@ fn write_module(dir: &std::path::Path, provider: &str, resource: &str, content: 
 fn run_apply_in_dir(dir: &std::path::Path, input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
-    let import_roots = vec![dir.to_path_buf()];
+    // Module-system tests in this file all use the `mymod` provider, mirroring
+    // the per-import-equals-one-provider layout.
+    let import_roots = vec![bit::import::ImportRoot {
+        provider: "mymod".into(),
+        path: dir.join("mymod"),
+    }];
     let (mut dag, base) =
         loader::load(&module, &Map::new(), &registry(&tracker), store, &import_roots).expect("load failed");
     engine::apply(&mut dag, &base, store, &Output::new(&[]), &[], 1, &tracker).expect("apply failed")

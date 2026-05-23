@@ -112,11 +112,13 @@ State is keyed per slice: `binary[amd64]`, `deploy[arm64, eu]`.
 
 ## 2. Modules
 
-A `.bit` file is itself a provider, if placed in `.bit/modules`. It declares parameters, contains blocks, and exposes outputs and targets. Only declared outputs and targets are accessible from outside the module — inner blocks are private.
+A `.bit` file is itself a provider. It declares parameters, contains blocks, and exposes outputs and targets. Only declared outputs and targets are accessible from outside the module — inner blocks are private.
 
-Each directory in `.bit/modules/` is a provider, and each file under those directories is a resource. For example the module `.bit/modules/docker/image.bit` would map to `docker.image`. A `.bit` file with the same name as its parent directory is the "default" resource, eg. `.bit/modules/docker/docker.bit` can be used directly as `docker`.
+Module files are made discoverable through one or more `import` directives at the top of `BUILD.bit`. **Each import brings exactly one provider into scope**; the provider name is the last segment of the import path. Resources are `<resource>.bit` files at the root of the imported directory. A `<provider>.bit` at the root is the "default" resource — callable bare.
 
 ```
+import "./.bit/modules/app"  # provider "app"
+
 # .bit/modules/app/app.bit
 param environment : string
 param replicas    : int
@@ -142,6 +144,8 @@ target deploy = [app]
 
 ```
 # BUILD.bit
+import "./.bit/modules/app"
+
 let git_sha = exec("git rev-parse --short HEAD") | trim
 
 app = app {
@@ -158,6 +162,49 @@ target deploy = [app.deploy]
 ```
 
 Modules nest arbitrarily. Two instances of the same module produce independent subgraphs. A module can only be depended on as a whole — use `depends_on = [module_name]` or reference one of its targets.
+
+### 2.1 Import Resolution
+
+`import` accepts a relative local path (starting with `./` or `../`) or a bare git URL of the form `host/path` (à la Go module paths). Schemes (`https://`, `ssh://`, `file://`), SSH shorthand (`git@host:`), and absolute paths are rejected. The URL is always cloned as `https://<url>`; for SSH or auth rewrites, configure `insteadOf` rules in the user's `~/.gitconfig` — bit shells out to `git clone`, which respects them. A trailing `.git` is optional and stripped for the lock key.
+
+An optional `as <identifier>` clause overrides the auto-derived provider name:
+
+```
+import "github.com/alecthomas/bit-modules" as bm
+```
+
+The provider name an import contributes is the alias when present, otherwise the last segment of the path:
+
+| Import | Provider |
+|---|---|
+| `./.bit/modules/docker` | `docker` |
+| `../shared/aws` | `aws` |
+| `github.com/alecthomas/bit-modules` | `bit-modules` |
+| `github.com/alecthomas/bit-modules/aws` | `aws` |
+| `git.sr.ht/~user/repo` | `repo` |
+
+Two unrelated imports producing the same provider name = hard error.
+
+For git imports with deep paths (e.g. `github.com/foo/bar/waz`), bit needs to know the boundary between repo and subpath. Hardcoded forges (`github.com`, `gitlab.com`, `bitbucket.org`) split at segment 3. Other hosts are probed via `git ls-remote` from the longest prefix down — the first prefix that responds is the repo, the remainder is the subpath. Probes are cached per run but not persisted, so cold loads against unfamiliar hosts pay one probe per import.
+
+### 2.2 Recursive resolution and `BUILD.bit.lock`
+
+Every project — the root and every imported project — has its own `BUILD.bit` listing its direct imports, and its own `BUILD.bit.lock` pinning those git deps. Resolution walks the graph: root's imports first, then each imported project's `BUILD.bit` imports, transitively.
+
+- The **root** project's lock is writable: new git imports are auto-pinned to the current default-branch HEAD, and `bit --update` re-resolves entries.
+- **Child** projects' locks are read-only. Every git import a child declares **must** have a matching entry in that child's `BUILD.bit.lock`, or bit errors. A child with no `BUILD.bit` is a leaf — no further deps to resolve.
+- Imports of imports become providers in the root project's scope, so any module can use any transitively imported provider.
+- The same git repo resolved to two different SHAs anywhere in the graph = hard error.
+
+Lock file format (commit to version control):
+
+```toml
+"github.com/alecthomas/bit-modules" = "a1b2c3d4e5f6789..."
+```
+
+The key is the repo's bare URL with any trailing `.git` stripped. The value is a full commit SHA. Local-path imports are not locked.
+
+A normal `bit` run honours the root lock and only contacts the network when a new direct import has no entry yet. `bit --update [<repo>...]` re-resolves matching entries against their default branch and rewrites the root lock; child locks aren't touched. Each resolved commit is extracted into an immutable per-commit cache directory, so re-using a pinned commit is fully offline.
 
 ## 3. Expression Language
 

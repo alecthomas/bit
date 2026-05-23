@@ -75,6 +75,7 @@ bit --plan --graph  # …and colour each node by its planned action
 bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
 bit --schema     # show provider/resource schemas
+bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
 ```
 
 All block/target-taking modes (`bit`, `--plan`, `--clean`, `--graph`, `--dump`)
@@ -105,6 +106,7 @@ name = provider.resource {
 ```
 
 Special fields:
+
 - `depends_on = [block, ...]` — content-coupled dependency (changes propagate)
 - `after = [block, ...]` — ordering-only dependency
 
@@ -190,25 +192,25 @@ Supported units: `ns`, `us`, `ms`, `s`, `m`, `h`, `d`. A bare `5` is a number; `
 
 ### Built-in Functions
 
-| Function | Description |
-|---|---|
-| `env(name)`, `env(name, default)` | Environment variable |
-| `exec(command)` | Run shell command, return stdout |
-| `glob(pattern)` | Expand filesystem glob |
-| `trim(value)` | Strip whitespace |
-| `lines(string)` | Split into lines |
-| `split(string, sep)` | Split by separator |
-| `uniq(list)` | Deduplicate list |
-| `basename(path)` | Extract file name from path |
-| `dirname(path)` | Extract directory from path |
-| `prefix(value, str)` | Prepend string to value or list elements |
-| `suffix(value, str)` | Append string to value or list elements |
-| `secret(name)` | Access secret |
-| `sha256(value)` | Hex-encoded SHA-256 digest |
+| Function                          | Description                              |
+| --------------------------------- | ---------------------------------------- |
+| `env(name)`, `env(name, default)` | Environment variable                     |
+| `exec(command)`                   | Run shell command, return stdout         |
+| `glob(pattern)`                   | Expand filesystem glob                   |
+| `trim(value)`                     | Strip whitespace                         |
+| `lines(string)`                   | Split into lines                         |
+| `split(string, sep)`              | Split by separator                       |
+| `uniq(list)`                      | Deduplicate list                         |
+| `basename(path)`                  | Extract file name from path              |
+| `dirname(path)`                   | Extract directory from path              |
+| `prefix(value, str)`              | Prepend string to value or list elements |
+| `suffix(value, str)`              | Append string to value or list elements  |
+| `secret(name)`                    | Access secret                            |
+| `sha256(value)`                   | Hex-encoded SHA-256 digest               |
 
 ### Modules
 
-A `.bit` file in `.bit/modules/` becomes a reusable provider. Each directory is a provider namespace, each file a resource. For example `.bit/modules/app/app.bit` maps to `app`:
+Each `import` brings exactly one provider into scope; the provider name is the last segment of the import path. The imported directory contains one `<resource>.bit` file per resource. For example, `./.bit/modules/app/` imported as `app` provider, with `app/app.bit` as the default resource and `app/staging.bit` exposed as `app.staging`:
 
 ```hcl
 # .bit/modules/app/app.bit
@@ -235,6 +237,8 @@ target deploy = [deploy]
 Use it like any other provider:
 
 ```hcl
+import "./.bit/modules/app"
+
 staging = app {
   environment = "staging"
   replicas    = 2
@@ -250,7 +254,45 @@ production = app {
 # Inner blocks are private: staging.server, staging.image are not accessible
 ```
 
-Two instances of the same module produce independent subgraphs. Modules nest arbitrarily.
+A `<provider>.bit` file at the root of the import directory is the **default** resource — callable bare (just `app { ... }`). All other `<name>.bit` files are addressable as `<provider>.<name>` (e.g. `app.staging`). Two instances of the same module produce independent subgraphs. Modules nest arbitrarily.
+
+#### Imports
+
+Each top-level `import` directive brings exactly one provider into scope. The provider name is the last segment of the import path. Local directories use `./` or `../` relative paths; git imports are bare `host/path` (à la Go module paths) — no schemes (`https://`, `ssh://`, `file://`), no SSH shorthand (`git@host:`), no `#ref`, no host allowlist, no absolute paths:
+
+```hcl
+import "./.bit/modules/docker"                       # provider "docker"
+import "../shared/aws"                               # provider "aws"
+import "github.com/alecthomas/bit-modules"           # provider "bit-modules"
+import "github.com/alecthomas/bit-modules/aws"       # provider "aws" — subpath inside the repo
+import "git.sr.ht/~user/repo"                        # arbitrary host
+import "github.com/alecthomas/bit-modules" as bm     # override the auto-derived provider name
+```
+
+For deep paths like `github.com/foo/bar/waz`, bit needs to know where the repo ends and the subpath begins. Hardcoded forges (`github.com`, `gitlab.com`, `bitbucket.org`) split at segment 3 (`host/owner/repo`). For other hosts bit probes via `git ls-remote` from the longest prefix down — the first one that responds is the repo, the rest is the subpath. The probe result is cached for the run but not persisted, so a fresh checkout against an unfamiliar host pays one probe per import.
+
+Use `as <ident>` to override the auto-derived provider name — useful when two imports would otherwise collide on the last path segment.
+
+Git URLs are always cloned as `https://<url>`; for SSH or custom auth, add `insteadOf` rules to your `~/.gitconfig` (bit shells out to `git clone`, which respects them). A trailing `.git` is optional and stripped from the lock key.
+
+##### Recursive resolution and `BUILD.bit.lock`
+
+Every project — the root and every imported project — has its own `BUILD.bit` listing **its** direct imports, and its own `BUILD.bit.lock` pinning those git deps. Resolution walks the graph: root's imports first, then each imported project's `BUILD.bit` imports, transitively.
+
+- The **root** project's lock is writable: new git imports are auto-pinned to the current default-branch HEAD, and `bit --update` re-resolves entries.
+- **Child** projects' locks are read-only. Every git import a child declares **must** have a matching entry in that child's `BUILD.bit.lock`, or bit errors. A child with no `BUILD.bit` is a leaf — no further deps to resolve.
+- Imports of imports become providers in the root project's scope, so any module can use any transitively imported provider.
+- Conflicts are hard errors:
+  - same git repo resolved to two different SHAs anywhere in the graph;
+  - two unrelated imports producing the same provider name.
+
+Lock file format (commit to version control):
+
+```toml
+"github.com/alecthomas/bit-modules" = "a1b2c3d4e5f6..."
+```
+
+A normal `bit` run honours the root lock and only contacts the network when a new direct import has no entry yet. `bit --update [repo...]` re-resolves matching entries against the default branch and rewrites the root lock; child locks aren't touched. Each resolved commit is extracted into an immutable per-commit cache directory (`~/Library/Caches/bit/` on macOS, `~/.cache/bit/` on Linux), so re-using a pinned commit is fully offline.
 
 ### Targets and Outputs
 
@@ -277,10 +319,10 @@ block = docker.image {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
-| `ref` | `string` | Image tag/reference |
-| `image_id` | `string` | Docker image ID |
+| Field      | Type     | Description         |
+| ---------- | -------- | ------------------- |
+| `ref`      | `string` | Image tag/reference |
+| `image_id` | `string` | Docker image ID     |
 
 **`docker.push`** (build) — Push a Docker image to a registry
 
@@ -293,8 +335,8 @@ block = docker.push {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field | Type     | Description            |
+| ----- | -------- | ---------------------- |
 | `ref` | `string` | Pushed image reference |
 
 **`docker.container`** (build) — Run a Docker container (tracks state like Terraform)
@@ -318,10 +360,10 @@ block = docker.container {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field          | Type     | Description         |
+| -------------- | -------- | ------------------- |
 | `container_id` | `string` | Docker container ID |
-| `name` | `string` | Container name |
+| `name`         | `string` | Container name      |
 
 **`docker.network`** (build) — Create a Docker network (Terraform-style: tracked state, drift detection)
 
@@ -334,33 +376,33 @@ block = docker.network {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
-| `name` | `string` | Network name |
-| `id` | `string` | Docker network ID |
+| Field  | Type     | Description       |
+| ------ | -------- | ----------------- |
+| `name` | `string` | Network name      |
+| `id`   | `string` | Docker network ID |
 
-**`docker.network_attach`** (build) — Attach a container to a Docker network (equivalent of `docker network connect`). Mirrors every flag of the CLI; idempotent and drift-detected.
+**`docker.network_attach`** (build) — Attach a container to a Docker network (equivalent of `docker network connect`). Mirrors every flag of the underlying CLI so this block fully replaces a hand-rolled `exec` wrapper. The attachment is idempotent and is tracked in state so drift detection works across runs.
 
 ```bit
 block = docker.network_attach {
   network = string                  # Network name or ID
   container = string                # Container name or ID
-  aliases = [string]?               # --alias
-  driver_opts = {string = string}?  # --driver-opt
-  gw_priority = number?             # --gw-priority
-  ip = string?                      # --ip
-  ip6 = string?                     # --ip6
-  links = [string]?                 # --link (name:alias)
-  link_local_ips = [string]?        # --link-local-ip
+  aliases = [string]?               # Network-scoped aliases for the container (`--alias`)
+  driver_opts = {string = string}?  # Driver options as key/value pairs (`--driver-opt`)
+  gw_priority = number?             # Default-gateway priority on this endpoint (`--gw-priority`). Highest priority provides the default gateway; accepts negative values.
+  ip = string?                      # IPv4 address (`--ip`)
+  ip6 = string?                     # IPv6 address (`--ip6`)
+  links = [string]?                 # Links to other containers, in `name:alias` form (`--link`)
+  link_local_ips = [string]?        # Link-local addresses for the container (`--link-local-ip`)
 }
 ```
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
-| `ip_address` | `string?` | IPv4 address Docker assigned to the endpoint, if any |
-| `ip6_address` | `string?` | IPv6 address Docker assigned to the endpoint, if any |
+| Field         | Type      | Description                                           |
+| ------------- | --------- | ----------------------------------------------------- |
+| `ip_address`  | `string?` | IPv4 address Docker assigned to the endpoint, if any. |
+| `ip6_address` | `string?` | IPv6 address Docker assigned to the endpoint, if any. |
 
 ### exec
 
@@ -380,9 +422,9 @@ block = exec {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
-| `path` | `string?` | Output path (single-output blocks) |
+| Field   | Type        | Description                        |
+| ------- | ----------- | ---------------------------------- |
+| `path`  | `string?`   | Output path (single-output blocks) |
 | `paths` | `[string]?` | Output paths (multi-output blocks) |
 
 **`exec.test`** (test) — Run a command as a test (pass/fail by exit code)
@@ -399,8 +441,8 @@ block = exec.test {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field    | Type   | Description             |
+| -------- | ------ | ----------------------- |
 | `passed` | `bool` | Whether the test passed |
 
 ### go
@@ -421,8 +463,8 @@ block = go.exe {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field  | Type     | Description              |
+| ------ | -------- | ------------------------ |
 | `path` | `string` | Path to the built binary |
 
 **`go.build`** (build) — Compile Go packages without producing a binary
@@ -469,8 +511,8 @@ block = go.test {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field    | Type   | Description              |
+| -------- | ------ | ------------------------ |
 | `passed` | `bool` | Whether all tests passed |
 
 **`go.lint`** (test) — Run golangci-lint
@@ -485,8 +527,8 @@ block = go.lint {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field    | Type   | Description            |
+| -------- | ------ | ---------------------- |
 | `passed` | `bool` | Whether linting passed |
 
 **`go.fmt`** (build) — Format Go source files
@@ -509,8 +551,8 @@ block = go.fmt-l {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field    | Type   | Description                     |
+| -------- | ------ | ------------------------------- |
 | `passed` | `bool` | Whether all files are formatted |
 
 ### pnpm
@@ -526,8 +568,8 @@ block = pnpm.install {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field  | Type     | Description                                             |
+| ------ | -------- | ------------------------------------------------------- |
 | `path` | `string` | Absolute path to the installed `node_modules` directory |
 
 **`pnpm.run`** (build) — Run a script defined in `package.json`.
@@ -545,9 +587,9 @@ block = pnpm.run {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
-| `path` | `string?` | Single output path, when exactly one was declared |
+| Field   | Type        | Description                                            |
+| ------- | ----------- | ------------------------------------------------------ |
+| `path`  | `string?`   | Single output path, when exactly one was declared      |
 | `paths` | `[string]?` | Multiple output paths, when more than one was declared |
 
 **`pnpm.test`** (test) — Run a test script via pnpm.
@@ -564,8 +606,8 @@ block = pnpm.test {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field    | Type   | Description                          |
+| -------- | ------ | ------------------------------------ |
 | `passed` | `bool` | Whether the test command exited zero |
 
 ### rust
@@ -601,8 +643,8 @@ block = rust.exe {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field  | Type     | Description              |
+| ------ | -------- | ------------------------ |
 | `path` | `string` | Path to the built binary |
 
 **`rust.test`** (test) — Run Rust tests
@@ -622,8 +664,8 @@ block = rust.test {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field    | Type   | Description              |
+| -------- | ------ | ------------------------ |
 | `passed` | `bool` | Whether the check passed |
 
 **`rust.clippy`** (test) — Run Clippy linter
@@ -642,8 +684,8 @@ block = rust.clippy {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field    | Type   | Description              |
+| -------- | ------ | ------------------------ |
 | `passed` | `bool` | Whether the check passed |
 
 **`rust.fmt`** (build) — Format Rust source files
@@ -672,8 +714,8 @@ block = rust.fmt-check {
 
 **Outputs:**
 
-| Field | Type | Description |
-|---|---|---|
+| Field    | Type   | Description              |
+| -------- | ------ | ------------------------ |
 | `passed` | `bool` | Whether the check passed |
 
 ## How It Works

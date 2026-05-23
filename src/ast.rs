@@ -34,11 +34,14 @@ pub enum Statement {
     Output(Output),
 }
 
-/// `import "github.com/user/repo[/subpath][#ref]"`
+/// `import "<host/path>" [as <ident>]`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Import {
     pub pos: Pos,
     pub url: String,
+    /// Override for the auto-derived provider name. When `None`, the
+    /// provider name is the last path segment of `url`.
+    pub alias: Option<String>,
 }
 
 /// Execution phase for a block.

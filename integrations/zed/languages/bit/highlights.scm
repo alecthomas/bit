@@ -3,6 +3,8 @@
 
 ; Keywords
 [
+  "import"
+  "as"
   "let"
   "param"
   "target"
@@ -37,6 +39,9 @@
   "}" @punctuation.special)
 
 ; Statement names
+(import_statement
+  alias: (identifier) @type)
+
 (let_statement
   name: (identifier) @variable)
 

@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use std::collections::HashMap;
 
 use crate::ast::{Module, Statement};
@@ -45,11 +43,6 @@ pub enum LoadError {
     ModuleLoad(String, String),
     #[error("failed to parse module {0}: {1}")]
     ModuleParse(String, String),
-    #[error("{pos}: import error: {source}")]
-    Import {
-        pos: crate::ast::Pos,
-        source: crate::import::ImportError,
-    },
     #[error("{pos}: matrix key '{name}' not found in scope")]
     MatrixKeyNotFound { pos: crate::ast::Pos, name: String },
     #[error("{pos}: matrix key '{name}' must be a list")]
@@ -86,7 +79,7 @@ pub fn load(
     params: &Map,
     registry: &ProviderRegistry,
     store: &dyn StateStore,
-    import_roots: &[PathBuf],
+    import_roots: &[crate::import::ImportRoot],
 ) -> Result<(Dag, BaseScope), LoadError> {
     let mut scope = Scope::new();
     let mut dag = Dag::new();
@@ -587,12 +580,20 @@ target build = [server]
         assert_eq!(targets["build"].doc.as_deref(), Some("Build the server"));
     }
 
-    /// Create a module file at {dir}/{provider}/{resource}.bit and return
-    /// the dir as an import root.
+    /// Create a module file at {dir}/{provider}/{resource}.bit.
     fn write_module(dir: &std::path::Path, provider: &str, resource: &str, content: &str) {
         let module_dir = dir.join(provider);
         std::fs::create_dir_all(&module_dir).unwrap();
         std::fs::write(module_dir.join(format!("{resource}.bit")), content).unwrap();
+    }
+
+    /// Build the `ImportRoot` vec for a single provider whose modules live
+    /// under `{dir}/{provider}/`.
+    fn roots(dir: &std::path::Path, provider: &str) -> Vec<crate::import::ImportRoot> {
+        vec![crate::import::ImportRoot {
+            provider: provider.into(),
+            path: dir.join(provider),
+        }]
     }
 
     #[test]
@@ -625,7 +626,7 @@ inst = mymod {
             &Map::new(),
             &test_registry(),
             &EmptyStore,
-            &[dir.path().to_path_buf()],
+            &roots(dir.path(), "mymod"),
         )
         .unwrap();
 
@@ -668,7 +669,7 @@ inst = mymod {
             &Map::new(),
             &test_registry(),
             &EmptyStore,
-            &[dir.path().to_path_buf()],
+            &roots(dir.path(), "mymod"),
         )
         .unwrap();
 
@@ -712,7 +713,7 @@ inst = mymod {}
             &Map::new(),
             &test_registry(),
             &EmptyStore,
-            &[dir.path().to_path_buf()],
+            &roots(dir.path(), "mymod"),
         )
         .unwrap();
 
@@ -757,7 +758,7 @@ inst = mymod {}
             &Map::new(),
             &test_registry(),
             &EmptyStore,
-            &[dir.path().to_path_buf()],
+            &roots(dir.path(), "mymod"),
         )
         .unwrap();
 
@@ -793,7 +794,7 @@ inst = mymod {}
             &Map::new(),
             &test_registry(),
             &EmptyStore,
-            &[dir.path().to_path_buf()],
+            &roots(dir.path(), "mymod"),
         );
         assert!(matches!(result, Err(LoadError::MissingParam { .. })));
     }
@@ -824,7 +825,7 @@ inst = mymod {}
             &Map::new(),
             &test_registry(),
             &EmptyStore,
-            &[dir.path().to_path_buf()],
+            &roots(dir.path(), "mymod"),
         )
         .unwrap();
 
@@ -866,7 +867,7 @@ inst = mymod {
             &Map::new(),
             &test_registry(),
             &EmptyStore,
-            &[dir.path().to_path_buf()],
+            &roots(dir.path(), "mymod"),
         )
         .unwrap();
 
@@ -910,7 +911,7 @@ inst2 = mymod {
             &Map::new(),
             &test_registry(),
             &EmptyStore,
-            &[dir.path().to_path_buf()],
+            &roots(dir.path(), "mymod"),
         )
         .unwrap();
 
@@ -956,7 +957,7 @@ inst = mymod {
             &Map::new(),
             &test_registry(),
             &EmptyStore,
-            &[dir.path().to_path_buf()],
+            &roots(dir.path(), "mymod"),
         )
         .unwrap();
 
@@ -970,7 +971,8 @@ inst = mymod {
     #[test]
     fn load_module_provider_resource_syntax() {
         let dir = tempfile::tempdir().unwrap();
-        // Module at .bit/modules/myns/myres.bit (provider.resource syntax)
+        // Module file at {dir}/myns/myres.bit; the import root points at
+        // {dir}/myns with provider name "myns" (one provider per import).
         write_module(
             dir.path(),
             "myns",
@@ -992,7 +994,7 @@ inst = myns.myres {}
             &Map::new(),
             &test_registry(),
             &EmptyStore,
-            &[dir.path().to_path_buf()],
+            &roots(dir.path(), "myns"),
         )
         .unwrap();
 

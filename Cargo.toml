@@ -25,6 +25,7 @@ dirs = "6.0.0"
 console = "0.16.3"
 indexmap = "2.14.0"
 serde_yml = "0.0.12"
+toml = { version = "1.1.2", default-features = false, features = ["parse", "display", "serde"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

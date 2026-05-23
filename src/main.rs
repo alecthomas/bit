@@ -65,6 +65,12 @@ struct Cli {
     #[arg(short = 's', long, num_args = 0..=1, default_missing_value = "")]
     schema: Option<String>,
 
+    /// Re-resolve git imports against their requested refs and rewrite
+    /// `BUILD.bit.lock`. Positional arguments, if any, filter which repos
+    /// to update (match by `host/owner/repo` or by full import URL).
+    #[arg(short = 'u', long)]
+    update: bool,
+
     /// Output in JSON format (currently applies to --schema)
     #[arg(long)]
     json: bool,
@@ -142,6 +148,43 @@ fn find_and_chdir_project_root() {
     process::exit(1);
 }
 
+/// Parse `BUILD.bit` from the current directory or exit.
+fn parse_build_bit() -> bit::ast::Module {
+    let source = match fs::read_to_string("BUILD.bit") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{} cannot read BUILD.bit: {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
+    match bit::parser::parse(&source, "BUILD.bit") {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    }
+}
+
+/// Resolve all `import` statements (honouring `BUILD.bit.lock` unless in
+/// update mode) or exit. Returns the resolved roots and any lock changes.
+fn resolve_imports_or_exit(module: &bit::ast::Module, mode: bit::import::UpdateMode) -> bit::import::ImportResolution {
+    let cache_root = match bit::import::default_cache_root() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
+    match bit::import::resolve_imports(module, std::path::Path::new("."), &cache_root, mode) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    }
+}
+
 fn load_module(
     registry: &ProviderRegistry,
     params: &Map,
@@ -159,28 +202,9 @@ fn load_module(
             process::exit(1);
         }
     };
-    let source = match fs::read_to_string("BUILD.bit") {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{} cannot read BUILD.bit: {e}", "error:".red().bold());
-            process::exit(1);
-        }
-    };
-    let module = match bit::parser::parse(&source, "BUILD.bit") {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("{} {e}", "error:".red().bold());
-            process::exit(1);
-        }
-    };
-    let import_roots = match bit::import::resolve_imports(&module, root) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{} {e}", "error:".red().bold());
-            process::exit(1);
-        }
-    };
-    let (dag, base) = match loader::load(&module, params, registry, store.as_ref(), &import_roots) {
+    let module = parse_build_bit();
+    let imports = resolve_imports_or_exit(&module, bit::import::UpdateMode::None);
+    let (dag, base) = match loader::load(&module, params, registry, store.as_ref(), &imports.roots) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{} {e}", "error:".red().bold());
@@ -188,6 +212,11 @@ fn load_module(
         }
     };
     (module, dag, base, store)
+}
+
+/// Truncate a SHA for display while staying unambiguous within a project.
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
 }
 
 /// Create an Output formatter sized to the blocks that will actually run.
@@ -240,15 +269,18 @@ fn main() {
 
     let tracker = Arc::new(Mutex::new(FileTracker::new()));
 
-    // --schema doesn't need the full DAG
+    // --schema doesn't need the full DAG, but it does need imports resolved
+    // so it can show schemas for imported modules.
     if let Some(ref filter) = cli.schema {
         let registry = default_registry(&tracker);
         find_and_chdir_project_root();
+        let module = parse_build_bit();
+        let imports = resolve_imports_or_exit(&module, bit::import::UpdateMode::None);
         let filter = if filter.is_empty() { None } else { Some(filter.as_str()) };
         if cli.json {
-            print_schema_json(&registry, filter);
+            print_schema_json(&registry, &imports.roots, filter);
         } else {
-            print_schema(&registry, filter);
+            print_schema(&registry, &imports.roots, filter);
         }
         return;
     }
@@ -257,6 +289,38 @@ fn main() {
     if cli.info {
         find_and_chdir_project_root();
         print_info();
+        return;
+    }
+
+    // --update re-resolves git imports and rewrites BUILD.bit.lock.
+    if cli.update {
+        if cli.clean || cli.test || cli.dump || cli.list || cli.plan || cli.graph {
+            eprintln!(
+                "{} --update is mutually exclusive with other modes",
+                "error:".red().bold()
+            );
+            process::exit(1);
+        }
+        find_and_chdir_project_root();
+        let module = parse_build_bit();
+        let filter = if cli.targets.is_empty() {
+            None
+        } else {
+            Some(cli.targets.clone())
+        };
+        let res = resolve_imports_or_exit(&module, bit::import::UpdateMode::Update(filter));
+        for f in &res.unmatched_filters {
+            eprintln!("{} --update filter {f:?} matched no repos", "warning:".yellow().bold());
+        }
+        if res.changes.is_empty() {
+            println!("no changes");
+        } else {
+            for change in &res.changes {
+                let old = change.old.as_deref().map(short_sha).unwrap_or("—");
+                let new = short_sha(&change.new);
+                println!("{} {old} -> {new}", change.repo);
+            }
+        }
         return;
     }
 
@@ -503,10 +567,10 @@ fn print_info() {
 /// Collect all matching (display_name, schema) pairs from native + module providers.
 fn collect_schema_entries(
     registry: &ProviderRegistry,
+    import_roots: &[bit::import::ImportRoot],
     filter: Option<&str>,
 ) -> Vec<(String, bit::provider::ResourceSchema)> {
-    let root = std::path::Path::new(".");
-    let module_schemas = scan_module_schemas(root);
+    let module_schemas = scan_module_schemas(import_roots);
 
     let mut entries: Vec<(String, bit::provider::ResourceSchema)> = Vec::new();
 
@@ -561,8 +625,8 @@ fn collect_schema_entries(
     entries
 }
 
-fn print_schema(registry: &ProviderRegistry, filter: Option<&str>) {
-    let entries = collect_schema_entries(registry, filter);
+fn print_schema(registry: &ProviderRegistry, import_roots: &[bit::import::ImportRoot], filter: Option<&str>) {
+    let entries = collect_schema_entries(registry, import_roots, filter);
     for (i, (name, schema)) in entries.iter().enumerate() {
         if i > 0 {
             println!();
@@ -571,8 +635,8 @@ fn print_schema(registry: &ProviderRegistry, filter: Option<&str>) {
     }
 }
 
-fn print_schema_json(registry: &ProviderRegistry, filter: Option<&str>) {
-    let entries = collect_schema_entries(registry, filter);
+fn print_schema_json(registry: &ProviderRegistry, import_roots: &[bit::import::ImportRoot], filter: Option<&str>) {
+    let entries = collect_schema_entries(registry, import_roots, filter);
     #[derive(serde::Serialize)]
     struct Entry {
         name: String,
@@ -636,100 +700,107 @@ fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {
     }
 }
 
-/// Scan .bit/modules/ for module files and derive their schemas.
-fn scan_module_schemas(root: &std::path::Path) -> Vec<(String, String, bit::provider::ResourceSchema)> {
-    use bit::provider::{ResourceKind, ResourceSchema, StructField, StructType};
-
-    let modules_dir = root.join(".bit/modules");
-    let Ok(providers) = std::fs::read_dir(&modules_dir) else {
-        return vec![];
-    };
-
-    let mut results = Vec::new();
-    for provider_entry in providers.flatten() {
-        if !provider_entry.path().is_dir() {
-            continue;
-        }
-        let provider_name = provider_entry.file_name().to_string_lossy().into_owned();
-        let Ok(resources) = std::fs::read_dir(provider_entry.path()) else {
-            continue;
-        };
-        for res_entry in resources.flatten() {
-            let path = res_entry.path();
-            let Some(ext) = path.extension() else {
-                continue;
-            };
-            if ext != "bit" {
-                continue;
-            }
-            let resource_name = path.file_stem().unwrap().to_string_lossy().into_owned();
-            let Ok(source) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(module) = bit::parser::parse(&source, &path.display().to_string()) else {
-                continue;
-            };
-
-            let mut inputs = Vec::new();
-            let mut outputs = Vec::new();
-            for stmt in &module.statements {
-                match stmt {
-                    bit::ast::Statement::Param(p) => {
-                        let default = p
-                            .default
-                            .as_ref()
-                            .and_then(|d| bit::expr::eval(d, &bit::expr::Scope::new()).ok());
-                        let typ = if p.default.is_some() {
-                            bit::value::Type::Optional(Box::new(p.typ.clone()))
-                        } else {
-                            p.typ.clone()
-                        };
-                        inputs.push((
-                            p.name.clone(),
-                            StructField {
-                                typ,
-                                default,
-                                description: p.doc.clone(),
-                            },
-                        ));
-                    }
-                    bit::ast::Statement::Output(o) => {
-                        outputs.push((
-                            o.name.clone(),
-                            StructField {
-                                typ: bit::value::Type::String,
-                                default: None,
-                                description: o.doc.clone(),
-                            },
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-
-            let display_name = if resource_name == provider_name {
-                provider_name.clone()
+/// Walk every resolved `ImportRoot` for module files and derive their
+/// schemas. With one provider per root, each root contributes a single
+/// provider; provider-name conflicts are already rejected at import
+/// resolution time.
+fn scan_module_schemas(
+    import_roots: &[bit::import::ImportRoot],
+) -> Vec<(String, String, bit::provider::ResourceSchema)> {
+    let mut results: Vec<(String, String, bit::provider::ResourceSchema)> = Vec::new();
+    for root in import_roots {
+        for (resource, schema) in scan_one_provider(&root.path) {
+            let display = if root.provider == resource {
+                root.provider.clone()
             } else {
-                format!("{provider_name}.{resource_name}")
+                format!("{}.{resource}", root.provider)
             };
-
-            results.push((
-                display_name,
-                resource_name,
-                ResourceSchema {
-                    kind: ResourceKind::Build,
-                    inputs: StructType {
-                        description: module.doc.or_else(|| Some(format!("Module from {}", path.display()))),
-                        fields: inputs,
-                    },
-                    outputs: StructType {
-                        description: None,
-                        fields: outputs,
-                    },
-                },
-            ));
+            results.push((display, resource, schema));
         }
     }
     results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
+
+/// Yield `(resource, schema)` for every `<resource>.bit` file at the root of
+/// `provider_dir`.
+fn scan_one_provider(provider_dir: &std::path::Path) -> Vec<(String, bit::provider::ResourceSchema)> {
+    use bit::provider::{ResourceKind, ResourceSchema, StructField, StructType};
+
+    let Ok(entries) = std::fs::read_dir(provider_dir) else {
+        return vec![];
+    };
+    let mut results = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("bit") {
+            continue;
+        }
+        let Some(resource_name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Skip BUILD.bit — it's the author's own test rig, not an exposed resource.
+        if resource_name == "BUILD" {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(module) = bit::parser::parse(&source, &path.display().to_string()) else {
+            continue;
+        };
+
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        for stmt in &module.statements {
+            match stmt {
+                bit::ast::Statement::Param(p) => {
+                    let default = p
+                        .default
+                        .as_ref()
+                        .and_then(|d| bit::expr::eval(d, &bit::expr::Scope::new()).ok());
+                    let typ = if p.default.is_some() {
+                        bit::value::Type::Optional(Box::new(p.typ.clone()))
+                    } else {
+                        p.typ.clone()
+                    };
+                    inputs.push((
+                        p.name.clone(),
+                        StructField {
+                            typ,
+                            default,
+                            description: p.doc.clone(),
+                        },
+                    ));
+                }
+                bit::ast::Statement::Output(o) => {
+                    outputs.push((
+                        o.name.clone(),
+                        StructField {
+                            typ: bit::value::Type::String,
+                            default: None,
+                            description: o.doc.clone(),
+                        },
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        results.push((
+            resource_name.to_owned(),
+            ResourceSchema {
+                kind: ResourceKind::Build,
+                inputs: StructType {
+                    description: module.doc.or_else(|| Some(format!("Module from {}", path.display()))),
+                    fields: inputs,
+                },
+                outputs: StructType {
+                    description: None,
+                    fields: outputs,
+                },
+            },
+        ));
+    }
     results
 }

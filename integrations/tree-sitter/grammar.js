@@ -16,6 +16,7 @@ module.exports = grammar({
     comment: $ => /#[^\n]*/,
 
     _statement: $ => choice(
+      $.import_statement,
       $.let_statement,
       $.param_statement,
       $.target_statement,
@@ -24,6 +25,16 @@ module.exports = grammar({
     ),
 
     // ── Statements ──
+
+    // `import "<host/path>" [as <identifier>]`
+    // URL is a bare git path (e.g. `github.com/foo/bar`) or a relative
+    // local path (`./modules/foo`). Optional alias overrides the
+    // auto-derived provider name.
+    import_statement: $ => seq(
+      'import',
+      field('url', choice($.string, $.raw_string)),
+      optional(seq('as', field('alias', $.identifier))),
+    ),
 
     let_statement: $ => seq(
       'let',
