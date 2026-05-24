@@ -88,6 +88,7 @@ sync-readme = exec {
       /^## How It Works/ { skip=0 }
       !skip { print }
     ' README.md > README.md.tmp && mv README.md.tmp README.md
+    dprint fmt README.md
   EOF
   depends_on = [debug]
   resolve = <<EOF
