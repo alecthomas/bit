@@ -547,12 +547,24 @@ impl OutputInner {
             .unwrap_or_default()
     }
 
+    /// Snapshot the header (the `Event::Starting` lines — i.e. the command
+    /// being executed) for a block that currently owns a live region. Used
+    /// alongside [`recent_tail`] on failure so the command stays visible in
+    /// scrollback. Returns an empty vec when the block has no active region.
+    fn recent_header(&self, name: &str) -> Vec<String> {
+        self.active
+            .get(name)
+            .map(|state| state.header.clone())
+            .unwrap_or_default()
+    }
+
     /// Print the task's terminal event above the live region and remove
-    /// the region. When `preserve_tail` is true (on failure), the
-    /// block's last `REGION_LINES` streamed lines are flushed above the
-    /// event so the context that led to the failure stays on screen.
-    /// In non-TTY mode the tail was already streamed; only `lines`
-    /// (the terminal event) needs printing.
+    /// the region. When `preserve_tail` is true (on failure), the block's
+    /// header (the command that was being executed) and its last
+    /// `REGION_LINES` streamed lines are flushed above the event so the
+    /// full failure context stays on screen. In non-TTY mode the header
+    /// and tail were already streamed; only `lines` (the terminal event)
+    /// needs printing.
     fn close_region(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<String>, preserve_tail: bool) {
         if !self.live {
             for line in &lines {
@@ -560,17 +572,14 @@ impl OutputInner {
             }
             return;
         }
-        let tail = if preserve_tail {
-            self.recent_tail(name)
+        let (header, tail) = if preserve_tail {
+            (self.recent_header(name), self.recent_tail(name))
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let _ = self.clear_live(out);
         self.active.shift_remove(name);
-        for line in &tail {
-            let _ = writeln!(out, "{line}");
-        }
-        for line in &lines {
+        for line in header.iter().chain(tail.iter()).chain(lines.iter()) {
             let _ = writeln!(out, "{line}");
         }
         let _ = self.redraw_live(out);
@@ -952,6 +961,54 @@ mod tests {
     fn recent_tail_empty_for_unknown_block() {
         let inner = inner_tty(4, 80);
         assert!(inner.recent_tail("missing").is_empty());
+    }
+
+    #[test]
+    fn recent_header_snapshots_starting_event() {
+        let mut inner = inner_tty(4, 80);
+        let state = inner.active.entry("backend".to_string()).or_default();
+        state.header = vec!["backend ▶ go build -o bin ./cmd".into()];
+
+        let header = inner.recent_header("backend");
+        assert_eq!(header, vec!["backend ▶ go build -o bin ./cmd"]);
+    }
+
+    #[test]
+    fn recent_header_empty_for_unknown_block() {
+        let inner = inner_tty(4, 80);
+        assert!(inner.recent_header("missing").is_empty());
+    }
+
+    #[test]
+    fn close_region_preserves_header_and_tail_on_failure() {
+        // Regression: on failure, the command being executed (the
+        // `Event::Starting` header) must remain in scrollback alongside the
+        // streamed-output tail, not just the failure event itself.
+        let mut inner = inner_tty(4, 80);
+        let state = inner.active.entry("backend".to_string()).or_default();
+        state.header = vec!["backend ▶ go build -o bin ./cmd".into()];
+        state.recent.push_back("backend │ error: missing package".into());
+
+        let header = inner.recent_header("backend");
+        let tail = inner.recent_tail("backend");
+        let terminal = ["backend ✘ `go build` exited with exit status: 1".to_string()];
+
+        // The chaining order in close_region: header first, then tail,
+        // then the terminal event lines.
+        let written: Vec<String> = header
+            .iter()
+            .chain(tail.iter())
+            .chain(terminal.iter())
+            .cloned()
+            .collect();
+        assert_eq!(
+            written,
+            vec![
+                "backend ▶ go build -o bin ./cmd".to_string(),
+                "backend │ error: missing package".to_string(),
+                "backend ✘ `go build` exited with exit status: 1".to_string(),
+            ]
+        );
     }
 
     #[test]
