@@ -13,7 +13,8 @@ EOF
     provider: (identifier)
     (field_assignment
       name: (identifier)
-      value: (heredoc))))
+      value: (heredoc
+        (heredoc_body)))))
 
 ================================================================================
 heredoc with strip indent
@@ -31,7 +32,8 @@ x = exec {
     provider: (identifier)
     (field_assignment
       name: (identifier)
-      value: (heredoc))))
+      value: (heredoc
+        (heredoc_body)))))
 
 ================================================================================
 heredoc with custom label
@@ -48,4 +50,73 @@ SCRIPT
     provider: (identifier)
     (field_assignment
       name: (identifier)
-      value: (heredoc))))
+      value: (heredoc
+        (heredoc_body)))))
+
+================================================================================
+heredoc with interpolation
+================================================================================
+x = exec {
+  command = <<EOF
+echo #{name} done
+EOF
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (heredoc
+        (heredoc_body
+          (interpolation
+            (reference
+              (identifier))))))))
+
+================================================================================
+heredoc with two interpolations on separate lines
+================================================================================
+x = exec.test {
+  command = <<-EOF
+#{a.b} one
+#{c.d} two
+EOF
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (heredoc
+        (heredoc_body
+          (interpolation
+            (reference
+              (identifier)
+              (identifier)))
+          (interpolation
+            (reference
+              (identifier)
+              (identifier))))))))
+
+================================================================================
+heredoc with literal hash
+================================================================================
+x = exec {
+  command = <<EOF
+# shell comment
+foo
+EOF
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    provider: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (heredoc
+        (heredoc_body)))))

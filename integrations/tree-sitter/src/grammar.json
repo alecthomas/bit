@@ -1056,9 +1056,41 @@
         },
         {
           "type": "SYMBOL",
-          "name": "_heredoc_body"
+          "name": "_heredoc_label_eol"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "heredoc_body"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_heredoc_end"
         }
       ]
+    },
+    "heredoc_body": {
+      "type": "REPEAT1",
+      "content": {
+        "type": "CHOICE",
+        "members": [
+          {
+            "type": "SYMBOL",
+            "name": "_heredoc_content"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "interpolation"
+          }
+        ]
+      }
     },
     "_heredoc_start": {
       "type": "TOKEN",
@@ -1412,7 +1444,15 @@
   "externals": [
     {
       "type": "SYMBOL",
-      "name": "_heredoc_body"
+      "name": "_heredoc_label_eol"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_heredoc_end"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "_heredoc_content"
     }
   ],
   "inline": [],

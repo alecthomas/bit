@@ -8,7 +8,7 @@ module.exports = grammar({
 
   word: $ => $.identifier,
 
-  externals: $ => [$._heredoc_body],
+  externals: $ => [$._heredoc_label_eol, $._heredoc_end, $._heredoc_content],
 
   rules: {
     source_file: $ => repeat($._statement),
@@ -219,10 +219,25 @@ module.exports = grammar({
 
     raw_string: _ => seq("'", /[^']*/, "'"),
 
+    // Body is wrapped in its own node so `(heredoc_body) @string`
+    // can mark the whole interior as a string scope while leaving
+    // the `<<`/label/terminator markers (siblings of heredoc_body
+    // inside heredoc) un-styled. With heredoc_content as a bare
+    // sibling of interpolation, Zed's stack-based highlighter
+    // failed to apply @variable to identifiers inside the second
+    // and later interpolations (the @string scope from the
+    // preceding sibling heredoc_content effectively leaked across
+    // the boundary in Zed, though tree-sitter-highlight handled it
+    // correctly). Mirroring tree-sitter-ruby's heredoc_body shape
+    // fixes it.
     heredoc: $ => seq(
       $._heredoc_start,
-      $._heredoc_body,
+      $._heredoc_label_eol,
+      optional($.heredoc_body),
+      $._heredoc_end,
     ),
+
+    heredoc_body: $ => repeat1(choice($._heredoc_content, $.interpolation)),
 
     _heredoc_start: _ => token(seq('<<', optional('-'))),
 

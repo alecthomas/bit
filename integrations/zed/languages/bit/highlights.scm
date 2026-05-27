@@ -26,7 +26,7 @@
 ; Literals
 (string) @string
 (raw_string) @string
-(heredoc) @string
+(heredoc_body) @string
 (escape_sequence) @string.escape
 (number) @number
 (duration) @number
