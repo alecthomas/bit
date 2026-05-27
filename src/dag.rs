@@ -39,6 +39,9 @@ pub struct DagNode {
     pub provider: String,
     pub resource_name: String,
     pub protected: bool,
+    /// When true, this block is excluded from the `...` selector and must be
+    /// named explicitly to run. Independent of `protected`.
+    pub explicit: bool,
     /// Raw field expressions — evaluated at execution time when upstream
     /// outputs are available.
     pub fields: Vec<Field>,
@@ -190,6 +193,21 @@ impl Dag {
             return Err(DagError::Cycle);
         }
         Ok(out)
+    }
+
+    /// Topological order with `explicit` blocks filtered out.
+    ///
+    /// This is the canonical expansion of the `...` selector (and of the
+    /// no-target/no-default fallback): "every block that is selectable
+    /// without being named." `explicit` blocks remain reachable by name or
+    /// as transitive dependencies of named targets, but never participate in
+    /// a bulk "run everything" sweep.
+    pub fn select_all(&self) -> Result<Vec<String>, DagError> {
+        Ok(self
+            .topo_order()?
+            .into_iter()
+            .filter(|n| !self.indices.get(n).is_some_and(|idx| self.graph[*idx].explicit))
+            .collect())
     }
 
     /// Return the preferred parent for tree rendering: the

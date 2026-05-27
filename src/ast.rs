@@ -53,8 +53,12 @@ pub enum Phase {
     Post,
 }
 
-/// `[pre|post] [protected] name = provider.resource { fields... }`
-/// or `name[key1, key2] = provider.resource { fields... }` (matrix expansion)
+/// `[pre|post] [protected] [explicit] name = provider.resource { fields... }`
+/// or `name[key1, key2] = provider.resource { fields... }` (matrix expansion).
+///
+/// `protected` and `explicit` may appear in either order and are independent:
+/// `protected` blocks refuse destroy without `--force`; `explicit` blocks are
+/// excluded from the `...` selector and must be named to run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub pos: Pos,
@@ -62,6 +66,7 @@ pub struct Block {
     pub doc: Option<String>,
     pub phase: Phase,
     pub protected: bool,
+    pub explicit: bool,
     /// Matrix expansion keys — list params to expand over.
     pub matrix_keys: Vec<String>,
     pub provider: String,
@@ -216,6 +221,7 @@ mod tests {
             doc: None,
             phase: Phase::Default,
             protected: false,
+            explicit: false,
             matrix_keys: vec![],
             provider: "go".into(),
             resource: "binary".into(),

@@ -19,6 +19,7 @@
 
 (phase_modifier) @keyword.modifier
 (protected_modifier) @keyword.modifier
+(explicit_modifier) @keyword.modifier
 
 ; Types
 (scalar_type) @type.builtin

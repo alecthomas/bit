@@ -18,10 +18,12 @@ name = provider.resource {
 }
 ```
 
-Blocks may be prefixed with modifiers:
+Blocks may be prefixed with modifiers (in any order):
 
 ```
 protected name = provider.resource { ... }
+explicit name = provider.resource { ... }
+protected explicit name = provider.resource { ... }
 ```
 
 References create implicit dependency edges:
@@ -513,6 +515,21 @@ protected prod_db = aws.aurora {
   cluster = "myapp-prod"
   engine  = "aurora-postgresql"
   version = "16.1"
+}
+```
+
+### Explicit Blocks
+
+Blocks can be prefixed with the `explicit` modifier to exclude them from the `...` selector (and the no-target/no-`default` fallback) for every action — apply, plan, destroy, dump. An `explicit` block still runs when named directly (`bit migrate`) or pulled in as a transitive dependency of a named target/block. The modifier is independent of `protected` and the two may be combined in either order.
+
+```
+explicit migrate = exec {
+  command = "./migrate"
+  inputs  = ["./schema.sql"]
+}
+
+protected explicit prod_db = aws.aurora {
+  cluster = "myapp-prod"
 }
 ```
 

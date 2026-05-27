@@ -202,6 +202,7 @@ pub fn load(
                         provider: b.provider.clone(),
                         resource_name: b.resource.clone(),
                         protected: b.protected,
+                        explicit: b.explicit,
                         fields: b.fields.clone(),
                         resource,
                         prior_state,

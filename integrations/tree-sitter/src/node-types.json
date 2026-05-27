@@ -249,6 +249,16 @@
     "type": "block",
     "named": true,
     "fields": {
+      "explicit": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "explicit_modifier",
+            "named": true
+          }
+        ]
+      },
       "matrix_keys": {
         "multiple": false,
         "required": false,
@@ -280,7 +290,7 @@
         ]
       },
       "protected": {
-        "multiple": false,
+        "multiple": true,
         "required": false,
         "types": [
           {
@@ -1726,6 +1736,10 @@
   },
   {
     "type": "escape_sequence",
+    "named": true
+  },
+  {
+    "type": "explicit_modifier",
     "named": true
   },
   {

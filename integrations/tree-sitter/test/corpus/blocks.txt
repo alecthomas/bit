@@ -94,6 +94,42 @@ pre protected db = aws.aurora {}
     resource: (identifier)))
 
 ================================================================================
+explicit modifier
+================================================================================
+explicit migrate = exec {
+  command = "./migrate"
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    explicit: (explicit_modifier)
+    name: (identifier)
+    provider: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (string))))
+
+================================================================================
+protected and explicit modifiers (either order)
+================================================================================
+protected explicit db = aws.aurora {}
+explicit protected db2 = aws.aurora {}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    protected: (protected_modifier)
+    explicit: (explicit_modifier)
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier))
+  (block
+    explicit: (explicit_modifier)
+    protected: (protected_modifier)
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier)))
+
+================================================================================
 matrix expansion keys
 ================================================================================
 binary[arch] = go.binary {

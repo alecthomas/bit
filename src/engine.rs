@@ -240,19 +240,20 @@ fn validate_active_params(dag: &Dag, order: &[String], base: &BaseScope) -> Resu
 }
 
 /// Resolve the block execution order for a given target.
-/// - `None` → use `default` target if defined, else all blocks
-/// - empty → default target if defined, else all blocks
-/// - `["..."]` → all blocks
-/// - one or more names → union of their target/block orders
+/// - empty → `default` target if defined, else every non-`explicit` block
+/// - `["..."]` → every non-`explicit` block
+/// - one or more names → union of their target/block orders (an `explicit`
+///   block is included when named directly or pulled in as a dependency of
+///   a selected target/block)
 pub fn resolve_order(dag: &Dag, targets: &[String]) -> Result<Vec<String>, EngineError> {
     if targets.is_empty() {
         if dag.targets().contains_key("default") {
             Ok(dag.target_order("default")?)
         } else {
-            Ok(dag.topo_order()?)
+            Ok(dag.select_all()?)
         }
     } else if targets.len() == 1 && targets[0] == "..." {
-        Ok(dag.topo_order()?)
+        Ok(dag.select_all()?)
     } else {
         let mut needed = std::collections::HashSet::new();
         for t in targets {
@@ -861,7 +862,8 @@ fn execute_block(
 /// # Arguments
 ///
 /// * `targets` - Block or target names to destroy. An empty slice or the
-///   single literal `"..."` destroys every block in the DAG.
+///   single literal `"..."` destroys every non-`explicit` block in the DAG;
+///   `explicit` blocks must be named to be destroyed.
 /// * `force` - When true, destroy protected blocks and continue past provider
 ///   errors (the failing block still shows an error, but remaining blocks
 ///   proceed).
@@ -881,7 +883,7 @@ pub fn destroy(
 ) -> Result<(), EngineError> {
     let destroy_all = targets.is_empty() || (targets.len() == 1 && targets[0] == "...");
     let mut order: Vec<String> = if destroy_all {
-        dag.topo_order()?
+        dag.select_all()?
     } else {
         // Gather each target's transitive dependents (inclusive) and emit them
         // in a single topological order so tie-breaking stays deterministic.
@@ -1295,6 +1297,97 @@ mod tests {
         // (reverse order: b first, then a — a fails but b already succeeded)
         // Both states should be removed since we remove state even on error in force mode
         assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn explicit_block_excluded_from_wildcard_selection() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        let input = format!(
+            concat!(
+                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "explicit b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            ),
+            file_a.display(),
+            file_a.display(),
+            file_b.display(),
+            file_b.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let (dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+
+        // `bit` (no targets, no default) skips explicit blocks
+        assert_eq!(resolve_order(&dag, &[]).unwrap(), vec!["a".to_owned()]);
+        // `bit ...` also skips explicit blocks
+        assert_eq!(resolve_order(&dag, &["...".into()]).unwrap(), vec!["a".to_owned()]);
+        // Naming the block directly still runs it
+        assert_eq!(resolve_order(&dag, &["b".into()]).unwrap(), vec!["b".to_owned()]);
+    }
+
+    #[test]
+    fn explicit_block_pulled_in_as_dependency() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        // `b` depends on `a`; `a` is explicit. Selecting `b` must still pull in `a`.
+        let input = format!(
+            concat!(
+                "explicit a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            ),
+            file_a.display(),
+            file_a.display(),
+            file_b.display(),
+            file_b.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let (dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+
+        assert_eq!(
+            resolve_order(&dag, &["b".into()]).unwrap(),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+        // `...` still skips the explicit dep, leaving b without its dependency —
+        // matching the contract that `...` is purely a "non-explicit blocks" filter.
+        assert_eq!(resolve_order(&dag, &["...".into()]).unwrap(), vec!["b".to_owned()]);
+    }
+
+    #[test]
+    fn explicit_block_skipped_by_destroy_wildcard() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        let input = format!(
+            concat!(
+                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "explicit b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            ),
+            file_a.display(),
+            file_a.display(),
+            file_b.display(),
+            file_b.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        let out = Output::new(&[]);
+        // Apply both directly so state is populated for both.
+        apply(&mut dag, &base, &store, &out, &["a".into(), "b".into()], 1, &tracker).unwrap();
+        let mut stored: Vec<String> = store.list().unwrap();
+        stored.sort();
+        assert_eq!(stored, vec!["a".to_owned(), "b".to_owned()]);
+
+        // Destroying with `...` should leave the explicit block's state in place.
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        destroy(&mut dag, &store, &out, &["...".into()], false).unwrap();
+        assert_eq!(store.list().unwrap(), vec!["b".to_owned()]);
     }
 
     #[test]

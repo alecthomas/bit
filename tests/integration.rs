@@ -173,6 +173,36 @@ fn destroy_removes_state() {
 }
 
 #[test]
+fn explicit_block_excluded_from_default_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_a = dir.path().join("a.txt");
+    let out_b = dir.path().join("b.txt");
+    let input = format!(
+        concat!(
+            "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "explicit b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        ),
+        out_a.display(),
+        out_a.display(),
+        out_b.display(),
+        out_b.display(),
+    );
+    let store = MemoryStore::new();
+
+    // Default apply (no targets, no `default` target) skips the explicit block.
+    run_apply(&input, &store);
+    assert!(out_a.exists());
+    assert!(!out_b.exists());
+
+    // Naming it explicitly runs it.
+    let tracker = test_tracker();
+    let module = parser::parse(&input, "<test>").unwrap();
+    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), &store, &[]).unwrap();
+    engine::apply(&mut dag, &base, &store, &Output::new(&[]), &["b".into()], 1, &tracker).unwrap();
+    assert!(out_b.exists());
+}
+
+#[test]
 fn protected_block_survives_destroy() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.txt");

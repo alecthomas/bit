@@ -72,9 +72,15 @@ module.exports = grammar({
       field('value', $._expression),
     ),
 
+    // `protected` and `explicit` are independent and may appear in either
+    // order. `repeat(choice(...))` allows both orderings without baking the
+    // ordering into the grammar; the real parser enforces uniqueness.
     block: $ => seq(
       optional(field('phase', $.phase_modifier)),
-      optional(field('protected', $.protected_modifier)),
+      repeat(choice(
+        field('protected', $.protected_modifier),
+        field('explicit', $.explicit_modifier),
+      )),
       field('name', $.identifier),
       optional(field('matrix_keys', $.block_matrix_keys)),
       '=',
@@ -87,6 +93,7 @@ module.exports = grammar({
 
     phase_modifier: _ => choice('pre', 'post'),
     protected_modifier: _ => 'protected',
+    explicit_modifier: _ => 'explicit',
 
     block_matrix_keys: $ => seq(
       '[',

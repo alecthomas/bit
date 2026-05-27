@@ -326,20 +326,28 @@
           ]
         },
         {
-          "type": "CHOICE",
-          "members": [
-            {
-              "type": "FIELD",
-              "name": "protected",
-              "content": {
-                "type": "SYMBOL",
-                "name": "protected_modifier"
+          "type": "REPEAT",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "FIELD",
+                "name": "protected",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "protected_modifier"
+                }
+              },
+              {
+                "type": "FIELD",
+                "name": "explicit",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "explicit_modifier"
+                }
               }
-            },
-            {
-              "type": "BLANK"
-            }
-          ]
+            ]
+          }
         },
         {
           "type": "FIELD",
@@ -435,6 +443,10 @@
     "protected_modifier": {
       "type": "STRING",
       "value": "protected"
+    },
+    "explicit_modifier": {
+      "type": "STRING",
+      "value": "explicit"
     },
     "block_matrix_keys": {
       "type": "SEQ",

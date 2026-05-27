@@ -123,6 +123,7 @@ pub fn expand_matrix(
             provider: block.provider.clone(),
             resource_name: block.resource.clone(),
             protected: block.protected,
+            explicit: block.explicit,
             fields: rewritten_fields,
             resource,
             prior_state,

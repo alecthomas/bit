@@ -63,8 +63,8 @@ target deploy = [app]
 ```
 
 ```sh
-bit              # apply the default target (or all blocks if no default)
-bit ...          # apply every block regardless of the default target
+bit              # apply the default target (or every non-`explicit` block if no default)
+bit ...          # apply every non-`explicit` block regardless of the default target
 bit build        # apply a specific target or block
 bit --plan       # show what would change
 bit --test       # run test blocks
@@ -80,9 +80,10 @@ bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
 
 All block/target-taking modes (`bit`, `--plan`, `--clean`, `--graph`, `--dump`)
 accept the same positional selector: no argument uses the `default` target
-(or every block if none), `...` forces every block, or name one or more
-targets/blocks to scope the operation. `--clean <name>` destroys that block
-plus anything that depends on it, in reverse topological order.
+(or every non-`explicit` block if none), `...` forces every non-`explicit`
+block, or name one or more targets/blocks to scope the operation. `--clean
+<name>` destroys that block plus anything that depends on it, in reverse
+topological order.
 
 ## Language
 
@@ -110,13 +111,17 @@ Special fields:
 - `depends_on = [block, ...]` — content-coupled dependency (changes propagate)
 - `after = [block, ...]` — ordering-only dependency
 
-Prefix with `protected` to prevent destruction:
+Prefix with `protected` to prevent destruction, `explicit` to exclude from `...`, or both (in either order):
 
 ```hcl
 protected db = docker.container { ... }
+explicit migrate = exec { ... }
+protected explicit prod_db = aws.aurora { ... }
 ```
 
-If a `default` target is defined, `bit` with no arguments runs only that target. Pass explicit targets or block names (`bit build release`) to run a specific subset, or `bit ...` to run every block regardless of the default.
+`explicit` blocks are skipped by the `...` selector (and the no-target/no-`default` fallback) for every action, including `--clean ...`. They still run when named directly or pulled in as a dependency of another selected block.
+
+If a `default` target is defined, `bit` with no arguments runs only that target. Pass explicit targets or block names (`bit build release`) to run a specific subset, or `bit ...` to run every non-`explicit` block regardless of the default.
 
 ```hcl
 target default = [server, test]

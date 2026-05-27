@@ -1,5 +1,5 @@
 use winnow::combinator::{alt, cut_err, delimited, opt, preceded, repeat, separated};
-use winnow::error::{ContextError, ErrMode, StrContext};
+use winnow::error::{AddContext, ContextError, ErrMode, StrContext};
 use winnow::prelude::*;
 use winnow::stream::Stream;
 use winnow::token::{any, take_while};
@@ -1010,7 +1010,34 @@ fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
     } else {
         Phase::Default
     };
-    let protected = opt(keyword("protected")).map(|o| o.is_some()).parse_next(input)?;
+    // `protected` and `explicit` are independent modifiers that may appear in
+    // either order. Loop until neither matches; reject duplicates so we surface
+    // typos like `protected protected name = ...` as parse errors.
+    let mut protected = false;
+    let mut explicit = false;
+    loop {
+        if opt(keyword("protected")).parse_next(input)?.is_some() {
+            if protected {
+                return Err(ErrMode::Cut(ContextError::new().add_context(
+                    input,
+                    &input.checkpoint(),
+                    StrContext::Label("duplicate 'protected' modifier"),
+                )));
+            }
+            protected = true;
+        } else if opt(keyword("explicit")).parse_next(input)?.is_some() {
+            if explicit {
+                return Err(ErrMode::Cut(ContextError::new().add_context(
+                    input,
+                    &input.checkpoint(),
+                    StrContext::Label("duplicate 'explicit' modifier"),
+                )));
+            }
+            explicit = true;
+        } else {
+            break;
+        }
+    }
     let name = ident_string.parse_next(input)?;
 
     // Optional matrix keys: name[key1, key2]
@@ -1058,6 +1085,7 @@ fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
         doc,
         phase,
         protected,
+        explicit,
         matrix_keys,
         provider,
         resource,
@@ -1540,11 +1568,47 @@ server = exec {
         match &result.statements[0] {
             Statement::Block(b) => {
                 assert!(b.protected);
+                assert!(!b.explicit);
                 assert_eq!(b.provider, "aws");
                 assert_eq!(b.resource, "aurora");
             }
             _ => panic!("expected Block"),
         }
+    }
+
+    #[test]
+    fn parse_explicit_block() {
+        let result = parse(r#"explicit migrate = exec { command = "./migrate" }"#, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Block(b) => {
+                assert!(!b.protected);
+                assert!(b.explicit);
+            }
+            _ => panic!("expected Block"),
+        }
+    }
+
+    #[test]
+    fn parse_protected_and_explicit_either_order() {
+        for src in [
+            r#"protected explicit db = aws.aurora {}"#,
+            r#"explicit protected db = aws.aurora {}"#,
+        ] {
+            let result = parse(src, "<test>").unwrap();
+            match &result.statements[0] {
+                Statement::Block(b) => {
+                    assert!(b.protected, "protected for {src}");
+                    assert!(b.explicit, "explicit for {src}");
+                }
+                _ => panic!("expected Block for {src}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_duplicate_modifier_is_error() {
+        assert!(parse("protected protected db = aws.aurora {}", "<test>").is_err());
+        assert!(parse("explicit explicit db = aws.aurora {}", "<test>").is_err());
     }
 
     #[test]
