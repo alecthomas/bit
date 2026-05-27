@@ -241,29 +241,35 @@ fn validate_active_params(dag: &Dag, order: &[String], base: &BaseScope) -> Resu
 
 /// Resolve the block execution order for a given target.
 /// - empty → `default` target if defined, else every non-`explicit` block
-/// - `["..."]` → every non-`explicit` block
-/// - one or more names → union of their target/block orders (an `explicit`
+/// - `...` (alone or alongside other targets) → every non-`explicit` block,
+///   unioned with the orders of any other named targets/blocks (an `explicit`
 ///   block is included when named directly or pulled in as a dependency of
 ///   a selected target/block)
 pub fn resolve_order(dag: &Dag, targets: &[String]) -> Result<Vec<String>, EngineError> {
     if targets.is_empty() {
         if dag.targets().contains_key("default") {
-            Ok(dag.target_order("default")?)
-        } else {
-            Ok(dag.select_all()?)
+            return Ok(dag.target_order("default")?);
         }
-    } else if targets.len() == 1 && targets[0] == "..." {
-        Ok(dag.select_all()?)
-    } else {
-        let mut needed = std::collections::HashSet::new();
-        for t in targets {
-            for name in dag.target_order(t)? {
-                needed.insert(name);
-            }
-        }
-        let all = dag.topo_order()?;
-        Ok(all.into_iter().filter(|n| needed.contains(n)).collect())
+        return Ok(dag.select_all()?);
     }
+    let mut needed = std::collections::HashSet::new();
+    let mut wildcard = false;
+    for t in targets {
+        if t == "..." {
+            wildcard = true;
+            continue;
+        }
+        for name in dag.target_order(t)? {
+            needed.insert(name);
+        }
+    }
+    if wildcard {
+        for name in dag.select_all()? {
+            needed.insert(name);
+        }
+    }
+    let all = dag.topo_order()?;
+    Ok(all.into_iter().filter(|n| needed.contains(n)).collect())
 }
 
 /// Plan all blocks in the DAG (or a target subset), returning what would change.
@@ -861,9 +867,10 @@ fn execute_block(
 ///
 /// # Arguments
 ///
-/// * `targets` - Block or target names to destroy. An empty slice or the
-///   single literal `"..."` destroys every non-`explicit` block in the DAG;
-///   `explicit` blocks must be named to be destroyed.
+/// * `targets` - Block or target names to destroy. An empty slice, or any
+///   target list containing the literal `"..."`, destroys every non-`explicit`
+///   block in the DAG (unioned with the transitive dependents of the other
+///   named targets); `explicit` blocks must be named to be destroyed.
 /// * `force` - When true, destroy protected blocks and continue past provider
 ///   errors (the failing block still shows an error, but remaining blocks
 ///   proceed).
@@ -881,15 +888,26 @@ pub fn destroy(
     targets: &[String],
     force: bool,
 ) -> Result<(), EngineError> {
-    let destroy_all = targets.is_empty() || (targets.len() == 1 && targets[0] == "...");
-    let mut order: Vec<String> = if destroy_all {
+    let mut order: Vec<String> = if targets.is_empty() {
         dag.select_all()?
     } else {
         // Gather each target's transitive dependents (inclusive) and emit them
         // in a single topological order so tie-breaking stays deterministic.
+        // `...` is composable: it contributes every non-`explicit` block,
+        // unioned with the dependents of any other named targets.
         let mut needed = std::collections::HashSet::new();
+        let mut wildcard = false;
         for t in targets {
+            if t == "..." {
+                wildcard = true;
+                continue;
+            }
             for name in dag.transitive_dependents(t)? {
+                needed.insert(name);
+            }
+        }
+        if wildcard {
+            for name in dag.select_all()? {
                 needed.insert(name);
             }
         }
@@ -1355,6 +1373,40 @@ mod tests {
         // `...` still skips the explicit dep, leaving b without its dependency —
         // matching the contract that `...` is purely a "non-explicit blocks" filter.
         assert_eq!(resolve_order(&dag, &["...".into()]).unwrap(), vec!["b".to_owned()]);
+        // `...` is composable: naming the explicit block alongside `...` unions
+        // the wildcard expansion with the named block (and its deps).
+        assert_eq!(
+            resolve_order(&dag, &["...".into(), "a".into()]).unwrap(),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+    }
+
+    #[test]
+    fn wildcard_composes_with_named_target() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        // `a` is a regular block selected by `...`; `b` is explicit and must
+        // be named to participate.
+        let input = format!(
+            concat!(
+                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "explicit b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            ),
+            file_a.display(),
+            file_a.display(),
+            file_b.display(),
+            file_b.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let (dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+
+        // `bit ... b` should run every non-explicit block plus the named explicit one.
+        let mut order = resolve_order(&dag, &["...".into(), "b".into()]).unwrap();
+        order.sort();
+        assert_eq!(order, vec!["a".to_owned(), "b".to_owned()]);
     }
 
     #[test]
@@ -1388,6 +1440,35 @@ mod tests {
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &["...".into()], false).unwrap();
         assert_eq!(store.list().unwrap(), vec!["b".to_owned()]);
+    }
+
+    #[test]
+    fn destroy_wildcard_composes_with_named_block() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        let input = format!(
+            concat!(
+                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "explicit b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            ),
+            file_a.display(),
+            file_a.display(),
+            file_b.display(),
+            file_b.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        let out = Output::new(&[]);
+        apply(&mut dag, &base, &store, &out, &["a".into(), "b".into()], 1, &tracker).unwrap();
+
+        // `bit -c ... b` should destroy every non-explicit block AND the named explicit one.
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        destroy(&mut dag, &store, &out, &["...".into(), "b".into()], false).unwrap();
+        assert!(store.list().unwrap().is_empty());
     }
 
     #[test]
