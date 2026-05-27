@@ -1160,7 +1160,7 @@ mod tests {
         let input = format!(
             concat!(
                 "a = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "b = exec {{\n  command = \"cp ${{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),
@@ -1309,8 +1309,8 @@ mod tests {
         let input = format!(
             concat!(
                 "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "b = exec {{\n  command = \"cp ${{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "c = exec {{\n  command = \"cp ${{b.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "c = exec {{\n  command = \"cp #{{b.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),
@@ -1347,8 +1347,8 @@ mod tests {
         let input = format!(
             concat!(
                 "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "b = exec {{\n  command = \"cp ${{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "c = exec {{\n  command = \"cp ${{b.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "c = exec {{\n  command = \"cp #{{b.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),

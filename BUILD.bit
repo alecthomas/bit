@@ -27,8 +27,8 @@ clippy = rust.clippy {
 integration-test = exec.test {
   depends_on = [debug]
   command  = <<-EOF
-  ${debug.path} --version
-  ${debug.path} --plan ...
+  #{debug.path} --version
+  #{debug.path} --plan ...
   EOF
 }
 
@@ -41,7 +41,7 @@ let tree_sitter_rev = exec("git log -1 --format=%H -- integrations/tree-sitter")
 # content hash re-runs this only when a new commit lands.
 protected sync-zed-rev = exec {
   command = <<-EOF
-    sed -i.bak 's|^rev = ".*"|rev = "${tree_sitter_rev}"|' integrations/zed/extension.toml
+    sed -i.bak 's|^rev = ".*"|rev = "#{tree_sitter_rev}"|' integrations/zed/extension.toml
     rm integrations/zed/extension.toml.bak
   EOF
   output = "integrations/zed/extension.toml"
@@ -53,7 +53,7 @@ sync-readme = exec {
   command = <<-EOF
     export SECTION=$(mktemp)
     trap 'rm -f "$SECTION"' EXIT
-    ${debug.path} --schema --json | jq -r '
+    #{debug.path} --schema --json | jq -r '
       def pad($n): . as $s | ([($n - ($s|length)), 2] | max) as $p | $s + (" " * $p);
       "## Providers\n",
       (group_by(.name | split(".")[0]) | .[] |
@@ -90,10 +90,7 @@ sync-readme = exec {
     ' README.md > README.md.tmp && mv README.md.tmp README.md
     dprint fmt README.md
   EOF
-  depends_on = [debug]
-  resolve = <<EOF
-    echo ${exec("${debug.path} --schema") | sha256}
-  EOF
+  resolve = '#{debug.path} --schema | sha256'
 }
 
 # Default target: release binary, tests, lints, and Zed rev sync.

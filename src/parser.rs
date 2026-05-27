@@ -72,11 +72,27 @@ fn ws(input: &mut &str) -> ModalResult<()> {
         .parse_next(input)
 }
 
+/// True if a `#` at the start of `input` introduces a comment.
+///
+/// `# ` (followed by whitespace, newline, or EOF) is a comment; `#{` opens an
+/// interpolation; anything else after `#` is reserved for the language. This
+/// disambiguation lets bit use both `#` for comments and `#{...}` for string
+/// interpolation without collision.
+fn is_comment_start(input: &str) -> bool {
+    if !input.starts_with('#') {
+        return false;
+    }
+    match input.as_bytes().get(1) {
+        None => true, // `#` at EOF
+        Some(b) => matches!(*b, b' ' | b'\t' | b'\n' | b'\r'),
+    }
+}
+
 /// Skip whitespace and comment lines.
 fn ws_and_comments(input: &mut &str) -> ModalResult<()> {
     loop {
         ws(input)?;
-        if input.starts_with('#') {
+        if is_comment_start(input) {
             take_while(0.., |c: char| c != '\n').void().parse_next(input)?;
             opt('\n').parse_next(input)?;
         } else {
@@ -108,7 +124,7 @@ fn ws_capturing_doc(input: &mut &str) -> Option<String> {
             }
         }
 
-        if input.starts_with('#') {
+        if is_comment_start(input) {
             // Blank line before this comment block — earlier lines were
             // not attached to anything, discard them
             if had_blank_line {
@@ -505,7 +521,7 @@ fn string_part(input: &mut &str) -> ModalResult<StringPart> {
 }
 
 fn string_interpolation(input: &mut &str) -> ModalResult<StringPart> {
-    "${".parse_next(input)?;
+    "#{".parse_next(input)?;
     let e = cut_err(expr)
         .context(StrContext::Label("interpolation expression"))
         .parse_next(input)?;
@@ -518,10 +534,10 @@ fn string_interpolation(input: &mut &str) -> ModalResult<StringPart> {
 fn string_literal(input: &mut &str) -> ModalResult<StringPart> {
     let mut result = String::new();
     loop {
-        let chunk: &str = take_while(0.., |c: char| c != '"' && c != '\\' && c != '$').parse_next(input)?;
+        let chunk: &str = take_while(0.., |c: char| c != '"' && c != '\\' && c != '#').parse_next(input)?;
         result.push_str(chunk);
 
-        if input.is_empty() || input.starts_with('"') || input.starts_with("${") {
+        if input.is_empty() || input.starts_with('"') || input.starts_with("#{") {
             break;
         }
         if input.starts_with('\\') {
@@ -535,7 +551,7 @@ fn string_literal(input: &mut &str) -> ModalResult<StringPart> {
                 't' => result.push('\t'),
                 '"' => result.push('"'),
                 '\\' => result.push('\\'),
-                '$' => result.push('$'),
+                '#' => result.push('#'),
                 other => {
                     result.push('\\');
                     result.push(other);
@@ -543,9 +559,9 @@ fn string_literal(input: &mut &str) -> ModalResult<StringPart> {
             }
             continue;
         }
-        if input.starts_with('$') {
+        if input.starts_with('#') {
             let _: char = any.parse_next(input)?;
-            result.push('$');
+            result.push('#');
             continue;
         }
         break;
@@ -614,10 +630,10 @@ fn heredoc_expr(input: &mut &str) -> ModalResult<Expr> {
 }
 
 /// Parse one line of heredoc content (up to and including the newline),
-/// handling `${}` interpolation.
+/// handling `#{}` interpolation.
 fn heredoc_line(parts: &mut Vec<StringPart>, input: &mut &str) -> ModalResult<()> {
     loop {
-        let chunk: &str = take_while(0.., |c: char| c != '\n' && c != '$').parse_next(input)?;
+        let chunk: &str = take_while(0.., |c: char| c != '\n' && c != '#').parse_next(input)?;
         if !chunk.is_empty() {
             push_literal(parts, chunk);
         }
@@ -630,8 +646,8 @@ fn heredoc_line(parts: &mut Vec<StringPart>, input: &mut &str) -> ModalResult<()
             push_literal(parts, "\n");
             break;
         }
-        if input.starts_with("${") {
-            "${".parse_next(input)?;
+        if input.starts_with("#{") {
+            "#{".parse_next(input)?;
             let e = cut_err(expr)
                 .context(StrContext::Label("heredoc interpolation"))
                 .parse_next(input)?;
@@ -641,9 +657,9 @@ fn heredoc_line(parts: &mut Vec<StringPart>, input: &mut &str) -> ModalResult<()
             parts.push(StringPart::Interpolation(e));
             continue;
         }
-        if input.starts_with('$') {
+        if input.starts_with('#') {
             let _: char = any.parse_next(input)?;
-            push_literal(parts, "$");
+            push_literal(parts, "#");
             continue;
         }
         break;
@@ -1141,7 +1157,7 @@ server = exec {
 
     #[test]
     fn parse_string_interpolation() {
-        let result = parse(r#"let x = "hello ${name}""#, "<test>").unwrap();
+        let result = parse(r#"let x = "hello #{name}""#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Str(parts) => {
@@ -1157,7 +1173,7 @@ server = exec {
 
     #[test]
     fn parse_interpolation_with_pipe() {
-        let result = parse(r#"let x = "${exec("cmd") | trim}""#, "<test>").unwrap();
+        let result = parse(r##"let x = "#{exec("cmd") | trim}""##, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Str(parts) => {
@@ -1568,7 +1584,7 @@ server = exec {
     fn parse_exec_block_with_dynamic_inputs() {
         let input = concat!(
             "server = exec {\n",
-            "  command = \"go build -o ${output}/server ./cmd/server\"\n",
+            "  command = \"go build -o #{output}/server ./cmd/server\"\n",
             "  inputs  = [\"go.mod\", \"go.sum\"]\n",
             "            + exec(\"go list -deps -f '{{.Dir}}/*.go' ./cmd/server/...\") | lines\n",
             "  output  = \"server\"\n",
@@ -1602,7 +1618,7 @@ server = exec {
             "server = go.binary { main = \"./cmd/server\" }\n",
             "\n",
             "image = docker.image {\n",
-            "  tag = \"${registry}/myapp:${git_sha}\"\n",
+            "  tag = \"#{registry}/myapp:#{git_sha}\"\n",
             "}\n",
             "\n",
             "output image_ref = image.ref\n",
@@ -1752,7 +1768,7 @@ server = exec {
 
     #[test]
     fn parse_heredoc_interpolation_preserves_spaces() {
-        let input = "let x = <<EOF\n${name} --version\nEOF\n";
+        let input = "let x = <<EOF\n#{name} --version\nEOF\n";
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
@@ -1769,7 +1785,7 @@ server = exec {
 
     #[test]
     fn parse_heredoc_strip_indent_with_interpolation() {
-        let input = "let x = <<-EOF\n  ${name} --version\n  ${name} graph\n  EOF\n";
+        let input = "let x = <<-EOF\n  #{name} --version\n  #{name} graph\n  EOF\n";
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
@@ -1788,7 +1804,7 @@ server = exec {
 
     #[test]
     fn parse_heredoc_with_interpolation() {
-        let input = "let x = <<EOF\nhello ${name}\nEOF\n";
+        let input = "let x = <<EOF\nhello #{name}\nEOF\n";
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
@@ -1885,10 +1901,10 @@ server = exec {
 
     #[test]
     fn raw_string_no_interpolation() {
-        let result = parse("let x = '${name}'", "<test>").unwrap();
+        let result = parse("let x = '#{name}'", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => {
-                assert_eq!(l.value, Expr::Str(vec![StringPart::Literal("${name}".into())]));
+                assert_eq!(l.value, Expr::Str(vec![StringPart::Literal("#{name}".into())]));
             }
             _ => panic!("expected Let"),
         }
@@ -1992,7 +2008,7 @@ server = exec {
         let input = r#"
 param arch = ["amd64", "arm64"]
 image[arch] = exec {
-  command = "build ${arch}"
+  command = "build #{arch}"
   output = "out"
 }
 "#;

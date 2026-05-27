@@ -148,7 +148,7 @@ binary[arch] = go.exe {
 
 container[arch] = docker.container {
   image = image.ref          # resolves to matching arch slice
-  name  = "app-${arch}"
+  name  = "app-#{arch}"
 }
 ```
 
@@ -156,13 +156,13 @@ Creates `binary[amd64]`, `binary[arm64]`, etc. Multiple keys produce a cartesian
 
 ### Strings
 
-Double-quoted with `${expr}` interpolation, single-quoted raw strings, and heredocs:
+Double-quoted with `#{expr}` interpolation, single-quoted raw strings, and heredocs:
 
 ```hcl
-greeting = "hello ${name}"
-pattern = 'no \escapes or ${interpolation}'
+greeting = "hello #{name}"
+pattern = 'no \escapes or #{interpolation}'
 script = <<-EOF
-  echo ${app.path}
+  echo #{app.path}
   echo "done"
 EOF
 ```
@@ -220,7 +220,7 @@ param replicas    : int = 1
 server = go.exe { package = "./cmd/server" }
 
 image = docker.image {
-  tag = "myapp:${environment}"
+  tag = "myapp:#{environment}"
   depends_on = [server]
 }
 

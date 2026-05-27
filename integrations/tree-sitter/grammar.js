@@ -13,7 +13,9 @@ module.exports = grammar({
   rules: {
     source_file: $ => repeat($._statement),
 
-    comment: $ => /#[^\n]*/,
+    // `# ` (or `#\t`) starts a comment. `#{...}` is string interpolation, so
+    // `#` not followed by whitespace is reserved — never a comment.
+    comment: $ => /#[ \t][^\n]*/,
 
     _statement: $ => choice(
       $.import_statement,
@@ -194,21 +196,23 @@ module.exports = grammar({
       '"',
       repeat(choice(
         $._string_content,
-        $._bare_dollar,
+        $._bare_hash,
         $.escape_sequence,
         $.interpolation,
       )),
       '"',
     ),
 
-    _string_content: _ => token.immediate(prec(1, /[^"\\$]+/)),
+    _string_content: _ => token.immediate(prec(1, /[^"\\#]+/)),
 
-    _bare_dollar: _ => token.immediate('$'),
+    // A `#` that isn't followed by `{`. Tree-sitter's GLR lexer picks the
+    // longest match, so `#{` is preferred over `#` when both apply.
+    _bare_hash: _ => token.immediate('#'),
 
     escape_sequence: _ => token.immediate(/\\./),
 
     interpolation: $ => seq(
-      token.immediate('${'),
+      token.immediate('#{'),
       $._expression,
       '}',
     ),

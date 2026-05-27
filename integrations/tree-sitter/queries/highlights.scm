@@ -35,7 +35,7 @@
 
 ; Interpolation
 (interpolation
-  "${" @punctuation.special
+  "#{" @punctuation.special
   "}" @punctuation.special)
 
 ; Statements

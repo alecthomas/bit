@@ -131,7 +131,7 @@ impl std::fmt::Display for Expr {
                                 }
                             }
                         }
-                        StringPart::Interpolation(e) => write!(f, "${{{e}}}")?,
+                        StringPart::Interpolation(e) => write!(f, "#{{{e}}}")?,
                     }
                 }
                 write!(f, "\"")

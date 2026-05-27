@@ -104,7 +104,7 @@ fn chained_blocks_with_refs() {
     let input = format!(
         concat!(
             "a = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"cp ${{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
         ),
         file_a.display(),
         file_a.display(),
@@ -230,7 +230,7 @@ fn let_bindings_in_block_fields() {
     let input = format!(
         concat!(
             "let msg = \"hello world\"\n",
-            "build = exec {{\n  command = \"echo ${{msg}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "build = exec {{\n  command = \"echo #{{msg}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
         ),
         out.display(),
         out.display(),
@@ -247,7 +247,7 @@ fn params_with_defaults() {
     let input = format!(
         concat!(
             "param msg : string = \"default\"\n",
-            "build = exec {{\n  command = \"echo ${{msg}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "build = exec {{\n  command = \"echo #{{msg}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
         ),
         out.display(),
         out.display(),
@@ -264,7 +264,7 @@ fn pipe_in_let_binding() {
     let input = format!(
         concat!(
             "let sha = exec(\"echo abc123\") | trim\n",
-            "build = exec {{\n  command = \"echo ${{sha}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "build = exec {{\n  command = \"echo #{{sha}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
         ),
         out.display(),
         out.display(),
@@ -284,9 +284,9 @@ fn diamond_dependency() {
     let input = format!(
         concat!(
             "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo b ${{a.path}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "c = exec {{\n  command = \"echo c ${{a.path}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "d = exec {{\n  command = \"echo d ${{b.path}} ${{c.path}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo b #{{a.path}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "c = exec {{\n  command = \"echo c #{{a.path}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "d = exec {{\n  command = \"echo d #{{b.path}} #{{c.path}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
         ),
         out_a.display(),
         out_a.display(),
@@ -535,7 +535,7 @@ fn module_end_to_end() {
             concat!(
                 "param msg : string\n",
                 "inner = exec {{\n",
-                "  command = \"echo ${{msg}} > {}\"\n",
+                "  command = \"echo #{{msg}} > {}\"\n",
                 "  output = \"{}\"\n",
                 "  inputs = []\n",
                 "}}\n",
@@ -574,7 +574,7 @@ fn module_output_forwarding() {
             concat!(
                 "param msg : string\n",
                 "inner = exec {{\n",
-                "  command = \"echo ${{msg}} > {}\"\n",
+                "  command = \"echo #{{msg}} > {}\"\n",
                 "  output = \"{}\"\n",
                 "  inputs = []\n",
                 "}}\n",
@@ -591,7 +591,7 @@ fn module_output_forwarding() {
             "  msg = \"from module\"\n",
             "}}\n",
             "consumer = exec {{\n",
-            "  command = \"cp ${{inst.result}} {}\"\n",
+            "  command = \"cp #{{inst.result}} {}\"\n",
             "  output = \"{}\"\n",
             "  inputs = []\n",
             "}}\n",
@@ -622,7 +622,7 @@ fn module_multiple_instances() {
         "mymod",
         "mymod",
         "param msg : string\nparam outfile : string\n\
-         inner = exec {\n  command = \"echo ${msg} > ${outfile}\"\n  output = outfile\n  inputs = []\n}\n\
+         inner = exec {\n  command = \"echo #{msg} > #{outfile}\"\n  output = outfile\n  inputs = []\n}\n\
          output result = inner.path\n",
     );
 
@@ -652,8 +652,8 @@ fn matrix_end_to_end() {
         concat!(
             "let arch = [\"amd64\", \"arm64\"]\n",
             "build[arch] = exec {{\n",
-            "  command = \"echo ${{arch}} > {dir}/out-${{arch}}.txt\"\n",
-            "  output = \"{dir}/out-${{arch}}.txt\"\n",
+            "  command = \"echo #{{arch}} > {dir}/out-#{{arch}}.txt\"\n",
+            "  output = \"{dir}/out-#{{arch}}.txt\"\n",
             "  inputs = []\n",
             "}}\n",
         ),

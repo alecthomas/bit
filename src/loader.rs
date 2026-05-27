@@ -844,16 +844,16 @@ inst = mymod {}
             dir.path(),
             "mymod",
             "mymod",
-            r#"
+            r##"
 param prefix : string
 
-let full_cmd = "${prefix} world"
+let full_cmd = "#{prefix} world"
 
 a = exec {
   command = full_cmd
   output = "a"
 }
-"#,
+"##,
         );
 
         let input = r#"
@@ -1008,8 +1008,8 @@ inst = myns.myres {}
 let arch = ["amd64", "arm64"]
 
 build[arch] = exec {
-  command = "build ${arch}"
-  output = "out-${arch}"
+  command = "build #{arch}"
+  output = "out-#{arch}"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -1047,13 +1047,13 @@ build[arch] = exec {
 let arch = ["amd64", "arm64"]
 
 build[arch] = exec {
-  command = "build ${arch}"
-  output = "out-${arch}"
+  command = "build #{arch}"
+  output = "out-#{arch}"
 }
 
 deploy[arch] = exec {
   command = build.path
-  output = "deploy-${arch}"
+  output = "deploy-#{arch}"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -1081,7 +1081,7 @@ let arch = ["amd64", "arm64"]
 let os = ["linux", "darwin"]
 
 build[arch, os] = exec {
-  command = "build ${os}-${arch}"
+  command = "build #{os}-#{arch}"
   output = "out"
 }
 "#;
@@ -1100,8 +1100,8 @@ build[arch, os] = exec {
 let arch = ["amd64", "arm64"]
 
 build[arch] = exec {
-  command = "build ${arch}"
-  output = "out-${arch}"
+  command = "build #{arch}"
+  output = "out-#{arch}"
 }
 
 package = exec {

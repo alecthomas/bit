@@ -158,3 +158,15 @@ import "github.com/foo/bar/waz" as wx
   (import_statement
     url: (string)
     alias: (identifier)))
+
+================================================================================
+comment with space
+================================================================================
+# this is a comment
+let x = 42
+--------------------------------------------------------------------------------
+(source_file
+  (comment)
+  (let_statement
+    name: (identifier)
+    value: (number)))

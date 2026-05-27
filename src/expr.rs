@@ -99,7 +99,7 @@ impl Default for Scope {
 pub enum EvalMode {
     /// Strict: missing fields are errors.
     Strict,
-    /// Lenient: missing fields produce `${ref}` placeholder strings.
+    /// Lenient: missing fields produce `#{ref}` placeholder strings.
     Lenient,
 }
 
@@ -109,7 +109,7 @@ pub fn eval(expr: &Expr, scope: &Scope) -> Result<Value, EvalError> {
 }
 
 /// Evaluate an expression in lenient mode — unresolved field references
-/// produce `${block.field}` placeholder strings instead of errors.
+/// produce `#{block.field}` placeholder strings instead of errors.
 pub fn eval_lenient(expr: &Expr, scope: &Scope) -> Result<Value, EvalError> {
     eval_inner(expr, scope, EvalMode::Lenient)
 }
@@ -215,7 +215,7 @@ fn eval_ref(parts: &[String], scope: &Scope, mode: EvalMode) -> Result<Value, Ev
             Value::Map(_, map) | Value::Struct(_, map) => match map.get(part).cloned() {
                 Some(val) => current = val,
                 None if mode == EvalMode::Lenient => {
-                    return Ok(Value::Str(format!("${{{}}}", parts.join("."))));
+                    return Ok(Value::Str(format!("#{{{}}}", parts.join("."))));
                 }
                 None => {
                     return Err(EvalError::UndefinedField(parts.join(".")));
@@ -232,7 +232,7 @@ fn eval_ref(parts: &[String], scope: &Scope, mode: EvalMode) -> Result<Value, Ev
 }
 
 fn has_placeholder(v: &Value) -> bool {
-    matches!(v, Value::Str(s) if s.contains("${"))
+    matches!(v, Value::Str(s) if s.contains("#{"))
 }
 
 fn check_arity(name: &str, args: &[Value], expected: usize) -> Result<(), EvalError> {
@@ -701,7 +701,7 @@ mod tests {
         let mut scope = Scope::new();
         scope.set("image", Value::strct(Map::new()));
         let expr = Expr::Ref(vec!["image".into(), "ref".into()]);
-        assert_eq!(eval_lenient(&expr, &scope).unwrap(), Value::Str("${image.ref}".into()));
+        assert_eq!(eval_lenient(&expr, &scope).unwrap(), Value::Str("#{image.ref}".into()));
     }
 
     #[test]
@@ -714,7 +714,7 @@ mod tests {
         ]);
         assert_eq!(
             eval_lenient(&expr, &scope).unwrap(),
-            Value::Str("docker run ${image.ref}".into())
+            Value::Str("docker run #{image.ref}".into())
         );
     }
 
@@ -730,7 +730,7 @@ mod tests {
             ])],
         );
         let result = eval_lenient(&expr, &scope).unwrap();
-        assert_eq!(result, Value::Str("${debug.path} --schema".into()));
+        assert_eq!(result, Value::Str("#{debug.path} --schema".into()));
     }
 
     #[test]
@@ -749,7 +749,7 @@ mod tests {
             vec![],
         );
         let result = eval_lenient(&expr, &scope).unwrap();
-        assert_eq!(result, Value::Str("${debug.path} --schema".into()));
+        assert_eq!(result, Value::Str("#{debug.path} --schema".into()));
     }
 
     #[test]
