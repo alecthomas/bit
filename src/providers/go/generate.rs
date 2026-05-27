@@ -74,7 +74,8 @@ impl Resource for GoGenerateResource {
 
     fn resolve(&self, inputs: &GoGenerateInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        let mut files = super::resolve_go_inputs(&inputs.package, false, &mut tracker)?;
+        let dir = inputs.dir.as_deref().map(Path::new);
+        let mut files = super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)?;
         for pattern in &inputs.inputs {
             files.extend(tracker.hash_glob(pattern)?);
         }

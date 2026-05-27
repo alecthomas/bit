@@ -166,9 +166,21 @@ fn collect_transitive(
 ///
 /// Results are cached per package directory so that multiple blocks sharing
 /// transitive imports only scan each directory once.
-pub fn scan(pattern: &str, include_tests: bool) -> Result<HashSet<PathBuf>, BoxError> {
-    let cwd = std::env::current_dir()?;
-    with_cache(&cwd, |cache| {
+///
+/// `base_dir` is the directory from which module-root discovery begins (walking
+/// upward looking for `go.mod`). Pass `Some(dir)` when the calling block runs
+/// `go` from a non-project-root directory — e.g. a `go.exe` block with a `dir`
+/// pointing at a separate-module subdirectory. `None` starts from bit's CWD.
+pub fn scan(pattern: &str, include_tests: bool, base_dir: Option<&Path>) -> Result<HashSet<PathBuf>, BoxError> {
+    let cwd;
+    let start = match base_dir {
+        Some(dir) => dir,
+        None => {
+            cwd = std::env::current_dir()?;
+            &cwd
+        }
+    };
+    with_cache(start, |cache| {
         let pkg_dirs = resolve_package_dirs(&cache.module_root, &cache.module_path, pattern)?;
 
         let mut all_files = HashSet::new();
@@ -774,5 +786,48 @@ func Hello() { fmt.Println("hello") }
 
         // Verify cache was populated: 3 package dirs scanned total.
         assert_eq!(cached_count, 3);
+    }
+
+    #[test]
+    fn scan_base_dir_selects_correct_module() {
+        // Regression: when a block sets `dir = "subpath"` pointing at a
+        // separate-module subdirectory, scan() must locate that submodule's
+        // `go.mod` rather than the outer module's. Without `base_dir` it
+        // walked up from bit's CWD and grabbed the wrong module.
+        clear_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let outer_root = dir.path();
+        fs::write(outer_root.join("go.mod"), "module example.com/outer\n").unwrap();
+        fs::write(outer_root.join("outer.go"), "package main\n").unwrap();
+
+        let inner_root = outer_root.join("sub");
+        fs::create_dir_all(&inner_root).unwrap();
+        fs::write(inner_root.join("go.mod"), "module example.com/inner\n").unwrap();
+        fs::write(inner_root.join("inner.go"), "package main\n").unwrap();
+
+        // base_dir = inner_root → scanner finds the inner module's go.mod
+        // and returns only inner.go (plus go.mod).
+        let inner_files = scan(".", false, Some(&inner_root)).unwrap();
+        assert!(
+            inner_files.iter().any(|p| p.ends_with("inner.go")),
+            "expected inner.go in {inner_files:?}"
+        );
+        assert!(
+            !inner_files.iter().any(|p| p.ends_with("outer.go")),
+            "did not expect outer.go in {inner_files:?}"
+        );
+
+        // base_dir = outer_root → scanner finds the outer module and skips
+        // inner.go (different module).
+        clear_cache();
+        let outer_files = scan(".", false, Some(outer_root)).unwrap();
+        assert!(
+            outer_files.iter().any(|p| p.ends_with("outer.go")),
+            "expected outer.go in {outer_files:?}"
+        );
+        assert!(
+            !outer_files.iter().any(|p| p.ends_with("inner.go")),
+            "did not expect inner.go in {outer_files:?}"
+        );
     }
 }

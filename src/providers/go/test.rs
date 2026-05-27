@@ -207,7 +207,8 @@ impl Resource for GoTestResource {
 
     fn resolve(&self, inputs: &GoTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        super::resolve_go_inputs(&inputs.package, true, &mut tracker)
+        let dir = inputs.dir.as_deref().map(std::path::Path::new);
+        super::resolve_go_inputs(&inputs.package, dir, true, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {

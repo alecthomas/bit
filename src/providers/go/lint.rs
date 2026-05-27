@@ -70,7 +70,8 @@ impl Resource for GoLintResource {
 
     fn resolve(&self, inputs: &GoLintInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        let mut files = super::resolve_go_inputs(&inputs.package, false, &mut tracker)?;
+        let dir = inputs.dir.as_deref().map(Path::new);
+        let mut files = super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)?;
         // Include golangci-lint config if present.
         for name in [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"] {
             let path = Path::new(name);

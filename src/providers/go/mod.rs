@@ -7,6 +7,7 @@ pub mod scanner;
 pub mod test;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -46,12 +47,17 @@ impl GoEnv {
 }
 
 /// Scan Go source files for a package pattern and return hashed inputs.
+///
+/// `dir`, when set, is the working directory where `go` would be invoked — the
+/// scanner walks up from there to locate `go.mod`. Required for blocks that
+/// build a separate Go module via the `dir` field; `None` starts from bit's CWD.
 pub fn resolve_go_inputs(
     pkg: &str,
+    dir: Option<&Path>,
     include_tests: bool,
     tracker: &mut FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let files: Vec<_> = scanner::scan(pkg, include_tests)?.into_iter().collect();
+    let files: Vec<_> = scanner::scan(pkg, include_tests, dir)?.into_iter().collect();
     tracker.hash_files(&files)
 }
 

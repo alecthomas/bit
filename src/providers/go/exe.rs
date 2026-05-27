@@ -66,6 +66,19 @@ impl GoExeResource {
             base.to_owned()
         })
     }
+
+    /// Build the `-o` argument for `go build`. When `dir` is set the child
+    /// process runs in that subdirectory, so a relative `output` would land
+    /// the artifact in the wrong place; this absolutises against `cwd` so it
+    /// matches the bit-CWD-relative path that `resolve()` and
+    /// `create_dir_all` use.
+    fn output_arg(output: &str, dir_set: bool, cwd: &Path) -> String {
+        if dir_set {
+            cwd.join(output).to_string_lossy().into_owned()
+        } else {
+            output.to_owned()
+        }
+    }
 }
 
 impl Resource for GoExeResource {
@@ -83,7 +96,8 @@ impl Resource for GoExeResource {
 
     fn resolve(&self, inputs: &GoExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        let mut files = super::resolve_go_inputs(&inputs.package, false, &mut tracker)?;
+        let dir = inputs.dir.as_deref().map(Path::new);
+        let mut files = super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)?;
         let output = GoExeResource::output_path(inputs);
         let output_path = Path::new(&output);
         if output_path.exists() {
@@ -136,7 +150,9 @@ impl Resource for GoExeResource {
             fs::create_dir_all(parent)?;
         }
 
-        let mut args = vec!["build".to_owned(), "-o".to_owned(), output.clone()];
+        let cwd = std::env::current_dir()?;
+        let output_arg = GoExeResource::output_arg(&output, inputs.dir.is_some(), &cwd);
+        let mut args = vec!["build".to_owned(), "-o".to_owned(), output_arg];
         args.extend(inputs.flags.iter().cloned());
         args.push(inputs.package.clone());
 
@@ -328,6 +344,29 @@ mod tests {
             env: GoEnv::default(),
         };
         assert_eq!(GoExeResource::output_path(&inputs), "bin/foo");
+    }
+
+    #[test]
+    fn output_arg_relative_when_no_dir() {
+        // Without `dir`, go runs in bit's CWD, so a relative path resolves
+        // correctly. We pass it through unchanged.
+        let arg = GoExeResource::output_arg("build/chromad", false, Path::new("/project"));
+        assert_eq!(arg, "build/chromad");
+    }
+
+    #[test]
+    fn output_arg_absolute_when_dir_set() {
+        // With `dir`, go runs in the subdirectory, so we must absolutise the
+        // output against bit's CWD or the binary lands in the wrong place.
+        let arg = GoExeResource::output_arg("build/chromad", true, Path::new("/project"));
+        assert_eq!(arg, "/project/build/chromad");
+    }
+
+    #[test]
+    fn output_arg_preserves_absolute_path() {
+        // An already-absolute output path is preserved as-is.
+        let arg = GoExeResource::output_arg("/tmp/out/bin", true, Path::new("/project"));
+        assert_eq!(arg, "/tmp/out/bin");
     }
 
     #[test]

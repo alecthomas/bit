@@ -45,8 +45,12 @@ pub struct GoFmtState {
 }
 
 /// Collect `.go` file paths (excluding test files) for the given package pattern.
-fn go_source_files(package: &str) -> Result<Vec<String>, BoxError> {
-    let files = super::scanner::scan(package, false)?;
+///
+/// `dir` mirrors [`super::scanner::scan`]'s `base_dir`: when set, module-root
+/// discovery starts from that directory so a block targeting a separate-module
+/// subdirectory scans the right module.
+fn go_source_files(package: &str, dir: Option<&std::path::Path>) -> Result<Vec<String>, BoxError> {
+    let files = super::scanner::scan(package, false, dir)?;
     let mut paths: Vec<String> = files
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e == "go"))
@@ -83,7 +87,8 @@ impl Resource for GoFmtResource {
 
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        super::resolve_go_inputs(&inputs.package, false, &mut tracker)
+        let dir = inputs.dir.as_deref().map(std::path::Path::new);
+        super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -116,7 +121,7 @@ impl Resource for GoFmtResource {
         _prior_state: Option<&GoFmtState>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoFmtState, GoFmtOutputs>, BoxError> {
-        let files = go_source_files(&inputs.package)?;
+        let files = go_source_files(&inputs.package, inputs.dir.as_deref().map(std::path::Path::new))?;
         if files.is_empty() {
             return Ok(ApplyResult {
                 outputs: GoFmtOutputs {},
@@ -191,7 +196,8 @@ impl Resource for GoFmtCheckResource {
 
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        super::resolve_go_inputs(&inputs.package, false, &mut tracker)
+        let dir = inputs.dir.as_deref().map(std::path::Path::new);
+        super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -224,7 +230,7 @@ impl Resource for GoFmtCheckResource {
         _prior_state: Option<&GoFmtState>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoFmtState, GoFmtCheckOutputs>, BoxError> {
-        let files = go_source_files(&inputs.package)?;
+        let files = go_source_files(&inputs.package, inputs.dir.as_deref().map(std::path::Path::new))?;
         if files.is_empty() {
             return Ok(ApplyResult {
                 outputs: GoFmtCheckOutputs { passed: true },
