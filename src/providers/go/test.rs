@@ -172,6 +172,29 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, verbose: boo
                     writer.test_suite_skipped(&event.package);
                 }
             }
+            // Package-level output (no Test): the per-package summary line emitted
+            // before `fail`/`pass`, e.g. "FAIL\texample/cmd/server [build failed]".
+            "output" => {
+                if let Some(text) = &event.output {
+                    for line in text.lines() {
+                        writer.stderr_line(line);
+                    }
+                }
+            }
+            // Compile-time diagnostics, emitted as JSON on stdout when `-json`
+            // is used (stderr is empty in that mode). Stream them so the rolling
+            // buffer captures the error text and `close_region` replays it on
+            // failure.
+            "build-output" => {
+                if let Some(text) = &event.output {
+                    for line in text.lines() {
+                        writer.stderr_line(line);
+                    }
+                }
+            }
+            "build-fail" => {
+                all_passed = false;
+            }
             _ => {}
         }
     }
@@ -444,5 +467,41 @@ mod tests {
         let result = process_go_test_json(std::io::Cursor::new(""), &writer, false);
         assert!(result.passed);
         assert!(!result.had_events);
+    }
+
+    #[test]
+    fn process_json_build_failure() {
+        // With `-json`, build errors are emitted on stdout (stderr is empty).
+        // They appear as `build-output` + `build-fail` events keyed by ImportPath,
+        // followed by a per-package `output` summary and a package-level `fail`.
+        let json = concat!(
+            r##"{"ImportPath":"internal/nettrace","Action":"build-output","Output":"# internal/nettrace\n"}"##,
+            "\n",
+            r#"{"ImportPath":"internal/nettrace","Action":"build-output","Output":"compile: version mismatch\n"}"#,
+            "\n",
+            r#"{"ImportPath":"internal/nettrace","Action":"build-fail"}"#,
+            "\n",
+            r#"{"Action":"output","Package":"example/cmd/server","Output":"FAIL\texample/cmd/server [build failed]\n"}"#,
+            "\n",
+            r#"{"Action":"fail","Package":"example/cmd/server","Elapsed":0,"FailedBuild":"internal/nettrace"}"#,
+            "\n",
+        );
+        let out = Output::new(&[]);
+        let writer = out.writer("test");
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, false);
+        assert!(!result.passed);
+        assert!(result.had_events);
+    }
+
+    #[test]
+    fn process_json_build_fail_alone_marks_failure() {
+        // A standalone `build-fail` (no package-level `fail` follows) must still
+        // mark the run as failed, otherwise the engine would fall back to the
+        // exit code only when `had_events` is true.
+        let json = concat!(r#"{"ImportPath":"x","Action":"build-fail"}"#, "\n",);
+        let out = Output::new(&[]);
+        let writer = out.writer("test");
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, false);
+        assert!(!result.passed);
     }
 }
