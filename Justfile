@@ -18,6 +18,13 @@ build:
 test:
     cargo test --all-features
 
+# Bump to next version
+bump:
+    #!/bin/bash
+    test "$(svu current)" = "$(svu next)" && exit 0
+    git tag "$(svu next)"
+    echo "Bumped to $(svu next)"
+
 # Generate release notes from git log since previous tag
 release-notes tag="":
     #!/usr/bin/env bash
