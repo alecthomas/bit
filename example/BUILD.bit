@@ -189,7 +189,7 @@ kustomize-pin-bff = exec {
 # Create a local k3d cluster connected to the registry.
 protected k3d = exec {
   command    = "k3d cluster create --config k8s/overlays/local/k3d-cluster.yaml"
-  resolve    = "k3d cluster list -o json | jq -e '.[] | select(.name == \"#{k3d_cluster}\")'"
+  resolve    = "k3d cluster list -o json | jq -er '.[] | select(.name == \"#{k3d_cluster}\") | .name'"
   inputs     = ["k8s/overlays/local/k3d-cluster.yaml"]
   clean      = "k3d cluster delete #{k3d_cluster}"
 }
