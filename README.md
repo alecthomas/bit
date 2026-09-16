@@ -753,7 +753,8 @@ the worktree that produced them has been deleted:
   with identical sources restores it to its own output path (for `rust.exe`,
   the same path under its own `target/` directory) instead of building.
   `bit --plan` reports this as a restore (`⇣`) without writing anything.
-- `docker.image` stores the complete image as a Docker archive. If the image
+- `docker.image` stores the members of a Docker image archive separately, so
+  image versions that share layers also share their cached bytes. If the image
   has been removed, an identical action restores it with `docker image load`
   instead of rebuilding it.
 

@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
-use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::io::{self, BufReader};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +18,7 @@ use crate::sha256::SHA256;
 
 use super::parse;
 
-const IMAGE_ROLE: &str = "image";
+const MANIFEST_ROLE: &str = "manifest.json";
 
 /// Build a Docker image (auto-detects inputs from Dockerfile)
 #[derive(Debug, Deserialize, bit_derive::Schema)]
@@ -107,6 +109,102 @@ fn strip_docker_prefix(id: &str) -> &str {
 fn pinned_tag(tag: &str, image_id: &str) -> String {
     let name = tag.split(':').next().unwrap_or(tag);
     format!("{name}:{image_id}")
+}
+
+fn archive_member_path(role: &str) -> io::Result<&Path> {
+    let path = Path::new(role);
+    let has_unsafe_segment = role
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..");
+    if has_unsafe_segment
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsafe Docker archive member path {role:?}"),
+        ));
+    }
+    Ok(path)
+}
+
+/// Split a Docker image archive into independently addressable members. The
+/// archive path is the artifact role, so the receipt contains everything
+/// needed to reconstruct the archive while the CAS deduplicates shared layers.
+fn capture_archive_members(archive_path: &Path, cas: &Cas) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
+    let file = File::open(archive_path)?;
+    let mut archive = tar::Archive::new(BufReader::new(file));
+    let mut artifacts = BTreeMap::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            continue;
+        }
+        if !entry_type.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported Docker archive member type for {}", entry.path()?.display()),
+            )
+            .into());
+        }
+
+        let member_path = entry.path()?.into_owned();
+        let role = archive_member_path(
+            member_path
+                .to_str()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 Docker archive member path"))?,
+        )?
+        .to_string_lossy()
+        .into_owned();
+        if artifacts.contains_key(&role) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate Docker archive member {role:?}"),
+            )
+            .into());
+        }
+
+        let mode = entry.header().mode()? & 0o777;
+        let mut member = tempfile::NamedTempFile::new()?;
+        io::copy(&mut entry, member.as_file_mut())?;
+        member.as_file().sync_all()?;
+        fs::set_permissions(member.path(), fs::Permissions::from_mode(mode))?;
+        artifacts.insert(role, cas.put_file(member.path())?);
+    }
+    if !artifacts.contains_key(MANIFEST_ROLE) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Docker archive has no manifest.json").into());
+    }
+    Ok(artifacts)
+}
+
+/// Reassemble cached Docker archive members into a loadable tar file.
+fn materialize_archive(
+    artifacts: &BTreeMap<String, ArtifactRef>,
+    cas: &Cas,
+    archive_path: &Path,
+) -> Result<(), BoxError> {
+    if !artifacts.contains_key(MANIFEST_ROLE) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "receipt has no Docker manifest").into());
+    }
+
+    let members = tempfile::tempdir()?;
+    let mut materialized = Vec::with_capacity(artifacts.len());
+    for (role, artifact) in artifacts {
+        let relative = archive_member_path(role)?;
+        let path = members.path().join(relative);
+        cas.materialize(artifact, &path)?;
+        materialized.push((relative.to_path_buf(), path));
+    }
+
+    let file = File::create(archive_path)?;
+    let mut archive = tar::Builder::new(file);
+    for (relative, path) in materialized {
+        archive.append_path_with_name(path, relative)?;
+    }
+    archive.into_inner()?.sync_all()?;
+    Ok(())
 }
 
 /// Build the argument list for `docker buildx build`.
@@ -357,7 +455,7 @@ impl Resource for ImageResource {
     }
 
     fn cache_policy(&self) -> CachePolicy {
-        CachePolicy::Shared { version: 1 }
+        CachePolicy::Shared { version: 2 }
     }
 
     fn capture_artifacts(
@@ -390,7 +488,7 @@ impl Resource for ImageResource {
             )
             .into());
         }
-        Ok(BTreeMap::from([(IMAGE_ROLE.to_owned(), cas.put_file(archive.path())?)]))
+        capture_archive_members(archive.path(), cas)
     }
 
     fn check_receipt(
@@ -399,7 +497,7 @@ impl Resource for ImageResource {
         state: &ImageState,
         artifacts: &BTreeMap<String, ArtifactRef>,
     ) -> Result<ReceiptCheck, BoxError> {
-        if !artifacts.contains_key(IMAGE_ROLE) {
+        if !artifacts.contains_key(MANIFEST_ROLE) {
             return Ok(ReceiptCheck::Unusable);
         }
         let pinned = pinned_tag(&inputs.tag, &state.image_id);
@@ -420,13 +518,12 @@ impl Resource for ImageResource {
         cas: &Cas,
         writer: &BlockWriter,
     ) -> MaterializeResult<ImageState, ImageOutputs> {
-        let artifact = artifacts.get(IMAGE_ROLE).ok_or("receipt has no image artifact")?;
         let pinned = pinned_tag(&inputs.tag, &state.image_id);
 
         if self.inspect_image_id(&state.image_id).as_deref() != Some(state.image_id.as_str()) {
             let dir = tempfile::tempdir()?;
             let archive = dir.path().join("image.tar");
-            cas.materialize(artifact, &archive)?;
+            materialize_archive(artifacts, cas, &archive)?;
             writer.line(&format!("docker image load --input {}", archive.display()));
             let output = self
                 .command()
@@ -468,6 +565,36 @@ impl Resource for ImageResource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+
+    fn write_archive(path: &Path, members: &[(&str, &[u8])]) {
+        let file = File::create(path).unwrap();
+        let mut archive = tar::Builder::new(file);
+        for (name, contents) in members {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive.append_data(&mut header, name, *contents).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
+    fn read_archive(path: &Path) -> BTreeMap<String, Vec<u8>> {
+        let file = File::open(path).unwrap();
+        let mut archive = tar::Archive::new(file);
+        archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let path = entry.path().unwrap().to_string_lossy().into_owned();
+                let mut contents = Vec::new();
+                entry.read_to_end(&mut contents).unwrap();
+                (path, contents)
+            })
+            .collect()
+    }
 
     fn test_inputs() -> ImageInputs {
         ImageInputs {
@@ -657,7 +784,7 @@ mod tests {
     #[test]
     fn image_uses_shared_cache() {
         let resource = ImageResource::new(Arc::new(Mutex::new(FileTracker::default())));
-        assert_eq!(Resource::cache_policy(&resource), CachePolicy::Shared { version: 1 });
+        assert_eq!(Resource::cache_policy(&resource), CachePolicy::Shared { version: 2 });
     }
 
     #[test]
@@ -671,16 +798,28 @@ mod tests {
 
     #[test]
     fn captures_and_restores_image_archive() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let docker = dir.path().join("docker");
+        let fixture = dir.path().join("fixture.tar");
+        let expected = BTreeMap::from([
+            ("blobs/sha256/config".to_owned(), b"config".to_vec()),
+            ("blobs/sha256/layer".to_owned(), b"shared layer".to_vec()),
+            ("manifest.json".to_owned(), b"manifest".to_vec()),
+        ]);
+        write_archive(
+            &fixture,
+            &[
+                ("manifest.json", b"manifest"),
+                ("blobs/sha256/config", b"config"),
+                ("blobs/sha256/layer", b"shared layer"),
+            ],
+        );
         std::fs::write(
             &docker,
             r#"#!/bin/sh
 log="$(dirname "$0")/docker.log"
 if [ "$1" = "image" ] && [ "$2" = "save" ]; then
-  printf archive > "$4"
+  cat "$(dirname "$0")/fixture.tar" > "$4"
   printf 'save %s\n' "$5" >> "$log"
   exit 0
 fi
@@ -688,7 +827,8 @@ if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
   exit 1
 fi
 if [ "$1" = "image" ] && [ "$2" = "load" ]; then
-  printf 'load %s\n' "$(cat "$4")" >> "$log"
+  cat "$4" > "$(dirname "$0")/loaded.tar"
+  printf 'load\n' >> "$log"
   exit 0
 fi
 if [ "$1" = "tag" ]; then
@@ -709,10 +849,10 @@ exit 1
         let inputs = test_inputs();
         let state = test_state();
         let artifacts = Resource::capture_artifacts(&resource, &inputs, &state, &cas).unwrap();
-        let artifact = artifacts.get(IMAGE_ROLE).unwrap();
-        let archive = dir.path().join("saved.tar");
-        cas.materialize(artifact, &archive).unwrap();
-        assert_eq!(std::fs::read(&archive).unwrap(), b"archive");
+        assert_eq!(
+            artifacts.keys().cloned().collect::<Vec<_>>(),
+            expected.keys().cloned().collect::<Vec<_>>()
+        );
 
         let output = crate::output::Output::new(&[]);
         let writer = output.writer("image");
@@ -722,11 +862,54 @@ exit 1
         assert_eq!(restored.outputs.image_ref, "myapp:abc123");
         assert_eq!(restored.outputs.image_id, "abc123");
         assert_eq!(restored.state.unwrap().pinned_tag.as_deref(), Some("myapp:abc123"));
+        assert_eq!(read_archive(&dir.path().join("loaded.tar")), expected);
 
         let log = std::fs::read_to_string(dir.path().join("docker.log")).unwrap();
         assert!(log.contains("save myapp:abc123"), "{log}");
-        assert!(log.contains("load archive"), "{log}");
+        assert!(log.contains("load"), "{log}");
         assert!(log.contains("tag abc123 myapp:abc123"), "{log}");
         assert!(log.contains("tag abc123 myapp:latest"), "{log}");
+    }
+
+    #[test]
+    fn shared_archive_members_share_cas_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.tar");
+        let second = dir.path().join("second.tar");
+        write_archive(
+            &first,
+            &[
+                ("manifest.json", b"first manifest"),
+                ("blobs/sha256/shared", b"shared layer"),
+                ("blobs/sha256/app", b"first app"),
+            ],
+        );
+        write_archive(
+            &second,
+            &[
+                ("manifest.json", b"second manifest"),
+                ("blobs/sha256/shared", b"shared layer"),
+                ("blobs/sha256/app", b"second app"),
+            ],
+        );
+        let cas = Cas::new(dir.path().join("cas"));
+
+        let first = capture_archive_members(&first, &cas).unwrap();
+        let second = capture_archive_members(&second, &cas).unwrap();
+
+        assert_eq!(first["blobs/sha256/shared"], second["blobs/sha256/shared"]);
+        assert_ne!(first["blobs/sha256/app"], second["blobs/sha256/app"]);
+        assert_ne!(first[MANIFEST_ROLE], second[MANIFEST_ROLE]);
+    }
+
+    #[test]
+    fn archive_member_paths_must_be_relative_and_normal() {
+        assert_eq!(
+            archive_member_path("blobs/sha256/layer").unwrap(),
+            Path::new("blobs/sha256/layer")
+        );
+        assert!(archive_member_path("../layer").is_err());
+        assert!(archive_member_path("/layer").is_err());
+        assert!(archive_member_path("blobs/./layer").is_err());
     }
 }
