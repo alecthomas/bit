@@ -229,19 +229,10 @@ tests[package] = go.test {
 }
 ```
 
-The built-in providers expose:
-
-| Function                                 | Description                                 |
-| ---------------------------------------- | ------------------------------------------- |
-| `go.packages(pattern)`                   | Go packages matching a package pattern      |
-| `go.packages(pattern, dir)`              | Go packages matching a pattern from `dir`   |
-| `rust.packages()`                        | Cargo workspace package names               |
-| `pnpm.packages_with_script(script)`      | Workspace packages that define `script`     |
-| `pnpm.packages_with_script(script, dir)` | Matching workspace packages rooted at `dir` |
-
 `bit --schema` includes these function signatures and their descriptions.
 Filter by provider or exact member, such as `bit --schema go` or
-`bit --schema go.packages`.
+`bit --schema go.packages`. The generated provider reference below includes
+the same function metadata.
 
 ### Modules
 
@@ -590,6 +581,8 @@ block = go.fmt-l {
 | -------- | ------ | ------------------------------- |
 | `passed` | `bool` | Whether all files are formatted |
 
+**`go.packages(pattern: string, dir: string?) -> [string]`** — List Go packages matching a package pattern.
+
 ### pnpm
 
 **`pnpm.install`** (build) — Install pnpm workspace dependencies.
@@ -644,6 +637,8 @@ block = pnpm.test {
 | Field    | Type   | Description                          |
 | -------- | ------ | ------------------------------------ |
 | `passed` | `bool` | Whether the test command exited zero |
+
+**`pnpm.packages_with_script(script: string, dir: string?) -> [string]`** — List workspace packages that define a script.
 
 ### rust
 
@@ -752,6 +747,8 @@ block = rust.fmt-check {
 | Field    | Type   | Description              |
 | -------- | ------ | ------------------------ |
 | `passed` | `bool` | Whether the check passed |
+
+**`rust.packages() -> [string]`** — List Cargo workspace packages.
 
 ## How It Works
 
