@@ -10,15 +10,21 @@ name: Release
 jobs:
   build:
     name: Build ${{ matrix.arch }}-${{ matrix.target-suffix }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        arch: [x86_64, aarch64]
         include:
-          - os: ubuntu-latest
+          - runner: ubuntu-latest
+            arch: x86_64
             target-suffix: unknown-linux-gnu
-          - os: macos-latest
+          - runner: ubuntu-latest
+            arch: aarch64
+            target-suffix: unknown-linux-gnu
+          - runner: [self-hosted, macOS, ARM64]
+            arch: x86_64
+            target-suffix: apple-darwin
+          - runner: [self-hosted, macOS, ARM64]
+            arch: aarch64
             target-suffix: apple-darwin
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # ratchet:actions/checkout@v6
