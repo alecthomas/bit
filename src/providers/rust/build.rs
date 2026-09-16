@@ -65,9 +65,9 @@ impl Resource for RustBuildResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, _inputs: &RustBuildInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &RustBuildInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
-        super::resolve_rust_inputs(&mut tracker)
+        super::resolve_rust_inputs(inputs.package.as_deref(), &mut tracker)
     }
 
     fn plan(&self, inputs: &RustBuildInputs, prior_state: Option<&RustBuildState>) -> Result<PlanResult, BoxError> {

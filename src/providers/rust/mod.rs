@@ -4,7 +4,7 @@ pub mod exe;
 pub mod fmt;
 pub mod test;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -252,9 +252,15 @@ pub fn toolchain_fingerprint(env: &RustEnv) -> Result<BTreeMap<String, String>, 
 /// discovered by `cargo metadata`. The cache avoids re-running the expensive
 /// metadata call on every resolve.
 #[derive(Clone)]
-struct DiscoveredPaths {
+struct InputPaths {
     globs: Vec<String>,
     files: Vec<PathBuf>,
+}
+
+#[derive(Clone)]
+struct DiscoveredPaths {
+    workspace: InputPaths,
+    packages: HashMap<String, InputPaths>,
     target_dir: PathBuf,
 }
 
@@ -278,17 +284,28 @@ pub fn target_directory() -> Result<PathBuf, BoxError> {
 
 /// Resolve Rust source files for change detection.
 ///
-/// Uses `cargo metadata` to discover local package source directories,
-/// then hashes `.rs` files within them via the tracker. The metadata
-/// discovery is cached so the call only happens once per run.
-pub fn resolve_rust_inputs(tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+/// Uses `cargo metadata` to discover local package source directories, then
+/// hashes `.rs` files within them via the tracker. When `package` is set, only
+/// that package and its transitive local workspace dependencies are included.
+/// The metadata discovery is cached so the call only happens once per run.
+pub fn resolve_rust_inputs(
+    package: Option<&str>,
+    tracker: &mut FileTracker,
+) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let discovered = discovered()?;
+    let paths = match package {
+        Some(package) => discovered
+            .packages
+            .get(package)
+            .ok_or_else(|| format!("Rust package '{package}' not found in workspace"))?,
+        None => &discovered.workspace,
+    };
 
     let mut result = BTreeMap::new();
-    for pattern in &discovered.globs {
+    for pattern in &paths.globs {
         result.extend(tracker.hash_glob(pattern)?);
     }
-    for path in &discovered.files {
+    for path in &paths.files {
         if path.is_file() {
             let key = path.display().to_string();
             result.insert(key, tracker.hash_file(path)?);
@@ -307,7 +324,28 @@ fn discover_paths() -> Result<DiscoveredPaths, BoxError> {
         .and_then(|t| t.as_str())
         .map(PathBuf::from)
         .ok_or("`cargo metadata` output has no target_directory")?;
-    let source_dirs = discover_source_dirs(&meta, &cwd);
+    let workspace_packages = workspace_packages_by_name(&meta)?;
+    let workspace_values: Vec<_> = workspace_packages.values().copied().collect();
+    let workspace = discover_input_paths(&workspace_values, &cwd);
+    let mut packages = HashMap::new();
+    for name in workspace_packages.keys() {
+        let closure = workspace_package_closure(&meta, name)?;
+        let values: Vec<_> = closure
+            .iter()
+            .filter_map(|dependency| workspace_packages.get(dependency).copied())
+            .collect();
+        packages.insert(name.clone(), discover_input_paths(&values, &cwd));
+    }
+
+    Ok(DiscoveredPaths {
+        workspace,
+        packages,
+        target_dir,
+    })
+}
+
+fn discover_input_paths(packages: &[&serde_json::Value], cwd: &Path) -> InputPaths {
+    let source_dirs = discover_source_dirs(packages, cwd);
 
     let mut globs = Vec::new();
     for dir in &source_dirs {
@@ -318,31 +356,25 @@ fn discover_paths() -> Result<DiscoveredPaths, BoxError> {
         globs.push(format!("{}/**/*.rs", rel.display()));
     }
 
-    let mut files = Vec::new();
-    // Include Cargo.toml files for all workspace members.
-    for dir in &source_dirs {
-        let cargo_toml = dir.join("Cargo.toml");
-        if cargo_toml.exists() {
-            let rel = cargo_toml.strip_prefix(&cwd).unwrap_or(&cargo_toml);
-            files.push(rel.to_path_buf());
+    let mut files: Vec<PathBuf> = packages
+        .iter()
+        .filter_map(|package| package.get("manifest_path").and_then(serde_json::Value::as_str))
+        .map(PathBuf::from)
+        .map(|manifest| manifest.strip_prefix(cwd).unwrap_or(&manifest).to_path_buf())
+        .collect();
+
+    for path in ["Cargo.toml", "Cargo.lock"] {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            files.push(path);
         }
     }
 
-    // Root manifest and lock file.
-    let cargo_toml = PathBuf::from("Cargo.toml");
-    if cargo_toml.exists() {
-        files.push(cargo_toml);
-    }
-    let cargo_lock = PathBuf::from("Cargo.lock");
-    if cargo_lock.exists() {
-        files.push(cargo_lock);
-    }
-
-    Ok(DiscoveredPaths {
-        globs,
-        files,
-        target_dir,
-    })
+    globs.sort();
+    globs.dedup();
+    files.sort();
+    files.dedup();
+    InputPaths { globs, files }
 }
 
 /// Run `cargo metadata --no-deps` for the current directory.
@@ -367,6 +399,12 @@ fn packages() -> Result<Vec<String>, BoxError> {
 }
 
 fn workspace_package_names(metadata: &serde_json::Value) -> Result<Vec<String>, BoxError> {
+    let mut names: Vec<_> = workspace_packages_by_name(metadata)?.into_keys().collect();
+    names.sort();
+    Ok(names)
+}
+
+fn workspace_packages_by_name(metadata: &serde_json::Value) -> Result<HashMap<String, &serde_json::Value>, BoxError> {
     let members = metadata
         .get("workspace_members")
         .and_then(serde_json::Value::as_array)
@@ -377,7 +415,7 @@ fn workspace_package_names(metadata: &serde_json::Value) -> Result<Vec<String>, 
         .ok_or("`cargo metadata` output has no packages")?;
 
     let member_ids: HashSet<&str> = members.iter().filter_map(serde_json::Value::as_str).collect();
-    let mut names: Vec<String> = packages
+    Ok(packages
         .iter()
         .filter(|package| {
             package
@@ -385,36 +423,86 @@ fn workspace_package_names(metadata: &serde_json::Value) -> Result<Vec<String>, 
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|id| member_ids.contains(id))
         })
-        .filter_map(|package| package.get("name").and_then(serde_json::Value::as_str))
-        .map(ToOwned::to_owned)
+        .filter_map(|package| {
+            package
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(|name| (name.to_owned(), package))
+        })
+        .collect())
+}
+
+fn workspace_package_closure(metadata: &serde_json::Value, selected: &str) -> Result<Vec<String>, BoxError> {
+    let packages = workspace_packages_by_name(metadata)?;
+    if !packages.contains_key(selected) {
+        return Err(format!("Rust package '{selected}' not found in workspace").into());
+    }
+    let roots: HashMap<PathBuf, String> = packages
+        .iter()
+        .filter_map(|(name, package)| {
+            let manifest = package.get("manifest_path")?.as_str()?;
+            Some((Path::new(manifest).parent()?.to_path_buf(), name.clone()))
+        })
         .collect();
+
+    let mut found = HashSet::new();
+    let mut pending = vec![selected.to_owned()];
+    while let Some(name) = pending.pop() {
+        if !found.insert(name.clone()) {
+            continue;
+        }
+        let Some(package) = packages.get(&name) else {
+            continue;
+        };
+        let dependencies = package
+            .get("dependencies")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for dependency in dependencies {
+            let local_name = dependency
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|path| roots.get(Path::new(path)).map(String::as_str))
+                .or_else(|| {
+                    dependency
+                        .get("source")
+                        .is_some_and(serde_json::Value::is_null)
+                        .then(|| dependency.get("name").and_then(serde_json::Value::as_str))
+                        .flatten()
+                        .and_then(|name| packages.contains_key(name).then_some(name))
+                });
+            if let Some(local_name) = local_name {
+                pending.push(local_name.to_owned());
+            }
+        }
+    }
+
+    let mut names: Vec<_> = found.into_iter().collect();
     names.sort();
-    names.dedup();
     Ok(names)
 }
 
 /// Directories containing local package sources (the parent of each
 /// target's src_path), relative to `cwd`.
-fn discover_source_dirs(meta: &serde_json::Value, cwd: &Path) -> HashSet<PathBuf> {
+fn discover_source_dirs(packages: &[&serde_json::Value], cwd: &Path) -> HashSet<PathBuf> {
     let mut dirs = HashSet::new();
 
     // Each package has targets with a src_path; collect their parent directories.
-    if let Some(packages) = meta.get("packages").and_then(|p| p.as_array()) {
-        for pkg in packages {
-            // Add the package root (parent of Cargo.toml) for tests/, benches/, examples/.
-            if let Some(manifest) = pkg.get("manifest_path").and_then(|m| m.as_str())
-                && let Some(pkg_dir) = Path::new(manifest).parent()
-            {
-                dirs.insert(pkg_dir.to_path_buf());
-            }
-            // Add each target's source directory.
-            if let Some(targets) = pkg.get("targets").and_then(|t| t.as_array()) {
-                for target in targets {
-                    if let Some(src_path) = target.get("src_path").and_then(|s| s.as_str())
-                        && let Some(parent) = Path::new(src_path).parent()
-                    {
-                        dirs.insert(parent.to_path_buf());
-                    }
+    for package in packages {
+        // Add the package root (parent of Cargo.toml) for tests/, benches/, examples/.
+        if let Some(manifest) = package.get("manifest_path").and_then(|manifest| manifest.as_str())
+            && let Some(package_dir) = Path::new(manifest).parent()
+        {
+            dirs.insert(package_dir.to_path_buf());
+        }
+        // Add each target's source directory.
+        if let Some(targets) = package.get("targets").and_then(|targets| targets.as_array()) {
+            for target in targets {
+                if let Some(source) = target.get("src_path").and_then(|source| source.as_str())
+                    && let Some(parent) = Path::new(source).parent()
+                {
+                    dirs.insert(parent.to_path_buf());
                 }
             }
         }
@@ -513,6 +601,42 @@ mod tests {
         });
 
         assert_eq!(workspace_package_names(&metadata).unwrap(), vec!["a", "z"]);
+    }
+
+    #[test]
+    fn workspace_package_closure_includes_local_dependencies_only() {
+        let metadata = serde_json::json!({
+            "workspace_members": ["app 0.1.0", "core 0.1.0", "other 0.1.0"],
+            "packages": [
+                {
+                    "id": "app 0.1.0",
+                    "name": "app",
+                    "manifest_path": "/workspace/app/Cargo.toml",
+                    "dependencies": [
+                        {"name": "core", "path": "/workspace/core", "source": null},
+                        {"name": "serde", "source": "registry+https://example.invalid/index"}
+                    ]
+                },
+                {
+                    "id": "core 0.1.0",
+                    "name": "core",
+                    "manifest_path": "/workspace/core/Cargo.toml",
+                    "dependencies": []
+                },
+                {
+                    "id": "other 0.1.0",
+                    "name": "other",
+                    "manifest_path": "/workspace/other/Cargo.toml",
+                    "dependencies": []
+                }
+            ]
+        });
+
+        assert_eq!(
+            workspace_package_closure(&metadata, "app").unwrap(),
+            vec!["app", "core"]
+        );
+        assert_eq!(workspace_package_closure(&metadata, "core").unwrap(), vec!["core"]);
     }
 
     #[test]

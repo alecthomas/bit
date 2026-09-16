@@ -143,9 +143,9 @@ impl Resource for RustExeResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, _inputs: &RustExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &RustExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
-        super::resolve_rust_inputs(&mut tracker)
+        super::resolve_rust_inputs(inputs.package.as_deref(), &mut tracker)
     }
 
     fn plan(&self, inputs: &RustExeInputs, prior_state: Option<&RustExeState>) -> Result<PlanResult, BoxError> {

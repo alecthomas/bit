@@ -69,8 +69,8 @@ fn fmt_check_command(inputs: &RustFmtInputs) -> CargoCommand {
     cargo
 }
 
-fn resolve(_inputs: &RustFmtInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let mut files = super::resolve_rust_inputs(tracker)?;
+fn resolve(inputs: &RustFmtInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let mut files = super::resolve_rust_inputs(inputs.package.as_deref(), tracker)?;
     for name in ["rustfmt.toml", ".rustfmt.toml"] {
         let path = std::path::Path::new(name);
         if path.is_file() {

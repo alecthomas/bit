@@ -69,9 +69,9 @@ impl Resource for RustClippyResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, _inputs: &RustClippyInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &RustClippyInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
-        super::resolve_rust_inputs(&mut tracker)
+        super::resolve_rust_inputs(inputs.package.as_deref(), &mut tracker)
     }
 
     fn plan(&self, inputs: &RustClippyInputs, prior_state: Option<&RustClippyState>) -> Result<PlanResult, BoxError> {
