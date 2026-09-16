@@ -349,7 +349,7 @@ fn discover_input_paths(packages: &[&serde_json::Value], cwd: &Path) -> InputPat
 
     let mut globs = Vec::new();
     for dir in &source_dirs {
-        let rel = dir.strip_prefix(&cwd).unwrap_or(dir);
+        let rel = dir.strip_prefix(cwd).unwrap_or(dir);
         if rel.as_os_str().is_empty() {
             continue;
         }
