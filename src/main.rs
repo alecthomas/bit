@@ -10,7 +10,7 @@ use bit::engine;
 use bit::file_tracker::FileTracker;
 use bit::loader;
 use bit::output::Output;
-use bit::provider::ProviderRegistry;
+use bit::provider::{FuncSignature, ProviderRegistry, ResourceSchema};
 use bit::providers::docker::DockerProvider;
 use bit::providers::exec::ExecProvider;
 use bit::providers::go::GoProvider;
@@ -67,7 +67,7 @@ struct Cli {
     #[arg(short = 'g', long)]
     graph: bool,
 
-    /// Show provider/resource schema (optional filter: "go", "docker.image")
+    /// Show provider resource/function schema (optional filter: "go", "go.packages")
     #[arg(short = 's', long, num_args = 0..=1, default_missing_value = "")]
     schema: Option<String>,
 
@@ -626,15 +626,20 @@ fn print_info() {
     }
 }
 
-/// Collect all matching (display_name, schema) pairs from native + module providers.
+enum SchemaEntry {
+    Resource { name: String, schema: ResourceSchema },
+    Function { name: String, signature: FuncSignature },
+}
+
+/// Collect all matching resource and function schemas from native + module providers.
 fn collect_schema_entries(
     registry: &ProviderRegistry,
     import_roots: &[bit::import::ImportRoot],
     filter: Option<&str>,
-) -> Vec<(String, bit::provider::ResourceSchema)> {
+) -> Vec<SchemaEntry> {
     let module_schemas = scan_module_schemas(import_roots);
 
-    let mut entries: Vec<(String, bit::provider::ResourceSchema)> = Vec::new();
+    let mut entries = Vec::new();
 
     let filter_parts = filter.map(|f| match f.split_once('.') {
         Some((p, r)) => (p, Some(r)),
@@ -658,7 +663,21 @@ fn collect_schema_entries(
             } else {
                 format!("{provider_name}.{}", res.name())
             };
-            entries.push((display, res.schema()));
+            entries.push(SchemaEntry::Resource {
+                name: display,
+                schema: res.schema(),
+            });
+        }
+        for function in registry.provider_functions(provider_name) {
+            if let Some((_, Some(member))) = filter_parts
+                && member != function.name
+            {
+                continue;
+            }
+            entries.push(SchemaEntry::Function {
+                name: format!("{provider_name}.{}", function.name),
+                signature: function,
+            });
         }
     }
 
@@ -674,7 +693,10 @@ fn collect_schema_entries(
         {
             continue;
         }
-        entries.push((display_name.clone(), schema.clone()));
+        entries.push(SchemaEntry::Resource {
+            name: display_name.clone(),
+            schema: schema.clone(),
+        });
     }
 
     if entries.is_empty()
@@ -689,30 +711,63 @@ fn collect_schema_entries(
 
 fn print_schema(registry: &ProviderRegistry, import_roots: &[bit::import::ImportRoot], filter: Option<&str>) {
     let entries = collect_schema_entries(registry, import_roots, filter);
-    for (i, (name, schema)) in entries.iter().enumerate() {
+    for (i, entry) in entries.iter().enumerate() {
         if i > 0 {
             println!();
         }
-        print_resource_schema(name, schema);
+        match entry {
+            SchemaEntry::Resource { name, schema } => print_resource_schema(name, schema),
+            SchemaEntry::Function { name, signature } => print_function_schema(name, signature),
+        }
     }
 }
 
 fn print_schema_json(registry: &ProviderRegistry, import_roots: &[bit::import::ImportRoot], filter: Option<&str>) {
     let entries = collect_schema_entries(registry, import_roots, filter);
+    println!("{}", render_schema_json(&entries));
+}
+
+fn render_schema_json(entries: &[SchemaEntry]) -> String {
     #[derive(serde::Serialize)]
-    struct Entry {
-        name: String,
+    struct ResourceEntry<'a> {
+        name: &'a str,
         #[serde(flatten)]
-        schema: bit::provider::ResourceSchema,
+        schema: &'a ResourceSchema,
     }
-    let json_entries: Vec<Entry> = entries
-        .into_iter()
-        .map(|(name, schema)| Entry { name, schema })
-        .collect();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json_entries).expect("JSON serialization failed")
-    );
+
+    #[derive(serde::Serialize)]
+    struct FunctionParam<'a> {
+        name: &'a str,
+        #[serde(flatten)]
+        field: &'a bit::value::StructField,
+    }
+
+    #[derive(serde::Serialize)]
+    struct FunctionEntry<'a> {
+        name: &'a str,
+        kind: &'static str,
+        params: Vec<FunctionParam<'a>>,
+        returns: String,
+    }
+
+    let values: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| match entry {
+            SchemaEntry::Resource { name, schema } => serde_json::to_value(ResourceEntry { name, schema }),
+            SchemaEntry::Function { name, signature } => serde_json::to_value(FunctionEntry {
+                name,
+                kind: "function",
+                params: signature
+                    .params
+                    .iter()
+                    .map(|(name, field)| FunctionParam { name, field })
+                    .collect(),
+                returns: signature.returns.to_string(),
+            }),
+        })
+        .collect::<Result<_, _>>()
+        .expect("JSON serialization failed");
+    serde_json::to_string_pretty(&values).expect("JSON serialization failed")
 }
 
 fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {
@@ -760,6 +815,22 @@ fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {
             }
         }
     }
+}
+
+fn print_function_schema(name: &str, signature: &FuncSignature) {
+    println!("{} ({})", name.bold(), "function".dim());
+
+    if !signature.params.is_empty() {
+        println!("  {}:", "Parameters".bold());
+        for (param_name, field) in &signature.params {
+            match &field.description {
+                Some(desc) => println!("    {} ({}) — {}", param_name, field.typ.to_string().dim(), desc.dim()),
+                None => println!("    {} ({})", param_name, field.typ.to_string().dim()),
+            }
+        }
+    }
+
+    println!("  {}: {}", "Returns".bold(), signature.returns.to_string().dim());
 }
 
 /// Walk every resolved `ImportRoot` for module files and derive their
@@ -865,4 +936,40 @@ fn scan_one_provider(provider_dir: &std::path::Path) -> Vec<(String, bit::provid
         ));
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry() -> ProviderRegistry {
+        default_registry(&Arc::new(Mutex::new(FileTracker::new())))
+    }
+
+    #[test]
+    fn schema_includes_provider_functions() {
+        let entries = collect_schema_entries(&registry(), &[], Some("go"));
+        let contains = |expected| {
+            entries.iter().any(|entry| match entry {
+                SchemaEntry::Resource { name, .. } | SchemaEntry::Function { name, .. } => name == expected,
+            })
+        };
+        assert!(contains("go.build"));
+        assert!(contains("go.packages"));
+    }
+
+    #[test]
+    fn schema_filter_matches_function_and_serializes_its_signature() {
+        let entries = collect_schema_entries(&registry(), &[], Some("go.packages"));
+        assert_eq!(entries.len(), 1);
+
+        let json: serde_json::Value = serde_json::from_str(&render_schema_json(&entries)).unwrap();
+        assert_eq!(json[0]["name"], "go.packages");
+        assert_eq!(json[0]["kind"], "function");
+        assert_eq!(json[0]["params"][0]["name"], "pattern");
+        assert_eq!(json[0]["params"][0]["type"], "string");
+        assert_eq!(json[0]["params"][1]["name"], "dir");
+        assert_eq!(json[0]["params"][1]["type"], "string?");
+        assert_eq!(json[0]["returns"], "[string]");
+    }
 }

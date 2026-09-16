@@ -56,7 +56,7 @@ sync-readme = exec {
     #{debug.path} --schema --json | jq -r '
       def pad($n): . as $s | ([($n - ($s|length)), 2] | max) as $p | $s + (" " * $p);
       "## Providers\n",
-      (group_by(.name | split(".")[0]) | .[] |
+      (map(select(.kind != "function")) | group_by(.name | split(".")[0]) | .[] |
       (.[0].name | split(".")[0]) as $prov |
       "### \($prov)\n",
       (.[] | . as $res |

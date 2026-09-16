@@ -418,6 +418,11 @@ impl ProviderRegistry {
     pub fn provider_resources(&self, provider: &str) -> Vec<Box<dyn DynResource>> {
         self.providers.get(provider).map(|p| p.resources()).unwrap_or_default()
     }
+
+    /// List all functions for a provider.
+    pub fn provider_functions(&self, provider: &str) -> Vec<FuncSignature> {
+        self.providers.get(provider).map(|p| p.functions()).unwrap_or_default()
+    }
 }
 
 impl Default for ProviderRegistry {
@@ -459,7 +464,7 @@ mod tests {
         }
 
         fn functions(&self) -> Vec<FuncSignature> {
-            vec![]
+            vec![__bit_signature_typed_function()]
         }
 
         fn call_function(&self, name: &str, _args: &[Value]) -> Result<Value, BoxError> {
@@ -523,6 +528,8 @@ mod tests {
         assert!(reg.get_resource("stub", "thing").is_some());
         assert!(reg.get_resource("stub", "missing").is_none());
         assert!(reg.get_resource("missing", "thing").is_none());
+        assert_eq!(reg.provider_functions("stub")[0].name, "typed_function");
+        assert!(reg.provider_functions("missing").is_empty());
     }
 
     #[test]

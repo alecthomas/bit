@@ -74,7 +74,7 @@ bit --graph      # render the DAG as an ASCII graph
 bit --plan --graph  # …and colour each node by its planned action
 bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
-bit --schema     # show provider/resource schemas
+bit --schema [provider.member]  # show provider resource and function schemas
 bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
 bit --cache      # show the size of the shared build cache
 bit --cache --clean  # delete every cached receipt and artifact
@@ -238,6 +238,9 @@ The built-in providers expose:
 | `rust.packages()`                        | Cargo workspace package names              |
 | `pnpm.packages_with_script(script)`      | Workspace packages that define `script`    |
 | `pnpm.packages_with_script(script, dir)` | Matching workspace packages rooted at `dir` |
+
+`bit --schema` includes these function signatures. Filter by provider or exact
+member, such as `bit --schema go` or `bit --schema go.packages`.
 
 ### Modules
 
