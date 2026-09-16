@@ -166,6 +166,8 @@ struct OutputInner {
     /// terminal AND the user has not opted out via [`Output::with_long`].
     /// When false, output is plain line-by-line streaming.
     live: bool,
+    /// Cached terminal height in rows (0 = unknown / unlimited).
+    term_height: usize,
     /// Cached terminal width in columns (0 = unknown / unlimited).
     term_width: usize,
     /// Per-task live-region state, in insertion order.
@@ -194,15 +196,17 @@ impl Output {
     pub fn new(block_names: &[&str]) -> Self {
         let max_name_len = block_names.iter().map(|n| n.len()).max().unwrap_or(0);
         let live = io::stdout().is_terminal();
-        let term_width = if live {
-            console::Term::stdout().size().1 as usize
+        let (term_height, term_width) = if live {
+            let (rows, columns) = console::Term::stdout().size();
+            (rows as usize, columns as usize)
         } else {
-            0
+            (0, 0)
         };
         Self {
             inner: Arc::new(Mutex::new(OutputInner {
                 max_name_len,
                 live,
+                term_height,
                 term_width,
                 active: IndexMap::new(),
                 live_rows: 0,
@@ -464,21 +468,54 @@ impl OutputInner {
         Ok(())
     }
 
-    /// Render every active task's header + the last `REGION_LINES`
-    /// entries of its rolling buffer at the current cursor position,
-    /// updating `live_rows` with the total rows drawn.
-    fn redraw_live(&mut self, out: &mut StdoutLock<'_>) -> io::Result<()> {
+    /// Render active task headers and as many recent output rows as fit in the
+    /// terminal. A trailing blank row must remain visible because cursor-up
+    /// cannot reach lines that have scrolled out of the viewport. Task state
+    /// remains buffered when rows are hidden, so it can reappear as other tasks
+    /// complete and leave room in the live region.
+    fn redraw_live(&mut self, out: &mut impl Write) -> io::Result<()> {
+        let row_budget = self.term_height.checked_sub(1).unwrap_or(usize::MAX);
+        let header_rows: usize = self.active.values().map(|state| state.header.len()).sum();
         let mut rows = 0;
-        for state in self.active.values() {
-            for line in &state.header {
+
+        if header_rows > row_budget {
+            let skip = header_rows - row_budget;
+            for line in self.active.values().flat_map(|state| &state.header).skip(skip) {
                 writeln!(out, "{line}")?;
                 rows += 1;
             }
-            let visible = state.recent.len().min(REGION_LINES);
-            let skip = state.recent.len() - visible;
-            for line in state.recent.iter().skip(skip) {
-                writeln!(out, "{line}")?;
-                rows += 1;
+        } else {
+            let mut recent_counts = vec![0; self.active.len()];
+            let mut remaining = row_budget - header_rows;
+            while remaining > 0 {
+                let mut added = false;
+                for (index, state) in self.active.values().enumerate().rev() {
+                    let available = state.recent.len().min(REGION_LINES);
+                    if recent_counts[index] < available {
+                        recent_counts[index] += 1;
+                        remaining -= 1;
+                        added = true;
+                        if remaining == 0 {
+                            break;
+                        }
+                    }
+                }
+                if !added {
+                    break;
+                }
+            }
+
+            for (index, state) in self.active.values().enumerate() {
+                for line in &state.header {
+                    writeln!(out, "{line}")?;
+                    rows += 1;
+                }
+                let visible = recent_counts[index];
+                let skip = state.recent.len() - visible;
+                for line in state.recent.iter().skip(skip) {
+                    writeln!(out, "{line}")?;
+                    rows += 1;
+                }
             }
         }
         self.live_rows = rows;
@@ -850,6 +887,7 @@ mod tests {
         OutputInner {
             max_name_len,
             live: true,
+            term_height: usize::MAX,
             term_width,
             active: IndexMap::new(),
             live_rows: 0,
@@ -859,24 +897,56 @@ mod tests {
     #[test]
     fn region_open_tracks_rows() {
         let mut inner = inner_tty(4, 80);
-        // Simulate open_region without a real stdout: manipulate state directly.
         let state = inner.active.entry("a".to_string()).or_default();
         state.header = vec!["h1".into(), "h2".into()];
-        // Redraw would write 2 header + 0 recent = 2 rows.
         let mut buf: Vec<u8> = Vec::new();
-        // Fake stdout lock by writing to Vec via a helper mirroring redraw_live.
-        let mut rows = 0;
-        for s in inner.active.values() {
-            for line in &s.header {
-                writeln!(&mut buf, "{line}").unwrap();
-                rows += 1;
-            }
-            for line in &s.recent {
-                writeln!(&mut buf, "{line}").unwrap();
-                rows += 1;
-            }
-        }
-        assert_eq!(rows, 2);
+        inner.redraw_live(&mut buf).unwrap();
+        assert_eq!(inner.live_rows, 2);
+        inner.live = false;
+    }
+
+    #[test]
+    fn region_windows_rows_that_do_not_fit_terminal() {
+        let mut inner = inner_tty(4, 80);
+        inner.term_height = 4;
+        let first = inner.active.entry("first".to_string()).or_default();
+        first.header.push("first start".into());
+        first.recent.push_back("first output".into());
+        let second = inner.active.entry("second".to_string()).or_default();
+        second.header.push("second start".into());
+        second.recent.push_back("second output".into());
+
+        let mut buf = Vec::new();
+        inner.redraw_live(&mut buf).unwrap();
+
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "first start\nsecond start\nsecond output\n"
+        );
+        assert!(inner.live);
+        assert_eq!(inner.live_rows, 3);
+        assert_eq!(inner.recent_tail("first"), vec!["first output"]);
+        inner.live = false;
+    }
+
+    #[test]
+    fn region_windowed_rows_reappear_when_an_active_task_completes() {
+        let mut inner = inner_tty(4, 80);
+        inner.term_height = 4;
+        let first = inner.active.entry("first".to_string()).or_default();
+        first.header.push("first start".into());
+        first.recent.push_back("first output".into());
+        let second = inner.active.entry("second".to_string()).or_default();
+        second.header.push("second start".into());
+        second.recent.push_back("second output".into());
+        inner.active.shift_remove("second");
+
+        let mut buf = Vec::new();
+        inner.redraw_live(&mut buf).unwrap();
+
+        assert_eq!(String::from_utf8(buf).unwrap(), "first start\nfirst output\n");
+        assert_eq!(inner.live_rows, 2);
+        inner.live = false;
     }
 
     #[test]

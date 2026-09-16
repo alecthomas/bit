@@ -2,10 +2,13 @@ use std::fs;
 use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::sha256::{Hasher, SHA256};
+
+static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, thiserror::Error)]
 pub enum CasError {
@@ -179,11 +182,10 @@ pub fn hash_path(path: &Path) -> io::Result<SHA256> {
     Ok(hasher.finalize())
 }
 
-fn unique_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default()
+fn unique_suffix() -> usize {
+    // The PID separates processes. Within one process, the atomic value is
+    // used only as an identity, so relaxed ordering is sufficient.
+    NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Owner/group/other permission bits only; setuid/setgid/sticky bits are
