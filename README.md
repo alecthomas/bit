@@ -239,8 +239,9 @@ The built-in providers expose:
 | `pnpm.packages_with_script(script)`      | Workspace packages that define `script`    |
 | `pnpm.packages_with_script(script, dir)` | Matching workspace packages rooted at `dir` |
 
-`bit --schema` includes these function signatures. Filter by provider or exact
-member, such as `bit --schema go` or `bit --schema go.packages`.
+`bit --schema` includes these function signatures and their descriptions.
+Filter by provider or exact member, such as `bit --schema go` or
+`bit --schema go.packages`.
 
 ### Modules
 

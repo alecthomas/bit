@@ -81,6 +81,7 @@ pub type MaterializeResult<S, O> = Result<Option<ApplyResult<S, O>>, BoxError>;
 #[derive(Debug, Clone)]
 pub struct FuncSignature {
     pub name: String,
+    pub description: Option<String>,
     pub params: Vec<(String, StructField)>,
     pub returns: crate::value::Type,
 }
@@ -449,6 +450,7 @@ mod tests {
 
     struct StubProvider;
 
+    /// Return a value with an optional suffix.
     #[bit_derive::provider_function]
     fn typed_function(value: String, suffix: Option<String>) -> Result<Vec<String>, BoxError> {
         Ok(vec![format!("{value}{}", suffix.unwrap_or_default())])
@@ -536,6 +538,10 @@ mod tests {
     fn provider_function_macro_generates_signature_and_adapter() {
         let signature = __bit_signature_typed_function();
         assert_eq!(signature.name, "typed_function");
+        assert_eq!(
+            signature.description.as_deref(),
+            Some("Return a value with an optional suffix.")
+        );
         assert_eq!(signature.params[0].1.typ, crate::value::Type::String);
         assert_eq!(
             signature.params[1].1.typ,

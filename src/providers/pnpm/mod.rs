@@ -12,6 +12,7 @@ use crate::output::BlockWriter;
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
 use crate::value::Value;
 
+/// List workspace packages that define a script.
 #[bit_derive::provider_function]
 fn packages_with_script(script: String, dir: Option<String>) -> Result<Vec<String>, BoxError> {
     let dir = dir.as_deref().unwrap_or(".");

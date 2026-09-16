@@ -78,6 +78,10 @@ fn expand_provider_function(function: ItemFn) -> syn::Result<TokenStream2> {
     let call_name = format_ident!("__bit_call_{name}");
     let signature_name = format_ident!("__bit_signature_{name}");
     let visibility = &function.vis;
+    let description = match extract_doc_comment(&function.attrs) {
+        Some(doc) => quote! { Some(#doc.into()) },
+        None => quote! { None },
+    };
 
     let argument_bindings = params.iter().enumerate().map(|(index, (param, typ, optional, _))| {
         let param_name = param.to_string();
@@ -142,6 +146,7 @@ fn expand_provider_function(function: ItemFn) -> syn::Result<TokenStream2> {
         #visibility fn #signature_name() -> crate::provider::FuncSignature {
             crate::provider::FuncSignature {
                 name: stringify!(#name).into(),
+                description: #description,
                 params: vec![#(#signature_params),*],
                 returns: #return_schema,
             }

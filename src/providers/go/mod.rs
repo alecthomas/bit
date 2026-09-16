@@ -96,6 +96,7 @@ pub fn toolchain_fingerprint(env: &GoEnv, dir: Option<&Path>) -> Result<BTreeMap
         .collect())
 }
 
+/// List Go packages matching a package pattern.
 #[bit_derive::provider_function]
 fn packages(pattern: String, dir: Option<String>) -> Result<Vec<String>, BoxError> {
     let mut command = Command::new("go");

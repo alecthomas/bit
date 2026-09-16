@@ -393,6 +393,7 @@ fn cargo_metadata() -> Result<serde_json::Value, BoxError> {
     Ok(serde_json::from_slice(&output.stdout).map_err(|e| format!("failed to parse `cargo metadata` output: {e}"))?)
 }
 
+/// List Cargo workspace packages.
 #[bit_derive::provider_function]
 fn packages() -> Result<Vec<String>, BoxError> {
     workspace_package_names(&cargo_metadata()?)

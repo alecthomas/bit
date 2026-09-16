@@ -746,6 +746,8 @@ fn render_schema_json(entries: &[SchemaEntry]) -> String {
     struct FunctionEntry<'a> {
         name: &'a str,
         kind: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<&'a str>,
         params: Vec<FunctionParam<'a>>,
         returns: String,
     }
@@ -757,6 +759,7 @@ fn render_schema_json(entries: &[SchemaEntry]) -> String {
             SchemaEntry::Function { name, signature } => serde_json::to_value(FunctionEntry {
                 name,
                 kind: "function",
+                description: signature.description.as_deref(),
                 params: signature
                     .params
                     .iter()
@@ -818,19 +821,21 @@ fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {
 }
 
 fn print_function_schema(name: &str, signature: &FuncSignature) {
-    println!("{} ({})", name.bold(), "function".dim());
-
-    if !signature.params.is_empty() {
-        println!("  {}:", "Parameters".bold());
-        for (param_name, field) in &signature.params {
-            match &field.description {
-                Some(desc) => println!("    {} ({}) — {}", param_name, field.typ.to_string().dim(), desc.dim()),
-                None => println!("    {} ({})", param_name, field.typ.to_string().dim()),
-            }
-        }
+    let display = format_function_signature(name, signature);
+    match &signature.description {
+        Some(description) => println!("{} — {}", display.bold(), description.dim()),
+        None => println!("{}", display.bold()),
     }
+}
 
-    println!("  {}: {}", "Returns".bold(), signature.returns.to_string().dim());
+fn format_function_signature(name: &str, signature: &FuncSignature) -> String {
+    let params = signature
+        .params
+        .iter()
+        .map(|(name, field)| format!("{name}: {}", field.typ))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({params}) -> {}", signature.returns)
 }
 
 /// Walk every resolved `ImportRoot` for module files and derive their
@@ -966,10 +971,19 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&render_schema_json(&entries)).unwrap();
         assert_eq!(json[0]["name"], "go.packages");
         assert_eq!(json[0]["kind"], "function");
+        assert_eq!(json[0]["description"], "List Go packages matching a package pattern.");
         assert_eq!(json[0]["params"][0]["name"], "pattern");
         assert_eq!(json[0]["params"][0]["type"], "string");
         assert_eq!(json[0]["params"][1]["name"], "dir");
         assert_eq!(json[0]["params"][1]["type"], "string?");
         assert_eq!(json[0]["returns"], "[string]");
+
+        let SchemaEntry::Function { name, signature } = &entries[0] else {
+            panic!("expected function schema");
+        };
+        assert_eq!(
+            format_function_signature(name, signature),
+            "go.packages(pattern: string, dir: string?) -> [string]"
+        );
     }
 }
