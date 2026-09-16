@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufReader;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -97,20 +96,6 @@ impl GoExeResource {
 
 /// Role under which the built binary is recorded in a receipt.
 const EXE_ROLE: &str = "exe";
-
-/// Whether the binary at `path` already matches the cached artifact.
-fn output_matches(path: &Path, artifact: &ArtifactRef) -> bool {
-    let Ok(meta) = fs::metadata(path) else {
-        return false;
-    };
-    if !meta.is_file() || meta.len() != artifact.size {
-        return false;
-    }
-    if meta.permissions().mode() & 0o111 != artifact.mode & 0o111 {
-        return false;
-    }
-    crate::cache::cas::hash_path(path).is_ok_and(|digest| digest == artifact.digest)
-}
 
 impl Resource for GoExeResource {
     type State = GoExeState;
@@ -255,7 +240,7 @@ impl Resource for GoExeResource {
             return Ok(ReceiptCheck::Unusable);
         };
         let output = GoExeResource::output_path(inputs);
-        Ok(if output_matches(Path::new(&output), exe) {
+        Ok(if exe.matches(Path::new(&output)) {
             ReceiptCheck::Valid
         } else {
             ReceiptCheck::Restore
@@ -275,7 +260,7 @@ impl Resource for GoExeResource {
         let exe = artifacts.get(EXE_ROLE).ok_or("receipt has no exe artifact")?;
         let output = GoExeResource::output_path(inputs);
         let path = Path::new(&output);
-        if !output_matches(path, exe) {
+        if !exe.matches(path) {
             writer.line(&format!("restore {output}"));
             cas.materialize(exe, path)?;
         }

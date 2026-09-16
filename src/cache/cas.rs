@@ -26,6 +26,20 @@ pub struct ArtifactRef {
     pub mode: u32,
 }
 
+impl ArtifactRef {
+    /// Whether the file at `path` already has this artifact's content and
+    /// executable bits, i.e. materializing it would be a no-op.
+    pub fn matches(&self, path: &Path) -> bool {
+        let Ok(meta) = fs::metadata(path) else {
+            return false;
+        };
+        if !meta.is_file() || meta.len() != self.size || meta.permissions().mode() & 0o111 != self.mode & 0o111 {
+            return false;
+        }
+        hash_path(path).is_ok_and(|digest| digest == self.digest)
+    }
+}
+
 /// Global content-addressed store of immutable file blobs.
 ///
 /// Blobs live at `<root>/<first two hex chars>/<digest>` and are published
@@ -279,6 +293,24 @@ mod tests {
         let dest = dir.path().join("dest");
         cas.materialize(&refs[0], &dest).unwrap();
         assert_eq!(fs::metadata(&dest).unwrap().len(), 1 << 20);
+    }
+
+    #[test]
+    fn artifact_matches_checks_content_and_mode() {
+        let (dir, cas) = temp_cas();
+        let src = dir.path().join("src");
+        fs::write(&src, b"content").unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o755)).unwrap();
+        let artifact = cas.put_file(&src).unwrap();
+        assert!(artifact.matches(&src));
+
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!artifact.matches(&src), "lost executable bit");
+
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&src, b"changed").unwrap();
+        assert!(!artifact.matches(&src));
+        assert!(!artifact.matches(&dir.path().join("missing")));
     }
 
     #[test]

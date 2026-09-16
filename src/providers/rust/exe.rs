@@ -1,13 +1,17 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, BoxError, CachePolicy, MaterializeResult, PlanAction, PlanResult, ReceiptCheck, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv, RustFeatures};
@@ -42,7 +46,12 @@ pub struct RustExeOutputs {
 pub struct RustExeState {
     pub bin: Option<String>,
     pub package: Option<String>,
+    /// Absolute path of the binary in this worktree.
     pub path: String,
+    /// Path of the binary relative to Cargo's target directory. This is the
+    /// portable identity shared through the cache; `path` is not.
+    #[serde(default)]
+    pub target_rel: String,
     pub flags: Vec<String>,
     #[serde(flatten)]
     pub features: RustFeatures,
@@ -52,6 +61,29 @@ pub struct RustExeState {
 
 pub struct RustExeResource {
     pub tracker: Arc<Mutex<FileTracker>>,
+}
+
+/// Role under which the built binary is recorded in a receipt.
+const EXE_ROLE: &str = "exe";
+
+/// Where a cached binary belongs in this worktree.
+fn exe_destination(target_dir: &Path, target_rel: &str) -> Result<PathBuf, BoxError> {
+    if target_rel.is_empty() || Path::new(target_rel).is_absolute() {
+        return Err(format!("receipt has no portable binary path (got {target_rel:?})").into());
+    }
+    Ok(target_dir.join(target_rel))
+}
+
+fn state_for(inputs: &RustExeInputs, path: String, target_rel: String) -> RustExeState {
+    RustExeState {
+        bin: inputs.bin.clone(),
+        package: inputs.package.clone(),
+        path,
+        target_rel,
+        flags: inputs.flags.clone(),
+        features: inputs.features.clone(),
+        env: inputs.env.clone(),
+    }
 }
 
 fn exe_command(inputs: &RustExeInputs) -> CargoCommand {
@@ -182,22 +214,76 @@ impl Resource for RustExeResource {
         }
 
         let path = built_binary.ok_or("cargo build succeeded but no binary was produced")?;
+        let target_rel = Path::new(&path)
+            .strip_prefix(super::target_directory()?)
+            .map(|rel| rel.to_string_lossy().into_owned())
+            .unwrap_or_default();
 
         Ok(ApplyResult {
             outputs: RustExeOutputs { path: path.clone() },
-            state: Some(RustExeState {
-                bin: inputs.bin.clone(),
-                package: inputs.package.clone(),
-                path,
-                flags: inputs.flags.clone(),
-                features: inputs.features.clone(),
-                env: inputs.env.clone(),
-            }),
+            state: Some(state_for(inputs, path, target_rel)),
         })
     }
 
     fn destroy(&self, _prior_state: &RustExeState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
+    }
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Shared { version: 1 }
+    }
+
+    fn toolchain(&self, inputs: &RustExeInputs) -> Result<BTreeMap<String, String>, BoxError> {
+        super::toolchain_fingerprint(&inputs.env)
+    }
+
+    fn artifacts(&self, _inputs: &RustExeInputs, state: &RustExeState) -> Result<BTreeMap<String, PathBuf>, BoxError> {
+        if state.target_rel.is_empty() {
+            return Err(format!("binary {} is outside the cargo target directory", state.path).into());
+        }
+        Ok(BTreeMap::from([(EXE_ROLE.to_owned(), PathBuf::from(&state.path))]))
+    }
+
+    fn check_receipt(
+        &self,
+        _inputs: &RustExeInputs,
+        state: &RustExeState,
+        artifacts: &BTreeMap<String, ArtifactRef>,
+    ) -> Result<ReceiptCheck, BoxError> {
+        let Some(exe) = artifacts.get(EXE_ROLE) else {
+            return Ok(ReceiptCheck::Unusable);
+        };
+        let Ok(dest) = exe_destination(&super::target_directory()?, &state.target_rel) else {
+            return Ok(ReceiptCheck::Unusable);
+        };
+        Ok(if exe.matches(&dest) {
+            ReceiptCheck::Valid
+        } else {
+            ReceiptCheck::Restore
+        })
+    }
+
+    /// The receipt's `path` belongs to another worktree; the destination is
+    /// this worktree's target directory plus the portable relative path.
+    fn materialize(
+        &self,
+        inputs: &RustExeInputs,
+        state: &RustExeState,
+        artifacts: &BTreeMap<String, ArtifactRef>,
+        cas: &Cas,
+        writer: &BlockWriter,
+    ) -> MaterializeResult<RustExeState, RustExeOutputs> {
+        let exe = artifacts.get(EXE_ROLE).ok_or("receipt has no exe artifact")?;
+        let dest = exe_destination(&super::target_directory()?, &state.target_rel)?;
+        if !exe.matches(&dest) {
+            writer.line(&format!("restore {}", dest.display()));
+            cas.materialize(exe, &dest)?;
+        }
+        let path = dest.to_string_lossy().into_owned();
+        Ok(Some(ApplyResult {
+            outputs: RustExeOutputs { path: path.clone() },
+            state: Some(state_for(inputs, path, state.target_rel.clone())),
+        }))
     }
 }
 
@@ -215,6 +301,17 @@ mod tests {
     #[test]
     fn resource_kind_is_build() {
         assert_eq!(Resource::kind(&make_resource()), ResourceKind::Build);
+    }
+
+    #[test]
+    fn exe_destination_requires_relative_path() {
+        let target = Path::new("/wt/b/target");
+        assert_eq!(
+            exe_destination(target, "debug/app").unwrap(),
+            PathBuf::from("/wt/b/target/debug/app")
+        );
+        assert!(exe_destination(target, "").is_err());
+        assert!(exe_destination(target, "/wt/a/target/debug/app").is_err());
     }
 
     #[test]
@@ -271,6 +368,7 @@ mod tests {
             bin: Some("myapp".into()),
             package: None,
             path: "target/debug/myapp".into(),
+            target_rel: "debug/myapp".into(),
             flags: vec![],
             features: RustFeatures::default(),
             env: RustEnv::default(),
@@ -292,6 +390,7 @@ mod tests {
             bin: Some("myapp".into()),
             package: None,
             path: "target/debug/myapp".into(),
+            target_rel: "debug/myapp".into(),
             flags: vec![],
             features: RustFeatures::default(),
             env: RustEnv::default(),

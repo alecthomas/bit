@@ -7,10 +7,11 @@ pub mod test;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cache::ProjectIdentity;
 use crate::file_tracker::FileTracker;
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
 use crate::sha256::SHA256;
@@ -112,10 +113,19 @@ impl CargoCommand {
         parts.join(" ")
     }
 
-    /// Build a `std::process::Command` ready to spawn.
+    /// Build a `std::process::Command` ready to spawn. When path remapping
+    /// is enabled, workspace crates are compiled through bit acting as
+    /// Cargo's workspace wrapper (see [`enable_path_remap`]).
     pub fn command(&self) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
+        if let Some(wrapper) = RUSTC_WRAPPER.get()
+            && let Some(remap) = remap_path_prefix()
+            && std::env::var_os("RUSTC_WORKSPACE_WRAPPER").is_none()
+        {
+            cmd.env("RUSTC_WORKSPACE_WRAPPER", wrapper);
+            cmd.env(REMAP_ENV, remap);
+        }
         cmd
     }
 
@@ -148,6 +158,48 @@ impl CargoCommand {
         }
         Ok(())
     }
+}
+
+/// Environment variable carrying the `--remap-path-prefix` value from the
+/// cargo invocation to bit's rustc wrapper mode.
+pub const REMAP_ENV: &str = "BIT_RUSTC_REMAP";
+
+static RUSTC_WRAPPER: OnceLock<PathBuf> = OnceLock::new();
+
+/// Enable source path remapping for every cargo invocation in this process.
+/// `wrapper` is the bit executable; cargo re-invokes it as
+/// `RUSTC_WORKSPACE_WRAPPER` for workspace crates and it appends
+/// `--remap-path-prefix` (see [`wrapper_args`]). Only the bit binary opts in,
+/// so library consumers and tests never route rustc through themselves.
+pub fn enable_path_remap(wrapper: PathBuf) {
+    let _ = RUSTC_WRAPPER.set(wrapper);
+}
+
+/// Arguments for the rustc wrapper mode: the original rustc command line
+/// followed by the remap flag. The flag is appended so it takes precedence
+/// over any earlier remap for the same prefix.
+pub fn wrapper_args<'a>(rustc_args: &'a [String], remap: &str) -> Vec<std::borrow::Cow<'a, str>> {
+    rustc_args
+        .iter()
+        .map(|a| a.as_str().into())
+        .chain(std::iter::once(format!("--remap-path-prefix={remap}").into()))
+        .collect()
+}
+
+/// `--remap-path-prefix` value that rewrites this worktree's root to the
+/// repository's main worktree, so binaries built in linked worktrees embed
+/// identical paths and their debug info still points at a real checkout.
+/// `None` outside Git or when this already is the main worktree.
+fn remap_path_prefix() -> Option<&'static str> {
+    static REMAP: LazyLock<Option<String>> = LazyLock::new(|| {
+        let root = std::env::current_dir().ok()?.canonicalize().ok()?;
+        let main = ProjectIdentity::detect(&root).main_worktree()?;
+        if main == root {
+            return None;
+        }
+        Some(format!("{}={}", root.display(), main.display()))
+    });
+    REMAP.as_deref()
 }
 
 /// Fingerprint of the Rust toolchain and build environment, for the shared
@@ -186,14 +238,33 @@ pub fn toolchain_fingerprint(env: &RustEnv) -> Result<BTreeMap<String, String>, 
     Ok(fingerprint)
 }
 
-/// Cached source directories and individual files discovered by `cargo metadata`.
-/// The cache avoids re-running the expensive metadata call on every resolve.
+/// Cached source directories, individual files, and target directory
+/// discovered by `cargo metadata`. The cache avoids re-running the expensive
+/// metadata call on every resolve.
+#[derive(Clone)]
 struct DiscoveredPaths {
     globs: Vec<String>,
     files: Vec<PathBuf>,
+    target_dir: PathBuf,
 }
 
 static DISCOVERED_CACHE: Mutex<Option<DiscoveredPaths>> = Mutex::new(None);
+
+/// Discover once per process and return a copy so the lock is released
+/// before any hashing.
+fn discovered() -> Result<DiscoveredPaths, BoxError> {
+    let mut guard = DISCOVERED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = Some(discover_paths()?);
+    }
+    Ok(guard.clone().expect("just populated"))
+}
+
+/// Cargo's target directory for the current project, honouring
+/// `CARGO_TARGET_DIR` and config.
+pub fn target_directory() -> Result<PathBuf, BoxError> {
+    Ok(discovered()?.target_dir)
+}
 
 /// Resolve Rust source files for change detection.
 ///
@@ -201,18 +272,7 @@ static DISCOVERED_CACHE: Mutex<Option<DiscoveredPaths>> = Mutex::new(None);
 /// then hashes `.rs` files within them via the tracker. The metadata
 /// discovery is cached so the call only happens once per run.
 pub fn resolve_rust_inputs(tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let discovered = {
-        let mut guard = DISCOVERED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.is_none() {
-            *guard = Some(discover_paths()?);
-        }
-        // Clone the discovered paths so we can release the lock before hashing.
-        let d = guard.as_ref().expect("just populated");
-        DiscoveredPaths {
-            globs: d.globs.clone(),
-            files: d.files.clone(),
-        }
-    };
+    let discovered = discovered()?;
 
     let mut result = BTreeMap::new();
     for pattern in &discovered.globs {
@@ -227,10 +287,17 @@ pub fn resolve_rust_inputs(tracker: &mut FileTracker) -> Result<BTreeMap<String,
     Ok(result)
 }
 
-/// Discover source globs and individual files from `cargo metadata`.
+/// Discover source globs, individual files, and the target directory from
+/// `cargo metadata`.
 fn discover_paths() -> Result<DiscoveredPaths, BoxError> {
     let cwd = std::env::current_dir()?;
-    let source_dirs = discover_source_dirs(&cwd)?;
+    let meta = cargo_metadata()?;
+    let target_dir = meta
+        .get("target_directory")
+        .and_then(|t| t.as_str())
+        .map(PathBuf::from)
+        .ok_or("`cargo metadata` output has no target_directory")?;
+    let source_dirs = discover_source_dirs(&meta, &cwd);
 
     let mut globs = Vec::new();
     for dir in &source_dirs {
@@ -261,12 +328,15 @@ fn discover_paths() -> Result<DiscoveredPaths, BoxError> {
         files.push(cargo_lock);
     }
 
-    Ok(DiscoveredPaths { globs, files })
+    Ok(DiscoveredPaths {
+        globs,
+        files,
+        target_dir,
+    })
 }
 
-/// Run `cargo metadata --no-deps` and return the set of directories
-/// containing local package sources (the parent of each target's src_path).
-fn discover_source_dirs(cwd: &Path) -> Result<HashSet<PathBuf>, BoxError> {
+/// Run `cargo metadata --no-deps` for the current directory.
+fn cargo_metadata() -> Result<serde_json::Value, BoxError> {
     let output = Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .stdin(std::process::Stdio::null())
@@ -278,10 +348,12 @@ fn discover_source_dirs(cwd: &Path) -> Result<HashSet<PathBuf>, BoxError> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("`cargo metadata` failed: {stderr}").into());
     }
+    Ok(serde_json::from_slice(&output.stdout).map_err(|e| format!("failed to parse `cargo metadata` output: {e}"))?)
+}
 
-    let meta: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("failed to parse `cargo metadata` output: {e}"))?;
-
+/// Directories containing local package sources (the parent of each
+/// target's src_path), relative to `cwd`.
+fn discover_source_dirs(meta: &serde_json::Value, cwd: &Path) -> HashSet<PathBuf> {
     let mut dirs = HashSet::new();
 
     // Each package has targets with a src_path; collect their parent directories.
@@ -311,10 +383,10 @@ fn discover_source_dirs(cwd: &Path) -> Result<HashSet<PathBuf>, BoxError> {
 
     // Convert back to relative paths.
     let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    Ok(canonical
+    canonical
         .into_iter()
         .map(|d| d.strip_prefix(&cwd_canon).unwrap_or(&d).to_path_buf())
-        .collect())
+        .collect()
 }
 
 /// Rust provider with `build`, `exe`, `test`, `clippy`, and `fmt` resources.
@@ -382,6 +454,16 @@ mod tests {
         assert_eq!(resources[3].name(), "clippy");
         assert_eq!(resources[4].name(), "fmt");
         assert_eq!(resources[5].name(), "fmt-check");
+    }
+
+    #[test]
+    fn wrapper_args_append_remap_flag() {
+        let args = vec!["/usr/bin/rustc".to_owned(), "--crate-name".to_owned(), "x".to_owned()];
+        let out = wrapper_args(&args, "/wt/a=/repo");
+        assert_eq!(
+            out,
+            vec!["/usr/bin/rustc", "--crate-name", "x", "--remap-path-prefix=/wt/a=/repo"]
+        );
     }
 
     #[test]

@@ -28,6 +28,17 @@ impl ProjectIdentity {
         git_identity(&canonical).unwrap_or(ProjectIdentity::Path(canonical))
     }
 
+    /// Root of the repository's main worktree, if this is a Git project with
+    /// a conventional `.git` directory.
+    pub fn main_worktree(&self) -> Option<PathBuf> {
+        match self {
+            ProjectIdentity::Git { common_dir, .. } if common_dir.file_name().is_some_and(|n| n == ".git") => {
+                common_dir.parent().map(Path::to_path_buf)
+            }
+            _ => None,
+        }
+    }
+
     /// Stable hex identifier used as the receipt store directory name.
     pub fn id(&self) -> String {
         let mut hasher = Hasher::new();
@@ -111,6 +122,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let id = ProjectIdentity::detect(dir.path());
         assert_eq!(id, ProjectIdentity::Path(dir.path().canonicalize().unwrap()));
+        assert_eq!(id.main_worktree(), None);
     }
 
     #[test]
@@ -131,6 +143,9 @@ mod tests {
         assert!(matches!(a, ProjectIdentity::Git { .. }), "{a:?}");
         assert_eq!(a, b);
         assert_eq!(a.id(), b.id());
+
+        assert_eq!(a.main_worktree(), Some(main.canonicalize().unwrap()));
+        assert_eq!(b.main_worktree(), Some(main.canonicalize().unwrap()));
 
         let a_nested = ProjectIdentity::detect(&main.join("nested"));
         let b_nested = ProjectIdentity::detect(&linked.join("nested"));

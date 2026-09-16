@@ -747,9 +747,19 @@ the worktree that produced them has been deleted:
   `go.build`, `go.test`, `go.lint`, `go.fmt`, and `go.fmt-l` record that the
   action succeeded for a given set of sources, inputs, dependencies, and
   toolchain. A worktree with identical sources skips the action.
-- `go.exe` additionally stores the built binary. A worktree with identical
-  sources restores it to its own `output` path instead of running `go build`.
+- `go.exe` and `rust.exe` additionally store the built binary. A worktree
+  with identical sources restores it to its own output path (for `rust.exe`,
+  the same path under its own `target/` directory) instead of building.
   `bit --plan` reports this as a restore (`⇣`) without writing anything.
+
+So that Rust binaries built in different worktrees are interchangeable, bit
+compiles workspace crates with `--remap-path-prefix` rewriting the worktree
+root to the repository's main worktree. Panic locations and debug info
+therefore point at the main checkout rather than the worktree that happened
+to build them. bit applies this through Cargo's workspace wrapper, so
+`.cargo/config.toml` rustflags are untouched and dependencies are compiled
+exactly as before. Workspace crates themselves are recompiled when switching
+between bit and plain `cargo` commands in the same worktree.
 
 Only linked worktrees of one repository share entries, and only when the
 `BUILD.bit` sits at the same path relative to the worktree root. Failed tests
@@ -758,3 +768,4 @@ editing or deleting one cannot affect the cache. `bit --clean` removes only
 the worktree's own outputs and state; cached entries live under
 `~/Library/Caches/bit/actions` and `~/Library/Caches/bit/cas` (or
 `~/.cache/bit/...` on Linux) and can be deleted by hand to reclaim space.
+Set `BIT_CACHE_DIR` to relocate the shared cache.

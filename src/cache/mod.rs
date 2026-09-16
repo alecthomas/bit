@@ -64,6 +64,18 @@ impl ActionKeyInput<'_> {
     }
 }
 
+/// Environment variable overriding the shared cache location.
+pub const CACHE_DIR_ENV: &str = "BIT_CACHE_DIR";
+
+/// Directory holding the shared cache: `$BIT_CACHE_DIR` if set, otherwise
+/// `bit` under the platform cache directory.
+pub fn cache_root() -> Result<PathBuf, CacheError> {
+    if let Some(dir) = std::env::var_os(CACHE_DIR_ENV) {
+        return Ok(PathBuf::from(dir));
+    }
+    Ok(dirs::cache_dir().ok_or(CacheError::NoCacheDir)?.join("bit"))
+}
+
 struct Shared {
     receipts: ReceiptStore,
     cas: Cas,
@@ -89,10 +101,9 @@ impl BuildCache {
         }
     }
 
-    /// Open the shared cache under the platform cache directory.
+    /// Open the shared cache under [`cache_root`].
     pub fn open(root: &Path) -> Result<Self, CacheError> {
-        let cache_dir = dirs::cache_dir().ok_or(CacheError::NoCacheDir)?.join("bit");
-        Ok(Self::open_at(root, &cache_dir))
+        Ok(Self::open_at(root, &cache_root()?))
     }
 
     /// Open the shared cache under an explicit cache directory.
