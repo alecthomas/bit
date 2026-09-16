@@ -78,6 +78,7 @@ bit --schema [provider.member]  # show provider resource and function schemas
 bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
 bit --cache      # show the size of the shared build cache
 bit --cache --clean  # delete every cached receipt and artifact
+bit --long       # disable live scrolling regions and stream every output line
 ```
 
 All block/target-taking modes (`bit`, `--plan`, `--clean`, `--graph`, `--dump`)

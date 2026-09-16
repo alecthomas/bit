@@ -135,10 +135,18 @@ fn color_for_name(name: &str) -> Color {
 /// Rendering state for a single task that currently occupies a live region.
 #[derive(Default)]
 struct TaskState {
-    /// Fully-formatted header lines (from the `Starting` event). Always visible.
+    /// Fully-formatted header lines (from the `Starting` event). Retained in
+    /// full for failure output; the live region displays only the tail.
     header: Vec<String>,
     /// Last `REGION_LINES` streamed output lines, fully formatted.
     recent: VecDeque<String>,
+}
+
+impl TaskState {
+    fn visible_header(&self) -> &[String] {
+        let start = self.header.len().saturating_sub(REGION_LINES);
+        &self.header[start..]
+    }
 }
 
 /// Thread-safe output formatter. All output goes through this to keep
@@ -468,19 +476,20 @@ impl OutputInner {
         Ok(())
     }
 
-    /// Render active task headers and as many recent output rows as fit in the
-    /// terminal. A trailing blank row must remain visible because cursor-up
-    /// cannot reach lines that have scrolled out of the viewport. Task state
-    /// remains buffered when rows are hidden, so it can reappear as other tasks
-    /// complete and leave room in the live region.
+    /// Render the last `REGION_LINES` rows of each active task header and as
+    /// many recent output rows as fit in the terminal. A trailing blank row
+    /// must remain visible because cursor-up cannot reach lines that have
+    /// scrolled out of the viewport. Task state remains buffered when rows are
+    /// hidden, so it can reappear as other tasks complete and leave room in the
+    /// live region.
     fn redraw_live(&mut self, out: &mut impl Write) -> io::Result<()> {
         let row_budget = self.term_height.checked_sub(1).unwrap_or(usize::MAX);
-        let header_rows: usize = self.active.values().map(|state| state.header.len()).sum();
+        let header_rows: usize = self.active.values().map(|state| state.visible_header().len()).sum();
         let mut rows = 0;
 
         if header_rows > row_budget {
             let skip = header_rows - row_budget;
-            for line in self.active.values().flat_map(|state| &state.header).skip(skip) {
+            for line in self.active.values().flat_map(TaskState::visible_header).skip(skip) {
                 writeln!(out, "{line}")?;
                 rows += 1;
             }
@@ -506,7 +515,7 @@ impl OutputInner {
             }
 
             for (index, state) in self.active.values().enumerate() {
-                for line in &state.header {
+                for line in state.visible_header() {
                     writeln!(out, "{line}")?;
                     rows += 1;
                 }
@@ -902,6 +911,21 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         inner.redraw_live(&mut buf).unwrap();
         assert_eq!(inner.live_rows, 2);
+        inner.live = false;
+    }
+
+    #[test]
+    fn region_caps_long_header_at_per_target_height() {
+        let mut inner = inner_tty(4, 80);
+        let state = inner.active.entry("a".to_string()).or_default();
+        state.header = (0..REGION_LINES + 2).map(|index| format!("line{index}")).collect();
+
+        let mut buf = Vec::new();
+        inner.redraw_live(&mut buf).unwrap();
+
+        assert_eq!(String::from_utf8(buf).unwrap(), "line2\nline3\nline4\nline5\nline6\n");
+        assert_eq!(inner.live_rows, REGION_LINES);
+        assert_eq!(inner.recent_header("a").len(), REGION_LINES + 2);
         inner.live = false;
     }
 
