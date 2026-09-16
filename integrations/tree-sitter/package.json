@@ -1,0 +1,23 @@
+{
+  "name": "tree-sitter-bit",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for the bit build language",
+  "repository": "github.com/alecthomas/bit",
+  "license": "MIT",
+  "main": "bindings/node",
+  "keywords": ["parser", "tree-sitter", "bit"],
+  "dependencies": {
+    "node-addon-api": "^7.1.0",
+    "node-gyp-build": "^4.8.0"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.0"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.bit",
+      "file-types": ["bit"],
+      "injection-regex": "^bit$"
+    }
+  ]
+}

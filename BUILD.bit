@@ -1,0 +1,97 @@
+# Format Rust sources before any build step runs.
+pre fmt = rust.fmt {}
+
+# Debug build of the `bit` binary.
+debug = rust.exe {}
+
+# Release build of the `bit` binary.
+release = rust.exe {
+  profile = "release"
+}
+
+# Package the release binary into a Docker image tagged `bit:latest`.
+image = docker.image {
+  tag = "bit:latest"
+  depends_on = [release]
+}
+
+# Run the Rust unit test suite.
+test = rust.test {}
+
+# Lint with clippy, treating warnings as errors.
+clippy = rust.clippy {
+  flags = ["--", "-D", "warnings"]
+}
+
+# End-to-end smoke test of the debug binary.
+integration-test = exec.test {
+  depends_on = [debug]
+  command  = <<-EOF
+  #{debug.path} --version
+  #{debug.path} --plan ...
+  EOF
+}
+
+# Latest commit SHA touching the tree-sitter grammar; used to pin the Zed
+# extension's grammar revision.
+let tree_sitter_rev = exec("git log -1 --format=%H -- integrations/tree-sitter") | trim
+
+# Sync the Zed extension's grammar rev to the latest commit touching
+# integrations/tree-sitter. The SHA is baked into the command, so bit's
+# content hash re-runs this only when a new commit lands.
+protected sync-zed-rev = exec {
+  command = <<-EOF
+    sed -i.bak 's|^rev = ".*"|rev = "#{tree_sitter_rev}"|' integrations/zed/extension.toml
+    rm integrations/zed/extension.toml.bak
+  EOF
+  output = "integrations/zed/extension.toml"
+}
+
+# Regenerate the Providers section of README.md from `bit --schema --json`.
+# Re-runs only when the debug binary changes (i.e. schema may have changed).
+sync-readme = exec {
+  command = <<-EOF
+    export SECTION=$(mktemp)
+    trap 'rm -f "$SECTION"' EXIT
+    #{debug.path} --schema --json | jq -r '
+      def pad($n): . as $s | ([($n - ($s|length)), 2] | max) as $p | $s + (" " * $p);
+      "## Providers\n",
+      (group_by(.name | split(".")[0]) | .[] |
+      (.[0].name | split(".")[0]) as $prov |
+      "### \($prov)\n",
+      (.[] | . as $res |
+        "**`\(.name)`** (\(.kind))\(.inputs.description // "" | if . != "" then " — \(.)" else "" end)\n",
+        (if (.inputs.fields | length) > 0 then
+          ([(.inputs.fields | map("  \(.name) = \(.type)" | length) | max + 2), 40] | min) as $col |
+          "```bit",
+          "block = \($res.name) {",
+          (.inputs.fields[] |
+            ("  \(.name) = \(.type)" | pad($col)) as $left |
+            [(.description // ""), (if .default then "default: \(.default)" else "" end)]
+              | map(select(. != "")) | join(", ") |
+            if . != "" then "\($left)# \(.)" else $left end),
+          "}",
+          "```\n"
+        else empty end),
+        (if (.outputs.fields | length) > 0 then
+          "**Outputs:**\n",
+          "| Field | Type | Description |",
+          "|---|---|---|",
+          (.outputs.fields[] |
+            "| `\(.name)` | `\(.type)` | \(.description // "") |"),
+          ""
+        else empty end)
+      ))
+    ' > "$SECTION"
+    awk '
+      /^## Providers/ { skip=1; system("cat " ENVIRON["SECTION"]); next }
+      /^## How It Works/ { skip=0 }
+      !skip { print }
+    ' README.md > README.md.tmp && mv README.md.tmp README.md
+    dprint fmt README.md
+  EOF
+  resolve = '#{debug.path} --schema | sha256'
+}
+
+# Default target: release binary, tests, lints, and Zed rev sync.
+target default = [release, test, clippy, sync-zed-rev]
