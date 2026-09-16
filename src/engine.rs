@@ -885,10 +885,7 @@ fn publish_receipt(
         return;
     };
     let attempt = || -> Result<(ActionKey, PublishOutcome), BoxError> {
-        let mut artifacts = BTreeMap::new();
-        for (role, path) in node.resource.artifacts(&prepared.inputs, state)? {
-            artifacts.insert(role, cas.put_file(&path)?);
-        }
+        let artifacts = node.resource.capture_artifacts(&prepared.inputs, state, cas)?;
         let key = action_key(
             name,
             node,
@@ -2043,8 +2040,16 @@ mod tests {
             fn toolchain(&self, _inputs: &Inputs) -> Result<BTreeMap<String, String>, BoxError> {
                 Ok(BTreeMap::from([("tool".to_owned(), "1".to_owned())]))
             }
-            fn artifacts(&self, _inputs: &Inputs, state: &State) -> Result<BTreeMap<String, PathBuf>, BoxError> {
-                Ok(BTreeMap::from([("out".to_owned(), PathBuf::from(&state.path))]))
+            fn capture_artifacts(
+                &self,
+                _inputs: &Inputs,
+                state: &State,
+                cas: &Cas,
+            ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
+                Ok(BTreeMap::from([(
+                    "out".to_owned(),
+                    cas.put_file(Path::new(&state.path))?,
+                )]))
             }
             fn check_receipt(
                 &self,

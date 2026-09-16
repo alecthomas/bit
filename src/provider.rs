@@ -1,9 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
-use std::error::Error;
-use std::path::PathBuf;
-
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::{BTreeMap, HashMap};
+use std::error::Error;
 
 use crate::cache::{ArtifactRef, Cas};
 use crate::output::BlockWriter;
@@ -156,10 +154,14 @@ pub trait Resource {
         Ok(BTreeMap::new())
     }
 
-    /// Durable files produced by a successful apply, keyed by a
-    /// provider-defined role. The engine stores each in the CAS and records
-    /// the references in the receipt.
-    fn artifacts(&self, _inputs: &Self::Inputs, _state: &Self::State) -> Result<BTreeMap<String, PathBuf>, BoxError> {
+    /// Capture durable artifacts produced by a successful apply into the CAS,
+    /// keyed by a provider-defined role.
+    fn capture_artifacts(
+        &self,
+        _inputs: &Self::Inputs,
+        _state: &Self::State,
+        _cas: &Cas,
+    ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
         Ok(BTreeMap::new())
     }
 
@@ -216,7 +218,12 @@ pub trait DynResource: Send + Sync {
     fn toolchain(&self, _inputs: &Map) -> Result<BTreeMap<String, String>, BoxError> {
         Ok(BTreeMap::new())
     }
-    fn artifacts(&self, _inputs: &Map, _state: &serde_json::Value) -> Result<BTreeMap<String, PathBuf>, BoxError> {
+    fn capture_artifacts(
+        &self,
+        _inputs: &Map,
+        _state: &serde_json::Value,
+        _cas: &Cas,
+    ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
         Ok(BTreeMap::new())
     }
     /// Returns [`ReceiptCheck::Unusable`] when the receipt state cannot be
@@ -315,10 +322,15 @@ impl<R: Resource + Send + Sync> DynResource for R {
         Resource::toolchain(self, &typed)
     }
 
-    fn artifacts(&self, inputs: &Map, state: &serde_json::Value) -> Result<BTreeMap<String, PathBuf>, BoxError> {
+    fn capture_artifacts(
+        &self,
+        inputs: &Map,
+        state: &serde_json::Value,
+        cas: &Cas,
+    ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         let state: R::State = serde_json::from_value(state.clone())?;
-        Resource::artifacts(self, &typed, &state)
+        Resource::capture_artifacts(self, &typed, &state, cas)
     }
 
     fn check_receipt(

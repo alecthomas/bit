@@ -753,6 +753,9 @@ the worktree that produced them has been deleted:
   with identical sources restores it to its own output path (for `rust.exe`,
   the same path under its own `target/` directory) instead of building.
   `bit --plan` reports this as a restore (`⇣`) without writing anything.
+- `docker.image` stores the complete image as a Docker archive. If the image
+  has been removed, an identical action restores it with `docker image load`
+  instead of rebuilding it.
 
 So that Rust binaries built in different worktrees are interchangeable, bit
 compiles workspace crates with `--remap-path-prefix` rewriting the worktree

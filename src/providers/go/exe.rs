@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -226,8 +226,16 @@ impl Resource for GoExeResource {
         super::toolchain_fingerprint(&inputs.env, inputs.dir.as_deref().map(Path::new))
     }
 
-    fn artifacts(&self, _inputs: &GoExeInputs, state: &GoExeState) -> Result<BTreeMap<String, PathBuf>, BoxError> {
-        Ok(BTreeMap::from([(EXE_ROLE.to_owned(), PathBuf::from(&state.output))]))
+    fn capture_artifacts(
+        &self,
+        _inputs: &GoExeInputs,
+        state: &GoExeState,
+        cas: &Cas,
+    ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
+        Ok(BTreeMap::from([(
+            EXE_ROLE.to_owned(),
+            cas.put_file(Path::new(&state.output))?,
+        )]))
     }
 
     fn check_receipt(

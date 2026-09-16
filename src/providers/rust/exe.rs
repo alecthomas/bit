@@ -237,11 +237,19 @@ impl Resource for RustExeResource {
         super::toolchain_fingerprint(&inputs.env)
     }
 
-    fn artifacts(&self, _inputs: &RustExeInputs, state: &RustExeState) -> Result<BTreeMap<String, PathBuf>, BoxError> {
+    fn capture_artifacts(
+        &self,
+        _inputs: &RustExeInputs,
+        state: &RustExeState,
+        cas: &Cas,
+    ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
         if state.target_rel.is_empty() {
             return Err(format!("binary {} is outside the cargo target directory", state.path).into());
         }
-        Ok(BTreeMap::from([(EXE_ROLE.to_owned(), PathBuf::from(&state.path))]))
+        Ok(BTreeMap::from([(
+            EXE_ROLE.to_owned(),
+            cas.put_file(Path::new(&state.path))?,
+        )]))
     }
 
     fn check_receipt(

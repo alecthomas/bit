@@ -1,17 +1,22 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, BoxError, CachePolicy, MaterializeResult, PlanAction, PlanResult, ReceiptCheck, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::parse;
+
+const IMAGE_ROLE: &str = "image";
 
 /// Build a Docker image (auto-detects inputs from Dockerfile)
 #[derive(Debug, Deserialize, bit_derive::Schema)]
@@ -135,11 +140,43 @@ fn build_args(inputs: &ImageInputs) -> Vec<String> {
 
 pub struct ImageResource {
     tracker: Arc<Mutex<FileTracker>>,
+    docker: PathBuf,
 }
 
 impl ImageResource {
     pub(super) fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
-        Self { tracker }
+        Self {
+            tracker,
+            docker: "docker".into(),
+        }
+    }
+
+    fn command(&self) -> Command {
+        Command::new(&self.docker)
+    }
+
+    fn inspect_image_id(&self, image: &str) -> Option<String> {
+        let output = self
+            .command()
+            .args(["image", "inspect", "--format", "{{.Id}}", image])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| strip_docker_prefix(String::from_utf8_lossy(&output.stdout).trim()).to_owned())
+    }
+
+    fn tag_image(&self, image: &str, tag: &str) -> Result<(), BoxError> {
+        let output = self
+            .command()
+            .args(["tag", image, tag])
+            .output()
+            .map_err(|e| format!("failed to run docker tag: {e}"))?;
+        if !output.status.success() {
+            return Err(format!("docker tag failed: {}", String::from_utf8_lossy(&output.stderr).trim()).into());
+        }
+        Ok(())
     }
 }
 
@@ -214,13 +251,7 @@ impl Resource for ImageResource {
             });
         }
 
-        let exists = Command::new("docker")
-            .args(["image", "inspect", &prior.image_id])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let exists = self.inspect_image_id(&prior.image_id).as_deref() == Some(prior.image_id.as_str());
 
         if !exists {
             return Ok(PlanResult {
@@ -244,7 +275,7 @@ impl Resource for ImageResource {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ImageState, ImageOutputs>, BoxError> {
         let args = build_args(inputs);
-        let mut cmd = Command::new("docker");
+        let mut cmd = self.command();
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd
@@ -268,7 +299,8 @@ impl Resource for ImageResource {
             return Err(format!("docker buildx build exited with {status}").into());
         }
 
-        let digest_output = Command::new("docker")
+        let digest_output = self
+            .command()
             .args(["inspect", "--format", "{{.Id}}", &inputs.tag])
             .output()
             .map_err(|e| format!("docker inspect failed: {e}"))?;
@@ -277,7 +309,8 @@ impl Resource for ImageResource {
         let image_id = strip_docker_prefix(&raw_id).to_owned();
 
         let pinned = pinned_tag(&inputs.tag, &image_id);
-        let tag_status = Command::new("docker")
+        let tag_status = self
+            .command()
             .args(["tag", &inputs.tag, &pinned])
             .output()
             .map_err(|e| format!("docker tag failed: {e}"))?;
@@ -307,10 +340,11 @@ impl Resource for ImageResource {
         use crate::output::Event;
         if let Some(pinned) = &prior_state.pinned_tag {
             writer.event(Event::Starting, &format!("docker rmi -f {pinned}"));
-            let _ = Command::new("docker").args(["rmi", "-f", pinned]).output();
+            let _ = self.command().args(["rmi", "-f", pinned]).output();
         }
         writer.event(Event::Starting, &format!("docker rmi -f {}", prior_state.image_id));
-        let output = Command::new("docker")
+        let output = self
+            .command()
             .args(["rmi", "-f", &prior_state.image_id])
             .output()
             .map_err(|e| format!("docker rmi failed: {e}"))?;
@@ -321,21 +355,142 @@ impl Resource for ImageResource {
         }
         Ok(())
     }
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Shared { version: 1 }
+    }
+
+    fn capture_artifacts(
+        &self,
+        inputs: &ImageInputs,
+        state: &ImageState,
+        cas: &Cas,
+    ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
+        if inputs.platform.len() > 1 {
+            return Err(
+                "multi-platform images are pushed to a registry and cannot be saved from the local image store".into(),
+            );
+        }
+        let image = state
+            .pinned_tag
+            .clone()
+            .unwrap_or_else(|| pinned_tag(&state.tag, &state.image_id));
+        let archive = tempfile::NamedTempFile::new()?;
+        let output = self
+            .command()
+            .args(["image", "save", "--output"])
+            .arg(archive.path())
+            .arg(&image)
+            .output()
+            .map_err(|e| format!("failed to run docker image save: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "docker image save failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+            .into());
+        }
+        Ok(BTreeMap::from([(IMAGE_ROLE.to_owned(), cas.put_file(archive.path())?)]))
+    }
+
+    fn check_receipt(
+        &self,
+        inputs: &ImageInputs,
+        state: &ImageState,
+        artifacts: &BTreeMap<String, ArtifactRef>,
+    ) -> Result<ReceiptCheck, BoxError> {
+        if !artifacts.contains_key(IMAGE_ROLE) {
+            return Ok(ReceiptCheck::Unusable);
+        }
+        let pinned = pinned_tag(&inputs.tag, &state.image_id);
+        Ok(
+            if self.inspect_image_id(&pinned).as_deref() == Some(state.image_id.as_str()) {
+                ReceiptCheck::Valid
+            } else {
+                ReceiptCheck::Restore
+            },
+        )
+    }
+
+    fn materialize(
+        &self,
+        inputs: &ImageInputs,
+        state: &ImageState,
+        artifacts: &BTreeMap<String, ArtifactRef>,
+        cas: &Cas,
+        writer: &BlockWriter,
+    ) -> MaterializeResult<ImageState, ImageOutputs> {
+        let artifact = artifacts.get(IMAGE_ROLE).ok_or("receipt has no image artifact")?;
+        let pinned = pinned_tag(&inputs.tag, &state.image_id);
+
+        if self.inspect_image_id(&state.image_id).as_deref() != Some(state.image_id.as_str()) {
+            let dir = tempfile::tempdir()?;
+            let archive = dir.path().join("image.tar");
+            cas.materialize(artifact, &archive)?;
+            writer.line(&format!("docker image load --input {}", archive.display()));
+            let output = self
+                .command()
+                .args(["image", "load", "--input"])
+                .arg(&archive)
+                .output()
+                .map_err(|e| format!("failed to run docker image load: {e}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "docker image load failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )
+                .into());
+            }
+        }
+
+        if self.inspect_image_id(&pinned).as_deref() != Some(state.image_id.as_str()) {
+            self.tag_image(&state.image_id, &pinned)?;
+        }
+        if self.inspect_image_id(&inputs.tag).as_deref() != Some(state.image_id.as_str()) {
+            self.tag_image(&state.image_id, &inputs.tag)?;
+        }
+
+        Ok(Some(ApplyResult {
+            state: Some(ImageState {
+                tag: inputs.tag.clone(),
+                image_id: state.image_id.clone(),
+                platform: inputs.platform.clone(),
+                pinned_tag: Some(pinned.clone()),
+            }),
+            outputs: ImageOutputs {
+                image_ref: pinned,
+                image_id: state.image_id.clone(),
+            },
+        }))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn plan_create_when_no_state() {
-        let inputs = ImageInputs {
+    fn test_inputs() -> ImageInputs {
+        ImageInputs {
             tag: "myapp:latest".into(),
             context: ".".into(),
             dockerfile: "Dockerfile".into(),
             build_args: HashMap::new(),
             platform: vec![],
-        };
+        }
+    }
+
+    fn test_state() -> ImageState {
+        ImageState {
+            tag: "myapp:latest".into(),
+            image_id: "abc123".into(),
+            platform: vec![],
+            pinned_tag: Some("myapp:abc123".into()),
+        }
+    }
+
+    #[test]
+    fn plan_create_when_no_state() {
+        let inputs = test_inputs();
         let result = Resource::plan(
             &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
             &inputs,
@@ -348,13 +503,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_image_deleted() {
-        let inputs = ImageInputs {
-            tag: "myapp:latest".into(),
-            context: ".".into(),
-            dockerfile: "Dockerfile".into(),
-            build_args: HashMap::new(),
-            platform: vec![],
-        };
+        let inputs = test_inputs();
         let prior = ImageState {
             tag: "myapp:latest".into(),
             image_id: "nonexistent".into(),
@@ -503,5 +652,81 @@ mod tests {
     fn strip_docker_prefix_removes_sha256() {
         assert_eq!(strip_docker_prefix("sha256:abc123"), "abc123");
         assert_eq!(strip_docker_prefix("abc123"), "abc123");
+    }
+
+    #[test]
+    fn image_uses_shared_cache() {
+        let resource = ImageResource::new(Arc::new(Mutex::new(FileTracker::default())));
+        assert_eq!(Resource::cache_policy(&resource), CachePolicy::Shared { version: 1 });
+    }
+
+    #[test]
+    fn receipt_without_image_archive_is_unusable() {
+        let resource = ImageResource::new(Arc::new(Mutex::new(FileTracker::default())));
+        assert_eq!(
+            Resource::check_receipt(&resource, &test_inputs(), &test_state(), &BTreeMap::new()).unwrap(),
+            ReceiptCheck::Unusable
+        );
+    }
+
+    #[test]
+    fn captures_and_restores_image_archive() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let docker = dir.path().join("docker");
+        std::fs::write(
+            &docker,
+            r#"#!/bin/sh
+log="$(dirname "$0")/docker.log"
+if [ "$1" = "image" ] && [ "$2" = "save" ]; then
+  printf archive > "$4"
+  printf 'save %s\n' "$5" >> "$log"
+  exit 0
+fi
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+  exit 1
+fi
+if [ "$1" = "image" ] && [ "$2" = "load" ]; then
+  printf 'load %s\n' "$(cat "$4")" >> "$log"
+  exit 0
+fi
+if [ "$1" = "tag" ]; then
+  printf 'tag %s %s\n' "$2" "$3" >> "$log"
+  exit 0
+fi
+exit 1
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let resource = ImageResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            docker,
+        };
+        let cas = Cas::new(dir.path().join("cas"));
+        let inputs = test_inputs();
+        let state = test_state();
+        let artifacts = Resource::capture_artifacts(&resource, &inputs, &state, &cas).unwrap();
+        let artifact = artifacts.get(IMAGE_ROLE).unwrap();
+        let archive = dir.path().join("saved.tar");
+        cas.materialize(artifact, &archive).unwrap();
+        assert_eq!(std::fs::read(&archive).unwrap(), b"archive");
+
+        let output = crate::output::Output::new(&[]);
+        let writer = output.writer("image");
+        let restored = Resource::materialize(&resource, &inputs, &state, &artifacts, &cas, &writer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.outputs.image_ref, "myapp:abc123");
+        assert_eq!(restored.outputs.image_id, "abc123");
+        assert_eq!(restored.state.unwrap().pinned_tag.as_deref(), Some("myapp:abc123"));
+
+        let log = std::fs::read_to_string(dir.path().join("docker.log")).unwrap();
+        assert!(log.contains("save myapp:abc123"), "{log}");
+        assert!(log.contains("load archive"), "{log}");
+        assert!(log.contains("tag abc123 myapp:abc123"), "{log}");
+        assert!(log.contains("tag abc123 myapp:latest"), "{log}");
     }
 }
