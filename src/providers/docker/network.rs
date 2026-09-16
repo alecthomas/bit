@@ -168,9 +168,6 @@ impl Resource for NetworkResource {
     }
 
     fn destroy(&self, prior_state: &NetworkState, writer: &BlockWriter) -> Result<(), BoxError> {
-        if network_id(&prior_state.name).is_none() {
-            return Ok(());
-        }
         writer.event(Event::Starting, &format!("docker network rm {}", prior_state.name));
         remove_network(&prior_state.name)
     }
@@ -181,15 +178,7 @@ fn remove_network(name: &str) -> Result<(), BoxError> {
         .args(["network", "rm", name])
         .output()
         .map_err(|e| format!("docker network rm failed: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-        // Ignore "not found" errors — idempotent destroy.
-        if stderr.contains("not found") || stderr.contains("No such network") {
-            return Ok(());
-        }
-        return Err(stderr.into());
-    }
-    Ok(())
+    super::check_remove_output("docker network rm", out)
 }
 
 fn short_id(id: &str) -> &str {

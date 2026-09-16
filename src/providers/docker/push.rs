@@ -165,8 +165,11 @@ impl Resource for PushResource {
     fn destroy(&self, prior_state: &PushState, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         writer.event(Event::Starting, &format!("docker rmi {}", prior_state.tag));
-        let _ = Command::new("docker").args(["rmi", &prior_state.tag]).output();
-        Ok(())
+        let output = Command::new("docker")
+            .args(["rmi", &prior_state.tag])
+            .output()
+            .map_err(|e| format!("docker rmi failed: {e}"))?;
+        super::check_remove_output("docker rmi", output)
     }
 }
 

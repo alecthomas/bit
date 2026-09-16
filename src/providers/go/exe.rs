@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
-use crate::output::{BlockWriter, Event};
+use crate::output::BlockWriter;
 use crate::provider::{
     ApplyResult, BoxError, CachePolicy, MaterializeResult, PlanAction, PlanResult, ReceiptCheck, Resource, ResourceKind,
 };
@@ -206,12 +206,7 @@ impl Resource for GoExeResource {
     }
 
     fn destroy(&self, prior_state: &GoExeState, writer: &BlockWriter) -> Result<(), BoxError> {
-        let path = Path::new(&prior_state.output);
-        if path.is_file() {
-            writer.event(Event::Starting, &format!("rm {}", prior_state.output));
-            fs::remove_file(path).ok();
-        }
-        Ok(())
+        crate::providers::remove_path(Path::new(&prior_state.output), writer)
     }
 
     fn cache_policy(&self) -> CachePolicy {
@@ -446,7 +441,7 @@ mod tests {
     fn destroy_removes_output() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("mybin");
-        fs::write(&output, "binary").unwrap();
+        std::fs::write(&output, "binary").unwrap();
 
         let state = GoExeState {
             package: "./cmd/app".into(),

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::{BlockWriter, Event};
+use crate::output::BlockWriter;
 use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
@@ -282,14 +282,7 @@ impl Resource for PnpmRunResource {
 
     fn destroy(&self, prior_state: &PnpmRunState, writer: &BlockWriter) -> Result<(), BoxError> {
         for output in &prior_state.output {
-            let path = Path::new(output);
-            if path.is_dir() {
-                writer.event(Event::Starting, &format!("rm -rf {output}"));
-                fs::remove_dir_all(path).ok();
-            } else if path.is_file() {
-                writer.event(Event::Starting, &format!("rm {output}"));
-                fs::remove_file(path).ok();
-            }
+            crate::providers::remove_path(Path::new(output), writer)?;
         }
         Ok(())
     }
@@ -374,5 +367,31 @@ mod tests {
         let o = PnpmRunOutputs::from_paths(&["a".to_owned(), "b".to_owned()]);
         assert!(o.path.is_none());
         assert_eq!(o.paths, Some(vec!["a".into(), "b".into()]));
+    }
+
+    #[test]
+    fn destroy_removes_declared_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bundle.js");
+        let output_dir = dir.path().join("dist");
+        fs::write(&file, "bundle").unwrap();
+        fs::create_dir(&output_dir).unwrap();
+        fs::write(output_dir.join("index.html"), "html").unwrap();
+        let state = PnpmRunState {
+            script: "build".into(),
+            package: None,
+            args: vec![],
+            output: vec![
+                file.to_string_lossy().into_owned(),
+                output_dir.to_string_lossy().into_owned(),
+            ],
+            dir: ".".into(),
+        };
+        let output = crate::output::Output::new(&[]);
+
+        Resource::destroy(&test_resource(), &state, &output.writer("build")).unwrap();
+
+        assert!(!file.exists());
+        assert!(!output_dir.exists());
     }
 }

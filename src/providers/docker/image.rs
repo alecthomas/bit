@@ -276,6 +276,15 @@ impl ImageResource {
         }
         Ok(())
     }
+
+    fn remove_image(&self, image: &str) -> Result<(), BoxError> {
+        let output = self
+            .command()
+            .args(["rmi", "-f", image])
+            .output()
+            .map_err(|e| format!("docker rmi failed: {e}"))?;
+        super::check_remove_output("docker rmi", output)
+    }
 }
 
 impl Resource for ImageResource {
@@ -438,20 +447,10 @@ impl Resource for ImageResource {
         use crate::output::Event;
         if let Some(pinned) = &prior_state.pinned_tag {
             writer.event(Event::Starting, &format!("docker rmi -f {pinned}"));
-            let _ = self.command().args(["rmi", "-f", pinned]).output();
+            self.remove_image(pinned)?;
         }
         writer.event(Event::Starting, &format!("docker rmi -f {}", prior_state.image_id));
-        let output = self
-            .command()
-            .args(["rmi", "-f", &prior_state.image_id])
-            .output()
-            .map_err(|e| format!("docker rmi failed: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            return Err(stderr.into());
-        }
-        Ok(())
+        self.remove_image(&prior_state.image_id)
     }
 
     fn cache_policy(&self) -> CachePolicy {
@@ -626,6 +625,33 @@ mod tests {
         .unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert!(result.description.contains("myapp:latest"));
+    }
+
+    #[test]
+    fn destroy_removes_pinned_tag_and_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let docker = dir.path().join("docker");
+        std::fs::write(
+            &docker,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$(dirname "$0")/docker.log"
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let resource = ImageResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            docker,
+        };
+        let output = crate::output::Output::new(&[]);
+
+        Resource::destroy(&resource, &test_state(), &output.writer("image")).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("docker.log")).unwrap(),
+            "rmi -f myapp:abc123\nrmi -f abc123\n"
+        );
     }
 
     #[test]

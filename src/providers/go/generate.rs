@@ -43,6 +43,8 @@ pub struct GoGenerateOutputs {}
 pub struct GoGenerateState {
     pub package: String,
     pub flags: Vec<String>,
+    #[serde(default)]
+    pub outputs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
     #[serde(flatten)]
@@ -156,13 +158,17 @@ impl Resource for GoGenerateResource {
             state: Some(GoGenerateState {
                 package: inputs.package.clone(),
                 flags: inputs.flags.clone(),
+                outputs: inputs.outputs.clone(),
                 dir: inputs.dir.clone(),
                 env: inputs.env.clone(),
             }),
         })
     }
 
-    fn destroy(&self, _prior_state: &GoGenerateState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &GoGenerateState, writer: &BlockWriter) -> Result<(), BoxError> {
+        for output in &prior_state.outputs {
+            crate::providers::remove_path(Path::new(output), writer)?;
+        }
         Ok(())
     }
 }
@@ -207,6 +213,7 @@ mod tests {
         let prior = GoGenerateState {
             package: "./...".into(),
             flags: vec![],
+            outputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
@@ -227,10 +234,37 @@ mod tests {
         let prior = GoGenerateState {
             package: "./...".into(),
             flags: vec![],
+            outputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn destroy_removes_declared_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("generated.go");
+        let output_dir = dir.path().join("generated");
+        std::fs::write(&file, "package generated").unwrap();
+        std::fs::create_dir(&output_dir).unwrap();
+        std::fs::write(output_dir.join("data.go"), "package generated").unwrap();
+        let state = GoGenerateState {
+            package: "./...".into(),
+            flags: vec![],
+            outputs: vec![
+                file.to_string_lossy().into_owned(),
+                output_dir.to_string_lossy().into_owned(),
+            ],
+            dir: None,
+            env: GoEnv::default(),
+        };
+
+        let output = crate::output::Output::new(&[]);
+        Resource::destroy(&test_resource(), &state, &output.writer("generate")).unwrap();
+
+        assert!(!file.exists());
+        assert!(!output_dir.exists());
     }
 }

@@ -361,14 +361,7 @@ impl Resource for ExecResource {
             return run_command(clean, prior_state.dir.as_deref(), writer);
         }
         for output in &prior_state.output {
-            let path = Path::new(output);
-            if path.is_dir() {
-                writer.event(Event::Starting, &format!("rm -rf {output}"));
-                fs::remove_dir_all(path).ok();
-            } else if path.is_file() {
-                writer.event(Event::Starting, &format!("rm {output}"));
-                fs::remove_file(path).ok();
-            }
+            super::remove_path(Path::new(output), writer)?;
         }
         // When resolve is set without clean or outputs, destroy is a no-op
         // (the resource is external and bit doesn't know how to tear it down).

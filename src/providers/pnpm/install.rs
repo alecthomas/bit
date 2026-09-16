@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::{BlockWriter, Event};
+use crate::output::BlockWriter;
 use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
@@ -157,10 +156,7 @@ impl Resource for PnpmInstallResource {
     fn destroy(&self, prior_state: &PnpmInstallState, writer: &BlockWriter) -> Result<(), BoxError> {
         for dir in &prior_state.node_modules_dirs {
             let nm: PathBuf = Path::new(dir).join("node_modules");
-            if nm.is_dir() {
-                writer.event(Event::Starting, &format!("rm -rf {}", nm.display()));
-                fs::remove_dir_all(&nm).ok();
-            }
+            crate::providers::remove_path(&nm, writer)?;
         }
         Ok(())
     }
@@ -211,8 +207,8 @@ mod tests {
     fn destroy_removes_all_node_modules_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        fs::create_dir_all(root.join("node_modules")).unwrap();
-        fs::create_dir_all(root.join("pkg/node_modules")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::create_dir_all(root.join("pkg/node_modules")).unwrap();
 
         let state = PnpmInstallState {
             dir: root.to_string_lossy().into_owned(),

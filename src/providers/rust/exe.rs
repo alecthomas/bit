@@ -225,8 +225,8 @@ impl Resource for RustExeResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &RustExeState, _writer: &BlockWriter) -> Result<(), BoxError> {
-        Ok(())
+    fn destroy(&self, prior_state: &RustExeState, writer: &BlockWriter) -> Result<(), BoxError> {
+        crate::providers::remove_path(Path::new(&prior_state.path), writer)
     }
 
     fn cache_policy(&self) -> CachePolicy {
@@ -405,6 +405,27 @@ mod tests {
         };
         let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn destroy_removes_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("myapp");
+        std::fs::write(&path, "binary").unwrap();
+        let state = RustExeState {
+            bin: Some("myapp".into()),
+            package: None,
+            path: path.to_string_lossy().into_owned(),
+            target_rel: "debug/myapp".into(),
+            flags: vec![],
+            features: RustFeatures::default(),
+            env: RustEnv::default(),
+        };
+
+        let out = Output::new(&[]);
+        Resource::destroy(&make_resource(), &state, &out.writer("test")).unwrap();
+
+        assert!(!path.exists());
     }
 
     #[test]

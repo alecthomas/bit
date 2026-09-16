@@ -182,11 +182,7 @@ fn remove_container(name: &str) -> Result<(), BoxError> {
         .args(["rm", "-f", name])
         .output()
         .map_err(|e| format!("docker rm failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(stderr.into());
-    }
-    Ok(())
+    super::check_remove_output("docker rm", output)
 }
 
 /// Poll `docker inspect` until the container's health status is "healthy"
