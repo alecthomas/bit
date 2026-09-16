@@ -2,6 +2,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
+use std::sync::Arc;
 
 use crate::cache::{ArtifactRef, Cas};
 use crate::output::BlockWriter;
@@ -91,7 +92,7 @@ pub enum ResourceKind {
 }
 
 /// A provider groups related resources and shared functions.
-pub trait Provider {
+pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     fn resources(&self) -> Vec<Box<dyn DynResource>>;
     fn functions(&self) -> Vec<FuncSignature>;
@@ -367,8 +368,9 @@ impl<R: Resource + Send + Sync> DynResource for R {
 }
 
 /// Registry for looking up providers by name.
+#[derive(Clone)]
 pub struct ProviderRegistry {
-    providers: HashMap<String, Box<dyn Provider>>,
+    providers: HashMap<String, Arc<dyn Provider>>,
 }
 
 impl ProviderRegistry {
@@ -379,7 +381,7 @@ impl ProviderRegistry {
     }
 
     pub fn register(&mut self, provider: Box<dyn Provider>) {
-        self.providers.insert(provider.name().to_owned(), provider);
+        self.providers.insert(provider.name().to_owned(), Arc::from(provider));
     }
 
     pub fn get_resource(&self, provider: &str, resource: &str) -> Option<Box<dyn DynResource>> {

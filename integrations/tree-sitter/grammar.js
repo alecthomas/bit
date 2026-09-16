@@ -290,13 +290,19 @@ module.exports = grammar({
     // ── Calls & References ──
 
     call: $ => seq(
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.provider_function)),
       '(',
       optional(seq(
         $._expression,
         repeat(seq(',', $._expression)),
       )),
       ')',
+    ),
+
+    provider_function: $ => seq(
+      $.identifier,
+      '.',
+      $.identifier,
     ),
 
     reference: $ => seq(

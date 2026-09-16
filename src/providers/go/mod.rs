@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
+use crate::provider::{BoxError, DynResource, FuncSignature, Provider, StructField};
 use crate::sha256::SHA256;
-use crate::value::Value;
+use crate::value::{Type, Value};
 
 /// First-class Go environment variables shared across all go resources.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
@@ -96,6 +96,47 @@ pub fn toolchain_fingerprint(env: &GoEnv, dir: Option<&Path>) -> Result<BTreeMap
         .collect())
 }
 
+fn packages(args: &[Value]) -> Result<Value, BoxError> {
+    if !(1..=2).contains(&args.len()) {
+        return Err(format!("go.packages expects 1 or 2 arguments, got {}", args.len()).into());
+    }
+    let pattern = args[0].as_str().ok_or("go.packages pattern must be a string")?;
+    let dir = args
+        .get(1)
+        .map(|value| value.as_str().ok_or("go.packages dir must be a string"))
+        .transpose()?;
+
+    let mut command = Command::new("go");
+    command.args(["list", pattern]);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to execute `go list {pattern}`: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`go list {pattern}` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+
+    Ok(package_list(&output.stdout))
+}
+
+fn package_list(output: &[u8]) -> Value {
+    let mut packages: Vec<_> = String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    packages.sort();
+    packages.dedup();
+    Value::List(Type::String, packages.into_iter().map(Value::Str).collect())
+}
+
 /// Go provider with `exe`, `build`, and `test` resources.
 pub struct GoProvider {
     tracker: Arc<Mutex<FileTracker>>,
@@ -125,11 +166,35 @@ impl Provider for GoProvider {
     }
 
     fn functions(&self) -> Vec<FuncSignature> {
-        vec![]
+        vec![FuncSignature {
+            name: "packages".into(),
+            params: vec![
+                (
+                    "pattern".into(),
+                    StructField {
+                        typ: Type::String,
+                        default: None,
+                        description: Some("Go package pattern (for example, ./...)".into()),
+                    },
+                ),
+                (
+                    "dir".into(),
+                    StructField {
+                        typ: Type::String,
+                        default: Some(Value::Str(".".into())),
+                        description: Some("Working directory for go list".into()),
+                    },
+                ),
+            ],
+            returns: Type::List(Box::new(Type::String)),
+        }]
     }
 
-    fn call_function(&self, name: &str, _args: &[Value]) -> Result<Value, BoxError> {
-        Err(format!("go provider has no function '{name}'").into())
+    fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {
+        match name {
+            "packages" => packages(args),
+            _ => Err(format!("go provider has no function '{name}'").into()),
+        }
     }
 }
 
@@ -150,5 +215,16 @@ mod tests {
         assert_eq!(resources[4].name(), "lint");
         assert_eq!(resources[5].name(), "fmt");
         assert_eq!(resources[6].name(), "fmt-l");
+    }
+
+    #[test]
+    fn package_list_is_sorted_and_deduplicated() {
+        assert_eq!(
+            package_list(b"example/z\nexample/a\nexample/z\n"),
+            Value::List(
+                Type::String,
+                vec![Value::Str("example/a".into()), Value::Str("example/z".into())]
+            )
+        );
     }
 }

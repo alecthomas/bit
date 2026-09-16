@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use crate::ast::{BinOp, Expr, Field, StringPart};
+use crate::provider::ProviderRegistry;
 use crate::value::{Map, Type, Value};
 
 #[derive(Debug, thiserror::Error)]
@@ -12,6 +13,8 @@ pub enum EvalError {
     UndefinedField(String),
     #[error("unknown function: {0}")]
     UnknownFunc(String),
+    #[error("provider function '{name}' failed: {message}")]
+    ProviderFunction { name: String, message: String },
     #[error("type error: {0}")]
     Type(String),
     #[error("wrong number of arguments for {name}: expected {expected}, got {got}")]
@@ -53,11 +56,22 @@ impl std::fmt::Display for SymbolKind {
 #[derive(Clone)]
 pub struct Scope {
     vars: HashMap<String, (SymbolKind, Value)>,
+    providers: Option<ProviderRegistry>,
 }
 
 impl Scope {
     pub fn new() -> Self {
-        Self { vars: HashMap::new() }
+        Self {
+            vars: HashMap::new(),
+            providers: None,
+        }
+    }
+
+    pub fn with_providers(providers: ProviderRegistry) -> Self {
+        Self {
+            vars: HashMap::new(),
+            providers: Some(providers),
+        }
     }
 
     /// Define a new symbol. Returns `Err(existing_kind)` if the name is
@@ -133,7 +147,7 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
             if mode == EvalMode::Lenient && values.iter().any(has_placeholder) {
                 return Ok(values.into_iter().find(has_placeholder).unwrap());
             }
-            call_builtin(name, &values)
+            call_function(name, &values, scope)
         }
         Expr::Pipe(inner, name, args) => {
             let lhs = eval_inner(inner, scope, mode)?;
@@ -363,6 +377,22 @@ fn call_builtin(name: &str, args: &[Value]) -> Result<Value, EvalError> {
         .get(name)
         .ok_or_else(|| EvalError::UnknownFunc(name.into()))?;
     (def.func)(args)
+}
+
+fn call_function(name: &str, args: &[Value], scope: &Scope) -> Result<Value, EvalError> {
+    let Some((provider, function)) = name.split_once('.') else {
+        return call_builtin(name, args);
+    };
+    let providers = scope
+        .providers
+        .as_ref()
+        .ok_or_else(|| EvalError::UnknownFunc(name.to_owned()))?;
+    providers
+        .call_function(provider, function, args)
+        .map_err(|source| EvalError::ProviderFunction {
+            name: name.to_owned(),
+            message: source.to_string(),
+        })
 }
 
 /// `env(name)` or `env(name, default)`
@@ -621,6 +651,30 @@ fn builtin_sha256(args: &[Value]) -> Result<Value, EvalError> {
 mod tests {
     use super::*;
     use crate::ast::StringPart;
+    use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
+
+    struct FunctionProvider;
+
+    impl Provider for FunctionProvider {
+        fn name(&self) -> &str {
+            "example"
+        }
+
+        fn resources(&self) -> Vec<Box<dyn DynResource>> {
+            vec![]
+        }
+
+        fn functions(&self) -> Vec<FuncSignature> {
+            vec![]
+        }
+
+        fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {
+            if name != "echo" || args.len() != 1 {
+                return Err("unexpected function call".into());
+            }
+            Ok(args[0].clone())
+        }
+    }
 
     #[test]
     fn eval_int() {
@@ -635,6 +689,19 @@ mod tests {
     fn eval_bool() {
         let scope = Scope::new();
         assert_eq!(eval(&Expr::Bool(true), &scope).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn eval_provider_function() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(Box::new(FunctionProvider));
+        let scope = Scope::with_providers(providers);
+        let expression = Expr::Call(
+            "example.echo".into(),
+            vec![Expr::Str(vec![StringPart::Literal("value".into())])],
+        );
+
+        assert_eq!(eval(&expression, &scope).unwrap(), Value::Str("value".into()));
     }
 
     #[test]

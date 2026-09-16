@@ -215,6 +215,30 @@ Supported units: `ns`, `us`, `ms`, `s`, `m`, `h`, `d`. A bare `5` is a number; `
 | `secret(name)`                    | Access secret                            |
 | `sha256(value)`                   | Hex-encoded SHA-256 digest               |
 
+### Provider Functions
+
+Providers can expose functions for configuration-time discovery. Their results
+can feed matrix expansion so each discovered package becomes an independent
+block:
+
+```bit
+let package = go.packages("./...")
+
+tests[package] = go.test {
+  package = package
+}
+```
+
+The built-in providers expose:
+
+| Function                                 | Description                                |
+| ---------------------------------------- | ------------------------------------------ |
+| `go.packages(pattern)`                   | Go packages matching a package pattern     |
+| `go.packages(pattern, dir)`              | Go packages matching a pattern from `dir`  |
+| `rust.packages()`                        | Cargo workspace package names              |
+| `pnpm.packages_with_script(script)`      | Workspace packages that define `script`    |
+| `pnpm.packages_with_script(script, dir)` | Matching workspace packages rooted at `dir` |
+
 ### Modules
 
 Each `import` brings exactly one provider into scope; the provider name is the last segment of the import path. The imported directory contains one `<resource>.bit` file per resource. For example, `./.bit/modules/app/` imported as `app` provider, with `app/app.bit` as the default resource and `app/staging.bit` exposed as `app.staging`:

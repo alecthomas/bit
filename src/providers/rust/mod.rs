@@ -15,7 +15,7 @@ use crate::cache::ProjectIdentity;
 use crate::file_tracker::FileTracker;
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
 use crate::sha256::SHA256;
-use crate::value::Value;
+use crate::value::{Type, Value};
 
 /// Shared Rust environment/config fields flattened into all rust resources.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
@@ -361,6 +361,41 @@ fn cargo_metadata() -> Result<serde_json::Value, BoxError> {
     Ok(serde_json::from_slice(&output.stdout).map_err(|e| format!("failed to parse `cargo metadata` output: {e}"))?)
 }
 
+fn workspace_packages(args: &[Value]) -> Result<Value, BoxError> {
+    if !args.is_empty() {
+        return Err(format!("rust.packages expects no arguments, got {}", args.len()).into());
+    }
+    let names = workspace_package_names(&cargo_metadata()?)?;
+    Ok(Value::List(Type::String, names.into_iter().map(Value::Str).collect()))
+}
+
+fn workspace_package_names(metadata: &serde_json::Value) -> Result<Vec<String>, BoxError> {
+    let members = metadata
+        .get("workspace_members")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("`cargo metadata` output has no workspace_members")?;
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("`cargo metadata` output has no packages")?;
+
+    let member_ids: HashSet<&str> = members.iter().filter_map(serde_json::Value::as_str).collect();
+    let mut names: Vec<String> = packages
+        .iter()
+        .filter(|package| {
+            package
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| member_ids.contains(id))
+        })
+        .filter_map(|package| package.get("name").and_then(serde_json::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 /// Directories containing local package sources (the parent of each
 /// target's src_path), relative to `cwd`.
 fn discover_source_dirs(meta: &serde_json::Value, cwd: &Path) -> HashSet<PathBuf> {
@@ -439,11 +474,18 @@ impl Provider for RustProvider {
     }
 
     fn functions(&self) -> Vec<FuncSignature> {
-        vec![]
+        vec![FuncSignature {
+            name: "packages".into(),
+            params: vec![],
+            returns: Type::List(Box::new(Type::String)),
+        }]
     }
 
-    fn call_function(&self, name: &str, _args: &[Value]) -> Result<Value, BoxError> {
-        Err(format!("rust provider has no function '{name}'").into())
+    fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {
+        match name {
+            "packages" => workspace_packages(args),
+            _ => Err(format!("rust provider has no function '{name}'").into()),
+        }
     }
 }
 
@@ -464,6 +506,20 @@ mod tests {
         assert_eq!(resources[3].name(), "clippy");
         assert_eq!(resources[4].name(), "fmt");
         assert_eq!(resources[5].name(), "fmt-check");
+    }
+
+    #[test]
+    fn workspace_package_names_are_sorted_and_exclude_dependencies() {
+        let metadata = serde_json::json!({
+            "workspace_members": ["z 0.1.0", "a 0.1.0"],
+            "packages": [
+                {"id": "dep 1.0.0", "name": "dep"},
+                {"id": "z 0.1.0", "name": "z"},
+                {"id": "a 0.1.0", "name": "a"}
+            ]
+        });
+
+        assert_eq!(workspace_package_names(&metadata).unwrap(), vec!["a", "z"]);
     }
 
     #[test]

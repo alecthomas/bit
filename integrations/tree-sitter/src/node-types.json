@@ -362,6 +362,10 @@
           {
             "type": "identifier",
             "named": true
+          },
+          {
+            "type": "provider_function",
+            "named": true
           }
         ]
       }
@@ -1511,6 +1515,21 @@
         },
         {
           "type": "string",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "provider_function",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
           "named": true
         }
       ]

@@ -75,6 +75,11 @@
 (call
   name: (identifier) @function)
 
+(call
+  name: (provider_function
+    (identifier) @type
+    (identifier) @function))
+
 ; Pipes
 (pipe_expression
   pipe: (identifier) @function)

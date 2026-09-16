@@ -139,11 +139,32 @@ struct PackageJsonName {
     name: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct PackageJsonScripts {
+    #[serde(default)]
+    scripts: HashMap<String, String>,
+}
+
 fn parse_package_name(path: &Path) -> Result<Option<String>, BoxError> {
     let content = fs::read_to_string(path).map_err(|e| format!("pnpm: reading {}: {e}", path.display()))?;
     let pkg: PackageJsonName =
         serde_json::from_str(&content).map_err(|e| format!("pnpm: parsing {}: {e}", path.display()))?;
     Ok(pkg.name)
+}
+
+pub fn packages_with_script(workspace: &Workspace, script: &str) -> Result<Vec<String>, BoxError> {
+    let mut packages = Vec::new();
+    for (name, dir) in &workspace.packages {
+        let path = dir.join("package.json");
+        let content = fs::read_to_string(&path).map_err(|e| format!("pnpm: reading {}: {e}", path.display()))?;
+        let package: PackageJsonScripts =
+            serde_json::from_str(&content).map_err(|e| format!("pnpm: parsing {}: {e}", path.display()))?;
+        if package.scripts.contains_key(script) {
+            packages.push(name.clone());
+        }
+    }
+    packages.sort();
+    Ok(packages)
 }
 
 /// Directory names that are never considered source inputs.
@@ -260,6 +281,30 @@ mod tests {
             assert!(ws.lockfile.is_none());
             assert_eq!(ws.packages.len(), 1);
             assert!(ws.packages.contains_key("solo"));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn packages_with_script_filters_and_sorts_packages() {
+        reset_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        setup_workspace(root);
+        fs::write(
+            root.join("bff/package.json"),
+            r#"{ "name": "bff", "scripts": { "test": "vitest" } }"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("frontend/package.json"),
+            r#"{ "name": "frontend", "scripts": { "build": "vite build" } }"#,
+        )
+        .unwrap();
+
+        with_workspace(root, |workspace| {
+            assert_eq!(packages_with_script(workspace, "test")?, vec!["bff"]);
             Ok(())
         })
         .unwrap();

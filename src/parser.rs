@@ -438,13 +438,30 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
         return Err(ErrMode::Backtrack(ContextError::new()));
     }
 
-    // Function call: name(args)
+    // Built-in function call: name(args)
     if opt(lex('(')).parse_next(input)?.is_some() {
         let args = arg_list.parse_next(input)?;
         cut_err(lex(')'))
             .context(StrContext::Label("closing ')'"))
             .parse_next(input)?;
         return Ok(Expr::Call(name, args));
+    }
+
+    // Provider function call or dotted reference: provider.function(args)
+    if opt(lex('.')).parse_next(input)?.is_some() {
+        let mut parts = vec![name];
+        parts.push(ident_string.parse_next(input)?);
+        if opt(lex('(')).parse_next(input)?.is_some() {
+            let args = arg_list.parse_next(input)?;
+            cut_err(lex(')'))
+                .context(StrContext::Label("closing ')'"))
+                .parse_next(input)?;
+            return Ok(Expr::Call(parts.join("."), args));
+        }
+        while opt(lex('.')).parse_next(input)?.is_some() {
+            parts.push(ident_string.parse_next(input)?);
+        }
+        return Ok(Expr::Ref(parts));
     }
 
     // Matrix slice reference: name["val1", "val2"] or name[ident]
@@ -458,7 +475,7 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
         name
     };
 
-    // Dotted reference: name.field.subfield
+    // Dotted reference after a matrix slice: name[key].field.subfield
     let mut parts = vec![first];
     while opt(lex('.')).parse_next(input)?.is_some() {
         parts.push(ident_string.parse_next(input)?);
@@ -1316,6 +1333,21 @@ server = exec {
             Statement::Let(l) => match &l.value {
                 Expr::Call(name, args) => {
                     assert_eq!(name, "exec");
+                    assert_eq!(args.len(), 1);
+                }
+                _ => panic!("expected Call"),
+            },
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_provider_function_call() {
+        let result = parse(r#"let packages = go.packages("./...")"#, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => match &l.value {
+                Expr::Call(name, args) => {
+                    assert_eq!(name, "go.packages");
                     assert_eq!(args.len(), 1);
                 }
                 _ => panic!("expected Call"),

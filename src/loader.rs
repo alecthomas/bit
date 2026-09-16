@@ -81,7 +81,7 @@ pub fn load(
     store: &dyn StateStore,
     import_roots: &[crate::import::ImportRoot],
 ) -> Result<(Dag, BaseScope), LoadError> {
-    let mut scope = Scope::new();
+    let mut scope = Scope::with_providers(registry.clone());
     let mut dag = Dag::new();
     let mut block_names = Vec::new();
     let mut matrix_blocks: HashMap<String, Vec<String>> = HashMap::new();
