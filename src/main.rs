@@ -306,32 +306,7 @@ fn plan_styles(
         .collect())
 }
 
-/// Cargo re-invokes bit as `RUSTC_WORKSPACE_WRAPPER` to compile workspace
-/// crates with `--remap-path-prefix` (see `providers::rust::enable_path_remap`).
-/// In that mode argv is `bit <rustc> <args...>`; exec rustc with the flag
-/// appended. Only reached when the remap variable is set, which bit sets on
-/// the cargo processes it spawns.
-fn run_rustc_wrapper(remap: &str) -> ! {
-    use std::os::unix::process::CommandExt;
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let Some((rustc, rest)) = argv.split_first() else {
-        eprintln!("{} rustc wrapper invoked without a compiler", "error:".red().bold());
-        process::exit(1);
-    };
-    let args = bit::providers::rust::wrapper_args(rest, remap);
-    let err = process::Command::new(rustc)
-        .args(args.iter().map(|a| a.as_ref()))
-        .env_remove(bit::providers::rust::REMAP_ENV)
-        .exec();
-    eprintln!("{} cannot exec {rustc}: {err}", "error:".red().bold());
-    process::exit(1);
-}
-
 fn main() {
-    if let Ok(remap) = std::env::var(bit::providers::rust::REMAP_ENV) {
-        run_rustc_wrapper(&remap);
-    }
-
     let cli = Cli::parse();
 
     let tracker = Arc::new(Mutex::new(FileTracker::new()));
@@ -421,9 +396,6 @@ fn main() {
     }
 
     find_and_chdir_project_root();
-    if let Ok(exe) = std::env::current_exe() {
-        bit::providers::rust::enable_path_remap(exe);
-    }
     let registry = default_registry(&tracker);
     let params = parse_params(&cli.params);
     let cache = open_build_cache();

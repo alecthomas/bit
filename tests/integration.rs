@@ -846,31 +846,6 @@ fn go_exe_restores_from_shared_cache_after_worktree_deleted() {
     assert_eq!(plans[0].plan.action, bit::provider::PlanAction::None);
 }
 
-/// When invoked by cargo as the workspace wrapper, bit execs the compiler
-/// with `--remap-path-prefix` appended and does not leak the trigger
-/// variable to the child.
-#[test]
-fn rustc_wrapper_mode_appends_remap_flag() {
-    use std::process::Command;
-    let out = Command::new(env!("CARGO_BIN_EXE_bit"))
-        .args([
-            "/bin/sh",
-            "-c",
-            "printf '%s\\n' \"$@\"; printf 'env=%s\\n' \"${BIT_RUSTC_REMAP:-unset}\"",
-            "sh",
-            "--crate-name",
-            "x",
-        ])
-        .env("BIT_RUSTC_REMAP", "/wt/a=/repo")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "--crate-name\nx\n--remap-path-prefix=/wt/a=/repo\nenv=unset\n"
-    );
-}
-
 /// End to end with the real binary: build a `rust.exe` block in linked
 /// worktree A, delete A, and confirm worktree B restores the binary from the
 /// shared cache without cargo compiling anything. The binary prints
@@ -915,10 +890,15 @@ fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
         walk(dir, needle)
     }
     fn bit(root: &std::path::Path, cache: &std::path::Path, args: &[&str]) -> std::process::Output {
+        // When this suite itself runs under `bit --test`, cargo hands the
+        // test binary the outer worktree's wrapper; the inner bit must see a
+        // clean environment or it would defer to that wrapper.
         let out = Command::new(env!("CARGO_BIN_EXE_bit"))
             .args(args)
             .current_dir(root)
             .env("BIT_CACHE_DIR", cache)
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("RUSTC_WRAPPER")
             .output()
             .unwrap();
         assert!(
