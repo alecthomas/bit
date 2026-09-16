@@ -76,6 +76,8 @@ bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
 bit --schema     # show provider/resource schemas
 bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
+bit --cache      # show the size of the shared build cache
+bit --cache --clean  # delete every cached receipt and artifact
 ```
 
 All block/target-taking modes (`bit`, `--plan`, `--clean`, `--graph`, `--dump`)
@@ -765,7 +767,7 @@ Only linked worktrees of one repository share entries, and only when the
 `BUILD.bit` sits at the same path relative to the worktree root. Failed tests
 and lint runs are never shared. Restored files are independent copies, so
 editing or deleting one cannot affect the cache. `bit --clean` removes only
-the worktree's own outputs and state; cached entries live under
-`~/Library/Caches/bit/actions` and `~/Library/Caches/bit/cas` (or
-`~/.cache/bit/...` on Linux) and can be deleted by hand to reclaim space.
-Set `BIT_CACHE_DIR` to relocate the shared cache.
+the worktree's own outputs and state. `bit --cache` shows how much the
+shared cache holds and `bit --cache --clean` deletes all of it, for every
+project. It lives under `~/Library/Caches/bit` (or `~/.cache/bit` on Linux);
+set `BIT_CACHE_DIR` to relocate it.

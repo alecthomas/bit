@@ -988,3 +988,36 @@ fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
         "src/main.rs"
     );
 }
+
+#[test]
+fn cache_flag_reports_and_cleans_shared_cache() {
+    use std::process::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = tmp.path().join("cache");
+    fs::create_dir_all(cache.join("cas/v1/sha256/ab")).unwrap();
+    fs::write(cache.join("cas/v1/sha256/ab/abcd"), b"blob").unwrap();
+    fs::create_dir_all(cache.join("actions/v1/p")).unwrap();
+    fs::write(cache.join("actions/v1/p/k.json"), b"{}").unwrap();
+    fs::create_dir_all(cache.join("statehash")).unwrap();
+    fs::write(cache.join("statehash/state.json"), b"{}").unwrap();
+
+    let bit = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_bit"))
+            .args(args)
+            .current_dir(tmp.path())
+            .env("BIT_CACHE_DIR", &cache)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let stats = bit(&["--cache"]);
+    assert!(stats.contains("receipts: 1 ("), "{stats}");
+    assert!(stats.contains("artifacts: 1 (4 B)"), "{stats}");
+
+    bit(&["--cache", "--clean"]);
+    assert!(!cache.join("cas").exists());
+    assert!(!cache.join("actions").exists());
+    assert!(cache.join("statehash/state.json").is_file(), "local state must survive");
+    assert!(bit(&["--cache"]).contains("artifacts: 0 (0 B)"));
+}

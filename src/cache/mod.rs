@@ -76,6 +76,87 @@ pub fn cache_root() -> Result<PathBuf, CacheError> {
     Ok(dirs::cache_dir().ok_or(CacheError::NoCacheDir)?.join("bit"))
 }
 
+/// Size of the shared cache, for `bit --cache`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CacheStats {
+    pub receipts: usize,
+    pub receipt_bytes: u64,
+    pub blobs: usize,
+    pub blob_bytes: u64,
+}
+
+impl std::fmt::Display for CacheStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "receipts: {} ({})", self.receipts, human_bytes(self.receipt_bytes))?;
+        write!(f, "artifacts: {} ({})", self.blobs, human_bytes(self.blob_bytes))
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// Count files and bytes under `dir`, treating a missing directory as empty.
+fn measure(dir: &Path) -> std::io::Result<(usize, u64)> {
+    let mut count = 0;
+    let mut bytes = 0;
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let meta = entry.metadata()?;
+            if meta.is_dir() {
+                pending.push(entry.path());
+            } else if meta.is_file() {
+                count += 1;
+                bytes += meta.len();
+            }
+        }
+    }
+    Ok((count, bytes))
+}
+
+/// Measure the shared cache under `cache_dir`.
+pub fn stats(cache_dir: &Path) -> std::io::Result<CacheStats> {
+    let (receipts, receipt_bytes) = measure(&cache_dir.join("actions"))?;
+    let (blobs, blob_bytes) = measure(&cache_dir.join("cas"))?;
+    Ok(CacheStats {
+        receipts,
+        receipt_bytes,
+        blobs,
+        blob_bytes,
+    })
+}
+
+/// Delete every receipt and artifact under `cache_dir`. Worktree-local state
+/// and the import cache, which share the directory, are left alone.
+pub fn clean(cache_dir: &Path) -> std::io::Result<()> {
+    for sub in ["actions", "cas"] {
+        match std::fs::remove_dir_all(cache_dir.join(sub)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 struct Shared {
     receipts: ReceiptStore,
     cas: Cas,
@@ -248,6 +329,54 @@ mod tests {
             ..base
         };
         assert_ne!(base.key(), different.key());
+    }
+
+    #[test]
+    fn stats_and_clean_cover_receipts_and_blobs_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let cache_dir = dir.path().join("cache");
+        // Unrelated content sharing the cache directory must survive a clean.
+        std::fs::create_dir_all(cache_dir.join("abc123")).unwrap();
+        std::fs::write(cache_dir.join("abc123/state.json"), "{}").unwrap();
+
+        assert_eq!(stats(&cache_dir).unwrap(), CacheStats::default());
+
+        let cache = BuildCache::open_at(&root, &cache_dir);
+        let src = root.join("bin");
+        std::fs::write(&src, b"binary").unwrap();
+        let artifact = cache.cas().unwrap().put_file(&src).unwrap();
+        let receipt = Receipt {
+            version: RECEIPT_VERSION,
+            provider: "p".into(),
+            resource: "r".into(),
+            cache_version: 1,
+            state: serde_json::Value::Null,
+            outputs: crate::value::Map::new(),
+            artifacts: [("exe".to_owned(), artifact)].into(),
+            content_hash: SHA256::digest(b"x"),
+        };
+        let key = ActionKey::new(SHA256::digest(b"k"));
+        cache.publish(&key, &receipt).unwrap();
+
+        let s = stats(&cache_dir).unwrap();
+        assert_eq!((s.receipts, s.blobs, s.blob_bytes), (1, 1, 6));
+        assert!(s.receipt_bytes > 0);
+        assert!(s.to_string().starts_with("receipts: 1 ("));
+
+        clean(&cache_dir).unwrap();
+        assert_eq!(stats(&cache_dir).unwrap(), CacheStats::default());
+        assert!(cache_dir.join("abc123/state.json").is_file());
+        clean(&cache_dir).unwrap();
+    }
+
+    #[test]
+    fn human_bytes_units() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1536), "1.5 KiB");
+        assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MiB");
     }
 
     #[test]

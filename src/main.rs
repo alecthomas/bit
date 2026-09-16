@@ -38,6 +38,11 @@ struct Cli {
     #[arg(short = 'c', long)]
     clean: bool,
 
+    /// Show the shared build cache size; with --clean, delete every cached
+    /// receipt and artifact for all projects
+    #[arg(long)]
+    cache: bool,
+
     /// Force clean: destroy protected blocks and continue past errors
     #[arg(short = 'f', long)]
     force: bool,
@@ -215,6 +220,29 @@ fn load_module(
     (module, dag, base, store)
 }
 
+/// `bit --cache`: print the shared cache size, or with `--clean` delete it.
+fn manage_cache(clean: bool) {
+    let root = match bit::cache::cache_root() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
+    let result = if clean {
+        bit::cache::clean(&root)
+    } else {
+        bit::cache::stats(&root).map(|stats| {
+            println!("{}", root.display());
+            println!("{stats}");
+        })
+    };
+    if let Err(e) = result {
+        eprintln!("{} {e}", "error:".red().bold());
+        process::exit(1);
+    }
+}
+
 /// Open the shared build cache for the project in the current directory.
 /// Failure to open it only disables sharing; builds still run locally.
 fn open_build_cache() -> BuildCache {
@@ -366,6 +394,16 @@ fn main() {
     if cli.force && !cli.clean {
         eprintln!("{} --force can only be used with --clean", "error:".red().bold());
         process::exit(1);
+    }
+
+    // --cache operates on the global cache and needs no project.
+    if cli.cache {
+        if cli.test || cli.dump || cli.list || cli.plan || cli.graph || cli.force || !cli.targets.is_empty() {
+            eprintln!("{} --cache can only be combined with --clean", "error:".red().bold());
+            process::exit(1);
+        }
+        manage_cache(cli.clean);
+        return;
     }
 
     // Validate mutually exclusive mode flags. `--plan` and `--graph` are
