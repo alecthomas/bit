@@ -32,7 +32,9 @@ jobs:
         run: |
           export TARGET="${{ matrix.arch }}-${{ matrix.target-suffix }}"
           rustup target add "${TARGET}"
-          cross build --release --target "${TARGET}"
+          # kache is installed on the host by Hermit but is unavailable inside
+          # cross's Linux build containers.
+          cross build --config 'build.rustc-wrapper=""' --release --target "${TARGET}"
           export TARGET_PATH="target/${TARGET}/release/bit-${TARGET}"
           mv "target/${TARGET}"/release/bit "${TARGET_PATH}"
           bzip2 -f9 "${TARGET_PATH}"
