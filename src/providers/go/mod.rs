@@ -61,6 +61,41 @@ pub fn resolve_go_inputs(
     tracker.hash_files(&files)
 }
 
+/// Fingerprint of the effective Go toolchain and target, for the shared
+/// action key. `go env` reports values after the block's `GoEnv` overrides
+/// and the ambient environment are applied, so both are captured.
+pub fn toolchain_fingerprint(env: &GoEnv, dir: Option<&Path>) -> Result<BTreeMap<String, String>, BoxError> {
+    const KEYS: [&str; 8] = [
+        "GOVERSION",
+        "GOOS",
+        "GOARCH",
+        "CGO_ENABLED",
+        "GOFLAGS",
+        "GOEXPERIMENT",
+        "GOARM",
+        "GOAMD64",
+    ];
+    let probe_key = format!(
+        "go env|{}|{:?}",
+        dir.map(|d| d.display().to_string()).unwrap_or_default(),
+        env
+    );
+    let text = super::probe_tool(&probe_key, || {
+        let mut cmd = Command::new("go");
+        cmd.arg("env").args(KEYS);
+        env.apply_to(&mut cmd);
+        if let Some(dir) = dir {
+            cmd.current_dir(dir);
+        }
+        cmd
+    })?;
+    Ok(KEYS
+        .iter()
+        .zip(text.lines().chain(std::iter::repeat("")))
+        .map(|(k, v)| (format!("go.{k}"), v.trim().to_owned()))
+        .collect())
+}
+
 /// Go provider with `exe`, `build`, and `test` resources.
 pub struct GoProvider {
     tracker: Arc<Mutex<FileTracker>>,

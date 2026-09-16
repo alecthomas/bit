@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod cache;
 pub mod dag;
 pub mod engine;
 pub mod expr;

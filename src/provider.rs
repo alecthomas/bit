@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
+use std::path::PathBuf;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::cache::{ArtifactRef, Cas};
 use crate::output::BlockWriter;
 use crate::schema::Schema;
 use crate::sha256::SHA256;
@@ -19,7 +21,32 @@ pub enum PlanAction {
     Create,
     Update,
     Destroy,
+    /// Recreate outputs from a shared cache receipt instead of running the
+    /// provider.
+    Restore,
     None,
+}
+
+/// Whether successful results of a resource may be shared across worktrees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CachePolicy {
+    /// Results stay in worktree-local state (the default).
+    Local,
+    /// Successful results are published to the shared action cache.
+    /// `version` must change whenever the receipt state, output
+    /// interpretation, capture, or restoration behaviour changes.
+    Shared { version: u32 },
+}
+
+/// A provider's classification of a shared receipt for the current context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptCheck {
+    /// The receipt's objects already exist and are valid here; skip.
+    Valid,
+    /// The receipt is usable but its artifacts must be materialized.
+    Restore,
+    /// The receipt cannot be used in this context; run the provider.
+    Unusable,
 }
 
 /// Result of the plan phase.
@@ -37,6 +64,9 @@ pub struct ApplyResult<S, O> {
     pub outputs: O,
     pub state: Option<S>,
 }
+
+/// Result of materializing a receipt: `None` binds the receipt verbatim.
+pub type MaterializeResult<S, O> = Result<Option<ApplyResult<S, O>>, BoxError>;
 
 /// Signature of a provider-exported function.
 #[derive(Debug, Clone)]
@@ -100,6 +130,65 @@ pub trait Resource {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
     fn destroy(&self, prior_state: &Self::State, writer: &BlockWriter) -> Result<(), BoxError>;
+
+    // -- Shared cache contract -------------------------------------------
+    //
+    // Resources are worktree-local by default. A resource opts into the
+    // shared action cache by returning `CachePolicy::Shared`; the engine then
+    // owns key computation, receipt storage, and CAS integrity, while the
+    // resource owns artifact meaning, destination selection, and contextual
+    // output reconstruction.
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Local
+    }
+
+    /// Keys of `resolve` entries that describe produced outputs rather than
+    /// sources. They stay in the local content hash (so a deleted output
+    /// triggers a rebuild) but are excluded from the shared action key,
+    /// which must be computable before the output exists.
+    fn output_keys(&self, _inputs: &Self::Inputs) -> Vec<String> {
+        vec![]
+    }
+
+    /// Toolchain and environment fingerprint mixed into the action key.
+    fn toolchain(&self, _inputs: &Self::Inputs) -> Result<BTreeMap<String, String>, BoxError> {
+        Ok(BTreeMap::new())
+    }
+
+    /// Durable files produced by a successful apply, keyed by a
+    /// provider-defined role. The engine stores each in the CAS and records
+    /// the references in the receipt.
+    fn artifacts(&self, _inputs: &Self::Inputs, _state: &Self::State) -> Result<BTreeMap<String, PathBuf>, BoxError> {
+        Ok(BTreeMap::new())
+    }
+
+    /// Classify a receipt for the current inputs. The default treats every
+    /// receipt as valid, which is correct for validation-only resources
+    /// that produce no artifacts.
+    fn check_receipt(
+        &self,
+        _inputs: &Self::Inputs,
+        _state: &Self::State,
+        _artifacts: &BTreeMap<String, ArtifactRef>,
+    ) -> Result<ReceiptCheck, BoxError> {
+        Ok(ReceiptCheck::Valid)
+    }
+
+    /// Recreate missing objects from the CAS and return state and outputs
+    /// resolved for the current worktree. `None` means the receipt's state
+    /// and outputs are context-free and can be bound verbatim. A resource
+    /// that returns [`ReceiptCheck::Restore`] must return `Some`.
+    fn materialize(
+        &self,
+        _inputs: &Self::Inputs,
+        _state: &Self::State,
+        _artifacts: &BTreeMap<String, ArtifactRef>,
+        _cas: &Cas,
+        _writer: &BlockWriter,
+    ) -> MaterializeResult<Self::State, Self::Outputs> {
+        Ok(None)
+    }
 }
 
 /// Object-safe resource trait used by the registry. Converts between
@@ -117,6 +206,39 @@ pub trait DynResource: Send + Sync {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError>;
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Local
+    }
+    fn output_keys(&self, _inputs: &Map) -> Result<Vec<String>, BoxError> {
+        Ok(vec![])
+    }
+    fn toolchain(&self, _inputs: &Map) -> Result<BTreeMap<String, String>, BoxError> {
+        Ok(BTreeMap::new())
+    }
+    fn artifacts(&self, _inputs: &Map, _state: &serde_json::Value) -> Result<BTreeMap<String, PathBuf>, BoxError> {
+        Ok(BTreeMap::new())
+    }
+    /// Returns [`ReceiptCheck::Unusable`] when the receipt state cannot be
+    /// deserialized for this resource.
+    fn check_receipt(
+        &self,
+        _inputs: &Map,
+        _state: &serde_json::Value,
+        _artifacts: &BTreeMap<String, ArtifactRef>,
+    ) -> Result<ReceiptCheck, BoxError> {
+        Ok(ReceiptCheck::Valid)
+    }
+    fn materialize(
+        &self,
+        _inputs: &Map,
+        _state: &serde_json::Value,
+        _artifacts: &BTreeMap<String, ArtifactRef>,
+        _cas: &Cas,
+        _writer: &BlockWriter,
+    ) -> MaterializeResult<serde_json::Value, Map> {
+        Ok(None)
+    }
 }
 
 /// Deserialize a `Map` into a typed struct via serde.
@@ -177,6 +299,58 @@ impl<R: Resource + Send + Sync> DynResource for R {
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError> {
         let state: R::State = serde_json::from_value(prior_state.clone())?;
         Resource::destroy(self, &state, writer)
+    }
+
+    fn cache_policy(&self) -> CachePolicy {
+        Resource::cache_policy(self)
+    }
+
+    fn output_keys(&self, inputs: &Map) -> Result<Vec<String>, BoxError> {
+        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        Ok(Resource::output_keys(self, &typed))
+    }
+
+    fn toolchain(&self, inputs: &Map) -> Result<BTreeMap<String, String>, BoxError> {
+        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        Resource::toolchain(self, &typed)
+    }
+
+    fn artifacts(&self, inputs: &Map, state: &serde_json::Value) -> Result<BTreeMap<String, PathBuf>, BoxError> {
+        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let state: R::State = serde_json::from_value(state.clone())?;
+        Resource::artifacts(self, &typed, &state)
+    }
+
+    fn check_receipt(
+        &self,
+        inputs: &Map,
+        state: &serde_json::Value,
+        artifacts: &BTreeMap<String, ArtifactRef>,
+    ) -> Result<ReceiptCheck, BoxError> {
+        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let Ok(state) = serde_json::from_value::<R::State>(state.clone()) else {
+            return Ok(ReceiptCheck::Unusable);
+        };
+        Resource::check_receipt(self, &typed, &state, artifacts)
+    }
+
+    fn materialize(
+        &self,
+        inputs: &Map,
+        state: &serde_json::Value,
+        artifacts: &BTreeMap<String, ArtifactRef>,
+        cas: &Cas,
+        writer: &BlockWriter,
+    ) -> MaterializeResult<serde_json::Value, Map> {
+        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let state: R::State = serde_json::from_value(state.clone())?;
+        let Some(result) = Resource::materialize(self, &typed, &state, artifacts, cas, writer)? else {
+            return Ok(None);
+        };
+        Ok(Some(ApplyResult {
+            outputs: serialize_outputs(&result.outputs)?,
+            state: result.state.map(serde_json::to_value).transpose()?,
+        }))
     }
 }
 

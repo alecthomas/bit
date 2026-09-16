@@ -1,15 +1,19 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufReader;
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::output::{BlockWriter, Event};
+use crate::provider::{
+    ApplyResult, BoxError, CachePolicy, MaterializeResult, PlanAction, PlanResult, ReceiptCheck, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::GoEnv;
@@ -79,6 +83,33 @@ impl GoExeResource {
             output.to_owned()
         }
     }
+
+    fn state_for(inputs: &GoExeInputs, output: String) -> GoExeState {
+        GoExeState {
+            package: inputs.package.clone(),
+            output,
+            flags: inputs.flags.clone(),
+            dir: inputs.dir.clone(),
+            env: inputs.env.clone(),
+        }
+    }
+}
+
+/// Role under which the built binary is recorded in a receipt.
+const EXE_ROLE: &str = "exe";
+
+/// Whether the binary at `path` already matches the cached artifact.
+fn output_matches(path: &Path, artifact: &ArtifactRef) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() != artifact.size {
+        return false;
+    }
+    if meta.permissions().mode() & 0o111 != artifact.mode & 0o111 {
+        return false;
+    }
+    crate::cache::cas::hash_path(path).is_ok_and(|digest| digest == artifact.digest)
 }
 
 impl Resource for GoExeResource {
@@ -185,24 +216,73 @@ impl Resource for GoExeResource {
 
         Ok(ApplyResult {
             outputs: GoExeOutputs { path: output.clone() },
-            state: Some(GoExeState {
-                package: inputs.package.clone(),
-                output,
-                flags: inputs.flags.clone(),
-                dir: inputs.dir.clone(),
-                env: inputs.env.clone(),
-            }),
+            state: Some(GoExeResource::state_for(inputs, output)),
         })
     }
 
     fn destroy(&self, prior_state: &GoExeState, writer: &BlockWriter) -> Result<(), BoxError> {
-        use crate::output::Event;
         let path = Path::new(&prior_state.output);
         if path.is_file() {
             writer.event(Event::Starting, &format!("rm {}", prior_state.output));
             fs::remove_file(path).ok();
         }
         Ok(())
+    }
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Shared { version: 1 }
+    }
+
+    fn output_keys(&self, inputs: &GoExeInputs) -> Vec<String> {
+        vec![GoExeResource::output_path(inputs)]
+    }
+
+    fn toolchain(&self, inputs: &GoExeInputs) -> Result<BTreeMap<String, String>, BoxError> {
+        super::toolchain_fingerprint(&inputs.env, inputs.dir.as_deref().map(Path::new))
+    }
+
+    fn artifacts(&self, _inputs: &GoExeInputs, state: &GoExeState) -> Result<BTreeMap<String, PathBuf>, BoxError> {
+        Ok(BTreeMap::from([(EXE_ROLE.to_owned(), PathBuf::from(&state.output))]))
+    }
+
+    fn check_receipt(
+        &self,
+        inputs: &GoExeInputs,
+        _state: &GoExeState,
+        artifacts: &BTreeMap<String, ArtifactRef>,
+    ) -> Result<ReceiptCheck, BoxError> {
+        let Some(exe) = artifacts.get(EXE_ROLE) else {
+            return Ok(ReceiptCheck::Unusable);
+        };
+        let output = GoExeResource::output_path(inputs);
+        Ok(if output_matches(Path::new(&output), exe) {
+            ReceiptCheck::Valid
+        } else {
+            ReceiptCheck::Restore
+        })
+    }
+
+    /// The receipt's `output` may come from another worktree, so the
+    /// destination is always re-derived from the current inputs.
+    fn materialize(
+        &self,
+        inputs: &GoExeInputs,
+        _state: &GoExeState,
+        artifacts: &BTreeMap<String, ArtifactRef>,
+        cas: &Cas,
+        writer: &BlockWriter,
+    ) -> MaterializeResult<GoExeState, GoExeOutputs> {
+        let exe = artifacts.get(EXE_ROLE).ok_or("receipt has no exe artifact")?;
+        let output = GoExeResource::output_path(inputs);
+        let path = Path::new(&output);
+        if !output_matches(path, exe) {
+            writer.line(&format!("restore {output}"));
+            cas.materialize(exe, path)?;
+        }
+        Ok(Some(ApplyResult {
+            outputs: GoExeOutputs { path: output.clone() },
+            state: Some(GoExeResource::state_for(inputs, output)),
+        }))
     }
 }
 

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use clap::Parser;
 use yansi::Paint;
 
+use bit::cache::BuildCache;
 use bit::engine;
 use bit::file_tracker::FileTracker;
 use bit::loader;
@@ -214,6 +215,19 @@ fn load_module(
     (module, dag, base, store)
 }
 
+/// Open the shared build cache for the project in the current directory.
+/// Failure to open it only disables sharing; builds still run locally.
+fn open_build_cache() -> BuildCache {
+    let root = std::path::Path::new(".");
+    match BuildCache::open(root) {
+        Ok(cache) => cache,
+        Err(e) => {
+            eprintln!("{} shared build cache unavailable: {e}", "warning:".yellow().bold());
+            BuildCache::local_only(root)
+        }
+    }
+}
+
 /// Truncate a SHA for display while staying unambiguous within a project.
 fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
@@ -234,13 +248,13 @@ fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool, long: bool)
 fn plan_styles(
     dag: &mut bit::dag::Dag,
     base: &bit::loader::BaseScope,
-    store: &dyn bit::state::StateStore,
+    cache: &BuildCache,
     targets: &[String],
     tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<std::collections::HashMap<String, bit::graph::NodeStyle>, engine::EngineError> {
     use yansi::Paint;
     let silent = Output::silent();
-    let plans = engine::plan(dag, base, store, &silent, targets, tracker)?;
+    let plans = engine::plan(dag, base, cache, &silent, targets, tracker)?;
     Ok(plans
         .into_iter()
         .map(|bp| {
@@ -346,13 +360,14 @@ fn main() {
     find_and_chdir_project_root();
     let registry = default_registry(&tracker);
     let params = parse_params(&cli.params);
+    let cache = open_build_cache();
     let jobs = cli
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
     let targets = &cli.targets;
 
     if cli.graph {
-        let (_module, mut dag, base, store) = load_module(&registry, &params);
+        let (_module, mut dag, base, _store) = load_module(&registry, &params);
         let names = match engine::resolve_order(&dag, targets) {
             Ok(n) => n,
             Err(e) => {
@@ -361,7 +376,7 @@ fn main() {
             }
         };
         let styles = if cli.plan {
-            match plan_styles(&mut dag, &base, store.as_ref(), targets, &tracker) {
+            match plan_styles(&mut dag, &base, &cache, targets, &tracker) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
@@ -373,9 +388,9 @@ fn main() {
         };
         println!("{}", bit::graph::render(&dag, &names, &styles));
     } else if cli.plan {
-        let (_module, mut dag, base, store) = load_module(&registry, &params);
+        let (_module, mut dag, base, _store) = load_module(&registry, &params);
         let output = make_output(&dag, targets, cli.debug, cli.long);
-        if let Err(e) = engine::plan(&mut dag, &base, store.as_ref(), &output, targets, &tracker) {
+        if let Err(e) = engine::plan(&mut dag, &base, &cache, &output, targets, &tracker) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
@@ -391,7 +406,7 @@ fn main() {
         let names = dag.test_order().unwrap_or_default();
         let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let output = Output::new(&name_refs).with_debug(cli.debug).with_long(cli.long);
-        if let Err(e) = engine::test(&mut dag, &base, store.as_ref(), &output, jobs, &tracker) {
+        if let Err(e) = engine::test(&mut dag, &base, store.as_ref(), &cache, &output, jobs, &tracker) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
@@ -414,7 +429,16 @@ fn main() {
         // Default: apply
         let (_module, mut dag, base, store) = load_module(&registry, &params);
         let output = make_output(&dag, targets, cli.debug, cli.long);
-        if let Err(e) = engine::apply(&mut dag, &base, store.as_ref(), &output, targets, jobs, &tracker) {
+        if let Err(e) = engine::apply(
+            &mut dag,
+            &base,
+            store.as_ref(),
+            &cache,
+            &output,
+            targets,
+            jobs,
+            &tracker,
+        ) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }

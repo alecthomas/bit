@@ -1,5 +1,6 @@
 use std::fs;
 
+use bit::cache::BuildCache;
 use bit::engine;
 use bit::loader;
 use std::sync::{Arc, Mutex};
@@ -14,6 +15,10 @@ use bit::value::Map;
 
 fn test_tracker() -> Arc<Mutex<FileTracker>> {
     Arc::new(Mutex::new(FileTracker::new()))
+}
+
+fn local_cache() -> BuildCache {
+    BuildCache::local_only(std::path::Path::new("."))
 }
 
 fn registry(tracker: &Arc<Mutex<FileTracker>>) -> ProviderRegistry {
@@ -55,14 +60,24 @@ fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
-    engine::apply(&mut dag, &base, store, &Output::new(&[]), &[], 1, &tracker).expect("apply failed")
+    engine::apply(
+        &mut dag,
+        &base,
+        store,
+        &local_cache(),
+        &Output::new(&[]),
+        &[],
+        1,
+        &tracker,
+    )
+    .expect("apply failed")
 }
 
 fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
-    engine::plan(&mut dag, &base, store, &Output::new(&[]), &[], &tracker).expect("plan failed")
+    engine::plan(&mut dag, &base, &local_cache(), &Output::new(&[]), &[], &tracker).expect("plan failed")
 }
 
 fn run_dump(input: &str, store: &MemoryStore, targets: &[String]) {
@@ -198,7 +213,17 @@ fn explicit_block_excluded_from_default_apply() {
     let tracker = test_tracker();
     let module = parser::parse(&input, "<test>").unwrap();
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), &store, &[]).unwrap();
-    engine::apply(&mut dag, &base, &store, &Output::new(&[]), &["b".into()], 1, &tracker).unwrap();
+    engine::apply(
+        &mut dag,
+        &base,
+        &store,
+        &local_cache(),
+        &Output::new(&[]),
+        &["b".into()],
+        1,
+        &tracker,
+    )
+    .unwrap();
     assert!(out_b.exists());
 }
 
@@ -242,6 +267,7 @@ fn target_filters_execution() {
         &mut dag,
         &base,
         &store,
+        &local_cache(),
         &Output::new(&[]),
         &["just_a".into()],
         1,
@@ -549,7 +575,17 @@ fn run_apply_in_dir(dir: &std::path::Path, input: &str, store: &MemoryStore) -> 
     }];
     let (mut dag, base) =
         loader::load(&module, &Map::new(), &registry(&tracker), store, &import_roots).expect("load failed");
-    engine::apply(&mut dag, &base, store, &Output::new(&[]), &[], 1, &tracker).expect("apply failed")
+    engine::apply(
+        &mut dag,
+        &base,
+        store,
+        &local_cache(),
+        &Output::new(&[]),
+        &[],
+        1,
+        &tracker,
+    )
+    .expect("apply failed")
 }
 
 #[test]
@@ -697,4 +733,115 @@ fn matrix_end_to_end() {
     assert!(out_arm64.exists());
     assert_eq!(fs::read_to_string(&out_amd64).unwrap().trim(), "amd64");
     assert_eq!(fs::read_to_string(&out_arm64).unwrap().trim(), "arm64");
+}
+
+// ── Shared build cache: go.exe acceptance ────────────────────────────────
+
+/// Build a Go binary in worktree A, delete A, and confirm worktree B
+/// restores the binary from the shared cache without running `go build`.
+/// Skipped when `go` is not installed.
+#[test]
+fn go_exe_restores_from_shared_cache_after_worktree_deleted() {
+    use std::process::Command;
+
+    if Command::new("go").arg("version").output().is_err() {
+        eprintln!("go not available; skipping");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let cache_dir = base.join("cache");
+
+    // Linked worktrees of one repository share receipts.
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+    let repo = base.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
+
+    fn write_project(root: &std::path::Path) {
+        fs::write(root.join("go.mod"), "module example.com/app\n").unwrap();
+        fs::write(
+            root.join("main.go"),
+            "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"hello from cache\") }\n",
+        )
+        .unwrap();
+    }
+
+    fn build_bit(root: &std::path::Path) -> String {
+        format!(
+            "app = go.exe {{\n  package = \".\"\n  dir = \"{}\"\n  output = \"{}\"\n}}\n",
+            root.display(),
+            root.join("bin/app").display()
+        )
+    }
+
+    fn run(
+        root: &std::path::Path,
+        cache_dir: &std::path::Path,
+        store: &MemoryStore,
+        plan_only: bool,
+    ) -> Vec<engine::BlockPlan> {
+        let tracker = test_tracker();
+        let mut reg = ProviderRegistry::new();
+        reg.register(Box::new(bit::providers::go::GoProvider::new(tracker.clone())));
+        let module = parser::parse(&build_bit(root), "<test>").unwrap();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &reg, store, &[]).unwrap();
+        let cache = BuildCache::open_at(root, cache_dir);
+        let output = Output::new(&[]);
+        if plan_only {
+            engine::plan(&mut dag, &base, &cache, &output, &[], &tracker).unwrap()
+        } else {
+            engine::apply(&mut dag, &base, store, &cache, &output, &[], 1, &tracker).unwrap()
+        }
+    }
+
+    let a = base.join("a");
+    git(&repo, &["worktree", "add", "-q", "--detach", a.to_str().unwrap()]);
+    write_project(&a);
+    let store_a = MemoryStore::new();
+    let plans = run(&a, &cache_dir, &store_a, false);
+    assert_eq!(plans[0].plan.action, bit::provider::PlanAction::Create);
+    assert!(a.join("bin/app").is_file());
+    fs::remove_dir_all(&a).unwrap();
+
+    let b = base.join("b");
+    git(&repo, &["worktree", "add", "-q", "--detach", b.to_str().unwrap()]);
+    write_project(&b);
+    let store_b = MemoryStore::new();
+    let plans = run(&b, &cache_dir, &store_b, true);
+    assert_eq!(plans[0].plan.action, bit::provider::PlanAction::Restore);
+    assert!(!b.join("bin/app").exists(), "plan must not materialize");
+
+    let plans = run(&b, &cache_dir, &store_b, false);
+    assert_eq!(plans[0].plan.action, bit::provider::PlanAction::Restore);
+    let exe = b.join("bin/app");
+    assert!(exe.is_file());
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello from cache");
+
+    let plans = run(&b, &cache_dir, &store_b, false);
+    assert_eq!(plans[0].plan.action, bit::provider::PlanAction::None);
 }

@@ -736,3 +736,25 @@ block = rust.fmt-check {
 3. Persist state to the user's cache directory (e.g. `~/Library/Caches/bit/<hash>/state.json` on macOS, `~/.cache/bit/<hash>/state.json` on Linux), partitioned by a hash of the project's absolute path
 
 Parallel execution with `-j N` (defaults to CPU count).
+
+### Shared build cache
+
+Successful results of some resources are also recorded in a shared cache so
+that linked Git worktrees of the same repository can reuse them, even after
+the worktree that produced them has been deleted:
+
+- `rust.build`, `rust.test`, `rust.clippy`, `rust.fmt`, `rust.fmt-check`,
+  `go.build`, `go.test`, `go.lint`, `go.fmt`, and `go.fmt-l` record that the
+  action succeeded for a given set of sources, inputs, dependencies, and
+  toolchain. A worktree with identical sources skips the action.
+- `go.exe` additionally stores the built binary. A worktree with identical
+  sources restores it to its own `output` path instead of running `go build`.
+  `bit --plan` reports this as a restore (`⇣`) without writing anything.
+
+Only linked worktrees of one repository share entries, and only when the
+`BUILD.bit` sits at the same path relative to the worktree root. Failed tests
+and lint runs are never shared. Restored files are independent copies, so
+editing or deleting one cannot affect the cache. `bit --clean` removes only
+the worktree's own outputs and state; cached entries live under
+`~/Library/Caches/bit/actions` and `~/Library/Caches/bit/cas` (or
+`~/.cache/bit/...` on Linux) and can be deleted by hand to reclaim space.

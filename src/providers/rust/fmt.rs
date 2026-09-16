@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv};
@@ -147,6 +147,14 @@ impl Resource for RustFmtResource {
     fn destroy(&self, _prior_state: &RustFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Shared { version: 1 }
+    }
+
+    fn toolchain(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, String>, BoxError> {
+        super::toolchain_fingerprint(&inputs.env)
+    }
 }
 
 // -- rust.fmt-check (test) ----------------------------------------------------
@@ -196,6 +204,14 @@ impl Resource for RustFmtCheckResource {
 
     fn destroy(&self, _prior_state: &RustFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
+    }
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Shared { version: 1 }
+    }
+
+    fn toolchain(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, String>, BoxError> {
+        super::toolchain_fingerprint(&inputs.env)
     }
 }
 

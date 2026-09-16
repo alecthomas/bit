@@ -56,6 +56,8 @@ pub enum Event {
     Create,
     Update,
     Destroy,
+    /// Outputs will be (or were) recreated from the shared cache.
+    Restore,
     NoChange,
     Debug,
     /// Terminal: block was skipped because it is `protected` (destroy refused).
@@ -72,6 +74,7 @@ impl Event {
             Event::Create => "+",
             Event::Update => "~",
             Event::Destroy => "-",
+            Event::Restore => "⇣",
             Event::NoChange => "·",
             Event::Debug => "⚙",
             Event::Protected => "⊘",
@@ -91,6 +94,7 @@ impl Event {
             Event::Create => Color::Green,
             Event::Update => Color::Yellow,
             Event::Destroy => Color::Red,
+            Event::Restore => Color::Cyan,
             Event::NoChange => Color::Primary,
             Event::Debug => Color::Blue,
             Event::Protected => Color::Primary,

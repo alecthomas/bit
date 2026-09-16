@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 /// Run golangci-lint
@@ -154,6 +154,22 @@ impl Resource for GoLintResource {
 
     fn destroy(&self, _prior_state: &GoLintState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
+    }
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Shared { version: 1 }
+    }
+
+    fn toolchain(&self, inputs: &GoLintInputs) -> Result<BTreeMap<String, String>, BoxError> {
+        let dir = inputs.dir.as_deref().map(Path::new);
+        let mut fingerprint = super::toolchain_fingerprint(&super::GoEnv::default(), dir)?;
+        let version = crate::providers::probe_tool("golangci-lint version", || {
+            let mut cmd = Command::new("golangci-lint");
+            cmd.arg("version");
+            cmd
+        })?;
+        fingerprint.insert("golangci-lint".to_owned(), version);
+        Ok(fingerprint)
     }
 }
 

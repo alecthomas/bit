@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 fn default_package() -> String {
@@ -167,6 +167,17 @@ impl Resource for GoFmtResource {
     fn destroy(&self, _prior_state: &GoFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Shared { version: 1 }
+    }
+
+    fn toolchain(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, String>, BoxError> {
+        super::toolchain_fingerprint(
+            &super::GoEnv::default(),
+            inputs.dir.as_deref().map(std::path::Path::new),
+        )
+    }
 }
 
 // ── go.fmt-l (test) ─────────────────────────────────────────────────────
@@ -269,6 +280,17 @@ impl Resource for GoFmtCheckResource {
 
     fn destroy(&self, _prior_state: &GoFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
+    }
+
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Shared { version: 1 }
+    }
+
+    fn toolchain(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, String>, BoxError> {
+        super::toolchain_fingerprint(
+            &super::GoEnv::default(),
+            inputs.dir.as_deref().map(std::path::Path::new),
+        )
     }
 }
 
