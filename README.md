@@ -159,7 +159,7 @@ container[arch] = docker.container {
 }
 ```
 
-Creates `binary[amd64]`, `binary[arm64]`, etc. Multiple keys produce a cartesian product. Non-matrix blocks depending on a matrix block wait for all slices.
+Creates `binary[amd64]`, `binary[arm64]`, etc. Multiple keys produce a cartesian product. Non-matrix blocks depending on a matrix block wait for all slices. Targets can name a matrix block to include all of its slices.
 
 ### Strings
 

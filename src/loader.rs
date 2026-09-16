@@ -86,6 +86,7 @@ pub fn load(
     let mut block_names = Vec::new();
     let mut matrix_blocks: HashMap<String, Vec<String>> = HashMap::new();
     let mut deferred_matrix: Vec<crate::ast::Block> = Vec::new();
+    let mut deferred_targets: Vec<crate::ast::Target> = Vec::new();
     let mut missing_params: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut declared_params: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -219,7 +220,7 @@ pub fn load(
                 }
             }
             Statement::Target(t) => {
-                dag.add_target(t.name.clone(), t.blocks.clone(), t.doc.clone());
+                deferred_targets.push(t.clone());
             }
             Statement::Output(_) => {
                 // Outputs are deferred — they reference block outputs
@@ -231,6 +232,19 @@ pub fn load(
     // Expand matrix blocks now that all params/lets are in scope
     for block in &deferred_matrix {
         matrix::expand_matrix(block, &mut scope, registry, store, &mut dag, &matrix_blocks)?;
+    }
+
+    for target in &deferred_targets {
+        let mut blocks = Vec::new();
+        for name in &target.blocks {
+            let resolved = resolve_dep(name, &dag, &matrix_blocks, &scope);
+            if resolved.is_empty() {
+                blocks.push(name.clone());
+            } else {
+                blocks.extend(resolved);
+            }
+        }
+        dag.add_target(target.name.clone(), blocks, target.doc.clone());
     }
 
     // Build dependency edges from field refs, depends_on, and after.
@@ -334,7 +348,9 @@ fn resolve_dep(name: &str, dag: &Dag, matrix_blocks: &HashMap<String, Vec<String
     if matrix_blocks.contains_key(name)
         && let Some(Value::Struct(_, map)) = scope.get(name)
     {
-        return map.keys().map(|k| format!("{name}[{k}]")).collect();
+        let mut names: Vec<_> = map.keys().map(|k| format!("{name}[{k}]")).collect();
+        names.sort();
+        return names;
     }
     vec![]
 }
@@ -1121,5 +1137,23 @@ package = exec {
         let pkg = order.iter().position(|n| n == "package").unwrap();
         assert!(build_amd64 < pkg);
         assert!(build_arm64 < pkg);
+    }
+
+    #[test]
+    fn target_expands_matrix_block_to_all_slices() {
+        let input = r#"
+let package = ["api", "worker"]
+
+tests[package] = exec.test {
+  command = "test #{package}"
+}
+
+target check = [tests]
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+
+        let order = dag.target_order("check").unwrap();
+        assert_eq!(order, vec!["tests[api]", "tests[worker]"]);
     }
 }
