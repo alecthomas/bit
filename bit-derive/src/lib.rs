@@ -1,7 +1,193 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
-use syn::{Data, DataEnum, DataStruct, DeriveInput, Fields, Ident, Lit, Meta, Type, parse_macro_input};
+use quote::{format_ident, quote};
+use syn::{
+    Data, DataEnum, DataStruct, DeriveInput, Fields, FnArg, GenericArgument, Ident, ItemFn, Lit, Meta, Pat,
+    PathArguments, ReturnType, Type, parse_macro_input,
+};
+
+/// Keep a provider function's implementation fully typed while generating
+/// its dynamic `Value` adapter and schema signature.
+///
+/// Optional positional arguments are represented as trailing `Option<T>`
+/// parameters. The function must return `Result<T, E>`, where `T` is
+/// serializable and `E` converts into `crate::provider::BoxError`.
+#[proc_macro_attribute]
+pub fn provider_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let function = parse_macro_input!(item as ItemFn);
+    match expand_provider_function(function) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+fn expand_provider_function(function: ItemFn) -> syn::Result<TokenStream2> {
+    let name = &function.sig.ident;
+    if function.sig.asyncness.is_some()
+        || function.sig.constness.is_some()
+        || function.sig.unsafety.is_some()
+        || function.sig.abi.is_some()
+        || function.sig.variadic.is_some()
+    {
+        return Err(syn::Error::new_spanned(
+            &function.sig,
+            "provider functions must be ordinary synchronous Rust functions",
+        ));
+    }
+
+    let mut params = Vec::new();
+    let mut saw_optional = false;
+    for input in &function.sig.inputs {
+        let FnArg::Typed(argument) = input else {
+            return Err(syn::Error::new_spanned(
+                input,
+                "provider functions cannot have a receiver",
+            ));
+        };
+        let Pat::Ident(pattern) = argument.pat.as_ref() else {
+            return Err(syn::Error::new_spanned(
+                &argument.pat,
+                "provider function arguments must be simple identifiers",
+            ));
+        };
+        let optional = option_inner(&argument.ty).is_some();
+        if saw_optional && !optional {
+            return Err(syn::Error::new_spanned(
+                &argument.ty,
+                "required provider function arguments cannot follow optional arguments",
+            ));
+        }
+        saw_optional |= optional;
+        params.push((
+            pattern.ident.clone(),
+            argument.ty.as_ref().clone(),
+            optional,
+            argument.attrs.clone(),
+        ));
+    }
+
+    let ReturnType::Type(_, return_type) = &function.sig.output else {
+        return Err(syn::Error::new_spanned(
+            &function.sig.output,
+            "provider functions must return Result<T, E>",
+        ));
+    };
+    let ok_type = result_ok_type(return_type)?;
+    let required = params.iter().take_while(|(_, _, optional, _)| !optional).count();
+    let total = params.len();
+    let call_name = format_ident!("__bit_call_{name}");
+    let signature_name = format_ident!("__bit_signature_{name}");
+    let visibility = &function.vis;
+
+    let argument_bindings = params.iter().enumerate().map(|(index, (param, typ, optional, _))| {
+        let param_name = param.to_string();
+        if *optional {
+            quote! {
+                let #param: #typ = match args.get(#index) {
+                    Some(value) => crate::provider::deserialize_function_value(value)
+                        .map_err(|error| format!("{} argument '{}': {error}", stringify!(#name), #param_name))?,
+                    None => None,
+                };
+            }
+        } else {
+            quote! {
+                let #param: #typ = crate::provider::deserialize_function_value(&args[#index])
+                    .map_err(|error| format!("{} argument '{}': {error}", stringify!(#name), #param_name))?;
+            }
+        }
+    });
+    let call_args = params.iter().map(|(param, _, _, _)| param);
+    let signature_params = params.iter().map(|(param, typ, _, attrs)| {
+        let param_name = param.to_string();
+        let schema_type = rust_type_to_schema_type(typ, false);
+        let description = match extract_doc_comment(attrs) {
+            Some(doc) => quote! { Some(#doc.into()) },
+            None => quote! { None },
+        };
+        quote! {
+            (
+                #param_name.into(),
+                crate::value::StructField {
+                    typ: #schema_type,
+                    default: None,
+                    description: #description,
+                },
+            )
+        }
+    });
+    let return_schema = rust_type_to_schema_type(&ok_type, false);
+
+    Ok(quote! {
+        #function
+
+        #[doc(hidden)]
+        #visibility fn #call_name(args: &[crate::value::Value]) -> Result<crate::value::Value, crate::provider::BoxError> {
+            if args.len() < #required || args.len() > #total {
+                return Err(format!(
+                    "{} expects {} to {} arguments, got {}",
+                    stringify!(#name),
+                    #required,
+                    #total,
+                    args.len(),
+                )
+                .into());
+            }
+            #(#argument_bindings)*
+            let result: #ok_type = #name(#(#call_args),*)
+                .map_err(|error| -> crate::provider::BoxError { error.into() })?;
+            crate::provider::serialize_function_value(&result)
+        }
+
+        #[doc(hidden)]
+        #visibility fn #signature_name() -> crate::provider::FuncSignature {
+            crate::provider::FuncSignature {
+                name: stringify!(#name).into(),
+                params: vec![#(#signature_params),*],
+                returns: #return_schema,
+            }
+        }
+    })
+}
+
+fn option_inner(ty: &Type) -> Option<Type> {
+    let Type::Path(path) = ty else { return None };
+    let segment = path.path.segments.last()?;
+    (segment.ident == "Option").then(|| extract_generic_arg(segment))
+}
+
+fn result_ok_type(ty: &Type) -> syn::Result<Type> {
+    let Type::Path(path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "provider functions must return Result<T, E>",
+        ));
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "provider functions must return Result<T, E>",
+        ));
+    };
+    if segment.ident != "Result" {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "provider functions must return Result<T, E>",
+        ));
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "provider functions must return Result<T, E>",
+        ));
+    };
+    match arguments.args.first() {
+        Some(GenericArgument::Type(ok)) if arguments.args.len() == 2 => Ok(ok.clone()),
+        _ => Err(syn::Error::new_spanned(
+            ty,
+            "provider functions must return Result<T, E>",
+        )),
+    }
+}
 
 /// Derive the `Schema` and `SchemaType` traits.
 ///

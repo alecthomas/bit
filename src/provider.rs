@@ -14,6 +14,16 @@ pub use crate::value::{StructField, StructType};
 /// Shorthand for the boxed error type used at provider boundaries.
 pub type BoxError = Box<dyn Error + Send + Sync>;
 
+#[doc(hidden)]
+pub fn deserialize_function_value<T: DeserializeOwned>(value: &Value) -> Result<T, BoxError> {
+    Ok(serde_json::from_value(serde_json::to_value(value)?)?)
+}
+
+#[doc(hidden)]
+pub fn serialize_function_value<T: Serialize>(value: &T) -> Result<Value, BoxError> {
+    Ok(serde_json::from_value(serde_json::to_value(value)?)?)
+}
+
 /// What action the plan phase determined is needed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanAction {
@@ -434,6 +444,11 @@ mod tests {
 
     struct StubProvider;
 
+    #[bit_derive::provider_function]
+    fn typed_function(value: String, suffix: Option<String>) -> Result<Vec<String>, BoxError> {
+        Ok(vec![format!("{value}{}", suffix.unwrap_or_default())])
+    }
+
     impl Provider for StubProvider {
         fn name(&self) -> &str {
             "stub"
@@ -508,6 +523,30 @@ mod tests {
         assert!(reg.get_resource("stub", "thing").is_some());
         assert!(reg.get_resource("stub", "missing").is_none());
         assert!(reg.get_resource("missing", "thing").is_none());
+    }
+
+    #[test]
+    fn provider_function_macro_generates_signature_and_adapter() {
+        let signature = __bit_signature_typed_function();
+        assert_eq!(signature.name, "typed_function");
+        assert_eq!(signature.params[0].1.typ, crate::value::Type::String);
+        assert_eq!(
+            signature.params[1].1.typ,
+            crate::value::Type::Optional(Box::new(crate::value::Type::String))
+        );
+        assert_eq!(
+            signature.returns,
+            crate::value::Type::List(Box::new(crate::value::Type::String))
+        );
+
+        assert_eq!(
+            __bit_call_typed_function(&[Value::Str("value".into()), Value::Str("-suffix".into())]).unwrap(),
+            Value::List(crate::value::Type::String, vec![Value::Str("value-suffix".into())])
+        );
+        assert_eq!(
+            __bit_call_typed_function(&[Value::Str("value".into())]).unwrap(),
+            Value::List(crate::value::Type::String, vec![Value::Str("value".into())])
+        );
     }
 
     #[test]

@@ -9,28 +9,15 @@ use std::sync::{Arc, Mutex};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{BoxError, DynResource, FuncSignature, Provider, StructField};
-use crate::value::{Type, Value};
+use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
+use crate::value::Value;
 
-fn packages_with_script(args: &[Value]) -> Result<Value, BoxError> {
-    if !(1..=2).contains(&args.len()) {
-        return Err(format!("pnpm.packages_with_script expects 1 or 2 arguments, got {}", args.len()).into());
-    }
-    let script = args[0]
-        .as_str()
-        .ok_or("pnpm.packages_with_script script must be a string")?;
-    let dir = args
-        .get(1)
-        .map(|value| value.as_str().ok_or("pnpm.packages_with_script dir must be a string"))
-        .transpose()?
-        .unwrap_or(".");
-    let packages = workspace::with_workspace(std::path::Path::new(dir), |workspace| {
-        workspace::packages_with_script(workspace, script)
-    })?;
-    Ok(Value::List(
-        Type::String,
-        packages.into_iter().map(Value::Str).collect(),
-    ))
+#[bit_derive::provider_function]
+fn packages_with_script(script: String, dir: Option<String>) -> Result<Vec<String>, BoxError> {
+    let dir = dir.as_deref().unwrap_or(".");
+    workspace::with_workspace(std::path::Path::new(dir), |workspace| {
+        workspace::packages_with_script(workspace, &script)
+    })
 }
 
 /// pnpm-aware provider with `install`, `run`, and `test` resources.
@@ -64,33 +51,12 @@ impl Provider for PnpmProvider {
     }
 
     fn functions(&self) -> Vec<FuncSignature> {
-        vec![FuncSignature {
-            name: "packages_with_script".into(),
-            params: vec![
-                (
-                    "script".into(),
-                    StructField {
-                        typ: Type::String,
-                        default: None,
-                        description: Some("Script that each returned package must define".into()),
-                    },
-                ),
-                (
-                    "dir".into(),
-                    StructField {
-                        typ: Type::String,
-                        default: Some(Value::Str(".".into())),
-                        description: Some("Workspace root directory".into()),
-                    },
-                ),
-            ],
-            returns: Type::List(Box::new(Type::String)),
-        }]
+        vec![__bit_signature_packages_with_script()]
     }
 
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {
         match name {
-            "packages_with_script" => packages_with_script(args),
+            "packages_with_script" => __bit_call_packages_with_script(args),
             _ => Err(format!("pnpm provider has no function '{name}'").into()),
         }
     }

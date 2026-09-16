@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::provider::{BoxError, DynResource, FuncSignature, Provider, StructField};
+use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
 use crate::sha256::SHA256;
-use crate::value::{Type, Value};
+use crate::value::Value;
 
 /// First-class Go environment variables shared across all go resources.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
@@ -96,19 +96,11 @@ pub fn toolchain_fingerprint(env: &GoEnv, dir: Option<&Path>) -> Result<BTreeMap
         .collect())
 }
 
-fn packages(args: &[Value]) -> Result<Value, BoxError> {
-    if !(1..=2).contains(&args.len()) {
-        return Err(format!("go.packages expects 1 or 2 arguments, got {}", args.len()).into());
-    }
-    let pattern = args[0].as_str().ok_or("go.packages pattern must be a string")?;
-    let dir = args
-        .get(1)
-        .map(|value| value.as_str().ok_or("go.packages dir must be a string"))
-        .transpose()?;
-
+#[bit_derive::provider_function]
+fn packages(pattern: String, dir: Option<String>) -> Result<Vec<String>, BoxError> {
     let mut command = Command::new("go");
-    command.args(["list", pattern]);
-    if let Some(dir) = dir {
+    command.args(["list", &pattern]);
+    if let Some(dir) = &dir {
         command.current_dir(dir);
     }
     let output = command
@@ -125,7 +117,7 @@ fn packages(args: &[Value]) -> Result<Value, BoxError> {
     Ok(package_list(&output.stdout))
 }
 
-fn package_list(output: &[u8]) -> Value {
+fn package_list(output: &[u8]) -> Vec<String> {
     let mut packages: Vec<_> = String::from_utf8_lossy(output)
         .lines()
         .map(str::trim)
@@ -134,7 +126,7 @@ fn package_list(output: &[u8]) -> Value {
         .collect();
     packages.sort();
     packages.dedup();
-    Value::List(Type::String, packages.into_iter().map(Value::Str).collect())
+    packages
 }
 
 /// Go provider with `exe`, `build`, and `test` resources.
@@ -166,33 +158,12 @@ impl Provider for GoProvider {
     }
 
     fn functions(&self) -> Vec<FuncSignature> {
-        vec![FuncSignature {
-            name: "packages".into(),
-            params: vec![
-                (
-                    "pattern".into(),
-                    StructField {
-                        typ: Type::String,
-                        default: None,
-                        description: Some("Go package pattern (for example, ./...)".into()),
-                    },
-                ),
-                (
-                    "dir".into(),
-                    StructField {
-                        typ: Type::String,
-                        default: Some(Value::Str(".".into())),
-                        description: Some("Working directory for go list".into()),
-                    },
-                ),
-            ],
-            returns: Type::List(Box::new(Type::String)),
-        }]
+        vec![__bit_signature_packages()]
     }
 
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {
         match name {
-            "packages" => packages(args),
+            "packages" => __bit_call_packages(args),
             _ => Err(format!("go provider has no function '{name}'").into()),
         }
     }
@@ -221,10 +192,7 @@ mod tests {
     fn package_list_is_sorted_and_deduplicated() {
         assert_eq!(
             package_list(b"example/z\nexample/a\nexample/z\n"),
-            Value::List(
-                Type::String,
-                vec![Value::Str("example/a".into()), Value::Str("example/z".into())]
-            )
+            vec!["example/a", "example/z"]
         );
     }
 }

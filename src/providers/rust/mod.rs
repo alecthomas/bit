@@ -15,7 +15,7 @@ use crate::cache::ProjectIdentity;
 use crate::file_tracker::FileTracker;
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
 use crate::sha256::SHA256;
-use crate::value::{Type, Value};
+use crate::value::Value;
 
 /// Shared Rust environment/config fields flattened into all rust resources.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
@@ -361,12 +361,9 @@ fn cargo_metadata() -> Result<serde_json::Value, BoxError> {
     Ok(serde_json::from_slice(&output.stdout).map_err(|e| format!("failed to parse `cargo metadata` output: {e}"))?)
 }
 
-fn workspace_packages(args: &[Value]) -> Result<Value, BoxError> {
-    if !args.is_empty() {
-        return Err(format!("rust.packages expects no arguments, got {}", args.len()).into());
-    }
-    let names = workspace_package_names(&cargo_metadata()?)?;
-    Ok(Value::List(Type::String, names.into_iter().map(Value::Str).collect()))
+#[bit_derive::provider_function]
+fn packages() -> Result<Vec<String>, BoxError> {
+    workspace_package_names(&cargo_metadata()?)
 }
 
 fn workspace_package_names(metadata: &serde_json::Value) -> Result<Vec<String>, BoxError> {
@@ -474,16 +471,12 @@ impl Provider for RustProvider {
     }
 
     fn functions(&self) -> Vec<FuncSignature> {
-        vec![FuncSignature {
-            name: "packages".into(),
-            params: vec![],
-            returns: Type::List(Box::new(Type::String)),
-        }]
+        vec![__bit_signature_packages()]
     }
 
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {
         match name {
-            "packages" => workspace_packages(args),
+            "packages" => __bit_call_packages(args),
             _ => Err(format!("rust provider has no function '{name}'").into()),
         }
     }
