@@ -231,12 +231,12 @@ tests[package] = go.test {
 
 The built-in providers expose:
 
-| Function                                 | Description                                |
-| ---------------------------------------- | ------------------------------------------ |
-| `go.packages(pattern)`                   | Go packages matching a package pattern     |
-| `go.packages(pattern, dir)`              | Go packages matching a pattern from `dir`  |
-| `rust.packages()`                        | Cargo workspace package names              |
-| `pnpm.packages_with_script(script)`      | Workspace packages that define `script`    |
+| Function                                 | Description                                 |
+| ---------------------------------------- | ------------------------------------------- |
+| `go.packages(pattern)`                   | Go packages matching a package pattern      |
+| `go.packages(pattern, dir)`              | Go packages matching a pattern from `dir`   |
+| `rust.packages()`                        | Cargo workspace package names               |
+| `pnpm.packages_with_script(script)`      | Workspace packages that define `script`     |
 | `pnpm.packages_with_script(script, dir)` | Matching workspace packages rooted at `dir` |
 
 `bit --schema` includes these function signatures and their descriptions.
