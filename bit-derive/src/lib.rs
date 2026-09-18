@@ -139,7 +139,7 @@ fn expand_provider_function(function: ItemFn) -> syn::Result<TokenStream2> {
             #(#argument_bindings)*
             let result: #ok_type = #name(#(#call_args),*)
                 .map_err(|error| -> crate::provider::BoxError { error.into() })?;
-            crate::provider::serialize_function_value(&result)
+            crate::provider::serialize_function_value(&result, &#return_schema)
         }
 
         #[doc(hidden)]
@@ -485,6 +485,7 @@ fn rust_type_to_schema_type(ty: &Type, has_default: bool) -> TokenStream2 {
 
             match ident.as_str() {
                 "String" => quote! { crate::value::Type::String },
+                "BlockRef" => quote! { crate::value::Type::BlockRef },
                 "bool" => {
                     if has_default {
                         quote! { crate::value::Type::Optional(Box::new(crate::value::Type::Bool)) }

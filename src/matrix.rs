@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Block, Expr, Field, StringPart};
-use crate::dag::{Dag, DagNode, collect_after, collect_block_refs, collect_depends_on};
+use crate::dag::{Dag, DagNode, collect_block_refs, collect_dependency_refs};
 use crate::expr::Scope;
 use crate::loader::LoadError;
 use crate::provider::ProviderRegistry;
@@ -141,12 +141,18 @@ pub fn expand_matrix(
                 dag.add_dep_edge(&dep, expanded)?;
             }
         }
-        for dep in collect_depends_on(node_fields) {
+        for dep in collect_dependency_refs(node_fields, "depends_on", scope).map_err(|source| LoadError::Eval {
+            pos: block.pos.clone(),
+            source,
+        })? {
             if dag.has_block(&dep) && dep != *expanded {
                 dag.add_dep_edge(&dep, expanded)?;
             }
         }
-        for dep in collect_after(node_fields) {
+        for dep in collect_dependency_refs(node_fields, "after", scope).map_err(|source| LoadError::Eval {
+            pos: block.pos.clone(),
+            source,
+        })? {
             if dag.has_block(&dep) && dep != *expanded {
                 dag.add_ordering_edge(&dep, expanded)?;
             }

@@ -21,8 +21,12 @@ pub fn deserialize_function_value<T: DeserializeOwned>(value: &Value) -> Result<
 }
 
 #[doc(hidden)]
-pub fn serialize_function_value<T: Serialize>(value: &T) -> Result<Value, BoxError> {
-    Ok(serde_json::from_value(serde_json::to_value(value)?)?)
+pub fn serialize_function_value<T: Serialize>(value: &T, typ: &crate::value::Type) -> Result<Value, BoxError> {
+    let mut value: Value = serde_json::from_value(serde_json::to_value(value)?)?;
+    if let (Value::List(actual, _), crate::value::Type::List(expected)) = (&mut value, typ) {
+        *actual = expected.as_ref().clone();
+    }
+    Ok(value)
 }
 
 /// What action the plan phase determined is needed.
@@ -583,6 +587,15 @@ mod tests {
         Ok(vec![format!("{value}{}", suffix.unwrap_or_default())])
     }
 
+    #[bit_derive::provider_function]
+    fn typed_block_refs(empty: bool) -> Result<Vec<crate::value::BlockRef>, BoxError> {
+        Ok(if empty {
+            Vec::new()
+        } else {
+            vec![crate::value::BlockRef::new("build[core]")]
+        })
+    }
+
     impl Provider for StubProvider {
         fn name(&self) -> &str {
             "stub"
@@ -690,6 +703,26 @@ mod tests {
         assert_eq!(
             __bit_call_typed_function(&[Value::Str("value".into())]).unwrap(),
             Value::List(crate::value::Type::String, vec![Value::Str("value".into())])
+        );
+    }
+
+    #[test]
+    fn provider_function_macro_preserves_block_reference_type() {
+        let signature = __bit_signature_typed_block_refs();
+        assert_eq!(
+            signature.returns,
+            crate::value::Type::List(Box::new(crate::value::Type::BlockRef))
+        );
+        assert_eq!(
+            __bit_call_typed_block_refs(&[Value::Bool(false)]).unwrap(),
+            Value::List(
+                crate::value::Type::BlockRef,
+                vec![Value::BlockRef("build[core]".into())]
+            )
+        );
+        assert_eq!(
+            __bit_call_typed_block_refs(&[Value::Bool(true)]).unwrap(),
+            Value::List(crate::value::Type::BlockRef, Vec::new())
         );
     }
 

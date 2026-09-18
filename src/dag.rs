@@ -7,7 +7,9 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 
 use crate::ast::{Expr, Field, Phase, StringPart};
+use crate::expr::{self, EvalError, Scope};
 use crate::provider::DynResource;
+use crate::value::{Type, Value};
 
 /// The type of edge between two blocks.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -436,6 +438,41 @@ pub fn collect_depends_on(fields: &[Field]) -> Vec<String> {
         }
     }
     vec![]
+}
+
+/// Resolve a dependency field that is either a literal list of block
+/// references or a configuration-time expression returning `[block]`.
+pub fn collect_dependency_refs(fields: &[Field], field_name: &str, scope: &Scope) -> Result<Vec<String>, EvalError> {
+    let Some(field) = fields.iter().find(|field| field.name == field_name) else {
+        return Ok(Vec::new());
+    };
+
+    if let Expr::List(items) = &field.value
+        && items.iter().all(|item| matches!(item, Expr::Ref(_)))
+    {
+        return Ok(items
+            .iter()
+            .filter_map(|item| match item {
+                Expr::Ref(parts) => Some(parts[0].clone()),
+                _ => None,
+            })
+            .collect());
+    }
+
+    match expr::eval(&field.value, scope)? {
+        Value::List(Type::BlockRef, references) => references
+            .into_iter()
+            .map(|reference| match reference {
+                Value::BlockRef(name) => Ok(name),
+                value => Err(EvalError::Type(format!(
+                    "{field_name} must return block references, got {value}"
+                ))),
+            })
+            .collect(),
+        value => Err(EvalError::Type(format!(
+            "{field_name} must be a list of block references, got {value}"
+        ))),
+    }
 }
 
 /// Extract explicit `after` entries from fields (ordering-only edges).

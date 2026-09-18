@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Module, Statement};
-use crate::dag::{Dag, DagError, DagNode, collect_after, collect_all_refs, collect_block_refs, collect_depends_on};
+use crate::dag::{Dag, DagError, DagNode, collect_all_refs, collect_block_refs, collect_dependency_refs};
 use crate::expr::{self, EvalError, Scope};
 use crate::matrix;
 use crate::module;
@@ -269,7 +269,10 @@ pub fn load(
                 }
             }
             // Explicit depends_on — must reference known blocks.
-            for dep in collect_depends_on(&b.fields) {
+            for dep in collect_dependency_refs(&b.fields, "depends_on", &scope).map_err(|source| LoadError::Eval {
+                pos: b.pos.clone(),
+                source,
+            })? {
                 let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope);
                 if resolved.is_empty() {
                     return Err(LoadError::UnknownBlock {
@@ -285,7 +288,10 @@ pub fn load(
                 }
             }
             // Explicit after — must reference known blocks.
-            for dep in collect_after(&b.fields) {
+            for dep in collect_dependency_refs(&b.fields, "after", &scope).map_err(|source| LoadError::Eval {
+                pos: b.pos.clone(),
+                source,
+            })? {
                 let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope);
                 if resolved.is_empty() {
                     return Err(LoadError::UnknownBlock {
@@ -362,13 +368,53 @@ mod tests {
     use super::*;
     use crate::file_tracker::FileTracker;
     use crate::parser;
+    use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
     use crate::providers::exec::ExecProvider;
 
     fn test_registry() -> ProviderRegistry {
         let mut reg = ProviderRegistry::new();
         let tracker = Arc::new(Mutex::new(FileTracker::new()));
         reg.register(Box::new(ExecProvider::new(tracker)));
+        reg.register(Box::new(DependencyProvider));
         reg
+    }
+
+    struct DependencyProvider;
+
+    impl Provider for DependencyProvider {
+        fn name(&self) -> &str {
+            "dependency"
+        }
+
+        fn resources(&self) -> Vec<Box<dyn DynResource>> {
+            Vec::new()
+        }
+
+        fn functions(&self) -> Vec<FuncSignature> {
+            Vec::new()
+        }
+
+        fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {
+            if args.len() != 1 {
+                return Err("unexpected dependency function call".into());
+            }
+            let package = args[0].as_str().ok_or("package must be a string")?;
+            if name == "strings" {
+                return Ok(Value::List(
+                    crate::value::Type::String,
+                    vec![Value::Str("crate[core]".into())],
+                ));
+            }
+            if name != "of" {
+                return Err("unexpected dependency function call".into());
+            }
+            let references = if package == "app" {
+                vec![Value::BlockRef("crate[core]".into())]
+            } else {
+                Vec::new()
+            };
+            Ok(Value::List(crate::value::Type::BlockRef, references))
+        }
     }
 
     struct EmptyStore;
@@ -1035,6 +1081,52 @@ build[arch] = exec {
         assert!(dag.has_block("build[amd64]"));
         assert!(dag.has_block("build[arm64]"));
         assert!(!dag.has_block("build"));
+    }
+
+    #[test]
+    fn matrix_dependencies_can_come_from_block_reference_function() {
+        let input = r#"
+let package = ["app", "core"]
+
+crate[package] = exec {
+  command = "build #{package}"
+  output = "out-#{package}"
+  depends_on = dependency.of(package)
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+
+        let order = dag.topo_order().unwrap();
+        let core = order.iter().position(|name| name == "crate[core]").unwrap();
+        let app = order.iter().position(|name| name == "crate[app]").unwrap();
+        assert!(core < app);
+    }
+
+    #[test]
+    fn dependency_function_does_not_coerce_strings_to_block_references() {
+        let input = r#"
+core = exec {
+  command = "build core"
+  output = "out-core"
+}
+
+app = exec {
+  command = "build app"
+  output = "out-app"
+  depends_on = dependency.strings("app")
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]);
+
+        match result {
+            Err(LoadError::Eval {
+                source: EvalError::Type(message),
+                ..
+            }) => assert!(message.contains("list of block references")),
+            _ => panic!("expected a block reference type error"),
+        }
     }
 
     #[test]

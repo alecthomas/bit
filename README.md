@@ -232,6 +232,20 @@ tests[package] = go.test {
 }
 ```
 
+Provider functions can also return typed block references for dependency
+fields. `rust.dependencies` returns immediate local workspace dependencies;
+each `$` in its optional template is replaced with the dependency package
+name:
+
+```bit
+let package = rust.packages()
+
+crate[package] = rust.build {
+  package = package
+  depends_on = rust.dependencies(package, "crate[$]")
+}
+```
+
 `bit --schema` includes these function signatures and their descriptions.
 Filter by provider or exact member, such as `bit --schema go` or
 `bit --schema go.packages`. The generated provider reference below includes
@@ -752,6 +766,8 @@ block = rust.fmt-check {
 | `passed` | `bool` | Whether the check passed |
 
 **`rust.packages() -> [string]`** — List Cargo workspace packages.
+
+**`rust.dependencies(package: string, template: string?) -> [block]`** — List a Cargo workspace package's immediate local dependencies. `package` names the Cargo workspace package. When `template` is set, every `$` in it is replaced with the dependency package name. For example, `crate[$]` returns matrix block references.
 
 ## How It Works
 

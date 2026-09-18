@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::ast::{Block, Expr, Field, Module, Statement, StringPart};
-use crate::dag::{Dag, DagNode, collect_after, collect_block_refs, collect_depends_on};
+use crate::dag::{Dag, DagNode, collect_block_refs, collect_dependency_refs};
 use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::output::BlockWriter;
@@ -301,12 +301,18 @@ pub fn expand_module(
                 ctx.dag.add_dep_edge(&dep, &qualified_name)?;
             }
         }
-        for dep in collect_depends_on(node_fields) {
+        for dep in collect_dependency_refs(node_fields, "depends_on", ctx.scope).map_err(|source| LoadError::Eval {
+            pos: block.pos.clone(),
+            source,
+        })? {
             if ctx.dag.has_block(&dep) && dep != qualified_name {
                 ctx.dag.add_dep_edge(&dep, &qualified_name)?;
             }
         }
-        for dep in collect_after(node_fields) {
+        for dep in collect_dependency_refs(node_fields, "after", ctx.scope).map_err(|source| LoadError::Eval {
+            pos: block.pos.clone(),
+            source,
+        })? {
             if ctx.dag.has_block(&dep) && dep != qualified_name {
                 ctx.dag.add_ordering_edge(&dep, &qualified_name)?;
             }

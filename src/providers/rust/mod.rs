@@ -15,7 +15,7 @@ use crate::cache::ProjectIdentity;
 use crate::file_tracker::FileTracker;
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
 use crate::sha256::SHA256;
-use crate::value::Value;
+use crate::value::{BlockRef, Value};
 
 /// Shared Rust environment/config fields flattened into all rust resources.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
@@ -265,6 +265,7 @@ struct DiscoveredPaths {
 }
 
 static DISCOVERED_CACHE: Mutex<Option<DiscoveredPaths>> = Mutex::new(None);
+static CARGO_METADATA_CACHE: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 
 /// Discover once per process and return a copy so the lock is released
 /// before any hashing.
@@ -377,8 +378,13 @@ fn discover_input_paths(packages: &[&serde_json::Value], cwd: &Path) -> InputPat
     InputPaths { globs, files }
 }
 
-/// Run `cargo metadata --no-deps` for the current directory.
+/// Run `cargo metadata --no-deps` once for the current directory.
 fn cargo_metadata() -> Result<serde_json::Value, BoxError> {
+    let mut guard = CARGO_METADATA_CACHE.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(metadata) = guard.as_ref() {
+        return Ok(metadata.clone());
+    }
+
     let output = Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .stdin(std::process::Stdio::null())
@@ -390,13 +396,31 @@ fn cargo_metadata() -> Result<serde_json::Value, BoxError> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("`cargo metadata` failed: {stderr}").into());
     }
-    Ok(serde_json::from_slice(&output.stdout).map_err(|e| format!("failed to parse `cargo metadata` output: {e}"))?)
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("failed to parse `cargo metadata` output: {error}"))?;
+    *guard = Some(metadata.clone());
+    Ok(metadata)
 }
 
 /// List Cargo workspace packages.
 #[bit_derive::provider_function]
 fn packages() -> Result<Vec<String>, BoxError> {
     workspace_package_names(&cargo_metadata()?)
+}
+
+/// List a Cargo workspace package's immediate local dependencies.
+///
+/// `package` names the Cargo workspace package. When `template` is set, every
+/// `$` in it is replaced with the dependency package name. For example,
+/// `crate[$]` returns matrix block references.
+#[bit_derive::provider_function]
+fn dependencies(package: String, template: Option<String>) -> Result<Vec<BlockRef>, BoxError> {
+    Ok(
+        workspace_package_dependencies(&cargo_metadata()?, &package, template.as_deref())?
+            .into_iter()
+            .map(BlockRef::new)
+            .collect(),
+    )
 }
 
 fn workspace_package_names(metadata: &serde_json::Value) -> Result<Vec<String>, BoxError> {
@@ -452,36 +476,76 @@ fn workspace_package_closure(metadata: &serde_json::Value, selected: &str) -> Re
         if !found.insert(name.clone()) {
             continue;
         }
-        let Some(package) = packages.get(&name) else {
-            continue;
-        };
-        let dependencies = package
-            .get("dependencies")
-            .and_then(serde_json::Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        for dependency in dependencies {
-            let local_name = dependency
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|path| roots.get(Path::new(path)).map(String::as_str))
-                .or_else(|| {
-                    dependency
-                        .get("source")
-                        .is_some_and(serde_json::Value::is_null)
-                        .then(|| dependency.get("name").and_then(serde_json::Value::as_str))
-                        .flatten()
-                        .and_then(|name| packages.contains_key(name).then_some(name))
-                });
-            if let Some(local_name) = local_name {
-                pending.push(local_name.to_owned());
-            }
+        for dependency in local_package_dependencies(&packages, &roots, &name) {
+            pending.push(dependency);
         }
     }
 
     let mut names: Vec<_> = found.into_iter().collect();
     names.sort();
     Ok(names)
+}
+
+fn workspace_package_dependencies(
+    metadata: &serde_json::Value,
+    selected: &str,
+    template: Option<&str>,
+) -> Result<Vec<String>, BoxError> {
+    let packages = workspace_packages_by_name(metadata)?;
+    if !packages.contains_key(selected) {
+        return Err(format!("Rust package '{selected}' not found in workspace").into());
+    }
+    if template.is_some_and(|template| !template.contains('$')) {
+        return Err("Rust dependency template must contain a `$` placeholder".into());
+    }
+
+    let roots: HashMap<PathBuf, String> = packages
+        .iter()
+        .filter_map(|(name, package)| {
+            let manifest = package.get("manifest_path")?.as_str()?;
+            Some((Path::new(manifest).parent()?.to_path_buf(), name.clone()))
+        })
+        .collect();
+    let dependencies = local_package_dependencies(&packages, &roots, selected);
+    Ok(match template {
+        Some(template) => dependencies
+            .into_iter()
+            .map(|dependency| template.replace('$', &dependency))
+            .collect(),
+        None => dependencies,
+    })
+}
+
+fn local_package_dependencies(
+    packages: &HashMap<String, &serde_json::Value>,
+    roots: &HashMap<PathBuf, String>,
+    selected: &str,
+) -> Vec<String> {
+    let mut names: Vec<_> = packages
+        .get(selected)
+        .and_then(|package| package.get("dependencies"))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|dependency| {
+            dependency
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|path| roots.get(Path::new(path)).cloned())
+                .or_else(|| {
+                    dependency
+                        .get("source")
+                        .is_some_and(serde_json::Value::is_null)
+                        .then(|| dependency.get("name").and_then(serde_json::Value::as_str))
+                        .flatten()
+                        .and_then(|name| packages.contains_key(name).then(|| name.to_owned()))
+                })
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Directories containing local package sources (the parent of each
@@ -560,12 +624,13 @@ impl Provider for RustProvider {
     }
 
     fn functions(&self) -> Vec<FuncSignature> {
-        vec![__bit_signature_packages()]
+        vec![__bit_signature_packages(), __bit_signature_dependencies()]
     }
 
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {
         match name {
             "packages" => __bit_call_packages(args),
+            "dependencies" => __bit_call_dependencies(args),
             _ => Err(format!("rust provider has no function '{name}'").into()),
         }
     }
@@ -588,6 +653,14 @@ mod tests {
         assert_eq!(resources[3].name(), "clippy");
         assert_eq!(resources[4].name(), "fmt");
         assert_eq!(resources[5].name(), "fmt-check");
+        let functions = provider.functions();
+        assert_eq!(functions.len(), 2);
+        assert_eq!(functions[0].name, "packages");
+        assert_eq!(functions[1].name, "dependencies");
+        assert_eq!(
+            functions[1].returns,
+            crate::value::Type::List(Box::new(crate::value::Type::BlockRef))
+        );
     }
 
     #[test]
@@ -638,6 +711,48 @@ mod tests {
             vec!["app", "core"]
         );
         assert_eq!(workspace_package_closure(&metadata, "core").unwrap(), vec!["core"]);
+    }
+
+    #[test]
+    fn workspace_package_dependencies_are_immediate_local_references() {
+        let metadata = serde_json::json!({
+            "workspace_members": ["app 0.1.0", "core 0.1.0", "leaf 0.1.0"],
+            "packages": [
+                {
+                    "id": "app 0.1.0",
+                    "name": "app",
+                    "manifest_path": "/workspace/app/Cargo.toml",
+                    "dependencies": [
+                        {"name": "core-alias", "path": "/workspace/core", "source": null},
+                        {"name": "serde", "source": "registry+https://example.invalid/index"}
+                    ]
+                },
+                {
+                    "id": "core 0.1.0",
+                    "name": "core",
+                    "manifest_path": "/workspace/core/Cargo.toml",
+                    "dependencies": [
+                        {"name": "leaf", "path": "/workspace/leaf", "source": null}
+                    ]
+                },
+                {
+                    "id": "leaf 0.1.0",
+                    "name": "leaf",
+                    "manifest_path": "/workspace/leaf/Cargo.toml",
+                    "dependencies": []
+                }
+            ]
+        });
+
+        assert_eq!(
+            workspace_package_dependencies(&metadata, "app", None).unwrap(),
+            vec!["core"]
+        );
+        assert_eq!(
+            workspace_package_dependencies(&metadata, "app", Some("crate[$]")).unwrap(),
+            vec!["crate[core]"]
+        );
+        assert!(workspace_package_dependencies(&metadata, "app", Some("crate")).is_err());
     }
 
     #[test]

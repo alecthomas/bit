@@ -4,10 +4,48 @@ use std::time::Duration as StdDuration;
 
 use bigdecimal::BigDecimal;
 use serde::de;
-use serde::ser::SerializeSeq;
+use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub type Map = HashMap<String, Value>;
+
+const BLOCK_REF_TAG: &str = "__bit_block_ref";
+
+/// A reference to a block in the dependency graph.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BlockRef(String);
+
+impl BlockRef {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for BlockRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for BlockRef {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Provider functions use a generic serde adapter. The private tag
+        // preserves reference identity there instead of degrading to a string.
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(BLOCK_REF_TAG, &self.0)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for BlockRef {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self(String::deserialize(deserializer)?))
+    }
+}
 
 /// A duration value — newtype over `std::time::Duration` that carries
 /// bit's string-literal serde format (`"5s"`, `"500ms"`, …) so fields
@@ -164,6 +202,7 @@ pub enum Value {
     Bool(bool),
     Number(BigDecimal),
     Str(String),
+    BlockRef(String),
     Duration(Duration),
     List(Type, Vec<Value>),
     Map(Type, Map),
@@ -174,6 +213,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Str(s) => write!(f, "{s}"),
+            Value::BlockRef(name) => write!(f, "{name}"),
             Value::Number(n) => write!(f, "{n}"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::Duration(d) => write!(f, "{d}"),
@@ -242,6 +282,7 @@ impl Value {
             Value::Bool(_) => Type::Bool,
             Value::Number(_) => Type::Number,
             Value::Str(_) => Type::String,
+            Value::BlockRef(_) => Type::BlockRef,
             Value::Duration(_) => Type::Duration,
             Value::List(typ, _) => Type::List(Box::new(typ.clone())),
             Value::Map(typ, _) => Type::Map(Box::new(typ.clone())),
@@ -259,6 +300,7 @@ impl Value {
         use crate::ast::{Expr, Field, StringPart};
         match self {
             Value::Str(s) => Expr::Str(vec![StringPart::Literal(s.clone())]),
+            Value::BlockRef(name) => Expr::Ref(vec![name.clone()]),
             Value::Number(n) => Expr::Number(n.clone()),
             Value::Bool(b) => Expr::Bool(*b),
             Value::Duration(d) => Expr::Duration(*d),
@@ -330,6 +372,9 @@ impl Serialize for Value {
             Value::Bool(b) => serializer.serialize_bool(*b),
             Value::Number(n) => n.serialize(serializer),
             Value::Str(s) => serializer.serialize_str(s),
+            // Once inside the evaluator, references serialize by name so they
+            // remain ordinary engine metadata rather than provider input data.
+            Value::BlockRef(name) => serializer.serialize_str(name),
             Value::Duration(d) => d.serialize(serializer),
             Value::List(_, items) => {
                 let mut seq = serializer.serialize_seq(Some(items.len()))?;
@@ -368,6 +413,11 @@ fn value_from_json(raw: serde_json::Value) -> Result<Value, String> {
             Ok(Value::list(items?))
         }
         serde_json::Value::Object(obj) => {
+            if obj.len() == 1
+                && let Some(serde_json::Value::String(name)) = obj.get(BLOCK_REF_TAG)
+            {
+                return Ok(Value::BlockRef(name.clone()));
+            }
             let map: Result<Map, String> = obj
                 .into_iter()
                 .map(|(k, v)| value_from_json(v).map(|val| (k, val)))
@@ -381,6 +431,7 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::String => write!(f, "string"),
+            Type::BlockRef => write!(f, "block"),
             Type::Number => write!(f, "number"),
             Type::Bool => write!(f, "bool"),
             Type::Duration => write!(f, "duration"),
@@ -416,6 +467,7 @@ impl std::fmt::Display for Type {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     String,
+    BlockRef,
     Number,
     Bool,
     Duration,
@@ -434,6 +486,7 @@ pub enum Type {
 pub fn validate_type(value: &Value, typ: &Type) -> Result<(), String> {
     match (typ, value) {
         (Type::String | Type::Path | Type::Secret, Value::Str(_)) => Ok(()),
+        (Type::BlockRef, Value::BlockRef(_)) => Ok(()),
         (Type::Number, Value::Number(_)) => Ok(()),
         (Type::Bool, Value::Bool(_)) => Ok(()),
         (Type::Duration, Value::Duration(_)) => Ok(()),
@@ -480,6 +533,7 @@ fn type_name(value: &Value) -> &'static str {
         Value::Bool(_) => "bool",
         Value::Number(_) => "number",
         Value::Str(_) => "string",
+        Value::BlockRef(_) => "block",
         Value::Duration(_) => "duration",
         Value::List(..) => "list",
         Value::Map(..) => "map",
