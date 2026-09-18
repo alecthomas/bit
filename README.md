@@ -233,9 +233,9 @@ tests[package] = go.test {
 ```
 
 Provider functions can also return typed block references for dependency
-fields. `rust.dependencies` returns immediate local workspace dependencies;
-each `$` in its optional template is replaced with the dependency package
-name:
+fields. `rust.dependencies` returns immediate local non-development
+dependencies; each `$` in its optional template is replaced with the
+dependency package name:
 
 ```bit
 let package = rust.packages()
@@ -767,7 +767,7 @@ block = rust.fmt-check {
 
 **`rust.packages() -> [string]`** — List Cargo workspace packages.
 
-**`rust.dependencies(package: string, template: string?) -> [block]`** — List a Cargo workspace package's immediate local dependencies. `package` names the Cargo workspace package. When `template` is set, every `$` in it is replaced with the dependency package name. For example, `crate[$]` returns matrix block references.
+**`rust.dependencies(package: string, template: string?) -> [block]`** — List a Cargo workspace package's immediate local non-development dependencies. `package` names the Cargo workspace package. When `template` is set, every `$` in it is replaced with the dependency package name. For example, `crate[$]` returns matrix block references. Development dependencies are excluded because Cargo does not build them for `cargo build` and permits cycles through them.
 
 ## How It Works
 

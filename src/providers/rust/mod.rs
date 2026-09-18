@@ -408,11 +408,13 @@ fn packages() -> Result<Vec<String>, BoxError> {
     workspace_package_names(&cargo_metadata()?)
 }
 
-/// List a Cargo workspace package's immediate local dependencies.
+/// List a Cargo workspace package's immediate local non-development dependencies.
 ///
 /// `package` names the Cargo workspace package. When `template` is set, every
 /// `$` in it is replaced with the dependency package name. For example,
-/// `crate[$]` returns matrix block references.
+/// `crate[$]` returns matrix block references. Development dependencies are
+/// excluded because Cargo does not build them for `cargo build` and permits
+/// cycles through them.
 #[bit_derive::provider_function]
 fn dependencies(package: String, template: Option<String>) -> Result<Vec<BlockRef>, BoxError> {
     Ok(
@@ -476,7 +478,7 @@ fn workspace_package_closure(metadata: &serde_json::Value, selected: &str) -> Re
         if !found.insert(name.clone()) {
             continue;
         }
-        for dependency in local_package_dependencies(&packages, &roots, &name) {
+        for dependency in local_package_dependencies(&packages, &roots, &name, DependencyKinds::All) {
             pending.push(dependency);
         }
     }
@@ -506,7 +508,7 @@ fn workspace_package_dependencies(
             Some((Path::new(manifest).parent()?.to_path_buf(), name.clone()))
         })
         .collect();
-    let dependencies = local_package_dependencies(&packages, &roots, selected);
+    let dependencies = local_package_dependencies(&packages, &roots, selected, DependencyKinds::NonDev);
     Ok(match template {
         Some(template) => dependencies
             .into_iter()
@@ -520,6 +522,7 @@ fn local_package_dependencies(
     packages: &HashMap<String, &serde_json::Value>,
     roots: &HashMap<PathBuf, String>,
     selected: &str,
+    kinds: DependencyKinds,
 ) -> Vec<String> {
     let mut names: Vec<_> = packages
         .get(selected)
@@ -529,6 +532,11 @@ fn local_package_dependencies(
         .unwrap_or_default()
         .iter()
         .filter_map(|dependency| {
+            if matches!(kinds, DependencyKinds::NonDev)
+                && dependency.get("kind").and_then(serde_json::Value::as_str) == Some("dev")
+            {
+                return None;
+            }
             dependency
                 .get("path")
                 .and_then(serde_json::Value::as_str)
@@ -546,6 +554,12 @@ fn local_package_dependencies(
     names.sort();
     names.dedup();
     names
+}
+
+#[derive(Clone, Copy)]
+enum DependencyKinds {
+    All,
+    NonDev,
 }
 
 /// Directories containing local package sources (the parent of each
@@ -714,18 +728,32 @@ mod tests {
     }
 
     #[test]
-    fn workspace_package_dependencies_are_immediate_local_references() {
+    fn workspace_package_dependencies_are_immediate_non_dev_references() {
         let metadata = serde_json::json!({
-            "workspace_members": ["app 0.1.0", "core 0.1.0", "leaf 0.1.0"],
+            "workspace_members": [
+                "app 0.1.0",
+                "build-helper 0.1.0",
+                "core 0.1.0",
+                "dev-helper 0.1.0",
+                "leaf 0.1.0"
+            ],
             "packages": [
                 {
                     "id": "app 0.1.0",
                     "name": "app",
                     "manifest_path": "/workspace/app/Cargo.toml",
                     "dependencies": [
-                        {"name": "core-alias", "path": "/workspace/core", "source": null},
+                        {"name": "core-alias", "path": "/workspace/core", "source": null, "kind": null},
+                        {"name": "build-helper", "path": "/workspace/build-helper", "source": null, "kind": "build"},
+                        {"name": "dev-helper", "path": "/workspace/dev-helper", "source": null, "kind": "dev"},
                         {"name": "serde", "source": "registry+https://example.invalid/index"}
                     ]
+                },
+                {
+                    "id": "build-helper 0.1.0",
+                    "name": "build-helper",
+                    "manifest_path": "/workspace/build-helper/Cargo.toml",
+                    "dependencies": []
                 },
                 {
                     "id": "core 0.1.0",
@@ -734,6 +762,12 @@ mod tests {
                     "dependencies": [
                         {"name": "leaf", "path": "/workspace/leaf", "source": null}
                     ]
+                },
+                {
+                    "id": "dev-helper 0.1.0",
+                    "name": "dev-helper",
+                    "manifest_path": "/workspace/dev-helper/Cargo.toml",
+                    "dependencies": []
                 },
                 {
                     "id": "leaf 0.1.0",
@@ -746,11 +780,11 @@ mod tests {
 
         assert_eq!(
             workspace_package_dependencies(&metadata, "app", None).unwrap(),
-            vec!["core"]
+            vec!["build-helper", "core"]
         );
         assert_eq!(
             workspace_package_dependencies(&metadata, "app", Some("crate[$]")).unwrap(),
-            vec!["crate[core]"]
+            vec!["crate[build-helper]", "crate[core]"]
         );
         assert!(workspace_package_dependencies(&metadata, "app", Some("crate")).is_err());
     }
