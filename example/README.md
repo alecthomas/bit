@@ -21,7 +21,8 @@ The BFF serves the built frontend bundle and proxies `/api/*` to the Go backend.
 ## Quick start
 
 ```sh
-bit --list                  # list blocks
+bit --list                  # list explicitly defined targets
+bit -ll                     # list all blocks
 bit --plan                  # show what would change
 bit                         # build + test everything (default target)
 bit build                   # build artifacts only

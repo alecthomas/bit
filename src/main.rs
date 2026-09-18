@@ -59,9 +59,9 @@ struct Cli {
     #[arg(short = 'i', long)]
     info: bool,
 
-    /// List all blocks
-    #[arg(short = 'l', long)]
-    list: bool,
+    /// List targets; repeat (-ll) to list all blocks
+    #[arg(short = 'l', long, action = clap::ArgAction::Count)]
+    list: u8,
 
     /// Render the block dependency graph as ASCII art
     #[arg(short = 'g', long)]
@@ -336,7 +336,7 @@ fn main() {
 
     // --update re-resolves git imports and rewrites BUILD.bit.lock.
     if cli.update {
-        if cli.clean || cli.test || cli.dump || cli.list || cli.plan || cli.graph {
+        if cli.clean || cli.test || cli.dump || cli.list > 0 || cli.plan || cli.graph {
             eprintln!(
                 "{} --update is mutually exclusive with other modes",
                 "error:".red().bold()
@@ -373,7 +373,7 @@ fn main() {
 
     // --cache operates on the global cache and needs no project.
     if cli.cache {
-        if cli.test || cli.dump || cli.list || cli.plan || cli.graph || cli.force || !cli.targets.is_empty() {
+        if cli.test || cli.dump || cli.list > 0 || cli.plan || cli.graph || cli.force || !cli.targets.is_empty() {
             eprintln!("{} --cache can only be combined with --clean", "error:".red().bold());
             process::exit(1);
         }
@@ -384,7 +384,7 @@ fn main() {
     // Validate mutually exclusive mode flags. `--plan` and `--graph` are
     // the one permitted combination: together they render a coloured
     // graph annotated with each block's planned action.
-    let exclusive_modes = [cli.clean, cli.test, cli.dump, cli.list];
+    let exclusive_modes = [cli.clean, cli.test, cli.dump, cli.list > 0];
     let exclusive_count = exclusive_modes.iter().filter(|&&b| b).count();
     let with_plan_or_graph = cli.plan || cli.graph;
     if exclusive_count > 1 || (exclusive_count == 1 && with_plan_or_graph) {
@@ -448,13 +448,17 @@ fn main() {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
-    } else if cli.list {
+    } else if cli.list > 0 {
         let (_module, dag, _base, _store) = load_module(&registry, &params);
-        match dag.topo_order() {
-            Ok(names) => print_block_tree(&dag, &names),
-            Err(e) => {
-                eprintln!("{} {e}", "error:".red().bold());
-                process::exit(1);
+        if cli.list == 1 {
+            print_targets(&dag);
+        } else {
+            match dag.topo_order() {
+                Ok(names) => print_block_tree(&dag, &names),
+                Err(e) => {
+                    eprintln!("{} {e}", "error:".red().bold());
+                    process::exit(1);
+                }
             }
         }
     } else if cli.dump {
@@ -479,6 +483,28 @@ fn main() {
         ) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
+        }
+    }
+}
+
+fn print_targets(dag: &bit::dag::Dag) {
+    let mut targets: Vec<_> = dag.targets().iter().collect();
+    targets.sort_by_key(|(name, _)| name.as_str());
+
+    if targets.is_empty() {
+        println!("No targets defined.");
+        return;
+    }
+
+    for (name, target) in targets {
+        match &target.doc {
+            Some(doc) => {
+                let mut lines = doc.lines();
+                let first = lines.next().unwrap_or("");
+                let suffix = if lines.next().is_some() { "…" } else { "" };
+                println!("{} — {}{}", name.bold(), first.dim(), suffix.dim());
+            }
+            None => println!("{}", name.bold()),
         }
     }
 }

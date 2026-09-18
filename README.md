@@ -69,7 +69,8 @@ bit build        # apply a specific target or block
 bit --plan       # show what would change
 bit --test       # run test blocks
 bit --clean      # destroy targets and their dependents in reverse topological order
-bit --list       # list all blocks
+bit --list       # list explicitly defined targets
+bit -ll          # list all blocks
 bit --graph      # render the DAG as an ASCII graph
 bit --plan --graph  # …and colour each node by its planned action
 bit --dump       # show evaluated inputs/stored outputs
