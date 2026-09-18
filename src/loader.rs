@@ -583,7 +583,10 @@ b = exec {
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]);
-        assert!(matches!(result, Err(LoadError::Dag(DagError::Cycle))));
+        match result {
+            Err(error) => assert_eq!(error.to_string(), "dependency cycle detected: a -> b -> a"),
+            Ok(_) => panic!("expected dependency cycle"),
+        }
     }
 
     #[test]

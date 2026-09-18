@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use petgraph::Direction;
-use petgraph::algo::toposort;
+use petgraph::algo::{tarjan_scc, toposort};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 
@@ -26,8 +26,8 @@ pub enum DagError {
     DuplicateBlock(String),
     #[error("unknown block: {0}")]
     UnknownBlock(String),
-    #[error("dependency cycle detected")]
-    Cycle,
+    #[error("dependency cycle detected: {}", .0.join(" -> "))]
+    Cycle(Vec<String>),
     #[error("target '{0}' references unknown block '{1}'")]
     UnknownTargetBlock(String, String),
 }
@@ -150,7 +150,7 @@ impl Dag {
 
     /// Validate the graph: no cycles, all target references are valid.
     pub fn validate(&self) -> Result<(), DagError> {
-        toposort(&self.graph, None).map_err(|_| DagError::Cycle)?;
+        toposort(&self.graph, None).map_err(|_| self.cycle_error())?;
         for (name, target) in &self.targets {
             for block in &target.blocks {
                 let block_name = block.split('.').next().unwrap_or(block);
@@ -192,9 +192,74 @@ impl Dag {
         }
 
         if out.len() != self.graph.node_count() {
-            return Err(DagError::Cycle);
+            return Err(self.cycle_error());
         }
         Ok(out)
+    }
+
+    fn cycle_error(&self) -> DagError {
+        let mut components: Vec<_> = tarjan_scc(&self.graph)
+            .into_iter()
+            .filter(|component| {
+                component.len() > 1
+                    || component
+                        .first()
+                        .is_some_and(|node| self.graph.find_edge(*node, *node).is_some())
+            })
+            .collect();
+        components.sort_by_key(|component| {
+            component
+                .iter()
+                .map(|node| self.graph[*node].name.as_str())
+                .min()
+                .unwrap_or_default()
+                .to_owned()
+        });
+
+        let Some(component) = components.first() else {
+            return DagError::Cycle(Vec::new());
+        };
+        let members: HashSet<_> = component.iter().copied().collect();
+        let Some(&start) = component.iter().min_by_key(|node| self.graph[**node].name.as_str()) else {
+            return DagError::Cycle(Vec::new());
+        };
+        let mut visited = HashSet::from([start]);
+        let mut path = vec![start];
+        if !self.find_cycle_path(start, start, &members, &mut visited, &mut path) {
+            path.push(start);
+        }
+        DagError::Cycle(path.into_iter().map(|node| self.graph[node].name.clone()).collect())
+    }
+
+    fn find_cycle_path(
+        &self,
+        current: NodeIndex,
+        start: NodeIndex,
+        members: &HashSet<NodeIndex>,
+        visited: &mut HashSet<NodeIndex>,
+        path: &mut Vec<NodeIndex>,
+    ) -> bool {
+        let mut neighbors: Vec<_> = self
+            .graph
+            .neighbors_directed(current, Direction::Outgoing)
+            .filter(|node| members.contains(node))
+            .collect();
+        neighbors.sort_by(|left, right| self.graph[*left].name.cmp(&self.graph[*right].name));
+
+        for neighbor in neighbors {
+            if neighbor == start {
+                path.push(start);
+                return true;
+            }
+            if visited.insert(neighbor) {
+                path.push(neighbor);
+                if self.find_cycle_path(neighbor, start, members, visited, path) {
+                    return true;
+                }
+                path.pop();
+            }
+        }
+        false
     }
 
     /// Topological order with `explicit` blocks filtered out.
