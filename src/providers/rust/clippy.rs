@@ -125,7 +125,7 @@ impl Resource for RustClippyResource {
         Ok(())
     }
 
-    fn cache_policy(&self) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &RustClippyInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 

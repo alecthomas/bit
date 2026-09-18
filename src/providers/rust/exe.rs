@@ -10,7 +10,8 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, CachePolicy, MaterializeResult, PlanAction, PlanResult, ReceiptCheck, Resource, ResourceKind,
+    ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, ReceiptCheck, Resource,
+    ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -229,7 +230,7 @@ impl Resource for RustExeResource {
         crate::providers::remove_path(Path::new(&prior_state.path), writer)
     }
 
-    fn cache_policy(&self) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &RustExeInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 
@@ -241,6 +242,7 @@ impl Resource for RustExeResource {
         &self,
         _inputs: &RustExeInputs,
         state: &RustExeState,
+        _outputs: &[OutputFile],
         cas: &Cas,
     ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
         if state.target_rel.is_empty() {
@@ -256,7 +258,9 @@ impl Resource for RustExeResource {
         &self,
         _inputs: &RustExeInputs,
         state: &RustExeState,
+        _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
+        cas: &Cas,
     ) -> Result<ReceiptCheck, BoxError> {
         let Some(exe) = artifacts.get(EXE_ROLE) else {
             return Ok(ReceiptCheck::Unusable);
@@ -264,7 +268,7 @@ impl Resource for RustExeResource {
         let Ok(dest) = exe_destination(&super::target_directory()?, &state.target_rel) else {
             return Ok(ReceiptCheck::Unusable);
         };
-        Ok(if exe.matches(&dest) {
+        Ok(if cas.matches(exe, &dest) {
             ReceiptCheck::Valid
         } else {
             ReceiptCheck::Restore
@@ -277,13 +281,14 @@ impl Resource for RustExeResource {
         &self,
         inputs: &RustExeInputs,
         state: &RustExeState,
+        _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
         cas: &Cas,
         writer: &BlockWriter,
     ) -> MaterializeResult<RustExeState, RustExeOutputs> {
         let exe = artifacts.get(EXE_ROLE).ok_or("receipt has no exe artifact")?;
         let dest = exe_destination(&super::target_directory()?, &state.target_rel)?;
-        if !exe.matches(&dest) {
+        if !cas.matches(exe, &dest) {
             writer.line(&format!("restore {}", dest.display()));
             cas.materialize(exe, &dest)?;
         }

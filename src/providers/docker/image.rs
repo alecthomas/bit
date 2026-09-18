@@ -12,7 +12,8 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, CachePolicy, MaterializeResult, PlanAction, PlanResult, ReceiptCheck, Resource, ResourceKind,
+    ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, ReceiptCheck, Resource,
+    ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -453,7 +454,7 @@ impl Resource for ImageResource {
         self.remove_image(&prior_state.image_id)
     }
 
-    fn cache_policy(&self) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &ImageInputs) -> CachePolicy {
         CachePolicy::Shared { version: 2 }
     }
 
@@ -461,6 +462,7 @@ impl Resource for ImageResource {
         &self,
         inputs: &ImageInputs,
         state: &ImageState,
+        _outputs: &[OutputFile],
         cas: &Cas,
     ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
         if inputs.platform.len() > 1 {
@@ -494,7 +496,9 @@ impl Resource for ImageResource {
         &self,
         inputs: &ImageInputs,
         state: &ImageState,
+        _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
+        _cas: &Cas,
     ) -> Result<ReceiptCheck, BoxError> {
         if !artifacts.contains_key(MANIFEST_ROLE) {
             return Ok(ReceiptCheck::Unusable);
@@ -513,6 +517,7 @@ impl Resource for ImageResource {
         &self,
         inputs: &ImageInputs,
         state: &ImageState,
+        _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
         cas: &Cas,
         writer: &BlockWriter,
@@ -810,14 +815,25 @@ exit 0
     #[test]
     fn image_uses_shared_cache() {
         let resource = ImageResource::new(Arc::new(Mutex::new(FileTracker::default())));
-        assert_eq!(Resource::cache_policy(&resource), CachePolicy::Shared { version: 2 });
+        assert_eq!(
+            Resource::cache_policy(&resource, &test_inputs()),
+            CachePolicy::Shared { version: 2 }
+        );
     }
 
     #[test]
     fn receipt_without_image_archive_is_unusable() {
         let resource = ImageResource::new(Arc::new(Mutex::new(FileTracker::default())));
         assert_eq!(
-            Resource::check_receipt(&resource, &test_inputs(), &test_state(), &BTreeMap::new()).unwrap(),
+            Resource::check_receipt(
+                &resource,
+                &test_inputs(),
+                &test_state(),
+                &[],
+                &BTreeMap::new(),
+                &Cas::new(std::env::temp_dir().join("bit-unused-cas")),
+            )
+            .unwrap(),
             ReceiptCheck::Unusable
         );
     }
@@ -874,7 +890,7 @@ exit 1
         let cas = Cas::new(dir.path().join("cas"));
         let inputs = test_inputs();
         let state = test_state();
-        let artifacts = Resource::capture_artifacts(&resource, &inputs, &state, &cas).unwrap();
+        let artifacts = Resource::capture_artifacts(&resource, &inputs, &state, &[], &cas).unwrap();
         assert_eq!(
             artifacts.keys().cloned().collect::<Vec<_>>(),
             expected.keys().cloned().collect::<Vec<_>>()
@@ -882,7 +898,7 @@ exit 1
 
         let output = crate::output::Output::new(&[]);
         let writer = output.writer("image");
-        let restored = Resource::materialize(&resource, &inputs, &state, &artifacts, &cas, &writer)
+        let restored = Resource::materialize(&resource, &inputs, &state, &[], &artifacts, &cas, &writer)
             .unwrap()
             .unwrap();
         assert_eq!(restored.outputs.image_ref, "myapp:abc123");

@@ -423,7 +423,7 @@ impl Resource for RustTestResource {
         Ok(())
     }
 
-    fn cache_policy(&self) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &RustTestInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 

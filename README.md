@@ -114,6 +114,7 @@ Special fields:
 
 - `depends_on = [block, ...]` — content-coupled dependency (changes propagate)
 - `after = [block, ...]` — ordering-only dependency
+- `uncached = [output, ...]` — outputs to keep out of the [shared build cache](#shared-build-cache)
 
 Prefix with `protected` to prevent destruction, `explicit` to exclude from `...`, or both (in either order):
 
@@ -788,6 +789,32 @@ the worktree that produced them has been deleted:
   image versions that share layers also share their cached bytes. If the image
   has been removed, an identical action restores it with `docker image load`
   instead of rebuilding it.
+- `exec` and `exec.test` store whatever they declare in `output`. A directory
+  is stored whole, as the set of files it contained, and is restored to
+  exactly that — anything already at the path is replaced, not merged. An
+  `exec` block that sets `resolve` or `outputs` is never shared: those fields
+  describe state outside the worktree, which a result recorded elsewhere
+  cannot speak for.
+
+A directory captured this way must contain only ordinary files and
+directories. If it holds a symlink the block still runs and succeeds, but bit
+reports that it could not be cached rather than restoring something the
+command never produced.
+
+To keep a particular output out of the cache, name it in `uncached`:
+
+```hcl
+build = exec {
+  command  = "pnpm build"
+  output   = ["dist/", "node_modules/"]
+  uncached = ["node_modules/"]
+}
+```
+
+The block still caches `dist/`. Excluding an output does not change when the
+block is considered up to date, only what is stored, so a worktree that reuses
+this result gets `dist/` and no `node_modules/`. Exclude an output when it is
+large and reproducible by other means, not when later blocks need it.
 
 So that Rust binaries built in different worktrees are interchangeable, bit
 compiles workspace crates with `--remap-path-prefix` rewriting the worktree

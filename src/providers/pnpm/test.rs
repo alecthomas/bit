@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::{run::resolve_inputs, run_pnpm};
@@ -140,6 +140,12 @@ impl Resource for PnpmTestResource {
 
     fn destroy(&self, _prior_state: &PnpmTestState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
+    }
+
+    /// Local for the same reason as `pnpm.run`: nothing in the action key
+    /// describes the tools the test script runs.
+    fn cache_policy(&self, _inputs: &PnpmTestInputs) -> CachePolicy {
+        CachePolicy::Local
     }
 }
 

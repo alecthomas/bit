@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 /// Create a Docker network (Terraform-style: tracked state, drift detection)
@@ -170,6 +170,12 @@ impl Resource for NetworkResource {
     fn destroy(&self, prior_state: &NetworkState, writer: &BlockWriter) -> Result<(), BoxError> {
         writer.event(Event::Starting, &format!("docker network rm {}", prior_state.name));
         remove_network(&prior_state.name)
+    }
+
+    /// A network is named, mutable state in the local Docker daemon; see
+    /// `docker.container`.
+    fn cache_policy(&self, _inputs: &NetworkInputs) -> CachePolicy {
+        CachePolicy::Local
     }
 }
 

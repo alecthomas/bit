@@ -148,7 +148,7 @@ impl Resource for RustFmtResource {
         Ok(())
     }
 
-    fn cache_policy(&self) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &RustFmtInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 
@@ -206,7 +206,7 @@ impl Resource for RustFmtCheckResource {
         Ok(())
     }
 
-    fn cache_policy(&self) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &RustFmtInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 

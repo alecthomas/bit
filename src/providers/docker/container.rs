@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 use crate::value::Duration;
 
@@ -386,6 +386,13 @@ impl Resource for ContainerResource {
         use crate::output::Event;
         writer.event(Event::Starting, &format!("docker rm -f {}", prior_state.name));
         remove_container(&prior_state.name)
+    }
+
+    /// A container is named, mutable state in the local Docker daemon.
+    /// Whether it is running is a fact about the daemon now, not about the
+    /// inputs that created it.
+    fn cache_policy(&self, _inputs: &ContainerInputs) -> CachePolicy {
+        CachePolicy::Local
     }
 }
 

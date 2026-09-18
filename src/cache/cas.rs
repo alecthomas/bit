@@ -18,20 +18,46 @@ pub enum CasError {
     Missing(SHA256),
     #[error("artifact {expected} is corrupt (content hashes to {actual})")]
     Corrupt { expected: SHA256, actual: SHA256 },
+    #[error("{0}")]
+    Unsupported(String),
+    #[error("tree manifest is malformed: {0}")]
+    Manifest(#[from] serde_json::Error),
 }
 
 /// A durable artifact stored in the CAS, as referenced by an action receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactRef {
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ArtifactRef {
+    /// The content of one file.
+    File(FileRef),
+    /// A directory tree, recorded as a manifest blob naming every entry
+    /// beneath it. The manifest is itself content-addressed, so two captures
+    /// of the same tree converge on one blob.
+    Tree { manifest: SHA256, mode: u32 },
+}
+
+impl ArtifactRef {
+    /// The file this artifact records, or `None` when it records a tree.
+    pub fn file(&self) -> Option<&FileRef> {
+        match self {
+            ArtifactRef::File(file) => Some(file),
+            ArtifactRef::Tree { .. } => None,
+        }
+    }
+}
+
+/// One file's content and permissions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRef {
     pub digest: SHA256,
     pub size: u64,
     /// Unix permission bits to apply when the artifact is materialized.
     pub mode: u32,
 }
 
-impl ArtifactRef {
-    /// Whether the file at `path` already has this artifact's content and
-    /// executable bits, i.e. materializing it would be a no-op.
+impl FileRef {
+    /// Whether the file at `path` already has this content and executable
+    /// bits, i.e. materializing it would be a no-op.
     pub fn matches(&self, path: &Path) -> bool {
         let Ok(meta) = fs::metadata(path) else {
             return false;
@@ -41,6 +67,41 @@ impl ArtifactRef {
         }
         hash_path(path).is_ok_and(|digest| digest == self.digest)
     }
+}
+
+/// One entry of a captured directory tree, at a path relative to its root.
+///
+/// Symlinks and other irregular entries have no representation here: a tree
+/// containing one is rejected at capture rather than restored as something
+/// it is not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum TreeEntry {
+    Dir {
+        path: String,
+        mode: u32,
+    },
+    File {
+        path: String,
+        #[serde(flatten)]
+        file: FileRef,
+    },
+}
+
+impl TreeEntry {
+    fn path(&self) -> &str {
+        match self {
+            TreeEntry::Dir { path, .. } | TreeEntry::File { path, .. } => path,
+        }
+    }
+}
+
+/// The content of a tree manifest blob. Entries are sorted by path, so a
+/// parent directory always precedes what it contains and the serialized form
+/// is identical for identical trees.
+#[derive(Debug, Serialize, Deserialize)]
+struct TreeManifest {
+    entries: Vec<TreeEntry>,
 }
 
 /// Global content-addressed store of immutable file blobs.
@@ -73,6 +134,10 @@ impl Cas {
     /// writers of the same content converge on one blob: the first rename
     /// wins and later copies are discarded.
     pub fn put_file(&self, src: &Path) -> Result<ArtifactRef, CasError> {
+        Ok(ArtifactRef::File(self.put_file_ref(src)?))
+    }
+
+    fn put_file_ref(&self, src: &Path) -> Result<FileRef, CasError> {
         let meta = fs::metadata(src)?;
         let mode = permission_bits(&meta);
 
@@ -93,7 +158,7 @@ impl Cas {
         let dest = self.blob_path(&digest);
         if dest.is_file() {
             let _ = fs::remove_file(&tmp);
-            return Ok(ArtifactRef { digest, size, mode });
+            return Ok(FileRef { digest, size, mode });
         }
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
@@ -110,15 +175,175 @@ impl Cas {
                 return Err(e.into());
             }
         }
-        Ok(ArtifactRef { digest, size, mode })
+        Ok(FileRef { digest, size, mode })
     }
 
-    /// Recreate `artifact` at `dest` from the store. The bytes are copied to
-    /// a temporary sibling, verified against the digest, given the recorded
-    /// permissions, and renamed into place, so `dest` is never partially
-    /// written. A blob whose content no longer matches its digest is removed
-    /// and reported as [`CasError::Corrupt`] so callers treat it as a miss.
+    /// Capture the directory at `src` as a tree: every file beneath it
+    /// becomes a blob, and the listing of the whole tree becomes one more.
+    ///
+    /// A symlink or other irregular entry is an error rather than a silent
+    /// omission, because restoring the tree without it would produce
+    /// something the action never built.
+    pub fn put_tree(&self, src: &Path) -> Result<ArtifactRef, CasError> {
+        let mut entries = Vec::new();
+        self.collect_tree(src, Path::new(""), &mut entries)?;
+        entries.sort_by(|a, b| a.path().cmp(b.path()));
+
+        let json = serde_json::to_vec(&TreeManifest { entries })?;
+        let staging = self.root.join("tmp");
+        fs::create_dir_all(&staging)?;
+        let tmp = staging.join(format!("tree.{}.{}", std::process::id(), unique_suffix()));
+        fs::write(&tmp, &json)?;
+        let manifest = self.put_file_ref(&tmp);
+        let _ = fs::remove_file(&tmp);
+
+        Ok(ArtifactRef::Tree {
+            manifest: manifest?.digest,
+            mode: permission_bits(&fs::metadata(src)?),
+        })
+    }
+
+    fn collect_tree(&self, root: &Path, relative: &Path, entries: &mut Vec<TreeEntry>) -> Result<(), CasError> {
+        for entry in fs::read_dir(root.join(relative))? {
+            let entry = entry?;
+            let child = relative.join(entry.file_name());
+            let path = child
+                .to_str()
+                .ok_or_else(|| CasError::Unsupported("captured directory holds a non-UTF-8 path".into()))?
+                .to_owned();
+            // `file_type` does not follow symlinks, so a link is reported as
+            // a link rather than as whatever it points at.
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                entries.push(TreeEntry::Dir {
+                    path,
+                    mode: permission_bits(&entry.metadata()?),
+                });
+                self.collect_tree(root, &child, entries)?;
+            } else if file_type.is_file() {
+                entries.push(TreeEntry::File {
+                    path,
+                    file: self.put_file_ref(&root.join(&child))?,
+                });
+            } else {
+                return Err(CasError::Unsupported(format!(
+                    "{path} is not a regular file or directory and cannot be cached"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn read_manifest(&self, digest: &SHA256) -> Result<TreeManifest, CasError> {
+        let blob = self.blob_path(digest);
+        if !blob.is_file() {
+            return Err(CasError::Missing(*digest));
+        }
+        let actual = hash_path(&blob)?;
+        if actual != *digest {
+            let _ = fs::set_permissions(&blob, fs::Permissions::from_mode(0o644));
+            let _ = fs::remove_file(&blob);
+            return Err(CasError::Corrupt {
+                expected: *digest,
+                actual,
+            });
+        }
+        let bytes = fs::read(&blob)?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    /// Whether `path` already holds this artifact, i.e. materializing it
+    /// would be a no-op. A tree matches only when it has exactly the recorded
+    /// entries: a file the tree does not contain makes it stale, because
+    /// restoring is defined to leave the destination equal to what was
+    /// captured.
+    pub fn matches(&self, artifact: &ArtifactRef, path: &Path) -> bool {
+        match artifact {
+            ArtifactRef::File(file) => file.matches(path),
+            ArtifactRef::Tree { manifest, .. } => {
+                let Ok(manifest) = self.read_manifest(manifest) else {
+                    return false;
+                };
+                let mut present = Vec::new();
+                if list_tree(path, Path::new(""), &mut present).is_err() {
+                    return false;
+                }
+                present.sort();
+                let recorded: Vec<&str> = manifest.entries.iter().map(TreeEntry::path).collect();
+                if present != recorded {
+                    return false;
+                }
+                manifest.entries.iter().all(|entry| match entry {
+                    TreeEntry::Dir { .. } => true,
+                    TreeEntry::File { path: rel, file } => file.matches(&path.join(rel)),
+                })
+            }
+        }
+    }
+
+    /// Recreate `artifact` at `dest` from the store.
+    ///
+    /// A file is copied to a temporary sibling, verified against the digest,
+    /// given the recorded permissions, and renamed into place, so `dest` is
+    /// never partially written. A tree is assembled the same way, entry by
+    /// entry, and swapped in whole; anything already at `dest` is replaced,
+    /// so the result is exactly the tree that was captured. A blob whose
+    /// content no longer matches its digest is removed and reported as
+    /// [`CasError::Corrupt`] so callers treat it as a miss.
     pub fn materialize(&self, artifact: &ArtifactRef, dest: &Path) -> Result<(), CasError> {
+        match artifact {
+            ArtifactRef::File(file) => self.materialize_file(file, dest),
+            ArtifactRef::Tree { manifest, mode } => self.materialize_tree(manifest, *mode, dest),
+        }
+    }
+
+    /// Assemble a tree beside `dest` and swap it in, so a failure part-way
+    /// through leaves the existing directory untouched.
+    fn materialize_tree(&self, manifest: &SHA256, mode: u32, dest: &Path) -> Result<(), CasError> {
+        let manifest = self.read_manifest(manifest)?;
+        let staging = staging_path(dest);
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging)?;
+
+        let build = || -> Result<(), CasError> {
+            // Entries are sorted by path, so a directory is always created
+            // before anything it contains.
+            for entry in &manifest.entries {
+                match entry {
+                    TreeEntry::Dir { path, mode } => {
+                        let dir = staging.join(path);
+                        fs::create_dir_all(&dir)?;
+                        fs::set_permissions(&dir, fs::Permissions::from_mode(*mode))?;
+                    }
+                    TreeEntry::File { path, file } => self.materialize_file(file, &staging.join(path))?,
+                }
+            }
+            fs::set_permissions(&staging, fs::Permissions::from_mode(mode))?;
+            Ok(())
+        };
+        if let Err(e) = build() {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+
+        if dest.is_dir() {
+            fs::remove_dir_all(dest)?;
+        } else if dest.exists() {
+            fs::remove_file(dest)?;
+        }
+        if let Some(parent) = dest.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        if let Err(e) = fs::rename(&staging, dest) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
+    fn materialize_file(&self, artifact: &FileRef, dest: &Path) -> Result<(), CasError> {
         let blob = self.blob_path(&artifact.digest);
         if !blob.is_file() {
             return Err(CasError::Missing(artifact.digest));
@@ -154,6 +379,34 @@ impl Cas {
         }
         result
     }
+}
+
+/// A sibling of `dest` to assemble a tree in before swapping it into place.
+fn staging_path(dest: &Path) -> PathBuf {
+    let parent = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    parent.join(format!(".{name}.bit-tmp.{}.{}", std::process::id(), unique_suffix()))
+}
+
+/// Collect every path beneath `root`, relative to it, for comparison against
+/// a manifest. Irregular entries are listed like anything else, so a tree
+/// that grew a symlink no longer matches.
+fn list_tree(root: &Path, relative: &Path, out: &mut Vec<String>) -> io::Result<()> {
+    for entry in fs::read_dir(root.join(relative))? {
+        let entry = entry?;
+        let child = relative.join(entry.file_name());
+        out.push(child.to_string_lossy().into_owned());
+        if entry.file_type()?.is_dir() {
+            list_tree(root, &child, out)?;
+        }
+    }
+    Ok(())
 }
 
 /// Copy `src` to `dst` and return the digest and size of the copy.
@@ -212,9 +465,10 @@ mod tests {
         fs::set_permissions(&src, fs::Permissions::from_mode(0o755)).unwrap();
 
         let artifact = cas.put_file(&src).unwrap();
-        assert_eq!(artifact.digest, SHA256::digest(b"#!/bin/sh\necho hi\n"));
-        assert_eq!(artifact.mode, 0o755);
-        assert!(cas.contains(&artifact.digest));
+        let file = artifact.file().unwrap();
+        assert_eq!(file.digest, SHA256::digest(b"#!/bin/sh\necho hi\n"));
+        assert_eq!(file.mode, 0o755);
+        assert!(cas.contains(&file.digest));
 
         let dest = dir.path().join("out/restored");
         cas.materialize(&artifact, &dest).unwrap();
@@ -246,7 +500,7 @@ mod tests {
         fs::write(&src, b"good").unwrap();
         let artifact = cas.put_file(&src).unwrap();
 
-        let blob = cas.blob_path(&artifact.digest);
+        let blob = cas.blob_path(&artifact.file().unwrap().digest);
         fs::set_permissions(&blob, fs::Permissions::from_mode(0o644)).unwrap();
         fs::write(&blob, b"bad!").unwrap();
 
@@ -254,17 +508,104 @@ mod tests {
         let err = cas.materialize(&artifact, &dest).unwrap_err();
         assert!(matches!(err, CasError::Corrupt { .. }), "{err}");
         assert!(!dest.exists());
-        assert!(!cas.contains(&artifact.digest));
+        assert!(!cas.contains(&artifact.file().unwrap().digest));
+    }
+
+    /// Build a small tree: a file, an empty directory, and a nested file.
+    fn write_tree(root: &Path) {
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::create_dir_all(root.join("empty")).unwrap();
+        fs::write(root.join("index.js"), b"main").unwrap();
+        fs::write(root.join("assets/run"), b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(root.join("assets/run"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn put_and_materialize_tree_roundtrip() {
+        let (dir, cas) = temp_cas();
+        let src = dir.path().join("dist");
+        write_tree(&src);
+
+        let artifact = cas.put_tree(&src).unwrap();
+        assert!(cas.matches(&artifact, &src));
+
+        let dest = dir.path().join("out/dist");
+        cas.materialize(&artifact, &dest).unwrap();
+        assert_eq!(fs::read(dest.join("index.js")).unwrap(), b"main");
+        assert!(dest.join("empty").is_dir(), "empty directories are preserved");
+        assert_eq!(
+            fs::metadata(dest.join("assets/run")).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(cas.matches(&artifact, &dest));
+    }
+
+    #[test]
+    fn identical_trees_converge_on_one_manifest() {
+        let (dir, cas) = temp_cas();
+        write_tree(&dir.path().join("a"));
+        write_tree(&dir.path().join("b"));
+
+        let a = cas.put_tree(&dir.path().join("a")).unwrap();
+        let b = cas.put_tree(&dir.path().join("b")).unwrap();
+
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_tree_with_an_extra_or_changed_file_does_not_match() {
+        let (dir, cas) = temp_cas();
+        let src = dir.path().join("dist");
+        write_tree(&src);
+        let artifact = cas.put_tree(&src).unwrap();
+
+        fs::write(src.join("stray.txt"), b"left over").unwrap();
+        assert!(!cas.matches(&artifact, &src), "an unrecorded file makes the tree stale");
+
+        fs::remove_file(src.join("stray.txt")).unwrap();
+        fs::write(src.join("index.js"), b"edited").unwrap();
+        assert!(!cas.matches(&artifact, &src));
+    }
+
+    /// Restoring is defined to leave the destination equal to what was
+    /// captured, so anything already there is replaced rather than merged.
+    #[test]
+    fn materializing_a_tree_replaces_the_destination() {
+        let (dir, cas) = temp_cas();
+        let src = dir.path().join("dist");
+        write_tree(&src);
+        let artifact = cas.put_tree(&src).unwrap();
+
+        let dest = dir.path().join("other");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("stale.txt"), b"old").unwrap();
+        cas.materialize(&artifact, &dest).unwrap();
+
+        assert!(!dest.join("stale.txt").exists());
+        assert!(dest.join("index.js").is_file());
+    }
+
+    #[test]
+    fn a_tree_containing_a_symlink_is_rejected() {
+        let (dir, cas) = temp_cas();
+        let src = dir.path().join("dist");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("real"), b"x").unwrap();
+        std::os::unix::fs::symlink(src.join("real"), src.join("link")).unwrap();
+
+        let err = cas.put_tree(&src).unwrap_err();
+
+        assert!(err.to_string().contains("not a regular file or directory"), "{err}");
     }
 
     #[test]
     fn missing_blob_is_reported() {
         let (dir, cas) = temp_cas();
-        let artifact = ArtifactRef {
+        let artifact = ArtifactRef::File(FileRef {
             digest: SHA256::digest(b"nope"),
             size: 4,
             mode: 0o644,
-        };
+        });
         let err = cas.materialize(&artifact, &dir.path().join("dest")).unwrap_err();
         assert!(matches!(err, CasError::Missing(_)));
     }
@@ -278,7 +619,7 @@ mod tests {
         fs::write(&b, b"same").unwrap();
         let ra = cas.put_file(&a).unwrap();
         let rb = cas.put_file(&b).unwrap();
-        assert_eq!(ra.digest, rb.digest);
+        assert_eq!(ra.file().unwrap().digest, rb.file().unwrap().digest);
         assert_eq!(fs::read_dir(cas.root.join("tmp")).unwrap().count(), 0);
     }
 
@@ -291,7 +632,10 @@ mod tests {
             let handles: Vec<_> = (0..8).map(|_| s.spawn(|| cas.put_file(&src).unwrap())).collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        assert!(refs.iter().all(|r| r.digest == refs[0].digest));
+        assert!(
+            refs.iter()
+                .all(|r| r.file().unwrap().digest == refs[0].file().unwrap().digest)
+        );
         let dest = dir.path().join("dest");
         cas.materialize(&refs[0], &dest).unwrap();
         assert_eq!(fs::metadata(&dest).unwrap().len(), 1 << 20);
@@ -304,15 +648,15 @@ mod tests {
         fs::write(&src, b"content").unwrap();
         fs::set_permissions(&src, fs::Permissions::from_mode(0o755)).unwrap();
         let artifact = cas.put_file(&src).unwrap();
-        assert!(artifact.matches(&src));
+        assert!(cas.matches(&artifact, &src));
 
         fs::set_permissions(&src, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(!artifact.matches(&src), "lost executable bit");
+        assert!(!cas.matches(&artifact, &src), "lost executable bit");
 
         fs::set_permissions(&src, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(&src, b"changed").unwrap();
-        assert!(!artifact.matches(&src));
-        assert!(!artifact.matches(&dir.path().join("missing")));
+        assert!(!cas.matches(&artifact, &src));
+        assert!(!cas.matches(&artifact, &dir.path().join("missing")));
     }
 
     #[test]
@@ -321,7 +665,7 @@ mod tests {
         let src = dir.path().join("src");
         fs::write(&src, b"x").unwrap();
         let artifact = cas.put_file(&src).unwrap();
-        let mode = fs::metadata(cas.blob_path(&artifact.digest))
+        let mode = fs::metadata(cas.blob_path(&artifact.file().unwrap().digest))
             .unwrap()
             .permissions()
             .mode();

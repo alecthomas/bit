@@ -168,7 +168,7 @@ impl Resource for GoFmtResource {
         Ok(())
     }
 
-    fn cache_policy(&self) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &GoFmtInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 
@@ -282,7 +282,7 @@ impl Resource for GoFmtCheckResource {
         Ok(())
     }
 
-    fn cache_policy(&self) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &GoFmtInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 

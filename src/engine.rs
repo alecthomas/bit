@@ -7,7 +7,9 @@ use crate::expr::{self, EvalError, Scope};
 use crate::file_tracker::FileTracker;
 use crate::loader::BaseScope;
 use crate::output::{BlockWriter, Event, Output};
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, ReceiptCheck, ResourceKind};
+use crate::provider::{
+    ApplyResult, BoxError, CachePolicy, OutputFile, PlanAction, PlanResult, ReceiptCheck, ResourceKind,
+};
 use crate::sha256::{Hasher, SHA256};
 use crate::state::{StateError, StateStore};
 use crate::value::{Map, Type, Value};
@@ -323,6 +325,13 @@ struct Prepared {
     dep_hashes: BTreeMap<String, SHA256>,
     content_hash: SHA256,
     plan: PlanResult,
+    /// Declared outputs paired with their project-relative roles. Empty for
+    /// resources the shared cache never consults.
+    outputs: Vec<OutputFile>,
+    /// The subset of `outputs` the shared cache stores and restores. Both an
+    /// excluded output and a cached one are kept out of the action key, since
+    /// neither is a source; only this subset reaches the CAS.
+    cached_outputs: Vec<OutputFile>,
     /// Toolchain fingerprint; `Some` only for shared-cache resources whose
     /// fingerprint could be computed.
     toolchain: Option<BTreeMap<String, String>>,
@@ -341,30 +350,61 @@ impl Prepared {
     }
 }
 
+/// Block field listing outputs the shared cache must not store.
+const UNCACHED_FIELD: &str = "uncached";
+
+/// Pair each key a resource declares as an output with its project-relative
+/// form. The relative form is what a receipt records, so that a receipt
+/// written in one worktree is legible in every other; the key itself stays as
+/// the destination, because that is the path this process can write.
+fn output_files(node: &DagNode, inputs: &Map, cache: &BuildCache) -> Result<Vec<OutputFile>, BoxError> {
+    Ok(node
+        .resource
+        .output_keys(inputs)?
+        .into_iter()
+        .map(|key| OutputFile {
+            role: cache.normalize_str(&key).into_owned(),
+            path: key,
+        })
+        .collect())
+}
+
+/// The entries of `uncached`. A trailing slash marks a directory in `output`,
+/// so it is optional here too and matching ignores it.
+fn uncached_outputs(inputs: &Map) -> HashSet<&str> {
+    fn trim(s: &str) -> &str {
+        s.trim_end_matches('/')
+    }
+    match inputs.get(UNCACHED_FIELD) {
+        Some(Value::List(_, items)) => items.iter().filter_map(|v| v.as_str()).map(trim).collect(),
+        Some(Value::Str(one)) => HashSet::from([trim(one)]),
+        _ => HashSet::new(),
+    }
+}
+
+/// Whether `uncached` names this output, under either of its spellings.
+fn is_uncached(uncached: &HashSet<&str>, output: &OutputFile) -> bool {
+    uncached.contains(output.path.trim_end_matches('/')) || uncached.contains(output.role.trim_end_matches('/'))
+}
+
 /// Compute the shared action key for a block from its normalized sources.
 /// `resolve_map` is the (normalized) resolve map at the moment the key is
 /// needed: before apply for lookup, after apply for publication.
 fn action_key(
     name: &str,
     node: &DagNode,
-    inputs: &Map,
+    prepared: &Prepared,
     resolve_map: &BTreeMap<String, SHA256>,
-    dep_hashes: &BTreeMap<String, SHA256>,
     toolchain: &BTreeMap<String, String>,
     cache: &BuildCache,
 ) -> Result<ActionKey, BoxError> {
-    let CachePolicy::Shared { version } = node.resource.cache_policy() else {
+    let CachePolicy::Shared { version } = node.resource.cache_policy(&prepared.inputs) else {
         return Err("resource is not shared".into());
     };
-    let outputs: HashSet<String> = node
-        .resource
-        .output_keys(inputs)?
-        .iter()
-        .map(|k| cache.normalize_str(k).into_owned())
-        .collect();
+    let produced: HashSet<&str> = prepared.outputs.iter().map(|o| o.role.as_str()).collect();
     let sources: BTreeMap<String, SHA256> = resolve_map
         .iter()
-        .filter(|(k, _)| !outputs.contains(*k))
+        .filter(|(k, _)| !produced.contains(k.as_str()))
         .map(|(k, v)| (k.clone(), *v))
         .collect();
     Ok(ActionKeyInput {
@@ -375,9 +415,9 @@ fn action_key(
         block: name,
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
-        inputs: hash_inputs(inputs, cache),
+        inputs: hash_inputs(&prepared.inputs, cache),
         sources: &sources,
-        deps: dep_hashes,
+        deps: &prepared.dep_hashes,
         toolchain,
     }
     .key())
@@ -463,16 +503,26 @@ fn prepare_block(
         dep_hashes,
         content_hash,
         plan,
+        outputs: Vec::new(),
+        cached_outputs: Vec::new(),
         toolchain: None,
         hit: None,
     };
 
-    if node.resource.cache_policy() == CachePolicy::Local
+    if node.resource.cache_policy(&prepared.inputs) == CachePolicy::Local
         || !cache.is_shared()
         || prepared.plan.action == PlanAction::None
     {
         return Ok(prepared);
     }
+    prepared.outputs = output_files(node, &prepared.inputs, cache).map_err(provider_error(node, name, "resolve"))?;
+    let uncached = uncached_outputs(&prepared.inputs);
+    prepared.cached_outputs = prepared
+        .outputs
+        .iter()
+        .filter(|o| !is_uncached(&uncached, o))
+        .cloned()
+        .collect();
     let toolchain = match node.resource.toolchain(&prepared.inputs) {
         Ok(t) => t,
         Err(e) => {
@@ -480,16 +530,8 @@ fn prepare_block(
             return Ok(prepared);
         }
     };
-    let key = action_key(
-        name,
-        node,
-        &prepared.inputs,
-        &prepared.resolve_map,
-        &prepared.dep_hashes,
-        &toolchain,
-        cache,
-    )
-    .map_err(provider_error(node, name, "resolve"))?;
+    let key = action_key(name, node, &prepared, &prepared.resolve_map, &toolchain, cache)
+        .map_err(provider_error(node, name, "resolve"))?;
     prepared.toolchain = Some(toolchain);
 
     // Look up a receipt only when every dependency hash is settled. A
@@ -502,10 +544,16 @@ fn prepare_block(
         crate::debug!(writer, "cache miss (key={})", short_hash(&key.digest()));
         return Ok(prepared);
     };
-    let check = match node
-        .resource
-        .check_receipt(&prepared.inputs, &receipt.state, &receipt.artifacts)
-    {
+    let Some(cas) = cache.cas() else {
+        return Ok(prepared);
+    };
+    let check = match node.resource.check_receipt(
+        &prepared.inputs,
+        &receipt.state,
+        &prepared.cached_outputs,
+        &receipt.artifacts,
+        cas,
+    ) {
         Ok(check) => check,
         Err(e) => {
             crate::debug!(writer, "receipt check failed: {e}");
@@ -844,6 +892,7 @@ fn apply_order_parallel(
 fn bind_receipt(
     node: &DagNode,
     inputs: &Map,
+    outputs: &[OutputFile],
     hit: &CacheHit,
     cache: &BuildCache,
     writer: &BlockWriter,
@@ -851,14 +900,20 @@ fn bind_receipt(
     let cas = cache.cas().ok_or("shared cache unavailable")?;
     match node
         .resource
-        .materialize(inputs, &hit.receipt.state, &hit.receipt.artifacts, cas, writer)?
+        .materialize(inputs, &hit.receipt.state, outputs, &hit.receipt.artifacts, cas, writer)?
     {
         Some(result) => Ok(result),
-        None if hit.check == ReceiptCheck::Valid => Ok(ApplyResult {
+        // The default `materialize` recreates the declared outputs and leaves
+        // the receipt's own state and outputs to be bound as they are. A
+        // resource that asks for a restore while declaring nothing to restore
+        // has not said how to perform one.
+        None if hit.check == ReceiptCheck::Restore && outputs.is_empty() => {
+            Err("resource requested restore but did not materialize".into())
+        }
+        None => Ok(ApplyResult {
             outputs: hit.receipt.outputs.clone(),
             state: Some(hit.receipt.state.clone()),
         }),
-        None => Err("resource requested restore but did not materialize".into()),
     }
 }
 
@@ -878,23 +933,17 @@ fn publish_receipt(
     cache: &BuildCache,
     writer: &BlockWriter,
 ) {
-    let CachePolicy::Shared { version } = node.resource.cache_policy() else {
+    let CachePolicy::Shared { version } = node.resource.cache_policy(&prepared.inputs) else {
         return;
     };
     let Some(cas) = cache.cas() else {
         return;
     };
     let attempt = || -> Result<(ActionKey, PublishOutcome), BoxError> {
-        let artifacts = node.resource.capture_artifacts(&prepared.inputs, state, cas)?;
-        let key = action_key(
-            name,
-            node,
-            &prepared.inputs,
-            post_resolve,
-            &prepared.dep_hashes,
-            toolchain,
-            cache,
-        )?;
+        let artifacts = node
+            .resource
+            .capture_artifacts(&prepared.inputs, state, &prepared.cached_outputs, cas)?;
+        let key = action_key(name, node, prepared, post_resolve, toolchain, cache)?;
         let receipt = Receipt {
             version: RECEIPT_VERSION,
             provider: node.provider.clone(),
@@ -955,7 +1004,7 @@ fn execute_block(
                 prepared.plan.reason.as_deref(),
             );
         }
-        match bind_receipt(node, &prepared.inputs, hit, cache, writer) {
+        match bind_receipt(node, &prepared.inputs, &prepared.cached_outputs, hit, cache, writer) {
             Ok(result) => bound = Some(result),
             Err(e) => {
                 writer.stderr_line(&format!("warning: cannot use cached result, running instead: {e}"));
@@ -1901,8 +1950,8 @@ mod tests {
         use crate::cache::{ArtifactRef, Cas};
         use crate::output::BlockWriter;
         use crate::provider::{
-            ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, MaterializeResult, PlanAction, PlanResult,
-            Provider, ReceiptCheck, Resource, ResourceKind,
+            ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, MaterializeResult, OutputFile, PlanAction,
+            PlanResult, Provider, Resource, ResourceKind,
         };
         use crate::sha256::SHA256;
         use crate::value::Value;
@@ -1967,10 +2016,6 @@ mod tests {
             Path::new(&inputs.dir).join("out.txt")
         }
 
-        fn matches(path: &Path, artifact: &ArtifactRef) -> bool {
-            crate::cache::cas::hash_path(path).is_ok_and(|d| d == artifact.digest)
-        }
-
         impl Resource for FileResource {
             type State = State;
             type Inputs = Inputs;
@@ -2031,7 +2076,7 @@ mod tests {
                 let _ = std::fs::remove_file(&state.path);
                 Ok(())
             }
-            fn cache_policy(&self) -> CachePolicy {
+            fn cache_policy(&self, _inputs: &Inputs) -> CachePolicy {
                 CachePolicy::Shared { version: 1 }
             }
             fn output_keys(&self, inputs: &Inputs) -> Vec<String> {
@@ -2040,53 +2085,26 @@ mod tests {
             fn toolchain(&self, _inputs: &Inputs) -> Result<BTreeMap<String, String>, BoxError> {
                 Ok(BTreeMap::from([("tool".to_owned(), "1".to_owned())]))
             }
-            fn capture_artifacts(
-                &self,
-                _inputs: &Inputs,
-                state: &State,
-                cas: &Cas,
-            ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
-                Ok(BTreeMap::from([(
-                    "out".to_owned(),
-                    cas.put_file(Path::new(&state.path))?,
-                )]))
-            }
-            fn check_receipt(
-                &self,
-                inputs: &Inputs,
-                _state: &State,
-                artifacts: &BTreeMap<String, ArtifactRef>,
-            ) -> Result<ReceiptCheck, BoxError> {
-                let Some(out) = artifacts.get("out") else {
-                    return Ok(ReceiptCheck::Unusable);
-                };
-                Ok(if matches(&out_path(inputs), out) {
-                    ReceiptCheck::Valid
-                } else {
-                    ReceiptCheck::Restore
-                })
-            }
+            /// Capture and check come from the default implementations. Only
+            /// the state and outputs are rebuilt here, because they hold this
+            /// worktree's absolute output path.
             fn materialize(
                 &self,
                 inputs: &Inputs,
                 _state: &State,
+                outputs: &[OutputFile],
                 artifacts: &BTreeMap<String, ArtifactRef>,
                 cas: &Cas,
-                _writer: &BlockWriter,
+                writer: &BlockWriter,
             ) -> MaterializeResult<State, Outputs> {
-                let out = artifacts.get("out").ok_or("no out artifact")?;
-                let path = out_path(inputs);
-                if !matches(&path, out) {
-                    cas.materialize(out, &path)?;
-                }
+                crate::provider::restore_output_files(outputs, artifacts, cas, writer)?;
+                let path = out_path(inputs).to_string_lossy().into_owned();
                 Ok(Some(ApplyResult {
                     outputs: Outputs {
-                        path: path.to_string_lossy().into_owned(),
+                        path: path.clone(),
                         passed: true,
                     },
-                    state: Some(State {
-                        path: path.to_string_lossy().into_owned(),
-                    }),
+                    state: Some(State { path }),
                 }))
             }
         }
@@ -2258,6 +2276,13 @@ mod tests {
         fn applies(&self) -> usize {
             self.applies.load(Ordering::SeqCst)
         }
+
+        /// The single published receipt, parsed.
+        fn only_receipt(&self) -> Receipt {
+            let paths = self.receipts();
+            assert_eq!(paths.len(), 1, "expected exactly one receipt");
+            serde_json::from_slice(&std::fs::read(&paths[0]).unwrap()).unwrap()
+        }
     }
 
     fn wrapped(store: &MemoryStore, block: &str) -> WrappedState {
@@ -2337,13 +2362,55 @@ mod tests {
     }
 
     #[test]
+    fn declared_outputs_reach_the_cache() {
+        let h = Harness::new();
+        let a = h.worktree("a");
+        a.write_src("v1");
+        h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+
+        assert_eq!(h.only_receipt().artifacts.keys().collect::<Vec<_>>(), ["out.txt"]);
+    }
+
+    /// An excluded output is still kept out of the action key -- it is a
+    /// produced file, not a source -- but nothing about it is stored.
+    #[test]
+    fn uncached_outputs_are_not_stored() {
+        let h = Harness::new();
+        let a = h.worktree("a");
+        a.write_src("v1");
+        // Named with the trailing slash `output` uses for directories, which
+        // is optional here.
+        let block = a.block("app", "file", "  uncached = [\"out.txt/\"]\n");
+        h.apply(&a, &block, 1).unwrap();
+
+        assert!(h.only_receipt().artifacts.is_empty());
+
+        // A second worktree still matches the action, because excluding an
+        // output changes what is stored, not what the block depends on. It
+        // therefore reuses the result without receiving the excluded file --
+        // the cost of opting an output out.
+        let b = h.worktree("b");
+        b.write_src("v1");
+        let plans = h
+            .apply(&b, &b.block("app", "file", "  uncached = [\"out.txt/\"]\n"), 1)
+            .unwrap();
+        assert_eq!(plans[0].plan.action, PlanAction::None);
+        assert_eq!(h.applies(), 1);
+        assert!(!b.out().exists());
+    }
+
+    #[test]
     fn valid_receipt_is_bound_without_materializing() {
         let h = Harness::new();
         let a = h.worktree("a");
         h.apply(&a, &a.block("app", "file", "  content = \"hi\"\n"), 1).unwrap();
 
+        // Reproduce what apply would have written, permissions included: a
+        // receipt only counts as valid when the destination is byte- and
+        // mode-identical to the captured artifact.
         let b = h.worktree("b");
         std::fs::write(b.out(), "hi").unwrap();
+        std::fs::set_permissions(b.out(), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let plans = h.apply(&b, &b.block("app", "file", "  content = \"hi\"\n"), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::None);
         assert_eq!(plans[0].plan.reason.as_deref(), Some("cached"));

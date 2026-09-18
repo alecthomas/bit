@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::{run_pnpm, workspace};
@@ -285,6 +285,13 @@ impl Resource for PnpmRunResource {
             crate::providers::remove_path(Path::new(output), writer)?;
         }
         Ok(())
+    }
+
+    /// A package script is an arbitrary command, like `exec`: the action key
+    /// names the script but nothing it invokes. Its declared outputs are also
+    /// commonly directories, which the CAS cannot store.
+    fn cache_policy(&self, _inputs: &PnpmRunInputs) -> CachePolicy {
+        CachePolicy::Local
     }
 }
 

@@ -121,7 +121,7 @@ impl Resource for RustBuildResource {
         Ok(())
     }
 
-    fn cache_policy(&self) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &RustBuildInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 

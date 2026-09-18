@@ -2,6 +2,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::cache::{ArtifactRef, Cas};
@@ -39,7 +40,7 @@ pub enum PlanAction {
 /// Whether successful results of a resource may be shared across worktrees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachePolicy {
-    /// Results stay in worktree-local state (the default).
+    /// Results stay in worktree-local state.
     Local,
     /// Successful results are published to the shared action cache.
     /// `version` must change whenever the receipt state, output
@@ -76,6 +77,88 @@ pub struct ApplyResult<S, O> {
 
 /// Result of materializing a receipt: `None` binds the receipt verbatim.
 pub type MaterializeResult<S, O> = Result<Option<ApplyResult<S, O>>, BoxError>;
+
+/// One file a resource declared as an output, in the two spellings the cache
+/// needs.
+///
+/// `role` is the project-relative path the engine derived, and is what a
+/// receipt records: it is the same string in every worktree of a repository,
+/// so a receipt written by one is legible to the others. `path` is where that
+/// file lives for this process, which is what any filesystem access must use.
+/// The two differ whenever a block names an output by absolute path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputFile {
+    pub role: String,
+    pub path: String,
+}
+
+/// Store the declared output files in the CAS under their roles. This is the
+/// default [`Resource::capture_artifacts`], exposed for resources that capture
+/// these files alongside artifacts of their own.
+pub fn capture_output_files(outputs: &[OutputFile], cas: &Cas) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
+    let mut artifacts = BTreeMap::new();
+    for output in outputs {
+        let path = Path::new(&output.path);
+        let artifact = if path.is_dir() {
+            cas.put_tree(path)?
+        } else if path.is_file() {
+            cas.put_file(path)?
+        } else {
+            return Err(format!("output `{}` does not exist", output.role).into());
+        };
+        artifacts.insert(output.role.clone(), artifact);
+    }
+    Ok(artifacts)
+}
+
+/// Classify a receipt by comparing its captured outputs against the files they
+/// describe in this worktree. This is the default [`Resource::check_receipt`].
+pub fn check_output_files(
+    outputs: &[OutputFile],
+    artifacts: &BTreeMap<String, ArtifactRef>,
+    cas: &Cas,
+) -> ReceiptCheck {
+    let mut restore = false;
+    for output in outputs {
+        let Some(artifact) = artifacts.get(&output.role) else {
+            return ReceiptCheck::Unusable;
+        };
+        if !cas.matches(artifact, Path::new(&output.path)) {
+            restore = true;
+        }
+    }
+    if restore {
+        ReceiptCheck::Restore
+    } else {
+        ReceiptCheck::Valid
+    }
+}
+
+/// Recreate the declared output files from the CAS, leaving alone any that
+/// already hold the captured content.
+///
+/// A resource whose state or outputs embed worktree-specific values calls this
+/// from [`Resource::materialize`] and then rebuilds those values from its own
+/// inputs, so that nothing from the producing worktree leaks into this one.
+pub fn restore_output_files(
+    outputs: &[OutputFile],
+    artifacts: &BTreeMap<String, ArtifactRef>,
+    cas: &Cas,
+    writer: &BlockWriter,
+) -> Result<(), BoxError> {
+    for output in outputs {
+        let artifact = artifacts
+            .get(&output.role)
+            .ok_or_else(|| format!("receipt has no artifact for output `{}`", output.role))?;
+        let path = Path::new(&output.path);
+        if cas.matches(artifact, path) {
+            continue;
+        }
+        writer.line(&format!("restore {}", output.path));
+        cas.materialize(artifact, path)?;
+    }
+    Ok(())
+}
 
 /// Signature of a provider-exported function.
 #[derive(Debug, Clone)]
@@ -143,20 +226,34 @@ pub trait Resource {
 
     // -- Shared cache contract -------------------------------------------
     //
-    // Resources are worktree-local by default. A resource opts into the
-    // shared action cache by returning `CachePolicy::Shared`; the engine then
-    // owns key computation, receipt storage, and CAS integrity, while the
-    // resource owns artifact meaning, destination selection, and contextual
-    // output reconstruction.
+    // A resource opts into the shared action cache by returning
+    // `CachePolicy::Shared`; the engine then owns key computation, receipt
+    // storage, and CAS integrity, while the resource owns artifact meaning,
+    // destination selection, and contextual output reconstruction.
 
-    fn cache_policy(&self) -> CachePolicy {
-        CachePolicy::Local
-    }
+    /// Whether successful results may be shared across worktrees. Every
+    /// resource states this explicitly: whether a result is safe to share
+    /// depends on whether the action key captures everything it depends on,
+    /// which only the resource knows.
+    ///
+    /// The answer may depend on the inputs. A resource that usually produces
+    /// files but can also be pointed at external state returns `Local` for
+    /// the latter, rather than publishing receipts nothing can use.
+    fn cache_policy(&self, inputs: &Self::Inputs) -> CachePolicy;
 
     /// Keys of `resolve` entries that describe produced outputs rather than
     /// sources. They stay in the local content hash (so a deleted output
     /// triggers a rebuild) but are excluded from the shared action key,
     /// which must be computable before the output exists.
+    ///
+    /// The engine also pairs each key with its project-relative form and
+    /// hands the result to the cache methods below as [`OutputFile`]s, so
+    /// these must be paths this process can read and write.
+    ///
+    /// A shared resource must name every file its consumers depend on. An
+    /// omitted output is not a missed optimisation: the receipt is published
+    /// as if complete, so another worktree restores a partial result and the
+    /// block reports success over it.
     fn output_keys(&self, _inputs: &Self::Inputs) -> Vec<String> {
         vec![]
     }
@@ -168,39 +265,54 @@ pub trait Resource {
 
     /// Capture durable artifacts produced by a successful apply into the CAS,
     /// keyed by a provider-defined role.
+    ///
+    /// The default stores the files named by [`Resource::output_keys`], which
+    /// covers any resource whose outputs are ordinary files. Override it for
+    /// artifacts that do not live on disk, such as a container image.
     fn capture_artifacts(
         &self,
         _inputs: &Self::Inputs,
         _state: &Self::State,
-        _cas: &Cas,
+        outputs: &[OutputFile],
+        cas: &Cas,
     ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
-        Ok(BTreeMap::new())
+        capture_output_files(outputs, cas)
     }
 
-    /// Classify a receipt for the current inputs. The default treats every
-    /// receipt as valid, which is correct for validation-only resources
-    /// that produce no artifacts.
+    /// Classify a receipt for the current inputs. The default compares the
+    /// captured outputs against the destinations [`Resource::output_keys`]
+    /// names here, and reports [`ReceiptCheck::Valid`] when a resource
+    /// declares none, which is correct for validation-only resources.
     fn check_receipt(
         &self,
         _inputs: &Self::Inputs,
         _state: &Self::State,
-        _artifacts: &BTreeMap<String, ArtifactRef>,
+        outputs: &[OutputFile],
+        artifacts: &BTreeMap<String, ArtifactRef>,
+        cas: &Cas,
     ) -> Result<ReceiptCheck, BoxError> {
-        Ok(ReceiptCheck::Valid)
+        Ok(check_output_files(outputs, artifacts, cas))
     }
 
     /// Recreate missing objects from the CAS and return state and outputs
-    /// resolved for the current worktree. `None` means the receipt's state
-    /// and outputs are context-free and can be bound verbatim. A resource
-    /// that returns [`ReceiptCheck::Restore`] must return `Some`.
+    /// resolved for the current worktree. `None` means the receipt's own
+    /// state and outputs are context-free and can be bound as they are.
+    ///
+    /// The default recreates the declared output files and returns `None`,
+    /// which is right for a resource whose state and outputs are derived from
+    /// its inputs. Override it when either embeds something specific to the
+    /// worktree that produced it, and call [`restore_output_files`] from the
+    /// override to recreate the files.
     fn materialize(
         &self,
         _inputs: &Self::Inputs,
         _state: &Self::State,
-        _artifacts: &BTreeMap<String, ArtifactRef>,
-        _cas: &Cas,
-        _writer: &BlockWriter,
+        outputs: &[OutputFile],
+        artifacts: &BTreeMap<String, ArtifactRef>,
+        cas: &Cas,
+        writer: &BlockWriter,
     ) -> MaterializeResult<Self::State, Self::Outputs> {
+        restore_output_files(outputs, artifacts, cas, writer)?;
         Ok(None)
     }
 }
@@ -221,9 +333,13 @@ pub trait DynResource: Send + Sync {
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError>;
 
-    fn cache_policy(&self) -> CachePolicy {
-        CachePolicy::Local
-    }
+    /// Returns [`CachePolicy::Local`] when the inputs cannot be deserialized
+    /// for this resource, so an unusable block is never published.
+    fn cache_policy(&self, inputs: &Map) -> CachePolicy;
+
+    // The remaining defaults describe a resource with no cached outputs.
+    // Anything implementing `Resource` reaches the richer defaults there
+    // through the blanket impl below instead.
     fn output_keys(&self, _inputs: &Map) -> Result<Vec<String>, BoxError> {
         Ok(vec![])
     }
@@ -234,6 +350,7 @@ pub trait DynResource: Send + Sync {
         &self,
         _inputs: &Map,
         _state: &serde_json::Value,
+        _outputs: &[OutputFile],
         _cas: &Cas,
     ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
         Ok(BTreeMap::new())
@@ -244,7 +361,9 @@ pub trait DynResource: Send + Sync {
         &self,
         _inputs: &Map,
         _state: &serde_json::Value,
+        _outputs: &[OutputFile],
         _artifacts: &BTreeMap<String, ArtifactRef>,
+        _cas: &Cas,
     ) -> Result<ReceiptCheck, BoxError> {
         Ok(ReceiptCheck::Valid)
     }
@@ -252,6 +371,7 @@ pub trait DynResource: Send + Sync {
         &self,
         _inputs: &Map,
         _state: &serde_json::Value,
+        _outputs: &[OutputFile],
         _artifacts: &BTreeMap<String, ArtifactRef>,
         _cas: &Cas,
         _writer: &BlockWriter,
@@ -320,8 +440,11 @@ impl<R: Resource + Send + Sync> DynResource for R {
         Resource::destroy(self, &state, writer)
     }
 
-    fn cache_policy(&self) -> CachePolicy {
-        Resource::cache_policy(self)
+    fn cache_policy(&self, inputs: &Map) -> CachePolicy {
+        match deserialize_inputs::<R::Inputs>(inputs) {
+            Ok(typed) => Resource::cache_policy(self, &typed),
+            Err(_) => CachePolicy::Local,
+        }
     }
 
     fn output_keys(&self, inputs: &Map) -> Result<Vec<String>, BoxError> {
@@ -338,37 +461,41 @@ impl<R: Resource + Send + Sync> DynResource for R {
         &self,
         inputs: &Map,
         state: &serde_json::Value,
+        outputs: &[OutputFile],
         cas: &Cas,
     ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         let state: R::State = serde_json::from_value(state.clone())?;
-        Resource::capture_artifacts(self, &typed, &state, cas)
+        Resource::capture_artifacts(self, &typed, &state, outputs, cas)
     }
 
     fn check_receipt(
         &self,
         inputs: &Map,
         state: &serde_json::Value,
+        outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
+        cas: &Cas,
     ) -> Result<ReceiptCheck, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         let Ok(state) = serde_json::from_value::<R::State>(state.clone()) else {
             return Ok(ReceiptCheck::Unusable);
         };
-        Resource::check_receipt(self, &typed, &state, artifacts)
+        Resource::check_receipt(self, &typed, &state, outputs, artifacts, cas)
     }
 
     fn materialize(
         &self,
         inputs: &Map,
         state: &serde_json::Value,
+        outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
         cas: &Cas,
         writer: &BlockWriter,
     ) -> MaterializeResult<serde_json::Value, Map> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         let state: R::State = serde_json::from_value(state.clone())?;
-        let Some(result) = Resource::materialize(self, &typed, &state, artifacts, cas, writer)? else {
+        let Some(result) = Resource::materialize(self, &typed, &state, outputs, artifacts, cas, writer)? else {
             return Ok(None);
         };
         Ok(Some(ApplyResult {
@@ -521,6 +648,10 @@ mod tests {
         fn destroy(&self, _prior_state: &StubState, _writer: &BlockWriter) -> Result<(), BoxError> {
             Ok(())
         }
+
+        fn cache_policy(&self, _inputs: &StubInputs) -> CachePolicy {
+            CachePolicy::Local
+        }
     }
 
     #[test]
@@ -653,5 +784,179 @@ mod tests {
         assert_eq!(json["inputs"]["fields"][1]["default"], "42");
         assert_eq!(json["outputs"]["fields"][0]["name"], "path");
         assert_eq!(json["outputs"]["fields"][0]["type"], "string");
+    }
+
+    /// Create `dir/name` as a declared output: recorded under its bare name,
+    /// living at an absolute path, as a block naming an absolute output would
+    /// produce.
+    fn write_output(dir: &std::path::Path, name: &str, content: &str) -> OutputFile {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        OutputFile {
+            role: name.to_owned(),
+            path: path.to_string_lossy().into_owned(),
+        }
+    }
+
+    #[test]
+    fn captures_declared_outputs_under_their_roles() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path().join("cas"));
+        let first = write_output(dir.path(), "a.txt", "one");
+        let second = write_output(dir.path(), "b.txt", "two");
+
+        let artifacts = capture_output_files(&[first, second], &cas).unwrap();
+
+        assert_eq!(artifacts.keys().collect::<Vec<_>>(), ["a.txt", "b.txt"]);
+        assert!(cas.contains(&artifacts["a.txt"].file().unwrap().digest));
+        assert!(cas.contains(&artifacts["b.txt"].file().unwrap().digest));
+    }
+
+    /// The point of separating role from path: a receipt written where the
+    /// output sat at one absolute path is readable where it sits at another.
+    #[test]
+    fn a_receipt_is_readable_where_the_output_has_a_different_path() {
+        let producer = tempfile::tempdir().unwrap();
+        let consumer = tempfile::tempdir().unwrap();
+        let cas = Cas::new(producer.path().join("cas"));
+        let artifacts = capture_output_files(&[write_output(producer.path(), "a.txt", "one")], &cas).unwrap();
+
+        let here = OutputFile {
+            role: "a.txt".to_owned(),
+            path: consumer.path().join("a.txt").to_string_lossy().into_owned(),
+        };
+        assert_eq!(
+            check_output_files(std::slice::from_ref(&here), &artifacts, &cas),
+            ReceiptCheck::Restore
+        );
+
+        let output = crate::output::Output::new(&[]);
+        restore_output_files(std::slice::from_ref(&here), &artifacts, &cas, &output.writer("block")).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&here.path).unwrap(), "one");
+        assert_eq!(check_output_files(&[here], &artifacts, &cas), ReceiptCheck::Valid);
+    }
+
+    #[test]
+    fn capture_rejects_a_missing_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path().join("cas"));
+        let missing = OutputFile {
+            role: "gone.txt".to_owned(),
+            path: dir.path().join("gone.txt").to_string_lossy().into_owned(),
+        };
+
+        let err = capture_output_files(&[missing], &cas).unwrap_err().to_string();
+
+        assert!(err.contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn captures_and_restores_a_directory_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path().join("cas"));
+        let tree = dir.path().join("dist");
+        std::fs::create_dir_all(tree.join("assets")).unwrap();
+        std::fs::write(tree.join("index.js"), "main").unwrap();
+        std::fs::write(tree.join("assets/app.css"), "body{}").unwrap();
+        let output = OutputFile {
+            role: "dist".to_owned(),
+            path: tree.to_string_lossy().into_owned(),
+        };
+
+        let artifacts = capture_output_files(std::slice::from_ref(&output), &cas).unwrap();
+        assert_eq!(
+            check_output_files(std::slice::from_ref(&output), &artifacts, &cas),
+            ReceiptCheck::Valid
+        );
+
+        std::fs::remove_dir_all(&tree).unwrap();
+        let writer = crate::output::Output::new(&[]);
+        restore_output_files(std::slice::from_ref(&output), &artifacts, &cas, &writer.writer("block")).unwrap();
+
+        assert_eq!(std::fs::read_to_string(tree.join("index.js")).unwrap(), "main");
+        assert_eq!(std::fs::read_to_string(tree.join("assets/app.css")).unwrap(), "body{}");
+        assert_eq!(check_output_files(&[output], &artifacts, &cas), ReceiptCheck::Valid);
+    }
+
+    #[test]
+    fn check_reports_valid_when_a_resource_declares_no_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path().join("cas"));
+        assert_eq!(check_output_files(&[], &BTreeMap::new(), &cas), ReceiptCheck::Valid);
+    }
+
+    #[test]
+    fn check_reports_valid_when_outputs_already_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path().join("cas"));
+        let output = write_output(dir.path(), "a.txt", "one");
+        let artifacts = capture_output_files(std::slice::from_ref(&output), &cas).unwrap();
+
+        assert_eq!(check_output_files(&[output], &artifacts, &cas), ReceiptCheck::Valid);
+    }
+
+    #[test]
+    fn check_reports_restore_when_an_output_is_absent_or_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path().join("cas"));
+        let output = write_output(dir.path(), "a.txt", "one");
+        let artifacts = capture_output_files(std::slice::from_ref(&output), &cas).unwrap();
+
+        std::fs::write(&output.path, "changed").unwrap();
+        assert_eq!(
+            check_output_files(std::slice::from_ref(&output), &artifacts, &cas),
+            ReceiptCheck::Restore
+        );
+
+        std::fs::remove_file(&output.path).unwrap();
+        assert_eq!(check_output_files(&[output], &artifacts, &cas), ReceiptCheck::Restore);
+    }
+
+    #[test]
+    fn check_reports_unusable_when_the_receipt_lacks_an_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path().join("cas"));
+        let first = write_output(dir.path(), "a.txt", "one");
+        let second = write_output(dir.path(), "b.txt", "two");
+        let artifacts = capture_output_files(std::slice::from_ref(&first), &cas).unwrap();
+
+        assert_eq!(
+            check_output_files(&[first, second], &artifacts, &cas),
+            ReceiptCheck::Unusable
+        );
+    }
+
+    #[test]
+    fn restores_a_deleted_output_with_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path().join("cas"));
+        let output = write_output(dir.path(), "a.txt", "one");
+        std::fs::set_permissions(&output.path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let artifacts = capture_output_files(std::slice::from_ref(&output), &cas).unwrap();
+        std::fs::remove_file(&output.path).unwrap();
+
+        let writer = crate::output::Output::new(&[]);
+        restore_output_files(std::slice::from_ref(&output), &artifacts, &cas, &writer.writer("block")).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&output.path).unwrap(), "one");
+        let mode = std::fs::metadata(&output.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111);
+    }
+
+    #[test]
+    fn restore_fails_when_the_receipt_lacks_an_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas = Cas::new(dir.path().join("cas"));
+        let output = write_output(dir.path(), "a.txt", "one");
+        let writer = crate::output::Output::new(&[]);
+
+        let err = restore_output_files(&[output], &BTreeMap::new(), &cas, &writer.writer("block"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("receipt has no artifact for output"), "{err}");
     }
 }

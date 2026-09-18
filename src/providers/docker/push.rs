@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 /// Push a Docker image to a registry
@@ -170,6 +170,12 @@ impl Resource for PushResource {
             .output()
             .map_err(|e| format!("docker rmi failed: {e}"))?;
         super::check_remove_output("docker rmi", output)
+    }
+
+    /// A push mutates a remote registry. Another worktree's receipt says
+    /// nothing about whether this tag is still there.
+    fn cache_policy(&self, _inputs: &PushInputs) -> CachePolicy {
+        CachePolicy::Local
     }
 }
 

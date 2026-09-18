@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, DynResource, FuncSignature, PlanAction, PlanResult, Provider, Resource, ResourceKind,
+    ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, PlanAction, PlanResult, Provider, Resource,
+    ResourceKind,
 };
 use crate::sha256::SHA256;
 use crate::value::Value;
@@ -367,6 +368,27 @@ impl Resource for ExecResource {
         // (the resource is external and bit doesn't know how to tear it down).
         Ok(())
     }
+
+    /// `resolve` and `outputs` make a block a window onto something outside
+    /// the worktree: `resolve` reports whether an external resource exists,
+    /// and `outputs` reads values back out of it. Neither is something a
+    /// receipt written elsewhere can vouch for, so those blocks stay local
+    /// and the rest share the files they produce.
+    fn cache_policy(&self, inputs: &ExecInputs) -> CachePolicy {
+        if inputs.resolve.is_some() || inputs.outputs.is_some() {
+            CachePolicy::Local
+        } else {
+            CachePolicy::Shared { version: 1 }
+        }
+    }
+
+    fn output_keys(&self, inputs: &ExecInputs) -> Vec<String> {
+        inputs
+            .output
+            .iter()
+            .map(|o| o.trim_end_matches('/').to_owned())
+            .collect()
+    }
 }
 
 // --- exec.test resource ---
@@ -485,6 +507,18 @@ impl Resource for ExecTestResource {
             return run_command(clean, prior_state.dir.as_deref(), writer);
         }
         Ok(())
+    }
+
+    fn cache_policy(&self, _inputs: &ExecTestInputs) -> CachePolicy {
+        CachePolicy::Shared { version: 1 }
+    }
+
+    fn output_keys(&self, inputs: &ExecTestInputs) -> Vec<String> {
+        inputs
+            .output
+            .iter()
+            .map(|o| o.trim_end_matches('/').to_owned())
+            .collect()
     }
 }
 
@@ -739,6 +773,56 @@ mod tests {
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
         assert!(!result.outputs.passed);
+    }
+
+    fn exec_inputs(output: Vec<String>) -> ExecInputs {
+        ExecInputs {
+            command: "make".into(),
+            output,
+            inputs: vec![],
+            dir: None,
+            clean: None,
+            resolve: None,
+            outputs: None,
+        }
+    }
+
+    #[test]
+    fn declared_outputs_are_cache_keys_without_their_trailing_slash() {
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
+        let inputs = exec_inputs(vec!["dist/".into(), "bin/app".into()]);
+
+        assert_eq!(Resource::output_keys(&resource, &inputs), ["dist", "bin/app"]);
+    }
+
+    #[test]
+    fn blocks_producing_files_are_shared() {
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
+        assert_eq!(
+            Resource::cache_policy(&resource, &exec_inputs(vec!["dist/".into()])),
+            CachePolicy::Shared { version: 1 }
+        );
+    }
+
+    /// `resolve` and `outputs` read state that lives outside the worktree, so
+    /// no other worktree can act on what this one observed.
+    #[test]
+    fn blocks_watching_external_state_stay_local() {
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
+
+        let mut inputs = exec_inputs(vec![]);
+        inputs.resolve = Some("docker inspect thing".into());
+        assert_eq!(Resource::cache_policy(&resource, &inputs), CachePolicy::Local);
+
+        let mut inputs = exec_inputs(vec![]);
+        inputs.outputs = Some("echo '{}'".into());
+        assert_eq!(Resource::cache_policy(&resource, &inputs), CachePolicy::Local);
     }
 
     #[test]

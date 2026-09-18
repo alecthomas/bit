@@ -7,8 +7,8 @@ use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult as ProviderApplyResult, BoxError, DynResource, PlanAction, PlanResult, ProviderRegistry, ResourceKind,
-    ResourceSchema, StructField, StructType,
+    ApplyResult as ProviderApplyResult, BoxError, CachePolicy, DynResource, PlanAction, PlanResult, ProviderRegistry,
+    ResourceKind, ResourceSchema, StructField, StructType,
 };
 use crate::state::StateStore;
 use crate::value::{Map, Value, validate_type};
@@ -68,6 +68,12 @@ impl DynResource for ModuleResource {
 
     fn destroy(&self, _prior_state: &serde_json::Value, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
+    }
+
+    /// A module instance only forwards the outputs of its inner blocks, which
+    /// carry their own policies. There is no result of its own to share.
+    fn cache_policy(&self, _inputs: &Map) -> CachePolicy {
+        CachePolicy::Local
     }
 }
 

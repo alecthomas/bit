@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 /// Attach a container to a Docker network (equivalent of `docker network connect`).
@@ -344,6 +344,12 @@ impl Resource for NetworkAttachResource {
             ),
         );
         run_disconnect(&prior_state.network, &prior_state.container)
+    }
+
+    /// An attachment is a live edge between two daemon objects; see
+    /// `docker.container`.
+    fn cache_policy(&self, _inputs: &NetworkAttachInputs) -> CachePolicy {
+        CachePolicy::Local
     }
 }
 

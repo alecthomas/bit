@@ -11,7 +11,8 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, CachePolicy, MaterializeResult, PlanAction, PlanResult, ReceiptCheck, Resource, ResourceKind,
+    ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, Resource, ResourceKind,
+    restore_output_files,
 };
 use crate::sha256::SHA256;
 
@@ -93,9 +94,6 @@ impl GoExeResource {
         }
     }
 }
-
-/// Role under which the built binary is recorded in a receipt.
-const EXE_ROLE: &str = "exe";
 
 impl Resource for GoExeResource {
     type State = GoExeState;
@@ -209,8 +207,11 @@ impl Resource for GoExeResource {
         crate::providers::remove_path(Path::new(&prior_state.output), writer)
     }
 
-    fn cache_policy(&self) -> CachePolicy {
-        CachePolicy::Shared { version: 1 }
+    /// Version 2 records the built binary under its project-relative path
+    /// rather than a provider-defined role, so version 1 receipts are not
+    /// readable.
+    fn cache_policy(&self, _inputs: &GoExeInputs) -> CachePolicy {
+        CachePolicy::Shared { version: 2 }
     }
 
     fn output_keys(&self, inputs: &GoExeInputs) -> Vec<String> {
@@ -221,52 +222,20 @@ impl Resource for GoExeResource {
         super::toolchain_fingerprint(&inputs.env, inputs.dir.as_deref().map(Path::new))
     }
 
-    fn capture_artifacts(
-        &self,
-        _inputs: &GoExeInputs,
-        state: &GoExeState,
-        cas: &Cas,
-    ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
-        Ok(BTreeMap::from([(
-            EXE_ROLE.to_owned(),
-            cas.put_file(Path::new(&state.output))?,
-        )]))
-    }
-
-    fn check_receipt(
-        &self,
-        inputs: &GoExeInputs,
-        _state: &GoExeState,
-        artifacts: &BTreeMap<String, ArtifactRef>,
-    ) -> Result<ReceiptCheck, BoxError> {
-        let Some(exe) = artifacts.get(EXE_ROLE) else {
-            return Ok(ReceiptCheck::Unusable);
-        };
-        let output = GoExeResource::output_path(inputs);
-        Ok(if exe.matches(Path::new(&output)) {
-            ReceiptCheck::Valid
-        } else {
-            ReceiptCheck::Restore
-        })
-    }
-
-    /// The receipt's `output` may come from another worktree, so the
-    /// destination is always re-derived from the current inputs.
+    /// The default capture and check handle the binary itself. Only the state
+    /// needs rebuilding: the receipt's came from another worktree, so it is
+    /// re-derived from the current inputs.
     fn materialize(
         &self,
         inputs: &GoExeInputs,
         _state: &GoExeState,
+        outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
         cas: &Cas,
         writer: &BlockWriter,
     ) -> MaterializeResult<GoExeState, GoExeOutputs> {
-        let exe = artifacts.get(EXE_ROLE).ok_or("receipt has no exe artifact")?;
+        restore_output_files(outputs, artifacts, cas, writer)?;
         let output = GoExeResource::output_path(inputs);
-        let path = Path::new(&output);
-        if !exe.matches(path) {
-            writer.line(&format!("restore {output}"));
-            cas.materialize(exe, path)?;
-        }
         Ok(Some(ApplyResult {
             outputs: GoExeOutputs { path: output.clone() },
             state: Some(GoExeResource::state_for(inputs, output)),
@@ -286,6 +255,23 @@ mod tests {
     fn resource_kind_is_build() {
         let resource = test_resource();
         assert_eq!(Resource::kind(&resource), ResourceKind::Build);
+    }
+
+    /// Pinned so that a change to how the binary is captured or restored is
+    /// forced to bump the version rather than collide with older receipts.
+    #[test]
+    fn cache_version_is_pinned() {
+        let inputs = GoExeInputs {
+            package: "./cmd/app".into(),
+            output: Some("bin/app".into()),
+            flags: vec![],
+            dir: None,
+            env: GoEnv::default(),
+        };
+        assert_eq!(
+            Resource::cache_policy(&test_resource(), &inputs),
+            CachePolicy::Shared { version: 2 }
+        );
     }
 
     #[test]

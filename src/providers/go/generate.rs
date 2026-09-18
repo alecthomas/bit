@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::GoEnv;
@@ -170,6 +170,14 @@ impl Resource for GoGenerateResource {
             crate::providers::remove_path(Path::new(output), writer)?;
         }
         Ok(())
+    }
+
+    /// `go generate` runs whatever the `//go:generate` directives in the
+    /// sources name. Those tools are not part of the Go toolchain
+    /// fingerprint, so the action key cannot describe what produced the
+    /// generated files.
+    fn cache_policy(&self, _inputs: &GoGenerateInputs) -> CachePolicy {
+        CachePolicy::Local
     }
 }
 

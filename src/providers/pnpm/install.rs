@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::{run_pnpm, workspace};
@@ -159,6 +159,12 @@ impl Resource for PnpmInstallResource {
             crate::providers::remove_path(&nm, writer)?;
         }
         Ok(())
+    }
+
+    /// The result of an install is a set of `node_modules` trees. The CAS
+    /// stores single files, so there is nothing here it could capture.
+    fn cache_policy(&self, _inputs: &PnpmInstallInputs) -> CachePolicy {
+        CachePolicy::Local
     }
 }
 

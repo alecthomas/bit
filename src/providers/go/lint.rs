@@ -156,7 +156,7 @@ impl Resource for GoLintResource {
         Ok(())
     }
 
-    fn cache_policy(&self) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &GoLintInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 
