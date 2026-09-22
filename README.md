@@ -80,6 +80,7 @@ bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
 bit --cache      # show the size of the shared build cache
 bit --cache --clean  # delete every cached receipt and artifact
 bit --long       # disable live scrolling regions and stream every output line
+bit --since origin/master  # apply blocks affected since the branch point
 ```
 
 All block/target-taking modes (`bit`, `--plan`, `--clean`, `--graph`, `--dump`)
@@ -88,6 +89,21 @@ accept the same positional selector: no argument uses the `default` target
 block, or name one or more targets/blocks to scope the operation. `--clean
 <name>` destroys that block plus anything that depends on it, in reverse
 topological order.
+
+`--since <ref>` limits apply, plan, test, graph, dump, and block-list operations to
+blocks affected by changes between `merge-base(<ref>, HEAD)` and the current
+worktree. Committed, staged, unstaged, and untracked changes are included. A
+block is affected when a changed path is one of its provider-resolved inputs,
+or when it content-depends on an affected block. Required prerequisites are
+included. `bit -ll --since <ref>` prints affected blocks across the full DAG;
+positional targets optionally narrow that list. `-l --since` is rejected
+because `-l` lists target definitions rather than blocks.
+
+Blocks without source paths are always included because Git cannot prove them
+unaffected. A changed `.bit` build definition selects the full requested target
+set. An unowned deleted path also selects the full set when prior state cannot
+identify its block. `--since` requires the ref and its merge base to exist
+locally, and cannot be combined with `--clean`.
 
 ## Language
 

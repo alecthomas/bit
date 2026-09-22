@@ -308,6 +308,114 @@ pub fn resolve_order(dag: &Dag, targets: &[String]) -> Result<Vec<String>, Engin
     Ok(all.into_iter().filter(|n| needed.contains(n)).collect())
 }
 
+/// Narrow an already-resolved execution order to blocks affected by a set of
+/// changed paths. Directly affected blocks pull in their content dependents
+/// and every prerequisite required to execute the result.
+pub fn affected_order(
+    dag: &Dag,
+    base: &BaseScope,
+    cache: &BuildCache,
+    order: &[String],
+    changes: &crate::git::Changes,
+    tracker: &Arc<Mutex<FileTracker>>,
+) -> Result<Vec<String>, EngineError> {
+    if order.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let normalize = |path: &std::path::Path| cache.normalize_str(&path.to_string_lossy()).into_owned();
+    let changed: HashSet<String> = changes.paths.iter().map(|path| normalize(path)).collect();
+    let mut unmatched_removed: HashSet<String> = changes.removed.iter().map(|path| normalize(path)).collect();
+
+    // Build definitions can change ownership, dependencies, or evaluated
+    // inputs in ways that cannot be attributed from the new graph alone.
+    if changes.paths.iter().any(|path| {
+        path.file_name().is_some_and(|name| name == "BUILD.bit.lock")
+            || path.extension().is_some_and(|extension| extension == "bit")
+    }) {
+        return Ok(order.to_vec());
+    }
+
+    tracker.lock().expect("tracker lock").reset();
+    let mut scope = base.scope.clone();
+    let mut affected = HashSet::new();
+
+    for name in order {
+        let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
+        let prior = node
+            .prior_state
+            .as_ref()
+            .map(unwrap_state)
+            .unwrap_or_else(default_prior);
+        let mut direct = false;
+        let mut current = BTreeMap::new();
+        let mut outputs = HashSet::new();
+
+        match eval_fields_lenient(&node.fields, &scope) {
+            Ok(inputs) => {
+                if prior.provider_state.is_some() && hash_inputs(&inputs, cache) != prior.input_hash {
+                    direct = true;
+                }
+                match node.resource.resolve(&inputs) {
+                    Ok(resolved) => current = cache.normalize_keys(&resolved),
+                    Err(_) => direct = true,
+                }
+                match node.resource.output_keys(&inputs) {
+                    Ok(keys) => {
+                        outputs.extend(keys.into_iter().map(|key| cache.normalize_str(&key).into_owned()));
+                    }
+                    Err(_) => direct = true,
+                }
+            }
+            Err(_) => direct = true,
+        }
+
+        let tracked: HashSet<&str> = current
+            .keys()
+            .chain(prior.resolve_map.keys())
+            .map(String::as_str)
+            .collect();
+        for path in &tracked {
+            if changed.contains(*path) {
+                direct = true;
+            }
+            unmatched_removed.remove(*path);
+        }
+
+        // A block with no source paths cannot be proven unaffected by Git.
+        if tracked.iter().all(|path| outputs.contains(*path)) {
+            direct = true;
+        }
+        if dag
+            .content_deps(name)
+            .iter()
+            .any(|dependency| affected.contains(dependency))
+        {
+            direct = true;
+        }
+        if direct {
+            affected.insert(name.clone());
+        }
+
+        scope.set(name, Value::strct(prior.outputs));
+    }
+
+    // A removed path absent from both current and prior input maps may have
+    // been an input in a clean checkout. Running the candidate order is the
+    // only sound fallback.
+    if !unmatched_removed.is_empty() {
+        return Ok(order.to_vec());
+    }
+
+    let mut needed = affected.clone();
+    for name in affected {
+        for dependency in dag.target_order(&name)? {
+            needed.insert(dependency);
+        }
+    }
+    Ok(order.iter().filter(|name| needed.contains(*name)).cloned().collect())
+}
+
 /// A usable shared-cache receipt found for a block.
 struct CacheHit {
     receipt: Receipt,
@@ -582,9 +690,21 @@ pub fn plan(
     targets: &[String],
     tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
-    tracker.lock().expect("tracker lock").reset();
     let order = resolve_order(dag, targets)?;
-    validate_active_params(dag, &order, base)?;
+    plan_selected(dag, base, cache, output, &order, tracker)
+}
+
+/// Plan an exact, already-resolved block order.
+pub fn plan_selected(
+    dag: &mut Dag,
+    base: &BaseScope,
+    cache: &BuildCache,
+    output: &Output,
+    order: &[String],
+    tracker: &Arc<Mutex<FileTracker>>,
+) -> Result<Vec<BlockPlan>, EngineError> {
+    tracker.lock().expect("tracker lock").reset();
+    validate_active_params(dag, order, base)?;
     crate::debug!(output, "plan: {} block(s) in order: {}", order.len(), order.join(", "));
 
     let mut scope = base.scope.clone();
@@ -592,7 +712,7 @@ pub fn plan(
     let mut dirty: HashSet<String> = HashSet::new();
     let mut results = RunResults::new();
 
-    for name in &order {
+    for name in order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
         let writer = output.writer_indented(name, 0);
 
@@ -651,9 +771,24 @@ pub fn apply(
     jobs: usize,
     tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
-    tracker.lock().expect("tracker lock").reset();
     let order = resolve_order(dag, targets)?;
-    validate_active_params(dag, &order, base)?;
+    apply_selected(dag, base, store, cache, output, &order, jobs, tracker)
+}
+
+/// Apply an exact, already-resolved block order.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_selected(
+    dag: &mut Dag,
+    base: &BaseScope,
+    store: &dyn StateStore,
+    cache: &BuildCache,
+    output: &Output,
+    order: &[String],
+    jobs: usize,
+    tracker: &Arc<Mutex<FileTracker>>,
+) -> Result<Vec<BlockPlan>, EngineError> {
+    tracker.lock().expect("tracker lock").reset();
+    validate_active_params(dag, order, base)?;
     crate::debug!(
         output,
         "apply: {} block(s), jobs={}, order: {}",
@@ -662,9 +797,9 @@ pub fn apply(
         order.join(", ")
     );
     if jobs <= 1 {
-        apply_order(dag, base, store, cache, output, &order, tracker)
+        apply_order(dag, base, store, cache, output, order, tracker)
     } else {
-        apply_order_parallel(dag, base, store, cache, output, &order, jobs, tracker)
+        apply_order_parallel(dag, base, store, cache, output, order, jobs, tracker)
     }
 }
 
@@ -687,11 +822,7 @@ pub fn test(
         jobs,
         order.join(", ")
     );
-    if jobs <= 1 {
-        apply_order(dag, base, store, cache, output, &order, tracker)
-    } else {
-        apply_order_parallel(dag, base, store, cache, output, &order, jobs, tracker)
-    }
+    apply_selected(dag, base, store, cache, output, &order, jobs, tracker)
 }
 
 /// Apply blocks sequentially in the given order.
@@ -1235,7 +1366,11 @@ pub fn destroy(
 /// Dump evaluated inputs and stored outputs for all blocks (or a target subset).
 pub fn dump(dag: &mut Dag, base: &BaseScope, targets: &[String]) -> Result<(), EngineError> {
     let order = resolve_order(dag, targets)?;
+    dump_selected(dag, base, &order)
+}
 
+/// Dump evaluated inputs and stored outputs for an exact block order.
+pub fn dump_selected(dag: &mut Dag, base: &BaseScope, order: &[String]) -> Result<(), EngineError> {
     let mut scope = base.scope.clone();
 
     for (i, name) in order.iter().enumerate() {
@@ -1609,6 +1744,86 @@ mod tests {
         assert_eq!(resolve_order(&dag, &["...".into()]).unwrap(), vec!["a".to_owned()]);
         // Naming the block directly still runs it
         assert_eq!(resolve_order(&dag, &["b".into()]).unwrap(), vec!["b".to_owned()]);
+    }
+
+    #[test]
+    fn affected_order_propagates_to_content_dependents_and_adds_prerequisites() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let c = dir.path().join("c.txt");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        std::fs::write(&c, "c").unwrap();
+        let input = format!(
+            concat!(
+                "a = exec {{ command = \"true\" inputs = [\"{}\"] }}\n",
+                "b = exec {{ command = \"true\" inputs = [\"{}\"] }}\n",
+                "c = exec {{ command = \"true\" inputs = [\"{}\"] depends_on = [a] }}\n",
+            ),
+            a.display(),
+            b.display(),
+            c.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let (dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        let order = resolve_order(&dag, &[]).unwrap();
+        let cache = BuildCache::local_only(dir.path());
+
+        let changed_a = crate::git::Changes {
+            paths: HashSet::from([a.clone()]),
+            removed: HashSet::new(),
+        };
+        assert_eq!(
+            affected_order(&dag, &base, &cache, &order, &changed_a, &tracker).unwrap(),
+            vec!["a".to_owned(), "c".to_owned()]
+        );
+
+        let changed_c = crate::git::Changes {
+            paths: HashSet::from([c]),
+            removed: HashSet::new(),
+        };
+        assert_eq!(
+            affected_order(&dag, &base, &cache, &order, &changed_c, &tracker).unwrap(),
+            vec!["a".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn affected_order_keeps_unmapped_blocks_and_falls_back_for_unknown_deletions() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.txt");
+        std::fs::write(&source, "source").unwrap();
+        let input = format!(
+            concat!(
+                "mapped = exec {{ command = \"true\" inputs = [\"{}\"] }}\n",
+                "unmapped = exec {{ command = \"true\" }}\n",
+            ),
+            source.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let (dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        let order = resolve_order(&dag, &[]).unwrap();
+        let cache = BuildCache::local_only(dir.path());
+
+        assert_eq!(
+            affected_order(&dag, &base, &cache, &order, &crate::git::Changes::default(), &tracker,).unwrap(),
+            vec!["unmapped".to_owned()]
+        );
+
+        let removed = dir.path().join("removed.txt");
+        let deletion = crate::git::Changes {
+            paths: HashSet::from([removed.clone()]),
+            removed: HashSet::from([removed]),
+        };
+        assert_eq!(
+            affected_order(&dag, &base, &cache, &order, &deletion, &tracker).unwrap(),
+            order
+        );
     }
 
     #[test]

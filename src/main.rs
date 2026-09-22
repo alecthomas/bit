@@ -30,6 +30,10 @@ struct Cli {
     #[arg(short = 'P', long = "param", value_name = "KEY=VALUE")]
     params: Vec<String>,
 
+    /// Limit blocks to those affected since merge-base(REF, HEAD)
+    #[arg(long, value_name = "REF")]
+    since: Option<String>,
+
     /// Show what would change without applying
     #[arg(short = 'p', long)]
     plan: bool,
@@ -264,6 +268,10 @@ fn short_sha(sha: &str) -> &str {
 /// Create an Output formatter sized to the blocks that will actually run.
 fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool, long: bool) -> Output {
     let names = engine::resolve_order(dag, targets).unwrap_or_default();
+    output_for_names(&names, debug, long)
+}
+
+fn output_for_names(names: &[String], debug: bool, long: bool) -> Output {
     let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
     Output::new(&name_refs).with_debug(debug).with_long(long)
 }
@@ -277,12 +285,12 @@ fn plan_styles(
     dag: &mut bit::dag::Dag,
     base: &bit::loader::BaseScope,
     cache: &BuildCache,
-    targets: &[String],
+    order: &[String],
     tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<std::collections::HashMap<String, bit::graph::NodeStyle>, engine::EngineError> {
     use yansi::Paint;
     let silent = Output::silent();
-    let plans = engine::plan(dag, base, cache, &silent, targets, tracker)?;
+    let plans = engine::plan_selected(dag, base, cache, &silent, order, tracker)?;
     Ok(plans
         .into_iter()
         .map(|bp| {
@@ -306,10 +314,84 @@ fn plan_styles(
         .collect())
 }
 
+#[derive(Clone, Copy)]
+enum SelectionMode {
+    Targets,
+    AllBlocks,
+    Tests,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SelectionError {
+    #[error("{0}")]
+    Engine(#[from] engine::EngineError),
+    #[error("{0}")]
+    Git(#[from] bit::git::ChangesError),
+}
+
+fn selected_order(
+    dag: &bit::dag::Dag,
+    base: &bit::loader::BaseScope,
+    cache: &BuildCache,
+    targets: &[String],
+    since: Option<&str>,
+    mode: SelectionMode,
+    tracker: &Arc<Mutex<FileTracker>>,
+) -> Result<Vec<String>, SelectionError> {
+    let order = match mode {
+        SelectionMode::Targets => engine::resolve_order(dag, targets)?,
+        SelectionMode::AllBlocks if targets.is_empty() => dag.topo_order().map_err(engine::EngineError::from)?,
+        SelectionMode::AllBlocks => engine::resolve_order(dag, targets)?,
+        SelectionMode::Tests => dag.test_order().map_err(engine::EngineError::from)?,
+    };
+    let Some(since) = since else {
+        return Ok(order);
+    };
+    let changes = bit::git::changes_since(std::path::Path::new("."), since)?;
+    Ok(engine::affected_order(dag, base, cache, &order, &changes, tracker)?)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selected_order_or_exit(
+    dag: &bit::dag::Dag,
+    base: &bit::loader::BaseScope,
+    cache: &BuildCache,
+    targets: &[String],
+    since: Option<&str>,
+    mode: SelectionMode,
+    tracker: &Arc<Mutex<FileTracker>>,
+) -> Option<Vec<String>> {
+    let order = match selected_order(dag, base, cache, targets, since, mode, tracker) {
+        Ok(order) => order,
+        Err(error) => {
+            eprintln!("{} {error}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
+    if since.is_some() && order.is_empty() {
+        println!("No affected blocks.");
+        None
+    } else {
+        Some(order)
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
     let tracker = Arc::new(Mutex::new(FileTracker::new()));
+
+    if cli.since.is_some() && (cli.clean || cli.cache || cli.schema.is_some() || cli.info || cli.update) {
+        eprintln!(
+            "{} --since cannot be combined with --clean, --cache, --schema, --info, or --update",
+            "error:".red().bold()
+        );
+        process::exit(1);
+    }
+    if cli.since.is_some() && cli.list == 1 {
+        eprintln!("{} --since requires -ll when listing blocks", "error:".red().bold());
+        process::exit(1);
+    }
 
     // --schema doesn't need the full DAG, but it does need imports resolved
     // so it can show schemas for imported modules.
@@ -406,15 +488,19 @@ fn main() {
 
     if cli.graph {
         let (_module, mut dag, base, _store) = load_module(&registry, &params);
-        let names = match engine::resolve_order(&dag, targets) {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("{} {e}", "error:".red().bold());
-                process::exit(1);
-            }
+        let Some(names) = selected_order_or_exit(
+            &dag,
+            &base,
+            &cache,
+            targets,
+            cli.since.as_deref(),
+            SelectionMode::Targets,
+            &tracker,
+        ) else {
+            return;
         };
         let styles = if cli.plan {
-            match plan_styles(&mut dag, &base, &cache, targets, &tracker) {
+            match plan_styles(&mut dag, &base, &cache, &names, &tracker) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
@@ -427,8 +513,19 @@ fn main() {
         println!("{}", bit::graph::render(&dag, &names, &styles));
     } else if cli.plan {
         let (_module, mut dag, base, _store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets, cli.debug, cli.long);
-        if let Err(e) = engine::plan(&mut dag, &base, &cache, &output, targets, &tracker) {
+        let Some(names) = selected_order_or_exit(
+            &dag,
+            &base,
+            &cache,
+            targets,
+            cli.since.as_deref(),
+            SelectionMode::Targets,
+            &tracker,
+        ) else {
+            return;
+        };
+        let output = output_for_names(&names, cli.debug, cli.long);
+        if let Err(e) = engine::plan_selected(&mut dag, &base, &cache, &output, &names, &tracker) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
@@ -441,16 +538,39 @@ fn main() {
         }
     } else if cli.test {
         let (_module, mut dag, base, store) = load_module(&registry, &params);
-        let names = dag.test_order().unwrap_or_default();
-        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        let output = Output::new(&name_refs).with_debug(cli.debug).with_long(cli.long);
-        if let Err(e) = engine::test(&mut dag, &base, store.as_ref(), &cache, &output, jobs, &tracker) {
+        let Some(names) = selected_order_or_exit(
+            &dag,
+            &base,
+            &cache,
+            targets,
+            cli.since.as_deref(),
+            SelectionMode::Tests,
+            &tracker,
+        ) else {
+            return;
+        };
+        let output = output_for_names(&names, cli.debug, cli.long);
+        if let Err(e) = engine::apply_selected(&mut dag, &base, store.as_ref(), &cache, &output, &names, jobs, &tracker)
+        {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
     } else if cli.list > 0 {
-        let (_module, dag, _base, _store) = load_module(&registry, &params);
-        if cli.list == 1 {
+        let (_module, dag, base, _store) = load_module(&registry, &params);
+        if cli.since.is_some() {
+            let Some(names) = selected_order_or_exit(
+                &dag,
+                &base,
+                &cache,
+                targets,
+                cli.since.as_deref(),
+                SelectionMode::AllBlocks,
+                &tracker,
+            ) else {
+                return;
+            };
+            print_block_tree(&dag, &names);
+        } else if cli.list == 1 {
             print_targets(&dag);
         } else {
             match dag.topo_order() {
@@ -463,24 +583,38 @@ fn main() {
         }
     } else if cli.dump {
         let (_module, mut dag, base, _store) = load_module(&registry, &params);
-        if let Err(e) = engine::dump(&mut dag, &base, targets) {
+        let Some(names) = selected_order_or_exit(
+            &dag,
+            &base,
+            &cache,
+            targets,
+            cli.since.as_deref(),
+            SelectionMode::Targets,
+            &tracker,
+        ) else {
+            return;
+        };
+        if let Err(e) = engine::dump_selected(&mut dag, &base, &names) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
     } else {
         // Default: apply
         let (_module, mut dag, base, store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets, cli.debug, cli.long);
-        if let Err(e) = engine::apply(
-            &mut dag,
+        let Some(names) = selected_order_or_exit(
+            &dag,
             &base,
-            store.as_ref(),
             &cache,
-            &output,
             targets,
-            jobs,
+            cli.since.as_deref(),
+            SelectionMode::Targets,
             &tracker,
-        ) {
+        ) else {
+            return;
+        };
+        let output = output_for_names(&names, cli.debug, cli.long);
+        if let Err(e) = engine::apply_selected(&mut dag, &base, store.as_ref(), &cache, &output, &names, jobs, &tracker)
+        {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }

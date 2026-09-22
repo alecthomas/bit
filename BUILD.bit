@@ -26,6 +26,7 @@ clippy = rust.clippy {
 # End-to-end smoke test of the debug binary.
 integration-test = exec.test {
   depends_on = [debug]
+  inputs = ["BUILD.bit"]
   command  = <<-EOF
   #{debug.path} --version
   #{debug.path} --plan ...
@@ -40,6 +41,7 @@ let tree_sitter_rev = exec("git log -1 --format=%H -- integrations/tree-sitter")
 # integrations/tree-sitter. The SHA is baked into the command, so bit's
 # content hash re-runs this only when a new commit lands.
 protected sync-zed-rev = exec {
+  inputs = ["integrations/tree-sitter/**/*"]
   command = <<-EOF
     sed -i.bak 's|^rev = ".*"|rev = "#{tree_sitter_rev}"|' integrations/zed/extension.toml
     rm integrations/zed/extension.toml.bak
@@ -48,8 +50,8 @@ protected sync-zed-rev = exec {
 }
 
 # Regenerate the Providers section of README.md from `bit --schema --json`.
-# Re-runs only when the debug binary changes (i.e. schema may have changed).
 sync-readme = exec {
+  inputs = ["bit-derive/src/**/*.rs", "dprint.json", "src/main.rs", "src/provider.rs", "src/providers/**/*.rs", "src/schema.rs"]
   command = <<-EOF
     export SECTION=$(mktemp)
     trap 'rm -f "$SECTION"' EXIT
@@ -97,6 +99,7 @@ sync-readme = exec {
     ' README.md > README.md.tmp && mv README.md.tmp README.md
     dprint fmt README.md
   EOF
+  output = "README.md"
   resolve = '#{debug.path} --schema | sha256'
 }
 
