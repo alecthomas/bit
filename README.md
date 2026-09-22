@@ -807,7 +807,8 @@ Parallel execution with `-j N` (defaults to CPU count).
 
 Rust resources with a `package` select that package and its transitive local
 workspace dependencies for change detection. Without `package`, they track the
-whole workspace.
+whole workspace. All Rust resources also track `rustfmt.toml` and
+`.cargo/config.toml` at the workspace root.
 
 ### Shared build cache
 

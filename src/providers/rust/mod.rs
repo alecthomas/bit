@@ -364,9 +364,9 @@ fn discover_input_paths(packages: &[&serde_json::Value], cwd: &Path) -> InputPat
         .map(|manifest| manifest.strip_prefix(cwd).unwrap_or(&manifest).to_path_buf())
         .collect();
 
-    for path in ["Cargo.toml", "Cargo.lock"] {
+    for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
         let path = PathBuf::from(path);
-        if path.exists() {
+        if cwd.join(&path).is_file() {
             files.push(path);
         }
     }
@@ -689,6 +689,21 @@ mod tests {
         });
 
         assert_eq!(workspace_package_names(&metadata).unwrap(), vec!["a", "z"]);
+    }
+
+    #[test]
+    fn input_paths_include_workspace_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".cargo")).unwrap();
+        for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
+            std::fs::write(dir.path().join(path), "").unwrap();
+        }
+
+        let paths = discover_input_paths(&[], dir.path());
+
+        for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
+            assert!(paths.files.contains(&PathBuf::from(path)), "missing {path}");
+        }
     }
 
     #[test]
