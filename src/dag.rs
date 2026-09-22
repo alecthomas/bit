@@ -44,6 +44,9 @@ pub struct DagNode {
     /// When true, this block is excluded from the `...` selector and must be
     /// named explicitly to run. Independent of `protected`.
     pub explicit: bool,
+    /// Expanded nodes from the same source block share this identity so the
+    /// scheduler can enforce that block's concurrency limit across all slices.
+    pub concurrency_group: String,
     /// Raw field expressions — evaluated at execution time when upstream
     /// outputs are available.
     pub fields: Vec<Field>,
@@ -482,6 +485,9 @@ fn collect_transitive_dependents(graph: &DiGraph<DagNode, EdgeKind>, node: NodeI
 pub fn collect_block_refs(fields: &[Field]) -> HashSet<String> {
     let mut refs = HashSet::new();
     for field in fields {
+        if field.name == "concurrency" {
+            continue;
+        }
         collect_expr_refs(&field.value, &mut refs);
     }
     refs
@@ -563,7 +569,7 @@ pub fn collect_after(fields: &[Field]) -> Vec<String> {
 pub fn collect_all_refs(fields: &[Field]) -> HashSet<String> {
     let mut refs = HashSet::new();
     for field in fields {
-        if field.name == "depends_on" || field.name == "after" {
+        if field.name == "depends_on" || field.name == "after" || field.name == "concurrency" {
             continue; // validated separately
         }
         collect_all_expr_refs(&field.value, &mut refs);

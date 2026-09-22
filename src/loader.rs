@@ -204,6 +204,7 @@ pub fn load(
                         resource_name: b.resource.clone(),
                         protected: b.protected,
                         explicit: b.explicit,
+                        concurrency_group: b.name.clone(),
                         fields: b.fields.clone(),
                         resource,
                         prior_state,

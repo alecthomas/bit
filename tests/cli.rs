@@ -10,7 +10,7 @@ fn run_bit(project: &std::path::Path, args: &[&str]) -> Output {
 }
 
 fn run_git(project: &std::path::Path, args: &[&str]) -> Output {
-    Command::new("git")
+    bit::git::command()
         .args(args)
         .current_dir(project)
         .output()

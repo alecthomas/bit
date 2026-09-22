@@ -41,6 +41,18 @@ pub enum EngineError {
     },
     #[error("{pos}: test block '{block}' failed")]
     TestFailed { pos: crate::ast::Pos, block: String },
+    #[error("{pos}: block '{block}' concurrency must be a positive integer, got {value}")]
+    InvalidConcurrency {
+        pos: crate::ast::Pos,
+        block: String,
+        value: String,
+    },
+}
+
+#[derive(Clone)]
+struct ConcurrencyLimit {
+    group: String,
+    limit: usize,
 }
 
 /// Result of planning a single block.
@@ -715,6 +727,7 @@ pub fn plan_selected(
     for name in order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
         let writer = output.writer_indented(name, 0);
+        evaluate_concurrency(node, &scope)?;
 
         let inputs = eval_fields_lenient(&node.fields, &scope).map_err(|e| EngineError::Eval {
             pos: node.pos.clone(),
@@ -796,10 +809,11 @@ pub fn apply_selected(
         jobs,
         order.join(", ")
     );
+    let concurrency = concurrency_limits(dag, &base.scope, order)?;
     if jobs <= 1 {
         apply_order(dag, base, store, cache, output, order, tracker)
     } else {
-        apply_order_parallel(dag, base, store, cache, output, order, jobs, tracker)
+        apply_order_parallel(dag, base, store, cache, output, order, jobs, tracker, &concurrency)
     }
 }
 
@@ -908,6 +922,7 @@ fn apply_order_parallel(
     order: &[String],
     jobs: usize,
     tracker: &Arc<Mutex<FileTracker>>,
+    concurrency: &HashMap<String, Option<ConcurrencyLimit>>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     use std::collections::VecDeque;
     use std::sync::mpsc;
@@ -935,8 +950,9 @@ fn apply_order_parallel(
     let total = order.len();
 
     std::thread::scope(|s| {
-        let (result_tx, result_rx) = mpsc::channel::<Result<BlockResult, EngineError>>();
+        let (result_tx, result_rx) = mpsc::channel::<(String, Result<BlockResult, EngineError>)>();
         let mut in_flight = 0;
+        let mut running_by_group: HashMap<String, usize> = HashMap::new();
         let mut failed: Option<EngineError> = None;
 
         loop {
@@ -944,16 +960,28 @@ fn apply_order_parallel(
             // snapshotted here, on the scheduler thread, after every
             // dependency has completed.
             while in_flight < jobs && !ready.is_empty() && failed.is_none() {
-                let name = ready.pop_front().expect("ready is non-empty");
+                let Some(index) = ready.iter().position(|name| {
+                    concurrency[name]
+                        .as_ref()
+                        .is_none_or(|config| running_by_group.get(&config.group).copied().unwrap_or(0) < config.limit)
+                }) else {
+                    break;
+                };
+                let name = ready.remove(index).expect("ready index is valid");
                 let node = dag.get_node(&name).expect("block in order");
                 let writer = output.writer(&name);
                 let scope_snapshot = scope.clone();
                 let dep_hashes = collect_dep_hashes(dag, &name, &results);
                 let tx = result_tx.clone();
+                let completed_name = name.clone();
+
+                if let Some(config) = &concurrency[&name] {
+                    *running_by_group.entry(config.group.clone()).or_default() += 1;
+                }
 
                 s.spawn(move || {
                     let result = execute_block(&name, node, dag, &scope_snapshot, dep_hashes, cache, &writer, tracker);
-                    let _ = tx.send(result);
+                    let _ = tx.send((completed_name, result));
                 });
                 in_flight += 1;
             }
@@ -963,8 +991,13 @@ fn apply_order_parallel(
             }
 
             // Wait for a result
-            let result = result_rx.recv().expect("channel open");
+            let (completed_name, result) = result_rx.recv().expect("channel open");
             in_flight -= 1;
+            if let Some(config) = &concurrency[&completed_name]
+                && let Some(running) = running_by_group.get_mut(&config.group)
+            {
+                *running -= 1;
+            }
 
             match result {
                 Ok(block_result) => {
@@ -1478,6 +1511,9 @@ fn emit_event(writer: &crate::output::BlockWriter, event: Event, description: &s
 fn eval_fields(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalError> {
     let mut inputs = Map::new();
     for field in fields {
+        if field.name == "concurrency" {
+            continue;
+        }
         let value = expr::eval(&field.value, scope)?;
         inputs.insert(field.name.clone(), value);
     }
@@ -1487,10 +1523,51 @@ fn eval_fields(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalE
 fn eval_fields_lenient(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalError> {
     let mut inputs = Map::new();
     for field in fields {
+        if field.name == "concurrency" {
+            continue;
+        }
         let value = expr::eval_lenient(&field.value, scope)?;
         inputs.insert(field.name.clone(), value);
     }
     Ok(inputs)
+}
+
+fn evaluate_concurrency(node: &DagNode, scope: &Scope) -> Result<Option<ConcurrencyLimit>, EngineError> {
+    let Some(field) = node.fields.iter().find(|field| field.name == "concurrency") else {
+        return Ok(None);
+    };
+    let value = expr::eval(&field.value, scope).map_err(|source| EngineError::Eval {
+        pos: node.pos.clone(),
+        block: node.name.clone(),
+        source,
+    })?;
+    let limit = value
+        .as_number()
+        .and_then(|number| number.to_string().parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+        .ok_or_else(|| EngineError::InvalidConcurrency {
+            pos: node.pos.clone(),
+            block: node.name.clone(),
+            value: value.to_string(),
+        })?;
+    Ok(Some(ConcurrencyLimit {
+        group: node.concurrency_group.clone(),
+        limit,
+    }))
+}
+
+fn concurrency_limits(
+    dag: &Dag,
+    scope: &Scope,
+    order: &[String],
+) -> Result<HashMap<String, Option<ConcurrencyLimit>>, EngineError> {
+    order
+        .iter()
+        .map(|name| {
+            let node = dag.get_node(name).expect("block in order");
+            Ok((name.clone(), evaluate_concurrency(node, scope)?))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1501,7 +1578,7 @@ mod tests {
     use crate::file_tracker::FileTracker;
     use crate::loader;
     use crate::parser;
-    use crate::provider::ProviderRegistry;
+    use crate::provider::{DynResource, FuncSignature, Provider, ProviderRegistry, Resource};
     use crate::providers::exec::ExecProvider;
     use crate::state::StateStore;
 
@@ -1571,6 +1648,164 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].plan.action, PlanAction::Create);
         assert!(output.exists());
+    }
+
+    #[test]
+    fn matrix_concurrency_does_not_limit_unrelated_blocks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct Counts {
+            running: AtomicUsize,
+            max_running: AtomicUsize,
+            matrix_running: AtomicUsize,
+            max_matrix_running: AtomicUsize,
+        }
+
+        #[derive(Debug, serde::Deserialize, bit_derive::Schema)]
+        struct Inputs {
+            label: String,
+        }
+
+        #[derive(Debug, serde::Serialize, bit_derive::Schema)]
+        struct Outputs {}
+
+        struct ProbeProvider {
+            counts: Arc<Counts>,
+        }
+
+        impl Provider for ProbeProvider {
+            fn name(&self) -> &str {
+                "probe"
+            }
+
+            fn resources(&self) -> Vec<Box<dyn DynResource>> {
+                vec![Box::new(ProbeResource {
+                    counts: self.counts.clone(),
+                })]
+            }
+
+            fn functions(&self) -> Vec<FuncSignature> {
+                vec![]
+            }
+
+            fn call_function(&self, name: &str, _args: &[Value]) -> Result<Value, BoxError> {
+                Err(format!("unknown function: {name}").into())
+            }
+        }
+
+        struct ProbeResource {
+            counts: Arc<Counts>,
+        }
+
+        impl Resource for ProbeResource {
+            type State = ();
+            type Inputs = Inputs;
+            type Outputs = Outputs;
+
+            fn name(&self) -> &str {
+                "run"
+            }
+
+            fn kind(&self) -> ResourceKind {
+                ResourceKind::Build
+            }
+
+            fn resolve(&self, _inputs: &Inputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+                Ok(BTreeMap::new())
+            }
+
+            fn plan(&self, _inputs: &Inputs, _prior_state: Option<&()>) -> Result<PlanResult, BoxError> {
+                Ok(PlanResult {
+                    action: PlanAction::Create,
+                    description: "probe concurrency".into(),
+                    reason: None,
+                })
+            }
+
+            fn apply(
+                &self,
+                inputs: &Inputs,
+                _prior_state: Option<&()>,
+                _writer: &BlockWriter,
+            ) -> Result<ApplyResult<(), Outputs>, BoxError> {
+                let running = self.counts.running.fetch_add(1, Ordering::SeqCst) + 1;
+                self.counts.max_running.fetch_max(running, Ordering::SeqCst);
+
+                let is_matrix = inputs.label.starts_with("matrix-");
+                if is_matrix {
+                    let matrix_running = self.counts.matrix_running.fetch_add(1, Ordering::SeqCst) + 1;
+                    self.counts
+                        .max_matrix_running
+                        .fetch_max(matrix_running, Ordering::SeqCst);
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(40));
+
+                if is_matrix {
+                    self.counts.matrix_running.fetch_sub(1, Ordering::SeqCst);
+                }
+                self.counts.running.fetch_sub(1, Ordering::SeqCst);
+                Ok(ApplyResult {
+                    outputs: Outputs {},
+                    state: Some(()),
+                })
+            }
+
+            fn destroy(&self, _prior_state: &(), _writer: &BlockWriter) -> Result<(), BoxError> {
+                Ok(())
+            }
+
+            fn cache_policy(&self, _inputs: &Inputs) -> CachePolicy {
+                CachePolicy::Local
+            }
+        }
+
+        let input = r#"
+let package = ["a", "b", "c"]
+
+work[package] = probe.run {
+  concurrency = 1
+  label = "matrix-#{package}"
+}
+
+other-a = probe.run { label = "other-a" }
+other-b = probe.run { label = "other-b" }
+"#;
+        let tracker = test_tracker();
+        let counts = Arc::new(Counts::default());
+        let mut registry = ProviderRegistry::new();
+        registry.register(Box::new(ProbeProvider { counts: counts.clone() }));
+        let module = parser::parse(input, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &registry, &store, &[]).unwrap();
+
+        let matrix_node = dag.get_node("work[a]").unwrap();
+        assert_eq!(matrix_node.concurrency_group, "work");
+        assert!(
+            !eval_fields(&matrix_node.fields, &base.scope)
+                .unwrap()
+                .contains_key("concurrency")
+        );
+
+        let output = Output::new(&[]);
+        let plans = apply(&mut dag, &base, &store, &test_cache(), &output, &[], 4, &tracker).unwrap();
+        assert_eq!(plans.len(), 5);
+        assert_eq!(counts.max_matrix_running.load(Ordering::SeqCst), 1);
+        assert!(counts.max_running.load(Ordering::SeqCst) > 1);
+    }
+
+    #[test]
+    fn concurrency_must_be_a_positive_integer() {
+        let tracker = test_tracker();
+        let module = parser::parse(r#"build = exec { concurrency = 0 command = "true" }"#, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        let output = Output::new(&[]);
+        let error = apply(&mut dag, &base, &store, &test_cache(), &output, &[], 1, &tracker)
+            .err()
+            .expect("invalid concurrency should fail");
+        assert!(matches!(error, EngineError::InvalidConcurrency { .. }));
     }
 
     #[test]

@@ -130,6 +130,7 @@ Special fields:
 
 - `depends_on = [block, ...]` — content-coupled dependency (changes propagate)
 - `after = [block, ...]` — ordering-only dependency
+- `concurrency = N` — maximum number of this block's matrix slices that may run at once
 - `uncached = [output, ...]` — outputs to keep out of the [shared build cache](#shared-build-cache)
 
 Prefix with `protected` to prevent destruction, `explicit` to exclude from `...`, or both (in either order):
@@ -168,6 +169,7 @@ Expand a block over list values with `name[key]`:
 let arch = ["amd64", "arm64"]
 
 binary[arch] = go.exe {
+  concurrency = 1
   package = "./cmd/server"
   goarch  = arch             # scalar within each expansion
 }
@@ -179,6 +181,10 @@ container[arch] = docker.container {
 ```
 
 Creates `binary[amd64]`, `binary[arm64]`, etc. Multiple keys produce a cartesian product. Non-matrix blocks depending on a matrix block wait for all slices. Targets can name a matrix block to include all of its slices.
+
+Set `concurrency` to a positive integer to cap simultaneous slices from that
+matrix block without reducing parallelism for unrelated blocks. The global
+`-j` limit still caps the total number of running blocks.
 
 ### Strings
 

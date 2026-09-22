@@ -163,6 +163,29 @@ deploy[arch, region] = kubernetes.deployment {}
     resource: (identifier)))
 
 ================================================================================
+matrix concurrency limit
+================================================================================
+crate[package] = rust.build {
+  concurrency = 1
+  package = package
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    matrix_keys: (block_matrix_keys
+      (identifier))
+    provider: (identifier)
+    resource: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (number))
+    (field_assignment
+      name: (identifier)
+      value: (reference
+        (identifier)))))
+
+================================================================================
 fields with commas
 ================================================================================
 image = docker.image {
