@@ -180,7 +180,15 @@ container[arch] = docker.container {
 }
 ```
 
-Creates `binary[amd64]`, `binary[arm64]`, etc. Multiple keys produce a cartesian product. Non-matrix blocks depending on a matrix block wait for all slices. Targets can name a matrix block to include all of its slices.
+Creates `binary["amd64"]`, `binary["arm64"]`, etc. Matrix keys retain their
+`.bit` types, so strings are quoted while numbers, booleans, and block
+references keep their respective literal forms.
+Multiple keys produce a cartesian product. Non-matrix blocks depending on a
+matrix block wait for all slices. Targets can name a matrix block to include
+all of its slices.
+
+Matrix slice selectors are expressions. For example, `binary[selected_arch].path`
+evaluates `selected_arch` and selects the slice with that typed key.
 
 Set `concurrency` to a positive integer to cap simultaneous slices from that
 matrix block without reducing parallelism for unrelated blocks. The global

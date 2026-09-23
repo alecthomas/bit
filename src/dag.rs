@@ -156,9 +156,8 @@ impl Dag {
         toposort(&self.graph, None).map_err(|_| self.cycle_error())?;
         for (name, target) in &self.targets {
             for block in &target.blocks {
-                let block_name = block.split('.').next().unwrap_or(block);
-                if !self.indices.contains_key(block_name) {
-                    return Err(DagError::UnknownTargetBlock(name.clone(), block_name.to_owned()));
+                if !self.indices.contains_key(block) {
+                    return Err(DagError::UnknownTargetBlock(name.clone(), block.clone()));
                 }
             }
         }
@@ -318,8 +317,7 @@ impl Dag {
 
         let mut needed = HashSet::new();
         for name in &block_names {
-            let block_name = name.split('.').next().unwrap_or(name);
-            if let Some(&idx) = self.indices.get(block_name) {
+            if let Some(&idx) = self.indices.get(name) {
                 collect_transitive_deps(&self.graph, idx, &mut needed);
             }
         }
@@ -368,8 +366,7 @@ impl Dag {
 
         let mut needed = HashSet::new();
         for name in &block_names {
-            let block_name = name.split('.').next().unwrap_or(name);
-            if let Some(&idx) = self.indices.get(block_name) {
+            if let Some(&idx) = self.indices.get(name) {
                 collect_transitive_dependents(&self.graph, idx, &mut needed);
             }
         }
@@ -482,15 +479,15 @@ fn collect_transitive_dependents(graph: &DiGraph<DagNode, EdgeKind>, node: NodeI
 
 /// Extract block names referenced in field expressions via dotted refs.
 /// Returns only the root name (e.g., "server" from "server.path").
-pub fn collect_block_refs(fields: &[Field]) -> HashSet<String> {
+pub fn collect_block_refs(fields: &[Field], scope: &Scope) -> Result<HashSet<String>, EvalError> {
     let mut refs = HashSet::new();
     for field in fields {
         if field.name == "concurrency" {
             continue;
         }
-        collect_expr_refs(&field.value, &mut refs);
+        collect_expr_refs(&field.value, scope, &mut refs)?;
     }
-    refs
+    Ok(refs)
 }
 
 /// Extract explicit `depends_on` entries from fields.
@@ -503,6 +500,8 @@ pub fn collect_depends_on(fields: &[Field]) -> Vec<String> {
                 .iter()
                 .filter_map(|e| match e {
                     Expr::Ref(parts) => Some(parts[0].clone()),
+                    Expr::BlockRef(name) => Some(name.clone()),
+                    Expr::MatrixRef { .. } => Some(e.to_string()),
                     _ => None,
                 })
                 .collect();
@@ -518,16 +517,26 @@ pub fn collect_dependency_refs(fields: &[Field], field_name: &str, scope: &Scope
         return Ok(Vec::new());
     };
 
-    if let Expr::List(items) = &field.value
-        && items.iter().all(|item| matches!(item, Expr::Ref(_)))
-    {
-        return Ok(items
-            .iter()
-            .filter_map(|item| match item {
+    if let Expr::List(items) = &field.value {
+        let mut references = Vec::with_capacity(items.len());
+        for item in items {
+            let reference = match item {
                 Expr::Ref(parts) => Some(parts[0].clone()),
+                Expr::BlockRef(name) => Some(name.clone()),
+                Expr::MatrixRef { name, keys, fields } if fields.is_empty() => {
+                    Some(expr::eval_matrix_ref_name(name, keys, scope)?)
+                }
                 _ => None,
-            })
-            .collect());
+            };
+            let Some(reference) = reference else {
+                references.clear();
+                break;
+            };
+            references.push(reference);
+        }
+        if references.len() == items.len() {
+            return Ok(references);
+        }
     }
 
     match expr::eval(&field.value, scope)? {
@@ -556,6 +565,8 @@ pub fn collect_after(fields: &[Field]) -> Vec<String> {
                 .iter()
                 .filter_map(|e| match e {
                     Expr::Ref(parts) => Some(parts[0].clone()),
+                    Expr::BlockRef(name) => Some(name.clone()),
+                    Expr::MatrixRef { .. } => Some(e.to_string()),
                     _ => None,
                 })
                 .collect();
@@ -581,6 +592,15 @@ fn collect_all_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
     match expr {
         Expr::Ref(parts) => {
             refs.insert(parts[0].clone());
+        }
+        Expr::BlockRef(name) => {
+            refs.insert(name.clone());
+        }
+        Expr::MatrixRef { name, keys, .. } => {
+            refs.insert(name.clone());
+            for key in keys {
+                collect_all_expr_refs(key, refs);
+            }
         }
         Expr::Str(parts) => {
             for part in parts {
@@ -623,48 +643,58 @@ fn collect_all_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
     }
 }
 
-fn collect_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
+fn collect_expr_refs(expr: &Expr, scope: &Scope, refs: &mut HashSet<String>) -> Result<(), EvalError> {
     match expr {
         Expr::Ref(parts) if parts.len() > 1 => {
             refs.insert(parts[0].clone());
         }
+        Expr::BlockRef(name) => {
+            refs.insert(name.clone());
+        }
+        Expr::MatrixRef { name, keys, fields: _ } => {
+            refs.insert(expr::eval_matrix_ref_name(name, keys, scope)?);
+            for key in keys {
+                collect_expr_refs(key, scope, refs)?;
+            }
+        }
         Expr::Str(parts) => {
             for part in parts {
                 if let StringPart::Interpolation(e) = part {
-                    collect_expr_refs(e, refs);
+                    collect_expr_refs(e, scope, refs)?;
                 }
             }
         }
         Expr::List(items) => {
             for item in items {
-                collect_expr_refs(item, refs);
+                collect_expr_refs(item, scope, refs)?;
             }
         }
         Expr::Map(fields) => {
             for field in fields {
-                collect_expr_refs(&field.value, refs);
+                collect_expr_refs(&field.value, scope, refs)?;
             }
         }
         Expr::Call(_, args) => {
             for arg in args {
-                collect_expr_refs(arg, refs);
+                collect_expr_refs(arg, scope, refs)?;
             }
         }
         Expr::Pipe(inner, _, args) => {
-            collect_expr_refs(inner, refs);
+            collect_expr_refs(inner, scope, refs)?;
             for arg in args {
-                collect_expr_refs(arg, refs);
+                collect_expr_refs(arg, scope, refs)?;
             }
         }
         Expr::If(cond, then_val, else_val) => {
-            collect_expr_refs(cond, refs);
-            collect_expr_refs(then_val, refs);
-            collect_expr_refs(else_val, refs);
+            collect_expr_refs(cond, scope, refs)?;
+            collect_expr_refs(then_val, scope, refs)?;
+            collect_expr_refs(else_val, scope, refs)?;
         }
         Expr::BinOp(lhs, _, rhs) | Expr::Add(lhs, rhs) => {
-            collect_expr_refs(lhs, refs);
-            collect_expr_refs(rhs, refs);
+            collect_expr_refs(lhs, scope, refs)?;
+            collect_expr_refs(rhs, scope, refs)?;
         }
         _ => {}
     }
+    Ok(())
 }

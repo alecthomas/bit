@@ -156,6 +156,21 @@ impl std::fmt::Display for Expr {
                 write!(f, "]")
             }
             Expr::Ref(parts) => write!(f, "{}", parts.join(".")),
+            Expr::BlockRef(name) => write!(f, "{name}"),
+            Expr::MatrixRef { name, keys, fields } => {
+                write!(f, "{name}[")?;
+                for (index, key) in keys.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{key}")?;
+                }
+                write!(f, "]")?;
+                for field in fields {
+                    write!(f, ".{field}")?;
+                }
+                Ok(())
+            }
             Expr::Call(name, args) => {
                 write!(f, "{name}(")?;
                 for (i, arg) in args.iter().enumerate() {
@@ -185,6 +200,14 @@ pub enum Expr {
     Map(Vec<Field>),
     /// Variable or block reference: `name` or `block.field`
     Ref(Vec<String>),
+    /// A typed block-reference value.
+    BlockRef(String),
+    /// A matrix slice selected by typed expressions: `name[key].field`.
+    MatrixRef {
+        name: String,
+        keys: Vec<Expr>,
+        fields: Vec<String>,
+    },
     /// `func(args...)`
     Call(String, Vec<Expr>),
     /// `expr | pipe` or `expr | pipe(args...)`

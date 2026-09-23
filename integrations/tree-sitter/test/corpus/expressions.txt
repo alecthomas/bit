@@ -272,7 +272,8 @@ let x = image[arch]
     value: (reference
       (matrix_slice_ref
         name: (identifier)
-        (identifier)))))
+        (reference
+          (identifier))))))
 
 ================================================================================
 matrix slice reference with string key
@@ -286,6 +287,40 @@ let x = image["amd64"].ref
       (matrix_slice_ref
         name: (identifier)
         (string))
+      (identifier))))
+
+================================================================================
+matrix slice reference with typed keys
+================================================================================
+let x = image["1", 1, true, 5s].ref
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (reference
+      (matrix_slice_ref
+        name: (identifier)
+        (string)
+        (number)
+        (boolean)
+        (duration))
+      (identifier))))
+
+================================================================================
+matrix slice reference with reference key
+================================================================================
+let x = image[crate["core"]].ref
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (reference
+      (matrix_slice_ref
+        name: (identifier)
+        (reference
+          (matrix_slice_ref
+            name: (identifier)
+            (string))))
       (identifier))))
 
 ================================================================================

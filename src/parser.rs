@@ -424,9 +424,8 @@ fn map_entry(input: &mut &str) -> ModalResult<Field> {
     Ok(Field { name, value })
 }
 
-/// Parse a key inside a matrix slice reference: `"string"`, `'string'`, or `ident`.
-fn matrix_ref_key(input: &mut &str) -> ModalResult<String> {
-    alt((lex(plain_string), lex(plain_raw_string), ident_string)).parse_next(input)
+fn matrix_ref_key(input: &mut &str) -> ModalResult<Expr> {
+    expr.parse_next(input)
 }
 
 fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
@@ -464,23 +463,17 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
         return Ok(Expr::Ref(parts));
     }
 
-    // Matrix slice reference: name["val1", "val2"] or name[ident]
-    let first = if opt('[').parse_next(input)?.is_some() {
-        let keys: Vec<String> = separated(1.., matrix_ref_key, lex(',')).parse_next(input)?;
+    // Matrix slice reference: name[expr1, expr2]
+    if opt('[').parse_next(input)?.is_some() {
+        let keys: Vec<Expr> = separated(1.., matrix_ref_key, lex(',')).parse_next(input)?;
         cut_err(lex(']'))
             .context(StrContext::Label("closing ']' in matrix ref"))
             .parse_next(input)?;
-        format!("{name}[{}]", keys.join(", "))
-    } else {
-        name
-    };
-
-    // Dotted reference after a matrix slice: name[key].field.subfield
-    let mut parts = vec![first];
-    while opt(lex('.')).parse_next(input)?.is_some() {
-        parts.push(ident_string.parse_next(input)?);
+        let fields: Vec<String> = repeat(0.., preceded(lex('.'), ident_string)).parse_next(input)?;
+        return Ok(Expr::MatrixRef { name, keys, fields });
     }
-    Ok(Expr::Ref(parts))
+
+    Ok(Expr::Ref(vec![name]))
 }
 
 fn arg_list(input: &mut &str) -> ModalResult<Vec<Expr>> {
@@ -2151,7 +2144,17 @@ image[arch, region] = exec {
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => {
-                assert_eq!(l.value, Expr::Ref(vec!["build[amd64, cachew]".into(), "path".into()]));
+                assert_eq!(
+                    l.value,
+                    Expr::MatrixRef {
+                        name: "build".into(),
+                        keys: vec![
+                            Expr::Str(vec![StringPart::Literal("amd64".into())]),
+                            Expr::Str(vec![StringPart::Literal("cachew".into())]),
+                        ],
+                        fields: vec!["path".into()],
+                    }
+                );
             }
             _ => panic!("expected Let"),
         }
@@ -2163,7 +2166,14 @@ image[arch, region] = exec {
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => {
-                assert_eq!(l.value, Expr::Ref(vec!["build[amd64]".into(), "path".into()]));
+                assert_eq!(
+                    l.value,
+                    Expr::MatrixRef {
+                        name: "build".into(),
+                        keys: vec![Expr::Str(vec![StringPart::Literal("amd64".into())])],
+                        fields: vec!["path".into()],
+                    }
+                );
             }
             _ => panic!("expected Let"),
         }
@@ -2175,7 +2185,61 @@ image[arch, region] = exec {
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => {
-                assert_eq!(l.value, Expr::Ref(vec!["build[amd64]".into(), "path".into()]));
+                assert_eq!(
+                    l.value,
+                    Expr::MatrixRef {
+                        name: "build".into(),
+                        keys: vec![Expr::Ref(vec!["amd64".into()])],
+                        fields: vec!["path".into()],
+                    }
+                );
+            }
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_matrix_ref_typed_keys() {
+        let input = r#"let x = build["1", 1, true, 5s].path"#;
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => {
+                assert_eq!(
+                    l.value,
+                    Expr::MatrixRef {
+                        name: "build".into(),
+                        keys: vec![
+                            Expr::Str(vec![StringPart::Literal("1".into())]),
+                            Expr::Number(1.into()),
+                            Expr::Bool(true),
+                            Expr::Duration(crate::value::Duration::from_secs(5)),
+                        ],
+                        fields: vec!["path".into()],
+                    }
+                );
+            }
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_matrix_ref_reference_key() {
+        let input = r#"let x = consumer[crate["core"]].path"#;
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => {
+                assert_eq!(
+                    l.value,
+                    Expr::MatrixRef {
+                        name: "consumer".into(),
+                        keys: vec![Expr::MatrixRef {
+                            name: "crate".into(),
+                            keys: vec![Expr::Str(vec![StringPart::Literal("core".into())])],
+                            fields: vec![],
+                        }],
+                        fields: vec!["path".into()],
+                    }
+                );
             }
             _ => panic!("expected Let"),
         }

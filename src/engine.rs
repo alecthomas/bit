@@ -1415,14 +1415,24 @@ pub fn dump_selected(dag: &mut Dag, base: &BaseScope, order: &[String]) -> Resul
             block: name.clone(),
             source: e,
         })?;
-        let depends_on = dag::collect_depends_on(&node.fields);
+        let depends_on =
+            dag::collect_dependency_refs(&node.fields, "depends_on", &scope).map_err(|source| EngineError::Eval {
+                pos: node.pos.clone(),
+                block: name.clone(),
+                source,
+            })?;
         if !depends_on.is_empty() {
             inputs.insert(
                 "depends_on".into(),
                 Value::List(Type::String, depends_on.into_iter().map(Value::Str).collect()),
             );
         }
-        let after = dag::collect_after(&node.fields);
+        let after =
+            dag::collect_dependency_refs(&node.fields, "after", &scope).map_err(|source| EngineError::Eval {
+                pos: node.pos.clone(),
+                block: name.clone(),
+                source,
+            })?;
         if !after.is_empty() {
             inputs.insert(
                 "after".into(),
@@ -1780,7 +1790,7 @@ other-b = probe.run { label = "other-b" }
         let store = MemoryStore::new();
         let (mut dag, base) = loader::load(&module, &Map::new(), &registry, &store, &[]).unwrap();
 
-        let matrix_node = dag.get_node("work[a]").unwrap();
+        let matrix_node = dag.get_node(r#"work["a"]"#).unwrap();
         assert_eq!(matrix_node.concurrency_group, "work");
         assert!(
             !eval_fields(&matrix_node.fields, &base.scope)

@@ -1446,21 +1446,8 @@
       ]
     },
     "_matrix_key": {
-      "type": "CHOICE",
-      "members": [
-        {
-          "type": "SYMBOL",
-          "name": "identifier"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "string"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "raw_string"
-        }
-      ]
+      "type": "SYMBOL",
+      "name": "_expression"
     },
     "identifier": {
       "type": "PATTERN",

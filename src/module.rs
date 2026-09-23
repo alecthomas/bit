@@ -297,7 +297,10 @@ pub fn expand_module(
 
         let node_fields = &ctx.dag.get_node(&qualified_name).expect("just added").fields.clone();
 
-        for dep in collect_block_refs(node_fields) {
+        for dep in collect_block_refs(node_fields, ctx.scope).map_err(|source| LoadError::Eval {
+            pos: block.pos.clone(),
+            source,
+        })? {
             if ctx.dag.has_block(&dep) && dep != qualified_name {
                 ctx.dag.add_dep_edge(&dep, &qualified_name)?;
             }
@@ -323,37 +326,37 @@ pub fn expand_module(
     // Handle non-param depends_on/after: create edges from external blocks
     // to all inner blocks so the module waits for them.
     for field in outer_fields {
-        if field.name == "depends_on"
-            && !param_names.contains("depends_on")
-            && let Expr::List(items) = &field.value
-        {
-            for item in items {
-                if let Expr::Ref(parts) = item {
-                    let dep = &parts[0];
-                    if ctx.dag.has_block(dep) {
-                        for inner in &iface.blocks {
-                            let qname = format!("{instance_name}.{}", inner.name);
-                            if ctx.dag.has_block(&qname) {
-                                ctx.dag.add_dep_edge(dep, &qname)?;
-                            }
+        if field.name == "depends_on" && !param_names.contains("depends_on") {
+            for dep in
+                collect_dependency_refs(std::slice::from_ref(field), "depends_on", ctx.scope).map_err(|source| {
+                    LoadError::Eval {
+                        pos: crate::ast::Pos::default(),
+                        source,
+                    }
+                })?
+            {
+                if ctx.dag.has_block(&dep) {
+                    for inner in &iface.blocks {
+                        let qname = format!("{instance_name}.{}", inner.name);
+                        if ctx.dag.has_block(&qname) {
+                            ctx.dag.add_dep_edge(&dep, &qname)?;
                         }
                     }
                 }
             }
         }
-        if field.name == "after"
-            && !param_names.contains("after")
-            && let Expr::List(items) = &field.value
-        {
-            for item in items {
-                if let Expr::Ref(parts) = item {
-                    let dep = &parts[0];
-                    if ctx.dag.has_block(dep) {
-                        for inner in &iface.blocks {
-                            let qname = format!("{instance_name}.{}", inner.name);
-                            if ctx.dag.has_block(&qname) {
-                                ctx.dag.add_ordering_edge(dep, &qname)?;
-                            }
+        if field.name == "after" && !param_names.contains("after") {
+            for dep in collect_dependency_refs(std::slice::from_ref(field), "after", ctx.scope).map_err(|source| {
+                LoadError::Eval {
+                    pos: crate::ast::Pos::default(),
+                    source,
+                }
+            })? {
+                if ctx.dag.has_block(&dep) {
+                    for inner in &iface.blocks {
+                        let qname = format!("{instance_name}.{}", inner.name);
+                        if ctx.dag.has_block(&qname) {
+                            ctx.dag.add_ordering_edge(&dep, &qname)?;
                         }
                     }
                 }
@@ -507,6 +510,23 @@ fn rewrite_expr(
             }
             expr.clone()
         }
+        Expr::BlockRef(name) => Expr::BlockRef(if inner_blocks.contains(name) {
+            format!("{prefix}.{name}")
+        } else {
+            name.clone()
+        }),
+        Expr::MatrixRef { name, keys, fields } => Expr::MatrixRef {
+            name: if inner_blocks.contains(name) {
+                format!("{prefix}.{name}")
+            } else {
+                name.clone()
+            },
+            keys: keys
+                .iter()
+                .map(|key| rewrite_expr(key, inner_blocks, substitutions, prefix))
+                .collect(),
+            fields: fields.clone(),
+        },
         Expr::Str(parts) => {
             let new_parts: Vec<StringPart> = parts
                 .iter()

@@ -512,7 +512,7 @@ fn workspace_package_dependencies(
     Ok(match template {
         Some(template) => dependencies
             .into_iter()
-            .map(|dependency| template.replace('$', &dependency))
+            .map(|dependency| template.replace('$', &Value::Str(dependency).to_literal()))
             .collect(),
         None => dependencies,
     })
@@ -799,7 +799,7 @@ mod tests {
         );
         assert_eq!(
             workspace_package_dependencies(&metadata, "app", Some("crate[$]")).unwrap(),
-            vec!["crate[build-helper]", "crate[core]"]
+            vec![r#"crate["build-helper"]"#, r#"crate["core"]"#]
         );
         assert!(workspace_package_dependencies(&metadata, "app", Some("crate")).is_err());
     }

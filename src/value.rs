@@ -300,7 +300,7 @@ impl Value {
         use crate::ast::{Expr, Field, StringPart};
         match self {
             Value::Str(s) => Expr::Str(vec![StringPart::Literal(s.clone())]),
-            Value::BlockRef(name) => Expr::Ref(vec![name.clone()]),
+            Value::BlockRef(name) => Expr::BlockRef(name.clone()),
             Value::Number(n) => Expr::Number(n.clone()),
             Value::Bool(b) => Expr::Bool(*b),
             Value::Duration(d) => Expr::Duration(*d),

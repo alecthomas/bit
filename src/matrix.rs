@@ -9,9 +9,16 @@ use crate::state::StateStore;
 use crate::value::{Map, Value};
 
 /// Format a matrix state key: `name[val1, val2]`.
-fn matrix_key(name: &str, values: &[&Value]) -> String {
-    let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();
-    format!("{name}[{}]", parts.join(", "))
+pub(crate) fn matrix_key(name: &str, values: &[&Value]) -> String {
+    format!("{name}[{}]", matrix_values_key(values))
+}
+
+fn matrix_values_key(values: &[&Value]) -> String {
+    values
+        .iter()
+        .map(|value| value.to_literal())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Compute the cartesian product of multiple lists.
@@ -137,7 +144,10 @@ pub fn expand_matrix(
     for expanded in &expanded_names {
         let node_fields = &dag.get_node(expanded).expect("just added").fields.clone();
 
-        for dep in collect_block_refs(node_fields) {
+        for dep in collect_block_refs(node_fields, scope).map_err(|source| LoadError::Eval {
+            pos: block.pos.clone(),
+            source,
+        })? {
             if dag.has_block(&dep) && dep != *expanded {
                 dag.add_dep_edge(&dep, expanded)?;
             }
@@ -165,15 +175,7 @@ pub fn expand_matrix(
     // Each entry is an empty map placeholder (outputs filled in at execution time).
     let mut matrix_map = Map::new();
     for combo in &combos {
-        let key: String = if combo.len() == 1 {
-            combo[0].to_string()
-        } else {
-            combo
-                .iter()
-                .map(|v: &&Value| v.to_string())
-                .collect::<Vec<String>>()
-                .join(", ")
-        };
+        let key = matrix_values_key(combo);
         matrix_map.insert(key, Value::strct(Map::new()));
     }
     scope
@@ -219,6 +221,15 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs
             }
             expr.clone()
         }
+        Expr::BlockRef(_) => expr.clone(),
+        Expr::MatrixRef { name, keys, fields } => Expr::MatrixRef {
+            name: name.clone(),
+            keys: keys
+                .iter()
+                .map(|key| rewrite_matrix_expr(key, key_subs, block_subs))
+                .collect(),
+            fields: fields.clone(),
+        },
         Expr::Str(parts) => {
             let new_parts: Vec<StringPart> = parts
                 .iter()
@@ -299,14 +310,33 @@ mod tests {
     #[test]
     fn matrix_key_single() {
         let v = Value::Str("amd64".into());
-        assert_eq!(matrix_key("image", &[&v]), "image[amd64]");
+        assert_eq!(matrix_key("image", &[&v]), r#"image["amd64"]"#);
     }
 
     #[test]
     fn matrix_key_multi() {
         let a = Value::Str("amd64".into());
         let b = Value::Str("us".into());
-        assert_eq!(matrix_key("deploy", &[&a, &b]), "deploy[amd64, us]");
+        assert_eq!(matrix_key("deploy", &[&a, &b]), r#"deploy["amd64", "us"]"#);
+    }
+
+    #[test]
+    fn matrix_key_preserves_value_types() {
+        let string = Value::Str("1.0".into());
+        let number = Value::Number(1.into());
+        let boolean = Value::Bool(true);
+
+        assert_eq!(
+            matrix_key("build", &[&string, &number, &boolean]),
+            r#"build["1.0", 1, true]"#
+        );
+    }
+
+    #[test]
+    fn matrix_key_preserves_block_reference_type() {
+        let reference = Value::BlockRef(r#"crate["core"]"#.into());
+
+        assert_eq!(matrix_key("consumer", &[&reference]), r#"consumer[crate["core"]]"#);
     }
 
     #[test]
@@ -322,10 +352,10 @@ mod tests {
     #[test]
     fn rewrite_remaps_sibling_block() {
         let subs = HashMap::new();
-        let block_subs = HashMap::from([("image".to_owned(), "image[amd64]".to_owned())]);
+        let block_subs = HashMap::from([("image".to_owned(), r#"image["amd64"]"#.to_owned())]);
 
         let expr = Expr::Ref(vec!["image".into(), "ref".into()]);
         let result = rewrite_matrix_expr(&expr, &subs, &block_subs);
-        assert_eq!(result, Expr::Ref(vec!["image[amd64]".into(), "ref".into()]));
+        assert_eq!(result, Expr::Ref(vec![r#"image["amd64"]"#.into(), "ref".into()]));
     }
 }

@@ -318,7 +318,7 @@ module.exports = grammar({
       ']',
     ),
 
-    _matrix_key: $ => choice($.identifier, $.string, $.raw_string),
+    _matrix_key: $ => $._expression,
 
     // ── Identifier ──
 

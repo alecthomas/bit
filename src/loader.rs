@@ -238,11 +238,9 @@ pub fn load(
     for target in &deferred_targets {
         let mut blocks = Vec::new();
         for name in &target.blocks {
-            let resolved = resolve_dep(name, &dag, &matrix_blocks, &scope);
-            if resolved.is_empty() {
-                blocks.push(name.clone());
-            } else {
-                blocks.extend(resolved);
+            match resolve_dep(name, &dag, &matrix_blocks, &scope) {
+                Some(resolved) => blocks.extend(resolved),
+                None => blocks.push(name.clone()),
             }
         }
         dag.add_target(target.name.clone(), blocks, target.doc.clone());
@@ -260,12 +258,16 @@ pub fn load(
             // Implicit deps from expression refs — these may reference
             // scope variables (not blocks), so we only create edges for
             // names that exist in the DAG or as matrix blocks.
-            let refs = collect_block_refs(&b.fields);
+            let refs = collect_block_refs(&b.fields, &scope).map_err(|source| LoadError::Eval {
+                pos: b.pos.clone(),
+                source,
+            })?;
             for dep in &refs {
-                let resolved = resolve_dep(dep, &dag, &matrix_blocks, &scope);
-                for r in &resolved {
-                    if *r != b.name {
-                        dag.add_dep_edge(r, &b.name)?;
+                if let Some(resolved) = resolve_dep(dep, &dag, &matrix_blocks, &scope) {
+                    for r in &resolved {
+                        if *r != b.name {
+                            dag.add_dep_edge(r, &b.name)?;
+                        }
                     }
                 }
             }
@@ -274,14 +276,12 @@ pub fn load(
                 pos: b.pos.clone(),
                 source,
             })? {
-                let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope);
-                if resolved.is_empty() {
-                    return Err(LoadError::UnknownBlock {
+                let resolved =
+                    resolve_dep(&dep, &dag, &matrix_blocks, &scope).ok_or_else(|| LoadError::UnknownBlock {
                         pos: b.pos.clone(),
-                        name: dep,
+                        name: dep.clone(),
                         from: b.name.clone(),
-                    });
-                }
+                    })?;
                 for r in &resolved {
                     if *r != b.name {
                         dag.add_dep_edge(r, &b.name)?;
@@ -293,14 +293,12 @@ pub fn load(
                 pos: b.pos.clone(),
                 source,
             })? {
-                let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope);
-                if resolved.is_empty() {
-                    return Err(LoadError::UnknownBlock {
+                let resolved =
+                    resolve_dep(&dep, &dag, &matrix_blocks, &scope).ok_or_else(|| LoadError::UnknownBlock {
                         pos: b.pos.clone(),
-                        name: dep,
+                        name: dep.clone(),
                         from: b.name.clone(),
-                    });
-                }
+                    })?;
                 for r in &resolved {
                     if *r != b.name {
                         dag.add_ordering_edge(r, &b.name)?;
@@ -345,11 +343,16 @@ pub fn load(
 }
 
 /// Resolve a dependency name to actual DAG node names.
-/// If the name is a matrix block, returns all expanded slice names.
-/// Otherwise returns the name itself if it exists in the DAG.
-fn resolve_dep(name: &str, dag: &Dag, matrix_blocks: &HashMap<String, Vec<String>>, scope: &Scope) -> Vec<String> {
+/// If the name is a matrix block, returns all expanded slice names, including
+/// an empty list for a matrix with no slices. Returns `None` for an unknown name.
+fn resolve_dep(
+    name: &str,
+    dag: &Dag,
+    matrix_blocks: &HashMap<String, Vec<String>>,
+    scope: &Scope,
+) -> Option<Vec<String>> {
     if dag.has_block(name) {
-        return vec![name.to_owned()];
+        return Some(vec![name.to_owned()]);
     }
     // If name matches a matrix block, resolve to all expanded slice names
     if matrix_blocks.contains_key(name)
@@ -357,9 +360,9 @@ fn resolve_dep(name: &str, dag: &Dag, matrix_blocks: &HashMap<String, Vec<String
     {
         let mut names: Vec<_> = map.keys().map(|k| format!("{name}[{k}]")).collect();
         names.sort();
-        return names;
+        return Some(names);
     }
-    vec![]
+    None
 }
 
 #[cfg(test)]
@@ -403,14 +406,14 @@ mod tests {
             if name == "strings" {
                 return Ok(Value::List(
                     crate::value::Type::String,
-                    vec![Value::Str("crate[core]".into())],
+                    vec![Value::Str(r#"crate["core"]"#.into())],
                 ));
             }
             if name != "of" {
                 return Err("unexpected dependency function call".into());
             }
             let references = if package == "app" {
-                vec![Value::BlockRef("crate[core]".into())]
+                vec![Value::BlockRef(r#"crate["core"]"#.into())]
             } else {
                 Vec::new()
             };
@@ -1082,8 +1085,8 @@ build[arch] = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
-        assert!(dag.has_block("build[amd64]"));
-        assert!(dag.has_block("build[arm64]"));
+        assert!(dag.has_block(r#"build["amd64"]"#));
+        assert!(dag.has_block(r#"build["arm64"]"#));
         assert!(!dag.has_block("build"));
     }
 
@@ -1102,9 +1105,25 @@ crate[package] = exec {
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
         let order = dag.topo_order().unwrap();
-        let core = order.iter().position(|name| name == "crate[core]").unwrap();
-        let app = order.iter().position(|name| name == "crate[app]").unwrap();
+        let core = order.iter().position(|name| name == r#"crate["core"]"#).unwrap();
+        let app = order.iter().position(|name| name == r#"crate["app"]"#).unwrap();
         assert!(core < app);
+    }
+
+    #[test]
+    fn matrix_key_can_be_a_block_reference() {
+        let input = r#"
+let dependency = dependency.of("app")
+
+consumer[dependency] = exec {
+  command = "consume"
+  output = "out"
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+
+        assert!(dag.has_block(r#"consumer[crate["core"]]"#));
     }
 
     #[test]
@@ -1146,7 +1165,7 @@ build[arch] = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
-        let node = dag.get_node("build[amd64]").unwrap();
+        let node = dag.get_node(r#"build["amd64"]"#).unwrap();
         let cmd = node.fields.iter().find(|f| f.name == "command").unwrap();
         assert_eq!(
             cmd.value,
@@ -1172,19 +1191,44 @@ deploy[arch] = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
-        // deploy[amd64] should depend on build[amd64], not build[arm64]
+        // deploy["amd64"] should depend on build["amd64"], not build["arm64"]
         let order = dag.topo_order().unwrap();
-        let build_amd64 = order.iter().position(|n| n == "build[amd64]").unwrap();
-        let deploy_amd64 = order.iter().position(|n| n == "deploy[amd64]").unwrap();
+        let build_amd64 = order.iter().position(|n| n == r#"build["amd64"]"#).unwrap();
+        let deploy_amd64 = order.iter().position(|n| n == r#"deploy["amd64"]"#).unwrap();
         assert!(build_amd64 < deploy_amd64);
 
-        // deploy[amd64]'s command should reference build[amd64].path
-        let node = dag.get_node("deploy[amd64]").unwrap();
+        // deploy["amd64"]'s command should reference build["amd64"].path
+        let node = dag.get_node(r#"deploy["amd64"]"#).unwrap();
         let cmd = node.fields.iter().find(|f| f.name == "command").unwrap();
         assert_eq!(
             cmd.value,
-            crate::ast::Expr::Ref(vec!["build[amd64]".into(), "path".into()])
+            crate::ast::Expr::Ref(vec![r#"build["amd64"]"#.into(), "path".into()])
         );
+    }
+
+    #[test]
+    fn matrix_slice_reference_uses_typed_key() {
+        let input = r#"
+let arch = ["amd64"]
+let selected_arch = "amd64"
+
+build[arch] = exec {
+  command = "build"
+  output = "out"
+}
+
+package = exec {
+  command = build[selected_arch].path
+  output = "package"
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+
+        let order = dag.topo_order().unwrap();
+        let build = order.iter().position(|name| name == r#"build["amd64"]"#).unwrap();
+        let package = order.iter().position(|name| name == "package").unwrap();
+        assert!(build < package);
     }
 
     #[test]
@@ -1201,10 +1245,10 @@ build[arch, os] = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
-        assert!(dag.has_block("build[amd64, linux]"));
-        assert!(dag.has_block("build[amd64, darwin]"));
-        assert!(dag.has_block("build[arm64, linux]"));
-        assert!(dag.has_block("build[arm64, darwin]"));
+        assert!(dag.has_block(r#"build["amd64", "linux"]"#));
+        assert!(dag.has_block(r#"build["amd64", "darwin"]"#));
+        assert!(dag.has_block(r#"build["arm64", "linux"]"#));
+        assert!(dag.has_block(r#"build["arm64", "darwin"]"#));
     }
 
     #[test]
@@ -1228,8 +1272,8 @@ package = exec {
 
         // package should come after both build slices
         let order = dag.topo_order().unwrap();
-        let build_amd64 = order.iter().position(|n| n == "build[amd64]").unwrap();
-        let build_arm64 = order.iter().position(|n| n == "build[arm64]").unwrap();
+        let build_amd64 = order.iter().position(|n| n == r#"build["amd64"]"#).unwrap();
+        let build_arm64 = order.iter().position(|n| n == r#"build["arm64"]"#).unwrap();
         let pkg = order.iter().position(|n| n == "package").unwrap();
         assert!(build_amd64 < pkg);
         assert!(build_arm64 < pkg);
@@ -1250,6 +1294,43 @@ target check = [tests]
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
         let order = dag.target_order("check").unwrap();
-        assert_eq!(order, vec!["tests[api]", "tests[worker]"]);
+        assert_eq!(order, vec![r#"tests["api"]"#, r#"tests["worker"]"#]);
+    }
+
+    #[test]
+    fn target_accepts_empty_matrix_block() {
+        let input = r#"
+let package = []
+
+tests[package] = exec.test {
+  command = "test #{package}"
+}
+
+target check = [tests]
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+
+        assert_eq!(dag.target_order("check").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn target_accepts_dots_in_matrix_values() {
+        let input = r#"
+let package = ["github.com/block/spectre/internal"]
+
+tests[package] = exec.test {
+  command = "test #{package}"
+}
+
+target check = [tests]
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+
+        assert_eq!(
+            dag.target_order("check").unwrap(),
+            vec![r#"tests["github.com/block/spectre/internal"]"#]
+        );
     }
 }

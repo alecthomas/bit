@@ -141,6 +141,14 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
         }
         Expr::Map(fields) => eval_map(fields, scope, mode),
         Expr::Ref(parts) => eval_ref(parts, scope, mode),
+        Expr::BlockRef(name) => Ok(Value::BlockRef(name.clone())),
+        Expr::MatrixRef { name, keys, fields } => {
+            let root = eval_matrix_ref_name_inner(name, keys, scope, mode)?;
+            let mut parts = Vec::with_capacity(fields.len() + 1);
+            parts.push(root);
+            parts.extend(fields.iter().cloned());
+            eval_ref(&parts, scope, mode)
+        }
         Expr::Call(name, args) => {
             let values: Result<Vec<_>, _> = args.iter().map(|e| eval_inner(e, scope, mode)).collect();
             let values = values?;
@@ -192,6 +200,17 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
             }
         }
     }
+}
+
+pub(crate) fn eval_matrix_ref_name(name: &str, keys: &[Expr], scope: &Scope) -> Result<String, EvalError> {
+    eval_matrix_ref_name_inner(name, keys, scope, EvalMode::Strict)
+}
+
+fn eval_matrix_ref_name_inner(name: &str, keys: &[Expr], scope: &Scope, mode: EvalMode) -> Result<String, EvalError> {
+    let values: Result<Vec<_>, _> = keys.iter().map(|key| eval_inner(key, scope, mode)).collect();
+    let values = values?;
+    let value_refs: Vec<_> = values.iter().collect();
+    Ok(crate::matrix::matrix_key(name, &value_refs))
 }
 
 fn eval_string(parts: &[StringPart], scope: &Scope, mode: EvalMode) -> Result<Value, EvalError> {
@@ -752,6 +771,36 @@ mod tests {
         scope.set("server", Value::strct(inner));
         let expr = Expr::Ref(vec!["server".into(), "path".into()]);
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("/bin/server".into()));
+    }
+
+    #[test]
+    fn eval_matrix_ref_key_reference() {
+        let mut scope = Scope::new();
+        scope.set("selected_arch", Value::Str("amd64".into()));
+        let mut outputs = Map::new();
+        outputs.insert("path".into(), Value::Str("/bin/server".into()));
+        scope.set(r#"build["amd64"]"#, Value::strct(outputs));
+        let expression = Expr::MatrixRef {
+            name: "build".into(),
+            keys: vec![Expr::Ref(vec!["selected_arch".into()])],
+            fields: vec!["path".into()],
+        };
+
+        assert_eq!(eval(&expression, &scope).unwrap(), Value::Str("/bin/server".into()));
+    }
+
+    #[test]
+    fn eval_matrix_ref_preserves_block_ref_key() {
+        let mut scope = Scope::new();
+        scope.set("dependency", Value::BlockRef(r#"crate["core"]"#.into()));
+        scope.set(r#"consumer[crate["core"]]"#, Value::strct(Map::new()));
+        let expression = Expr::MatrixRef {
+            name: "consumer".into(),
+            keys: vec![Expr::Ref(vec!["dependency".into()])],
+            fields: vec![],
+        };
+
+        assert_eq!(eval(&expression, &scope).unwrap(), Value::strct(Map::new()));
     }
 
     #[test]
