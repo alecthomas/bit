@@ -59,8 +59,9 @@ pub enum LoadError {
 /// for deferred field evaluation.
 pub struct BaseScope {
     pub scope: Scope,
-    /// Params that were declared without defaults and not provided via -p.
-    /// Active blocks referencing these will produce errors at execution time.
+    /// Params that were declared without defaults and not provided via -p,
+    /// plus let bindings that transitively depend on them. Active blocks
+    /// referencing these will produce errors at execution time.
     pub missing_params: std::collections::HashSet<String>,
 }
 
@@ -144,9 +145,15 @@ pub fn load(
                                 existing: existing.as_str(),
                             })?;
                     }
-                    Err(_) => {
-                        // Let depends on a missing param — defer
+                    Err(EvalError::UndefinedVar(name)) if missing_params.contains(&name) => {
+                        // Let depends on a missing param or an earlier deferred let.
                         missing_params.insert(l.name.clone());
+                    }
+                    Err(source) => {
+                        return Err(LoadError::Eval {
+                            pos: l.pos.clone(),
+                            source,
+                        });
                     }
                 }
             }
@@ -403,6 +410,9 @@ mod tests {
                 return Err("unexpected dependency function call".into());
             }
             let package = args[0].as_str().ok_or("package must be a string")?;
+            if name == "fail" {
+                return Err("dependency function failed".into());
+            }
             if name == "strings" {
                 return Ok(Value::List(
                     crate::value::Type::String,
@@ -491,6 +501,81 @@ server = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let (_dag, base) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         assert!(base.missing_params.contains("env"));
+    }
+
+    #[test]
+    fn load_let_depending_on_missing_param_is_deferred() {
+        let input = r##"param env : string
+let prefix = env
+let command = "#{prefix} echo"
+"##;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (_dag, base) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+
+        assert!(base.missing_params.contains("env"));
+        assert!(base.missing_params.contains("prefix"));
+        assert!(base.missing_params.contains("command"));
+        assert!(base.scope.get("prefix").is_none());
+        assert!(base.scope.get("command").is_none());
+    }
+
+    #[test]
+    fn load_provider_failure_in_let_is_reported_at_declaration() {
+        let input = r#"let package = dependency.fail("package")
+
+crate[package] = exec {
+  command = "build #{package}"
+  output = "out-#{package}"
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]);
+
+        match result {
+            Err(LoadError::Eval {
+                pos,
+                source: EvalError::ProviderFunction { name, message },
+            }) => {
+                assert_eq!(
+                    pos,
+                    crate::ast::Pos {
+                        file: "<test>".into(),
+                        line: 1,
+                        col: 1,
+                    }
+                );
+                assert_eq!(name, "dependency.fail");
+                assert_eq!(message, "dependency function failed");
+            }
+            _ => panic!("expected provider function evaluation error"),
+        }
+    }
+
+    #[test]
+    fn load_builtin_failure_in_let_is_reported_at_declaration() {
+        let input = "let value = trim()\n";
+        let module = parser::parse(input, "<test>").unwrap();
+        let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]);
+
+        match result {
+            Err(LoadError::Eval {
+                pos,
+                source: EvalError::Arity { name, expected, got },
+            }) => {
+                assert_eq!(
+                    pos,
+                    crate::ast::Pos {
+                        file: "<test>".into(),
+                        line: 1,
+                        col: 1,
+                    }
+                );
+                assert_eq!(name, "trim");
+                assert_eq!(expected, 1);
+                assert_eq!(got, 0);
+            }
+            _ => panic!("expected built-in function evaluation error"),
+        }
     }
 
     #[test]
