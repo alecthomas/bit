@@ -392,10 +392,10 @@ block = docker.image {
 
 **Outputs:**
 
-| Field      | Type     | Description         |
-| ---------- | -------- | ------------------- |
-| `ref`      | `string` | Image tag/reference |
-| `image_id` | `string` | Docker image ID     |
+| Field      | Type     | Description                                                          |
+| ---------- | -------- | -------------------------------------------------------------------- |
+| `ref`      | `string` | Locally pinned tag or registry digest reference                      |
+| `image_id` | `string` | Docker image ID or multi-platform manifest digest, without `sha256:` |
 
 **`docker.push`** (build) — Push a Docker image to a registry
 
@@ -832,10 +832,12 @@ the worktree that produced them has been deleted:
   with identical sources restores it to its own output path (for `rust.exe`,
   the same path under its own `target/` directory) instead of building.
   `bit --plan` reports this as a restore (`⇣`) without writing anything.
-- `docker.image` stores the members of a Docker image archive separately, so
-  image versions that share layers also share their cached bytes. If the image
-  has been removed, an identical action restores it with `docker image load`
-  instead of rebuilding it.
+- Single-platform `docker.image` builds store the members of a Docker image
+  archive separately, so image versions that share layers also share their
+  cached bytes. If the image has been removed, an identical action restores it
+  with `docker image load` instead of rebuilding it. Multi-platform builds are
+  pushed directly to their registry and remain in worktree-local state because
+  they cannot be restored through the local image store.
 - `exec` and `exec.test` store whatever they declare in `output`. A directory
   is stored whole, as the set of files it contained, and is restored to
   exactly that — anything already at the path is replaced, not merged. An
