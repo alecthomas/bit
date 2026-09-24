@@ -86,10 +86,10 @@ where
 
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct ImageOutputs {
-    /// Image tag/reference
+    /// Locally pinned tag or registry digest reference
     #[serde(rename = "ref")]
     pub image_ref: String,
-    /// Docker image ID
+    /// Docker image ID or multi-platform manifest digest, without `sha256:`
     pub image_id: String,
 }
 
@@ -107,9 +107,51 @@ fn strip_docker_prefix(id: &str) -> &str {
     id.strip_prefix("sha256:").unwrap_or(id)
 }
 
+fn repository_name(image: &str) -> &str {
+    let image = image.split_once('@').map_or(image, |(name, _)| name);
+    match (image.rfind('/'), image.rfind(':')) {
+        (slash, Some(colon)) if slash.is_none_or(|slash| colon > slash) => &image[..colon],
+        _ => image,
+    }
+}
+
 fn pinned_tag(tag: &str, image_id: &str) -> String {
-    let name = tag.split(':').next().unwrap_or(tag);
-    format!("{name}:{image_id}")
+    format!("{}:{image_id}", repository_name(tag))
+}
+
+fn digest_reference(tag: &str, digest: &str) -> Result<String, BoxError> {
+    let Some((algorithm, encoded)) = digest.split_once(':') else {
+        return Err(format!("invalid Buildx image digest {digest:?}").into());
+    };
+    if algorithm.is_empty()
+        || !algorithm
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'.' | b'_' | b'-'))
+        || encoded.is_empty()
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'=' | b'_' | b'-'))
+    {
+        return Err(format!("invalid Buildx image digest {digest:?}").into());
+    }
+    Ok(format!("{}@{digest}", repository_name(tag)))
+}
+
+#[derive(Deserialize)]
+struct BuildMetadata {
+    #[serde(rename = "containerimage.digest")]
+    image_digest: Option<String>,
+}
+
+fn read_build_digest(path: &Path) -> Result<String, BoxError> {
+    let file = File::open(path).map_err(|e| format!("failed to read Buildx metadata: {e}"))?;
+    let metadata: BuildMetadata =
+        serde_json::from_reader(file).map_err(|e| format!("failed to parse Buildx metadata: {e}"))?;
+    let digest = metadata
+        .image_digest
+        .ok_or("Buildx metadata did not contain containerimage.digest")?;
+    digest_reference("image", &digest)?;
+    Ok(digest)
 }
 
 fn archive_member_path(role: &str) -> io::Result<&Path> {
@@ -209,7 +251,7 @@ fn materialize_archive(
 }
 
 /// Build the argument list for `docker buildx build`.
-fn build_args(inputs: &ImageInputs) -> Vec<String> {
+fn build_args(inputs: &ImageInputs, metadata_path: Option<&Path>) -> Vec<String> {
     let mut args = vec![
         "buildx".into(),
         "build".into(),
@@ -233,6 +275,10 @@ fn build_args(inputs: &ImageInputs) -> Vec<String> {
         args.push("--build-arg".into());
         args.push(format!("{key}={val}"));
     }
+    if let Some(path) = metadata_path {
+        args.push("--metadata-file".into());
+        args.push(path.to_string_lossy().into_owned());
+    }
     args.push(inputs.context.clone());
     args
 }
@@ -254,16 +300,36 @@ impl ImageResource {
         Command::new(&self.docker)
     }
 
-    fn inspect_image_id(&self, image: &str) -> Option<String> {
+    fn inspect_image_id_result(&self, image: &str) -> Result<String, BoxError> {
         let output = self
             .command()
             .args(["image", "inspect", "--format", "{{.Id}}", image])
             .output()
-            .ok()?;
-        output
-            .status
-            .success()
-            .then(|| strip_docker_prefix(String::from_utf8_lossy(&output.stdout).trim()).to_owned())
+            .map_err(|e| format!("failed to run docker image inspect: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "docker image inspect failed for {image}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+            .into());
+        }
+        let raw_id = String::from_utf8_lossy(&output.stdout);
+        let image_id = strip_docker_prefix(raw_id.trim());
+        if image_id.is_empty() {
+            return Err(format!("docker image inspect returned no image ID for {image}").into());
+        }
+        Ok(image_id.to_owned())
+    }
+
+    fn inspect_image_id(&self, image: &str) -> Option<String> {
+        self.inspect_image_id_result(image).ok()
+    }
+
+    fn remote_image_exists(&self, image: &str) -> bool {
+        self.command()
+            .args(["buildx", "imagetools", "inspect", image])
+            .output()
+            .is_ok_and(|output| output.status.success())
     }
 
     fn tag_image(&self, image: &str, tag: &str) -> Result<(), BoxError> {
@@ -332,7 +398,7 @@ impl Resource for ImageResource {
             ).into());
         }
 
-        let args = build_args(inputs);
+        let args = build_args(inputs, None);
         let desc = format!("docker {}", args.join(" "));
 
         let Some(prior) = prior_state else {
@@ -359,7 +425,17 @@ impl Resource for ImageResource {
             });
         }
 
-        let exists = self.inspect_image_id(&prior.image_id).as_deref() == Some(prior.image_id.as_str());
+        let exists = if inputs.platform.len() > 1 {
+            let digest = format!("sha256:{}", prior.image_id);
+            let image_ref = prior
+                .pinned_tag
+                .clone()
+                .filter(|image_ref| image_ref.contains('@'))
+                .or_else(|| digest_reference(&prior.tag, &digest).ok());
+            image_ref.is_some_and(|image_ref| self.remote_image_exists(&image_ref))
+        } else {
+            self.inspect_image_id(&prior.image_id).as_deref() == Some(prior.image_id.as_str())
+        };
 
         if !exists {
             return Ok(PlanResult {
@@ -382,7 +458,11 @@ impl Resource for ImageResource {
         _prior_state: Option<&ImageState>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ImageState, ImageOutputs>, BoxError> {
-        let args = build_args(inputs);
+        let metadata = (inputs.platform.len() > 1)
+            .then(tempfile::NamedTempFile::new)
+            .transpose()
+            .map_err(|e| format!("failed to create Buildx metadata file: {e}"))?;
+        let args = build_args(inputs, metadata.as_ref().map(|file| file.path()));
         let mut cmd = self.command();
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -407,28 +487,20 @@ impl Resource for ImageResource {
             return Err(format!("docker buildx build exited with {status}").into());
         }
 
-        let digest_output = self
-            .command()
-            .args(["inspect", "--format", "{{.Id}}", &inputs.tag])
-            .output()
-            .map_err(|e| format!("docker inspect failed: {e}"))?;
-
-        let raw_id = String::from_utf8_lossy(&digest_output.stdout).trim().to_owned();
-        let image_id = strip_docker_prefix(&raw_id).to_owned();
-
-        let pinned = pinned_tag(&inputs.tag, &image_id);
-        let tag_status = self
-            .command()
-            .args(["tag", &inputs.tag, &pinned])
-            .output()
-            .map_err(|e| format!("docker tag failed: {e}"))?;
-        if !tag_status.status.success() {
-            return Err(format!(
-                "docker tag failed: {}",
-                String::from_utf8_lossy(&tag_status.stderr).trim()
+        // A multi-platform push has no local image ID. Buildx metadata is the
+        // authoritative digest of the manifest list that was just pushed.
+        let (image_id, pinned) = if let Some(metadata) = metadata {
+            let digest = read_build_digest(metadata.path())?;
+            (
+                strip_docker_prefix(&digest).to_owned(),
+                digest_reference(&inputs.tag, &digest)?,
             )
-            .into());
-        }
+        } else {
+            let image_id = self.inspect_image_id_result(&inputs.tag)?;
+            let pinned = pinned_tag(&inputs.tag, &image_id);
+            self.tag_image(&inputs.tag, &pinned)?;
+            (image_id, pinned)
+        };
 
         Ok(ApplyResult {
             state: Some(ImageState {
@@ -446,6 +518,11 @@ impl Resource for ImageResource {
 
     fn destroy(&self, prior_state: &ImageState, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
+        // Multi-platform builds never enter the local image store, and this
+        // build resource does not own deletion from an external registry.
+        if prior_state.platform.len() > 1 {
+            return Ok(());
+        }
         if let Some(pinned) = &prior_state.pinned_tag {
             writer.event(Event::Starting, &format!("docker rmi -f {pinned}"));
             self.remove_image(pinned)?;
@@ -454,8 +531,14 @@ impl Resource for ImageResource {
         self.remove_image(&prior_state.image_id)
     }
 
-    fn cache_policy(&self, _inputs: &ImageInputs) -> CachePolicy {
-        CachePolicy::Shared { version: 2 }
+    fn cache_policy(&self, inputs: &ImageInputs) -> CachePolicy {
+        // A registry push cannot be reconstructed from Bit's local CAS or
+        // vouched for by another worktree's receipt.
+        if inputs.platform.len() > 1 {
+            CachePolicy::Local
+        } else {
+            CachePolicy::Shared { version: 2 }
+        }
     }
 
     fn capture_artifacts(
@@ -500,7 +583,7 @@ impl Resource for ImageResource {
         artifacts: &BTreeMap<String, ArtifactRef>,
         _cas: &Cas,
     ) -> Result<ReceiptCheck, BoxError> {
-        if !artifacts.contains_key(MANIFEST_ROLE) {
+        if inputs.platform.len() > 1 || !artifacts.contains_key(MANIFEST_ROLE) {
             return Ok(ReceiptCheck::Unusable);
         }
         let pinned = pinned_tag(&inputs.tag, &state.image_id);
@@ -522,6 +605,9 @@ impl Resource for ImageResource {
         cas: &Cas,
         writer: &BlockWriter,
     ) -> MaterializeResult<ImageState, ImageOutputs> {
+        if inputs.platform.len() > 1 {
+            return Err("multi-platform image receipts cannot be materialized from the local image store".into());
+        }
         let pinned = pinned_tag(&inputs.tag, &state.image_id);
 
         if self.inspect_image_id(&state.image_id).as_deref() != Some(state.image_id.as_str()) {
@@ -616,6 +702,16 @@ mod tests {
             image_id: "abc123".into(),
             platform: vec![],
             pinned_tag: Some("myapp:abc123".into()),
+        }
+    }
+
+    fn multi_platform_inputs() -> ImageInputs {
+        ImageInputs {
+            tag: "registry.example.com:5000/team/myapp:v1".into(),
+            context: ".".into(),
+            dockerfile: "Dockerfile".into(),
+            build_args: HashMap::new(),
+            platform: vec!["linux/amd64".into(), "linux/arm64".into()],
         }
     }
 
@@ -807,6 +903,35 @@ exit 0
     }
 
     #[test]
+    fn pinned_tag_preserves_registry_port() {
+        assert_eq!(
+            pinned_tag("registry.example.com:5000/app:v1", "abcdef123456789"),
+            "registry.example.com:5000/app:abcdef123456789"
+        );
+    }
+
+    #[test]
+    fn digest_reference_replaces_tag_and_preserves_registry_port() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        assert_eq!(
+            digest_reference("registry.example.com:5000/app:v1", &digest).unwrap(),
+            format!("registry.example.com:5000/app@{digest}")
+        );
+        assert!(digest_reference("registry.example.com/app:v1", "").is_err());
+        assert!(digest_reference("registry.example.com/app:v1", "sha256:").is_err());
+    }
+
+    #[test]
+    fn build_metadata_requires_an_image_digest() {
+        let metadata = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(metadata.path(), "{}").unwrap();
+
+        let error = read_build_digest(metadata.path()).unwrap_err().to_string();
+
+        assert!(error.contains("containerimage.digest"), "{error}");
+    }
+
+    #[test]
     fn strip_docker_prefix_removes_sha256() {
         assert_eq!(strip_docker_prefix("sha256:abc123"), "abc123");
         assert_eq!(strip_docker_prefix("abc123"), "abc123");
@@ -819,6 +944,146 @@ exit 0
             Resource::cache_policy(&resource, &test_inputs()),
             CachePolicy::Shared { version: 2 }
         );
+    }
+
+    #[test]
+    fn multi_platform_image_uses_local_state_only() {
+        let resource = ImageResource::new(Arc::new(Mutex::new(FileTracker::default())));
+        assert_eq!(
+            Resource::cache_policy(&resource, &multi_platform_inputs()),
+            CachePolicy::Local
+        );
+    }
+
+    #[test]
+    fn multi_platform_apply_uses_buildx_digest_without_local_tagging() {
+        let dir = tempfile::tempdir().unwrap();
+        let docker = dir.path().join("docker");
+        std::fs::write(
+            &docker,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$(dirname "$0")/docker.log"
+if [ "$1" = "buildx" ] && [ "$2" = "build" ]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--metadata-file" ]; then
+      printf '{"containerimage.digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n' > "$2"
+      exit 0
+    fi
+    shift
+  done
+fi
+exit 91
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let resource = ImageResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            docker,
+        };
+        let output = crate::output::Output::new(&[]);
+
+        let result = Resource::apply(&resource, &multi_platform_inputs(), None, &output.writer("image")).unwrap();
+
+        let digest = "a".repeat(64);
+        let image_ref = format!("registry.example.com:5000/team/myapp@sha256:{digest}");
+        assert_eq!(result.outputs.image_ref, image_ref);
+        assert_eq!(result.outputs.image_id, digest);
+        assert_eq!(result.state.unwrap().pinned_tag.as_deref(), Some(image_ref.as_str()));
+        let log = std::fs::read_to_string(dir.path().join("docker.log")).unwrap();
+        assert!(log.contains("--platform linux/amd64,linux/arm64 --push"), "{log}");
+        assert!(log.contains("--metadata-file"), "{log}");
+        assert!(!log.lines().any(|line| line.starts_with("tag ")), "{log}");
+        assert!(!log.lines().any(|line| line.starts_with("image inspect ")), "{log}");
+    }
+
+    #[test]
+    fn multi_platform_plan_checks_immutable_registry_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let docker = dir.path().join("docker");
+        std::fs::write(
+            &docker,
+            r#"#!/bin/sh
+printf '%s\n' "$*" > "$(dirname "$0")/docker.log"
+[ "$1" = "buildx" ] && [ "$2" = "imagetools" ] && [ "$3" = "inspect" ]
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let resource = ImageResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            docker,
+        };
+        let digest = "b".repeat(64);
+        let state = ImageState {
+            tag: "registry.example.com:5000/team/myapp:v1".into(),
+            image_id: digest.clone(),
+            platform: vec!["linux/amd64".into(), "linux/arm64".into()],
+            pinned_tag: Some(format!("registry.example.com:5000/team/myapp@sha256:{digest}")),
+        };
+
+        let plan = Resource::plan(&resource, &multi_platform_inputs(), Some(&state)).unwrap();
+
+        assert_eq!(plan.action, PlanAction::None);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("docker.log")).unwrap(),
+            format!("buildx imagetools inspect registry.example.com:5000/team/myapp@sha256:{digest}\n")
+        );
+    }
+
+    #[test]
+    fn multi_platform_destroy_does_not_remove_a_local_image() {
+        let resource = ImageResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            docker: "/does/not/exist/docker".into(),
+        };
+        let state = ImageState {
+            tag: "registry.example.com/team/myapp:v1".into(),
+            image_id: "a".repeat(64),
+            platform: vec!["linux/amd64".into(), "linux/arm64".into()],
+            pinned_tag: Some(format!("registry.example.com/team/myapp@sha256:{}", "a".repeat(64))),
+        };
+        let output = crate::output::Output::new(&[]);
+
+        Resource::destroy(&resource, &state, &output.writer("image")).unwrap();
+    }
+
+    #[test]
+    fn single_platform_apply_reports_inspect_failure_without_tagging() {
+        let dir = tempfile::tempdir().unwrap();
+        let docker = dir.path().join("docker");
+        std::fs::write(
+            &docker,
+            r#"#!/bin/sh
+if [ "$1" = "buildx" ] && [ "$2" = "build" ]; then
+  exit 0
+fi
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+  printf 'image unavailable\n' >&2
+  exit 1
+fi
+if [ "$1" = "tag" ]; then
+  touch "$(dirname "$0")/tagged"
+  exit 0
+fi
+exit 91
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let resource = ImageResource {
+            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            docker,
+        };
+        let output = crate::output::Output::new(&[]);
+
+        let error = Resource::apply(&resource, &test_inputs(), None, &output.writer("image"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("docker image inspect failed"), "{error}");
+        assert!(error.contains("image unavailable"), "{error}");
+        assert!(!dir.path().join("tagged").exists());
     }
 
     #[test]
