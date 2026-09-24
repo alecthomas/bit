@@ -1060,12 +1060,28 @@ fn bind_receipt(
     hit: &CacheHit,
     cache: &BuildCache,
     writer: &BlockWriter,
+    tracker: &Mutex<FileTracker>,
 ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
     let cas = cache.cas().ok_or("shared cache unavailable")?;
-    match node
-        .resource
-        .materialize(inputs, &hit.receipt.state, outputs, &hit.receipt.artifacts, cas, writer)?
-    {
+    let materialize = || {
+        node.resource
+            .materialize(inputs, &hit.receipt.state, outputs, &hit.receipt.artifacts, cas, writer)
+    };
+    // Restoring declared outputs mutates provider-visible paths. Serialize it
+    // with input resolution so another block cannot hash bit's temporary
+    // files while they are being atomically moved into place. With no declared
+    // outputs there are no engine-managed paths to protect; provider-specific
+    // restoration such as `docker image load` must not block unrelated input
+    // resolution.
+    let materialized = if hit.check == ReceiptCheck::Restore && !outputs.is_empty() {
+        let mut tracker = tracker.lock().expect("tracker lock");
+        let result = materialize();
+        tracker.clear_hash_cache();
+        result?
+    } else {
+        materialize()?
+    };
+    match materialized {
         Some(result) => Ok(result),
         // The default `materialize` recreates the declared outputs and leaves
         // the receipt's own state and outputs to be bound as they are. A
@@ -1168,7 +1184,15 @@ fn execute_block(
                 prepared.plan.reason.as_deref(),
             );
         }
-        match bind_receipt(node, &prepared.inputs, &prepared.cached_outputs, hit, cache, writer) {
+        match bind_receipt(
+            node,
+            &prepared.inputs,
+            &prepared.cached_outputs,
+            hit,
+            cache,
+            writer,
+            tracker,
+        ) {
             Ok(result) => bound = Some(result),
             Err(e) => {
                 writer.stderr_line(&format!("warning: cannot use cached result, running instead: {e}"));
@@ -2402,12 +2426,13 @@ other-b = probe.run { label = "other-b" }
         //! `passed` output is controlled by an input.
         use std::collections::BTreeMap;
         use std::path::{Path, PathBuf};
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
 
         use serde::{Deserialize, Serialize};
 
         use crate::cache::{ArtifactRef, Cas};
+        use crate::file_tracker::FileTracker;
         use crate::output::BlockWriter;
         use crate::provider::{
             ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, MaterializeResult, OutputFile, PlanAction,
@@ -2438,6 +2463,8 @@ other-b = probe.run { label = "other-b" }
 
         pub struct CachedProvider {
             pub applies: Arc<AtomicUsize>,
+            pub tracker: Arc<Mutex<FileTracker>>,
+            pub materialize_saw_tracker_lock: Arc<AtomicBool>,
         }
 
         impl Provider for CachedProvider {
@@ -2448,11 +2475,15 @@ other-b = probe.run { label = "other-b" }
                 vec![
                     Box::new(FileResource {
                         applies: self.applies.clone(),
+                        tracker: self.tracker.clone(),
+                        materialize_saw_tracker_lock: self.materialize_saw_tracker_lock.clone(),
                         kind: ResourceKind::Build,
                         name: "file",
                     }),
                     Box::new(FileResource {
                         applies: self.applies.clone(),
+                        tracker: self.tracker.clone(),
+                        materialize_saw_tracker_lock: self.materialize_saw_tracker_lock.clone(),
                         kind: ResourceKind::Test,
                         name: "check",
                     }),
@@ -2468,6 +2499,8 @@ other-b = probe.run { label = "other-b" }
 
         pub struct FileResource {
             applies: Arc<AtomicUsize>,
+            tracker: Arc<Mutex<FileTracker>>,
+            materialize_saw_tracker_lock: Arc<AtomicBool>,
             kind: ResourceKind,
             name: &'static str,
         }
@@ -2557,6 +2590,10 @@ other-b = probe.run { label = "other-b" }
                 cas: &Cas,
                 writer: &BlockWriter,
             ) -> MaterializeResult<State, Outputs> {
+                self.materialize_saw_tracker_lock.store(
+                    matches!(self.tracker.try_lock(), Err(std::sync::TryLockError::WouldBlock)),
+                    Ordering::SeqCst,
+                );
                 crate::provider::restore_output_files(outputs, artifacts, cas, writer)?;
                 let path = out_path(inputs).to_string_lossy().into_owned();
                 Ok(Some(ApplyResult {
@@ -2571,7 +2608,7 @@ other-b = probe.run { label = "other-b" }
     }
 
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// One linked git worktree: a project root with its own local state store.
     struct Worktree {
@@ -2626,6 +2663,7 @@ other-b = probe.run { label = "other-b" }
         repo: PathBuf,
         cache_dir: PathBuf,
         applies: Arc<AtomicUsize>,
+        materialize_saw_tracker_lock: Arc<AtomicBool>,
     }
 
     impl Harness {
@@ -2655,6 +2693,7 @@ other-b = probe.run { label = "other-b" }
                 repo,
                 _tmp: tmp,
                 applies: Arc::new(AtomicUsize::new(0)),
+                materialize_saw_tracker_lock: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -2662,10 +2701,12 @@ other-b = probe.run { label = "other-b" }
             Worktree::new(&self.repo, &self.base, name)
         }
 
-        fn registry(&self) -> ProviderRegistry {
+        fn registry(&self, tracker: &Arc<Mutex<FileTracker>>) -> ProviderRegistry {
             let mut reg = ProviderRegistry::new();
             reg.register(Box::new(cached::CachedProvider {
                 applies: self.applies.clone(),
+                tracker: tracker.clone(),
+                materialize_saw_tracker_lock: self.materialize_saw_tracker_lock.clone(),
             }));
             reg
         }
@@ -2678,7 +2719,7 @@ other-b = probe.run { label = "other-b" }
             let tracker = test_tracker();
             let module = parser::parse(input, "<test>").expect("parse failed");
             let (dag, base) =
-                loader::load(&module, &Map::new(), &self.registry(), &wt.store, &[]).expect("load failed");
+                loader::load(&module, &Map::new(), &self.registry(&tracker), &wt.store, &[]).expect("load failed");
             (dag, base, tracker)
         }
 
@@ -2737,6 +2778,10 @@ other-b = probe.run { label = "other-b" }
             self.applies.load(Ordering::SeqCst)
         }
 
+        fn materialize_saw_tracker_lock(&self) -> bool {
+            self.materialize_saw_tracker_lock.load(Ordering::SeqCst)
+        }
+
         /// The single published receipt, parsed.
         fn only_receipt(&self) -> Receipt {
             let paths = self.receipts();
@@ -2767,6 +2812,10 @@ other-b = probe.run { label = "other-b" }
         assert_eq!(plans[0].plan.action, PlanAction::Restore);
         assert_eq!(plans[0].plan.reason.as_deref(), Some("cached"));
         assert_eq!(h.applies(), 1, "provider must not run on a cache hit");
+        assert!(
+            h.materialize_saw_tracker_lock(),
+            "receipt materialization must be serialized with input resolution"
+        );
         assert_eq!(std::fs::read_to_string(b.out()).unwrap(), "hello");
         let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(b.out()).unwrap().permissions());
         assert_eq!(mode & 0o111, 0o111);
@@ -2875,6 +2924,10 @@ other-b = probe.run { label = "other-b" }
         assert_eq!(plans[0].plan.action, PlanAction::None);
         assert_eq!(plans[0].plan.reason.as_deref(), Some("cached"));
         assert_eq!(h.applies(), 1);
+        assert!(
+            !h.materialize_saw_tracker_lock(),
+            "binding a valid receipt must not block input resolution"
+        );
         assert!(b.store.load("app").unwrap().is_some());
     }
 
