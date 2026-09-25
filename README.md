@@ -66,6 +66,7 @@ target deploy = [app]
 bit              # apply the default target (or every non-`explicit` block if no default)
 bit ...          # apply every non-`explicit` block regardless of the default target
 bit build        # apply a specific target or block
+bit --force      # rebuild selected blocks without change detection or cache
 bit --plan       # show what would change
 bit --test       # run test blocks
 bit --clean      # destroy targets and their dependents in reverse topological order
@@ -89,6 +90,10 @@ accept the same positional selector: no argument uses the `default` target
 block, or name one or more targets/blocks to scope the operation. `--clean
 <name>` destroys that block plus anything that depends on it, in reverse
 topological order.
+
+`--force` (`-f`) rebuilds every block selected by a normal apply, ignoring
+change detection and the shared cache. With `--clean`, it instead allows
+protected blocks to be destroyed and continues cleanup past errors.
 
 `--since <ref>` limits apply, plan, test, graph, dump, and block-list operations to
 blocks affected by changes between `merge-base(<ref>, HEAD)` and the current

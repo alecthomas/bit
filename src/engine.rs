@@ -168,6 +168,12 @@ fn compute_content_hash(
 /// and a block never observes a stale hash from a previous run.
 type RunResults = HashMap<String, SHA256>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApplyMode {
+    Normal,
+    Force,
+}
+
 /// Collect dependency hashes from the current run. A dependency outside the
 /// run's order falls back to the state loaded when the DAG was built.
 fn collect_dep_hashes(dag: &Dag, block_name: &str, results: &RunResults) -> BTreeMap<String, SHA256> {
@@ -565,6 +571,7 @@ fn prepare_block(
     dirty: &HashSet<String>,
     cache: &BuildCache,
     writer: &BlockWriter,
+    mode: ApplyMode,
 ) -> Result<Prepared, EngineError> {
     let prior = restore_prior(writer, node.prior_state.as_ref());
 
@@ -607,6 +614,15 @@ fn prepare_block(
         }
     }
 
+    if mode == ApplyMode::Force && plan.action == PlanAction::None {
+        plan.action = if prior.provider_state.is_some() {
+            PlanAction::Update
+        } else {
+            PlanAction::Create
+        };
+        plan.reason = Some("forced".into());
+    }
+
     if node.protected && plan.action == PlanAction::Destroy {
         return Err(EngineError::Protected {
             pos: node.pos.clone(),
@@ -629,7 +645,8 @@ fn prepare_block(
         hit: None,
     };
 
-    if node.resource.cache_policy(&prepared.inputs) == CachePolicy::Local
+    if mode == ApplyMode::Force
+        || node.resource.cache_policy(&prepared.inputs) == CachePolicy::Local
         || !cache.is_shared()
         || prepared.plan.action == PlanAction::None
     {
@@ -735,7 +752,17 @@ pub fn plan_selected(
             source: e,
         })?;
         let dep_hashes = collect_dep_hashes(dag, name, &results);
-        let prepared = prepare_block(name, node, dag, inputs, dep_hashes, &dirty, cache, &writer)?;
+        let prepared = prepare_block(
+            name,
+            node,
+            dag,
+            inputs,
+            dep_hashes,
+            &dirty,
+            cache,
+            &writer,
+            ApplyMode::Normal,
+        )?;
 
         match prepared.settled_hash() {
             Some(hash) => {
@@ -800,6 +827,37 @@ pub fn apply_selected(
     jobs: usize,
     tracker: &Arc<Mutex<FileTracker>>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
+    apply_selected_with_mode(dag, base, store, cache, output, order, jobs, tracker, ApplyMode::Normal)
+}
+
+/// Force-apply an exact, already-resolved block order without consulting the
+/// shared cache or skipping unchanged blocks.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_selected_forced(
+    dag: &mut Dag,
+    base: &BaseScope,
+    store: &dyn StateStore,
+    cache: &BuildCache,
+    output: &Output,
+    order: &[String],
+    jobs: usize,
+    tracker: &Arc<Mutex<FileTracker>>,
+) -> Result<Vec<BlockPlan>, EngineError> {
+    apply_selected_with_mode(dag, base, store, cache, output, order, jobs, tracker, ApplyMode::Force)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_selected_with_mode(
+    dag: &mut Dag,
+    base: &BaseScope,
+    store: &dyn StateStore,
+    cache: &BuildCache,
+    output: &Output,
+    order: &[String],
+    jobs: usize,
+    tracker: &Arc<Mutex<FileTracker>>,
+    mode: ApplyMode,
+) -> Result<Vec<BlockPlan>, EngineError> {
     tracker.lock().expect("tracker lock").reset();
     validate_active_params(dag, order, base)?;
     crate::debug!(
@@ -811,9 +869,20 @@ pub fn apply_selected(
     );
     let concurrency = concurrency_limits(dag, &base.scope, order)?;
     if jobs <= 1 {
-        apply_order(dag, base, store, cache, output, order, tracker)
+        apply_order(dag, base, store, cache, output, order, tracker, mode)
     } else {
-        apply_order_parallel(dag, base, store, cache, output, order, jobs, tracker, &concurrency)
+        apply_order_parallel(
+            dag,
+            base,
+            store,
+            cache,
+            output,
+            order,
+            jobs,
+            tracker,
+            &concurrency,
+            mode,
+        )
     }
 }
 
@@ -840,6 +909,7 @@ pub fn test(
 }
 
 /// Apply blocks sequentially in the given order.
+#[allow(clippy::too_many_arguments)]
 fn apply_order(
     dag: &mut Dag,
     base: &BaseScope,
@@ -848,6 +918,7 @@ fn apply_order(
     output: &Output,
     order: &[String],
     tracker: &Arc<Mutex<FileTracker>>,
+    mode: ApplyMode,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let mut scope = base.scope.clone();
     let mut results = RunResults::new();
@@ -857,7 +928,7 @@ fn apply_order(
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
         let writer = output.writer(name);
         let dep_hashes = collect_dep_hashes(dag, name, &results);
-        let result = execute_block(name, node, dag, &scope, dep_hashes, cache, &writer, tracker)?;
+        let result = execute_block(name, node, dag, &scope, dep_hashes, cache, &writer, tracker, mode)?;
         let test_failed = result.test_failed;
         let pos = result.pos.clone();
         complete_block(result, store, output, &mut scope, &mut results, &mut plans)?;
@@ -923,6 +994,7 @@ fn apply_order_parallel(
     jobs: usize,
     tracker: &Arc<Mutex<FileTracker>>,
     concurrency: &HashMap<String, Option<ConcurrencyLimit>>,
+    mode: ApplyMode,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     use std::collections::VecDeque;
     use std::sync::mpsc;
@@ -980,7 +1052,17 @@ fn apply_order_parallel(
                 }
 
                 s.spawn(move || {
-                    let result = execute_block(&name, node, dag, &scope_snapshot, dep_hashes, cache, &writer, tracker);
+                    let result = execute_block(
+                        &name,
+                        node,
+                        dag,
+                        &scope_snapshot,
+                        dep_hashes,
+                        cache,
+                        &writer,
+                        tracker,
+                        mode,
+                    );
                     let _ = tx.send((completed_name, result));
                 });
                 in_flight += 1;
@@ -1162,6 +1244,7 @@ fn execute_block(
     cache: &BuildCache,
     writer: &BlockWriter,
     tracker: &Mutex<FileTracker>,
+    mode: ApplyMode,
 ) -> Result<BlockResult, EngineError> {
     let inputs = eval_fields(&node.fields, scope).map_err(|e| EngineError::Eval {
         pos: node.pos.clone(),
@@ -1169,7 +1252,17 @@ fn execute_block(
         source: e,
     })?;
 
-    let mut prepared = prepare_block(name, node, dag, inputs, dep_hashes, &HashSet::new(), cache, writer)?;
+    let mut prepared = prepare_block(
+        name,
+        node,
+        dag,
+        inputs,
+        dep_hashes,
+        &HashSet::new(),
+        cache,
+        writer,
+        mode,
+    )?;
     crate::debug!(writer, "planned action: {:?}", prepared.plan.action);
 
     // Bind or restore from a shared receipt. Any failure here is a cache

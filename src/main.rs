@@ -47,7 +47,8 @@ struct Cli {
     #[arg(long)]
     cache: bool,
 
-    /// Force clean: destroy protected blocks and continue past errors
+    /// Force builds past change detection and cache; with --clean, destroy
+    /// protected blocks and continue past errors
     #[arg(short = 'f', long)]
     force: bool,
 
@@ -321,6 +322,63 @@ enum SelectionMode {
     Tests,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    Apply,
+    Cache,
+    Clean,
+    Dump,
+    Graph,
+    Info,
+    List,
+    Plan,
+    Schema,
+    Test,
+    Update,
+}
+
+impl Cli {
+    /// Select once so mode-specific validation and dispatch cannot diverge.
+    fn selected(&self) -> Option<Operation> {
+        let requested: Vec<_> = [
+            self.schema.is_some().then_some(Operation::Schema),
+            self.info.then_some(Operation::Info),
+            self.update.then_some(Operation::Update),
+            self.cache.then_some(Operation::Cache),
+            self.graph.then_some(Operation::Graph),
+            self.plan.then_some(Operation::Plan),
+            self.clean.then_some(Operation::Clean),
+            self.test.then_some(Operation::Test),
+            (self.list > 0).then_some(Operation::List),
+            self.dump.then_some(Operation::Dump),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        match requested.as_slice() {
+            [] => Some(Operation::Apply),
+            [operation] => Some(*operation),
+            [Operation::Cache, Operation::Clean] => Some(Operation::Cache),
+            [Operation::Graph, Operation::Plan] => Some(Operation::Graph),
+            _ => None,
+        }
+    }
+}
+
+impl Operation {
+    fn allows_force(self) -> bool {
+        matches!(self, Self::Apply | Self::Clean)
+    }
+
+    fn allows_since(self) -> bool {
+        matches!(
+            self,
+            Self::Apply | Self::Dump | Self::Graph | Self::List | Self::Plan | Self::Test
+        )
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum SelectionError {
     #[error("{0}")]
@@ -378,14 +436,26 @@ fn selected_order_or_exit(
 
 fn main() {
     let cli = Cli::parse();
+    let Some(operation) = cli.selected() else {
+        eprintln!(
+            "{} operation modes are mutually exclusive (except --plan --graph and --clean --cache)",
+            "error:".red().bold()
+        );
+        process::exit(1);
+    };
 
     let tracker = Arc::new(Mutex::new(FileTracker::new()));
 
-    if cli.since.is_some() && (cli.clean || cli.cache || cli.schema.is_some() || cli.info || cli.update) {
+    if cli.force && !operation.allows_force() {
         eprintln!(
-            "{} --since cannot be combined with --clean, --cache, --schema, --info, or --update",
+            "{} --force can only be used for builds or with --clean",
             "error:".red().bold()
         );
+        process::exit(1);
+    }
+
+    if cli.since.is_some() && !operation.allows_since() {
+        eprintln!("{} --since is not supported for this operation", "error:".red().bold());
         process::exit(1);
     }
     if cli.since.is_some() && cli.list == 1 {
@@ -395,12 +465,13 @@ fn main() {
 
     // --schema doesn't need the full DAG, but it does need imports resolved
     // so it can show schemas for imported modules.
-    if let Some(ref filter) = cli.schema {
+    if matches!(operation, Operation::Schema) {
+        let filter = cli.schema.as_deref().expect("schema operation has a filter");
         let registry = default_registry(&tracker);
         find_and_chdir_project_root();
         let module = parse_build_bit();
         let imports = resolve_imports_or_exit(&module, bit::import::UpdateMode::None);
-        let filter = if filter.is_empty() { None } else { Some(filter.as_str()) };
+        let filter = if filter.is_empty() { None } else { Some(filter) };
         if cli.json {
             print_schema_json(&registry, &imports.roots, filter);
         } else {
@@ -410,21 +481,14 @@ fn main() {
     }
 
     // --info doesn't need the full DAG
-    if cli.info {
+    if matches!(operation, Operation::Info) {
         find_and_chdir_project_root();
         print_info();
         return;
     }
 
     // --update re-resolves git imports and rewrites BUILD.bit.lock.
-    if cli.update {
-        if cli.clean || cli.test || cli.dump || cli.list > 0 || cli.plan || cli.graph {
-            eprintln!(
-                "{} --update is mutually exclusive with other modes",
-                "error:".red().bold()
-            );
-            process::exit(1);
-        }
+    if matches!(operation, Operation::Update) {
         find_and_chdir_project_root();
         let module = parse_build_bit();
         let filter = if cli.targets.is_empty() {
@@ -448,33 +512,14 @@ fn main() {
         return;
     }
 
-    if cli.force && !cli.clean {
-        eprintln!("{} --force can only be used with --clean", "error:".red().bold());
-        process::exit(1);
-    }
-
     // --cache operates on the global cache and needs no project.
-    if cli.cache {
-        if cli.test || cli.dump || cli.list > 0 || cli.plan || cli.graph || cli.force || !cli.targets.is_empty() {
-            eprintln!("{} --cache can only be combined with --clean", "error:".red().bold());
+    if matches!(operation, Operation::Cache) {
+        if !cli.targets.is_empty() {
+            eprintln!("{} --cache does not accept targets", "error:".red().bold());
             process::exit(1);
         }
         manage_cache(cli.clean);
         return;
-    }
-
-    // Validate mutually exclusive mode flags. `--plan` and `--graph` are
-    // the one permitted combination: together they render a coloured
-    // graph annotated with each block's planned action.
-    let exclusive_modes = [cli.clean, cli.test, cli.dump, cli.list > 0];
-    let exclusive_count = exclusive_modes.iter().filter(|&&b| b).count();
-    let with_plan_or_graph = cli.plan || cli.graph;
-    if exclusive_count > 1 || (exclusive_count == 1 && with_plan_or_graph) {
-        eprintln!(
-            "{} --plan, --clean, --test, --dump, --list, and --graph are mutually exclusive (except --plan --graph)",
-            "error:".red().bold()
-        );
-        process::exit(1);
     }
 
     find_and_chdir_project_root();
@@ -486,7 +531,7 @@ fn main() {
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
     let targets = &cli.targets;
 
-    if cli.graph {
+    if matches!(operation, Operation::Graph) {
         let (_module, mut dag, base, _store) = load_module(&registry, &params);
         let Some(names) = selected_order_or_exit(
             &dag,
@@ -511,7 +556,7 @@ fn main() {
             std::collections::HashMap::new()
         };
         println!("{}", bit::graph::render(&dag, &names, &styles));
-    } else if cli.plan {
+    } else if matches!(operation, Operation::Plan) {
         let (_module, mut dag, base, _store) = load_module(&registry, &params);
         let Some(names) = selected_order_or_exit(
             &dag,
@@ -529,14 +574,14 @@ fn main() {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
-    } else if cli.clean {
+    } else if matches!(operation, Operation::Clean) {
         let (_module, mut dag, _base, store) = load_module(&registry, &params);
         let output = make_output(&dag, targets, cli.debug, cli.long);
         if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, targets, cli.force) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
-    } else if cli.test {
+    } else if matches!(operation, Operation::Test) {
         let (_module, mut dag, base, store) = load_module(&registry, &params);
         let Some(names) = selected_order_or_exit(
             &dag,
@@ -555,7 +600,7 @@ fn main() {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
-    } else if cli.list > 0 {
+    } else if matches!(operation, Operation::List) {
         let (_module, dag, base, _store) = load_module(&registry, &params);
         if cli.since.is_some() {
             let Some(names) = selected_order_or_exit(
@@ -581,7 +626,7 @@ fn main() {
                 }
             }
         }
-    } else if cli.dump {
+    } else if matches!(operation, Operation::Dump) {
         let (_module, mut dag, base, _store) = load_module(&registry, &params);
         let Some(names) = selected_order_or_exit(
             &dag,
@@ -613,8 +658,12 @@ fn main() {
             return;
         };
         let output = output_for_names(&names, cli.debug, cli.long);
-        if let Err(e) = engine::apply_selected(&mut dag, &base, store.as_ref(), &cache, &output, &names, jobs, &tracker)
-        {
+        let result = if cli.force {
+            engine::apply_selected_forced(&mut dag, &base, store.as_ref(), &cache, &output, &names, jobs, &tracker)
+        } else {
+            engine::apply_selected(&mut dag, &base, store.as_ref(), &cache, &output, &names, jobs, &tracker)
+        };
+        if let Err(e) = result {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }

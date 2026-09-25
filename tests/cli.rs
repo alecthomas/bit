@@ -9,6 +9,15 @@ fn run_bit(project: &std::path::Path, args: &[&str]) -> Output {
         .expect("run bit")
 }
 
+fn run_bit_with_cache(project: &std::path::Path, cache: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_bit"))
+        .args(args)
+        .current_dir(project)
+        .env("BIT_CACHE_DIR", cache)
+        .output()
+        .expect("run bit")
+}
+
 fn run_git(project: &std::path::Path, args: &[&str]) -> Output {
     bit::git::command()
         .args(args)
@@ -53,6 +62,49 @@ target deploy = [beta]
     assert!(stdout.contains("beta"));
     assert!(stdout.contains("exec.exec"));
     assert!(!stdout.contains("Build the project"));
+}
+
+#[test]
+fn force_rebuilds_implicit_and_specified_blocks_without_cache() {
+    let project = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("BUILD.bit"),
+        r#"
+implicit = exec {
+  command = "printf x >> implicit.txt"
+  output = "implicit.txt"
+  inputs = []
+}
+
+explicit specified = exec {
+  command = "printf x >> specified.txt"
+  output = "specified.txt"
+  inputs = []
+}
+"#,
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        let output = run_bit_with_cache(project.path(), cache.path(), args);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+
+    run(&[]);
+    run(&[]);
+    assert_eq!(fs::read_to_string(project.path().join("implicit.txt")).unwrap(), "x");
+    assert!(!project.path().join("specified.txt").exists());
+
+    run(&["--force"]);
+    assert_eq!(fs::read_to_string(project.path().join("implicit.txt")).unwrap(), "xx");
+
+    run(&["specified"]);
+    run(&["specified"]);
+    assert_eq!(fs::read_to_string(project.path().join("specified.txt")).unwrap(), "x");
+
+    run(&["--force", "specified"]);
+    assert_eq!(fs::read_to_string(project.path().join("specified.txt")).unwrap(), "xx");
 }
 
 #[test]
