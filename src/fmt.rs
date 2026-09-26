@@ -1,8 +1,7 @@
-//! Source formatter for `.bit` files. Formatting the AST would discard comments
-//! and the original spelling of strings and heredocs, so this works on source.
+//! Canonical source formatting from the parser's semantic AST and comments.
 
-use crate::ast::{Module, Pos, Statement};
-use crate::parser::{self, ParseError};
+use crate::ast::{Block, Module, Phase, Pos, Statement};
+use crate::parser::{self, Comment, ParseError, StatementSource};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FormatError {
@@ -10,85 +9,244 @@ pub enum FormatError {
     Parse(#[from] ParseError),
     #[error("formatting would change the meaning of the file")]
     ChangedMeaning,
+    #[error("formatting would change the comments in the file")]
+    ChangedComments,
 }
 
-/// Format source while retaining comments and literal contents verbatim.
 pub fn format(source: &str, filename: &str) -> Result<String, FormatError> {
-    let mut before = parser::parse(source, filename)?;
-    let mut result = String::with_capacity(source.len());
-    let mut depth = 0usize;
-    let mut quote = Vec::new();
-    let mut heredoc: Option<String> = None;
+    let parsed = parser::parse_with_comments(source, filename)?;
+    let mut result = String::new();
+    let mut comment_index = 0;
 
-    for line in source.split_inclusive('\n') {
-        if let Some(label) = &heredoc {
-            result.push_str(line);
-            if is_heredoc_end(line, label) {
-                heredoc = None;
+    for (index, (statement, syntax)) in parsed.module.statements.iter().zip(&parsed.statements).enumerate() {
+        let leading_start = comment_index;
+        while comment_index < parsed.comments.len() && parsed.comments[comment_index].offset < syntax.start {
+            comment_index += 1;
+        }
+        let leading = &parsed.comments[leading_start..comment_index];
+        let doc_count = statement_doc(statement).map_or(0, |doc| doc.split('\n').count());
+        let ordinary_count = leading.len().saturating_sub(doc_count);
+        let mut ordinary_start = 0;
+
+        if index == 0 {
+            let module_doc_count = parsed.module.doc.as_ref().map_or(0, |doc| doc.split('\n').count());
+            for comment in leading.iter().take(module_doc_count) {
+                push_comment(&mut result, *comment, 0);
             }
-            continue;
-        }
-
-        let (content, newline) = if let Some(content) = line.strip_suffix("\r\n") {
-            (content, "\r\n")
-        } else if let Some(content) = line.strip_suffix('\n') {
-            (content, "\n")
+            if module_doc_count > 0 {
+                result.push('\n');
+            }
+            ordinary_start = module_doc_count;
         } else {
-            (line, "")
-        };
-
-        if quote.is_empty() && content.trim().is_empty() {
-            result.push_str(newline);
-            continue;
-        }
-
-        let was_in_quote = !quote.is_empty();
-        let (tokens, next_heredoc) = tokenize(content, &mut quote);
-        if was_in_quote {
-            // Continuation lines are literal content, including their indentation.
-            result.push_str(line);
-        } else {
-            let leading_close = tokens.first().is_some_and(|token| token.text == "}");
-            let indent = depth.saturating_sub(usize::from(leading_close));
-            result.push_str(&"  ".repeat(indent));
-            for (index, token) in tokens.iter().enumerate() {
-                if index > 0 {
-                    let previous = &tokens[index - 1];
-                    if token.comment {
-                        result.push_str("  ");
-                    } else if needs_space(previous.text, token.text) {
-                        result.push(' ');
-                    }
+            // A comment parsed as documentation must stay before its statement,
+            // even if it was originally written after the previous one.
+            for comment in &leading[..ordinary_count] {
+                if is_inline(source, comment.offset) {
+                    push_inline_comment(&mut result, *comment);
+                    ordinary_start += 1;
+                } else {
+                    break;
                 }
-                result.push_str(token.text);
             }
-            result.push_str(newline);
+            result.push('\n');
         }
 
-        for token in tokens {
-            match token.text {
-                "{" => depth += 1,
-                "}" => depth = depth.saturating_sub(1),
-                _ => {}
-            }
+        for comment in &leading[ordinary_start..ordinary_count] {
+            push_comment(&mut result, *comment, 0);
         }
-        heredoc = next_heredoc;
-        if !quote.is_empty() {
-            scan_quoted(newline, &mut quote);
+        if ordinary_start < ordinary_count && !matches!(statement, Statement::Import(_) | Statement::Let(_)) {
+            // Detached section comments must not become statement docs.
+            result.push('\n');
         }
-    }
+        for comment in &leading[ordinary_count..] {
+            push_comment(&mut result, *comment, 0);
+        }
 
-    if !source.is_empty() && !result.ends_with('\n') {
+        let inner_start = comment_index;
+        while comment_index < parsed.comments.len() && parsed.comments[comment_index].offset < syntax.end {
+            comment_index += 1;
+        }
+        render_statement(
+            &mut result,
+            statement,
+            syntax,
+            &parsed.comments[inner_start..comment_index],
+            source,
+        );
         result.push('\n');
     }
 
-    let mut after = parser::parse(&result, filename)?;
+    for comment in &parsed.comments[comment_index..] {
+        if !result.is_empty() && is_inline(source, comment.offset) {
+            push_inline_comment(&mut result, *comment);
+        } else {
+            if !result.is_empty() && !result.ends_with("\n\n") {
+                result.push('\n');
+            }
+            push_comment(&mut result, *comment, 0);
+        }
+    }
+
+    let after_parsed = parser::parse_with_comments(&result, filename)?;
+    if !parsed
+        .comments
+        .iter()
+        .map(|comment| comment.text.trim_end_matches('\r'))
+        .eq(after_parsed.comments.iter().map(|comment| comment.text))
+    {
+        return Err(FormatError::ChangedComments);
+    }
+    let mut before = parsed.module;
+    let mut after = after_parsed.module;
     clear_positions(&mut before);
     clear_positions(&mut after);
     if before != after {
         return Err(FormatError::ChangedMeaning);
     }
     Ok(result)
+}
+
+fn statement_doc(statement: &Statement) -> Option<&str> {
+    match statement {
+        Statement::Block(value) => value.doc.as_deref(),
+        Statement::Param(value) => value.doc.as_deref(),
+        Statement::Target(value) => value.doc.as_deref(),
+        Statement::Output(value) => value.doc.as_deref(),
+        Statement::Import(_) | Statement::Let(_) => None,
+    }
+}
+
+fn is_inline(source: &str, offset: usize) -> bool {
+    source[..offset]
+        .rsplit('\n')
+        .next()
+        .is_some_and(|line| !line.trim().is_empty())
+}
+
+fn push_comment(result: &mut String, comment: Comment<'_>, indent: usize) {
+    result.push_str(&" ".repeat(indent));
+    result.push_str(comment.text.trim_end_matches('\r'));
+    result.push('\n');
+}
+
+fn push_inline_comment(result: &mut String, comment: Comment<'_>) {
+    if result.ends_with('\n') {
+        result.pop();
+    }
+    result.push_str("  ");
+    result.push_str(comment.text.trim_end_matches('\r'));
+    result.push('\n');
+}
+
+fn render_statement(
+    result: &mut String,
+    statement: &Statement,
+    syntax: &StatementSource,
+    comments: &[Comment<'_>],
+    source: &str,
+) {
+    match statement {
+        Statement::Import(value) => {
+            result.push_str("import ");
+            result.push_str(syntax.expression.trim_end());
+            if let Some(alias) = &value.alias {
+                result.push_str(" as ");
+                result.push_str(alias);
+            }
+        }
+        Statement::Let(value) => {
+            result.push_str("let ");
+            result.push_str(&value.name);
+            if let Some(typ) = &value.typ {
+                result.push_str(&format!(" : {typ}"));
+            }
+            result.push_str(" = ");
+            result.push_str(syntax.expression.trim_end());
+        }
+        Statement::Param(value) => {
+            result.push_str("param ");
+            result.push_str(&value.name);
+            if syntax.param_type_explicit {
+                result.push_str(&format!(" : {}", value.typ));
+            }
+            if value.default.is_some() {
+                result.push_str(" = ");
+                result.push_str(syntax.expression.trim_end());
+            }
+        }
+        Statement::Target(value) => {
+            result.push_str("target ");
+            result.push_str(&value.name);
+            result.push_str(" = [");
+            result.push_str(&value.blocks.join(", "));
+            result.push(']');
+        }
+        Statement::Output(value) => {
+            result.push_str("output ");
+            result.push_str(&value.name);
+            result.push_str(" = ");
+            result.push_str(syntax.expression.trim_end());
+        }
+        Statement::Block(value) => render_block(result, value, syntax, comments, source),
+    }
+}
+
+fn render_block(result: &mut String, block: &Block, syntax: &StatementSource, comments: &[Comment<'_>], source: &str) {
+    match block.phase {
+        Phase::Pre => result.push_str("pre "),
+        Phase::Post => result.push_str("post "),
+        Phase::Default => {}
+    }
+    if block.protected {
+        result.push_str("protected ");
+    }
+    if block.explicit {
+        result.push_str("explicit ");
+    }
+    result.push_str(&block.name);
+    if !block.matrix_keys.is_empty() {
+        result.push('[');
+        result.push_str(&block.matrix_keys.join(", "));
+        result.push(']');
+    }
+    result.push_str(" = ");
+    result.push_str(&block.provider);
+    if block.resource != block.provider {
+        result.push('.');
+        result.push_str(&block.resource);
+    }
+    if block.fields.is_empty() && comments.is_empty() {
+        result.push_str(" {}");
+        return;
+    }
+    result.push_str(" {\n");
+
+    let mut comment_index = 0;
+    for (index, field) in block.fields.iter().enumerate() {
+        let field_start = syntax.fields[index].start;
+        while comment_index < comments.len() && comments[comment_index].offset < field_start {
+            let comment = comments[comment_index];
+            if index > 0 && is_inline(source, comment.offset) {
+                push_inline_comment(result, comment);
+            } else {
+                push_comment(result, comment, 2);
+            }
+            comment_index += 1;
+        }
+        result.push_str("  ");
+        result.push_str(&field.name);
+        result.push_str(" = ");
+        result.push_str(syntax.fields[index].expression.trim_end());
+        result.push('\n');
+    }
+    for comment in &comments[comment_index..] {
+        if !block.fields.is_empty() && is_inline(source, comment.offset) {
+            push_inline_comment(result, *comment);
+        } else {
+            push_comment(result, *comment, 2);
+        }
+    }
+    result.push('}');
 }
 
 fn clear_positions(module: &mut Module) {
@@ -105,203 +263,82 @@ fn clear_positions(module: &mut Module) {
     }
 }
 
-fn is_heredoc_end(line: &str, label: &str) -> bool {
-    line.trim_start_matches([' ', '\t'])
-        .strip_prefix(label)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['\n', '\r']))
-}
-
-struct Token<'a> {
-    text: &'a str,
-    comment: bool,
-}
-
-fn tokenize<'a>(line: &'a str, quote: &mut Vec<QuoteFrame>) -> (Vec<Token<'a>>, Option<String>) {
-    let mut tokens = Vec::new();
-    let mut heredoc = None;
-    let mut offset = 0;
-    while offset < line.len() {
-        let rest = &line[offset..];
-        let Some(current) = rest.chars().next() else {
-            break;
-        };
-        if !quote.is_empty() {
-            let end = scan_quoted(rest, quote);
-            tokens.push(Token {
-                text: &rest[..end],
-                comment: false,
-            });
-            offset += end;
-            continue;
-        }
-        if current.is_whitespace() {
-            offset += current.len_utf8();
-            continue;
-        }
-        if current == '#' && (tokens.is_empty() || rest[1..].chars().next().is_none_or(char::is_whitespace)) {
-            tokens.push(Token {
-                text: rest,
-                comment: true,
-            });
-            break;
-        }
-        if current == '\'' || current == '"' {
-            quote.push(QuoteFrame::String {
-                delimiter: current,
-                escaped: false,
-            });
-            let end = scan_quoted(&rest[current.len_utf8()..], quote) + current.len_utf8();
-            let text = &rest[..end];
-            tokens.push(Token { text, comment: false });
-            offset += end;
-            continue;
-        }
-        if let Some(opener) = rest.strip_prefix("<<") {
-            let label_start = usize::from(opener.starts_with('-'));
-            let label_len = opener[label_start..]
-                .bytes()
-                .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-                .count();
-            if label_len > 0 {
-                let end = 2 + label_start + label_len;
-                heredoc = Some(opener[label_start..label_start + label_len].to_owned());
-                tokens.push(Token {
-                    text: &rest[..end],
-                    comment: false,
-                });
-                offset += end;
-                continue;
-            }
-        }
-        let symbol = if rest.starts_with("==") || rest.starts_with("!=") {
-            Some(2)
-        } else if "{}[](),.=+|:".contains(current) {
-            Some(current.len_utf8())
-        } else {
-            None
-        };
-        if let Some(length) = symbol {
-            tokens.push(Token {
-                text: &rest[..length],
-                comment: false,
-            });
-            offset += length;
-            continue;
-        }
-        let length = rest
-            .char_indices()
-            .skip(1)
-            .find(|(_, character)| character.is_whitespace() || "{}[](),.=+|:'\"#".contains(*character))
-            .map_or(rest.len(), |(index, _)| index);
-        tokens.push(Token {
-            text: &rest[..length],
-            comment: false,
-        });
-        offset += length;
-    }
-    (tokens, heredoc)
-}
-
-enum QuoteFrame {
-    String { delimiter: char, escaped: bool },
-    Interpolation { depth: usize },
-}
-
-fn scan_quoted(rest: &str, frames: &mut Vec<QuoteFrame>) -> usize {
-    let mut offset = 0;
-    while offset < rest.len() && !frames.is_empty() {
-        let Some(current) = rest[offset..].chars().next() else {
-            break;
-        };
-        let mut pop = false;
-        let mut push = None;
-        let mut length = current.len_utf8();
-        match frames.last_mut() {
-            Some(QuoteFrame::String { delimiter, escaped }) => {
-                if *escaped {
-                    *escaped = false;
-                } else if *delimiter == '"' && current == '\\' {
-                    *escaped = true;
-                } else if *delimiter == '"' && rest[offset..].starts_with("#{") {
-                    push = Some(QuoteFrame::Interpolation { depth: 1 });
-                    length = 2;
-                } else if current == *delimiter {
-                    pop = true;
-                }
-            }
-            Some(QuoteFrame::Interpolation { depth }) => {
-                if current == '\'' || current == '"' {
-                    push = Some(QuoteFrame::String {
-                        delimiter: current,
-                        escaped: false,
-                    });
-                } else if current == '{' {
-                    *depth += 1;
-                } else if current == '}' {
-                    *depth -= 1;
-                    pop = *depth == 0;
-                }
-            }
-            None => break,
-        }
-        offset += length;
-        if pop {
-            frames.pop();
-        }
-        if let Some(frame) = push {
-            frames.push(frame);
-        }
-    }
-    offset
-}
-
-fn needs_space(previous: &str, current: &str) -> bool {
-    if current == "." || previous == "." {
-        return false;
-    }
-    if matches!(current, "," | ")" | "]") || matches!(previous, "(" | "[") {
-        return false;
-    }
-    if matches!(current, "(" | "[") {
-        return matches!(previous, "=" | "+" | "|" | "==" | "!=");
-    }
-    if current == "}" && previous == "{" {
-        return false;
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::format;
 
     #[test]
-    fn formats_spacing_and_indentation_without_moving_comments() {
-        let source = "#Heading\n\n# Block docs\njob=exec{\n  # Field docs\ncommand=\"# literal #{name}\"#  inline\n  inputs=[1,2]\n}\n# Tail\n";
-        let expected = "#Heading\n\n# Block docs\njob = exec {\n  # Field docs\n  command = \"# literal #{name}\"  #  inline\n  inputs = [1, 2]\n}\n# Tail\n";
+    fn formats_comments_and_block_spacing() {
+        let source = "# Heading\n\n# Block docs\njob=exec{\n  # Field docs\ncommand='echo' # inline\n}\nother=exec{}\n";
+        let expected = "# Heading\n\n# Block docs\njob = exec {\n  # Field docs\n  command = 'echo'  # inline\n}\n\nother = exec {}\n";
         assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
         assert_eq!(format(expected, "BUILD.bit").unwrap(), expected);
     }
 
     #[test]
-    fn leaves_heredoc_and_multiline_string_contents_intact() {
-        let source = "job=exec{\ncommand=<<-EOF\n    # Keep indentation\n    echo #{name}\n  EOF\nother='line one\n    \n  # line two'\n}\n";
+    fn preserves_heredoc_and_multiline_string_spelling() {
+        let source = "job=exec{\ncommand=<<-EOF\n    echo #{name}\n  EOF\nother='line one\nline two'\n}\n";
         let formatted = format(source, "BUILD.bit").unwrap();
-        assert!(formatted.contains("    # Keep indentation\n    echo #{name}\n  EOF\n"));
-        assert!(formatted.contains("other = 'line one\n    \n  # line two'\n"));
+        assert!(formatted.contains("command = <<-EOF\n    echo #{name}\n  EOF\n"));
+        assert!(formatted.contains("other = 'line one\nline two'"));
         assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
     }
 
     #[test]
-    fn preserves_quotes_and_hashes_inside_interpolation() {
-        let source = r##"let message="hello #{exec("printf '# done'")}"  # note
-"##;
+    fn keeps_literal_interpolation_markers_literal() {
+        let source = r#"let message = "\#{literal} #{name}""#;
         let formatted = format(source, "BUILD.bit").unwrap();
-        assert_eq!(
-            formatted,
-            r##"let message = "hello #{exec("printf '# done'")}"  # note
-"##
-        );
+        assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
+    }
+
+    #[test]
+    fn keeps_detached_comments_detached() {
+        let source = "first=exec{}\n# section\n\n# docs\nsecond=exec{}\n";
+        let expected = "first = exec {}\n\n# section\n\n# docs\nsecond = exec {}\n";
+        assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
+        assert_eq!(format(expected, "BUILD.bit").unwrap(), expected);
+    }
+
+    #[test]
+    fn keeps_leading_comment_before_let_out_of_module_doc() {
+        let source = "# section\nlet value=1\n";
+        let expected = "# section\nlet value = 1\n";
+        assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
+    }
+
+    #[test]
+    fn keeps_comment_adjacent_to_let_after_a_block() {
+        let source = "job=exec{}\n# Explains the binding.\nlet tree_sitter_rev=exec('git')|trim\n";
+        let expected = "job = exec {}\n\n# Explains the binding.\nlet tree_sitter_rev = exec('git')|trim\n";
+        assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
+        assert_eq!(format(expected, "BUILD.bit").unwrap(), expected);
+    }
+
+    #[test]
+    fn moves_attached_comment_after_block_before_next_statement() {
+        let source = "first=exec{} # next block\nsecond=exec{}\n";
+        let expected = "first = exec {}\n\n# next block\nsecond = exec {}\n";
+        assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
+        assert_eq!(format(expected, "BUILD.bit").unwrap(), expected);
+    }
+
+    #[test]
+    fn normalizes_crlf_and_preserves_comment_text() {
+        let source = "# Heading\r\n\r\njob=exec{}\r\n";
+        assert_eq!(format(source, "BUILD.bit").unwrap(), "# Heading\n\njob = exec {}\n");
+    }
+
+    #[test]
+    fn formats_all_statement_and_expression_forms() {
+        let source = "import 'example.com/mod' as mod\nparam names:[string]=['one','two']\nlet selected=if true then [1]+[2] else [3]\noutput chosen=selected[0].name\npre protected explicit job[names]=exec{config={answer=42}, command=\"#{mod.value | trim}\"}\ntarget default=[job]\n";
+        let formatted = format(source, "BUILD.bit").unwrap();
+        assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
+    }
+
+    #[test]
+    fn preserves_nested_expression_spelling() {
+        let source = "let branch=if env('MODE')=='prod' then exec('cmd')|trim else 'dev'\nlet options={'a b'=1,'x\"y'=2}\nlet literal='line one\nline two'\n";
+        let formatted = format(source, "BUILD.bit").unwrap();
         assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
     }
 
@@ -311,8 +348,17 @@ mod tests {
     }
 
     #[test]
-    fn formats_repository_build_file_without_changing_its_meaning() {
+    fn formats_repository_build_files_without_changing_their_meaning() {
+        for source in [include_str!("../BUILD.bit"), include_str!("../example/BUILD.bit")] {
+            let formatted = format(source, "BUILD.bit").unwrap();
+            assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
+        }
+    }
+
+    #[test]
+    fn repository_build_file_keeps_heredocs_and_let_comment() {
         let formatted = format(include_str!("../BUILD.bit"), "BUILD.bit").unwrap();
-        assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
+        assert!(formatted.contains("command = <<-EOF\n"));
+        assert!(formatted.contains("# extension's grammar revision.\nlet tree_sitter_rev"));
     }
 }

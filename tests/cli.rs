@@ -63,7 +63,7 @@ fn fmt_without_a_path_formats_the_project_build_file() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         fs::read_to_string(path).unwrap(),
-        "# Comment\njob = exec { command = 'true' }\n"
+        "# Comment\njob = exec {\n  command = 'true'\n}\n"
     );
     assert_eq!(
         fs::read_to_string(project.path().join("other.bit")).unwrap(),

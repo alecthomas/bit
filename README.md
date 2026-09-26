@@ -78,7 +78,7 @@ bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
 bit --schema [provider.member]  # show provider resource and function schemas
 bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
-bit --fmt        # format the project's BUILD.bit, preserving comments
+bit --fmt        # canonically format the project's BUILD.bit, preserving comments
 bit --fmt path/to/file.bit  # format a specified .bit file in place
 bit --cache      # show the size of the shared build cache
 bit --cache --clean  # delete every cached receipt and artifact
@@ -86,6 +86,10 @@ bit --long       # disable live scrolling regions and stream every output line
 bit --quiet      # suppress output unless an error occurs (also -q)
 bit --since origin/master  # apply blocks affected since the branch point
 ```
+
+`--fmt` separates top-level declarations with one empty line and puts each
+block field on its own line. It retains comments and their attachment to
+declarations, as well as expression spelling such as heredocs and quoted strings.
 
 All block/target-taking modes (`bit`, `--plan`, `--clean`, `--graph`, `--dump`)
 accept the same positional selector: no argument uses the `default` target

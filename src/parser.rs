@@ -13,15 +13,46 @@ pub struct ParseError {
     pub message: String,
 }
 
+/// Source details retained for formatting, separate from the semantic AST.
+pub(crate) struct ParsedModule<'a> {
+    pub(crate) module: Module,
+    pub(crate) comments: Vec<Comment<'a>>,
+    pub(crate) statements: Vec<StatementSource<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Comment<'a> {
+    /// Byte offset from the start of the original source.
+    pub(crate) offset: usize,
+    pub(crate) text: &'a str,
+}
+
+pub(crate) struct StatementSource<'a> {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) expression: &'a str,
+    pub(crate) param_type_explicit: bool,
+    pub(crate) fields: Vec<FieldSource<'a>>,
+}
+
+pub(crate) struct FieldSource<'a> {
+    pub(crate) start: usize,
+    pub(crate) expression: &'a str,
+}
+
 pub fn parse(input: &str, filename: &str) -> Result<Module, ParseError> {
+    Ok(parse_with_comments(input, filename)?.module)
+}
+
+pub(crate) fn parse_with_comments<'a>(input: &'a str, filename: &str) -> Result<ParsedModule<'a>, ParseError> {
     // The inner parser captures byte offsets in Pos.line (temporarily).
     // We fix them up to real line:col after parsing.
-    let mut m = module.parse(input).map_err(|e| {
+    let mut parsed = module.parse(input).map_err(|e| {
         let message = format_parse_error(input, filename, e.offset(), e.inner());
         ParseError { message }
     })?;
     // Convert byte offsets to line:col and attach filename
-    for stmt in &mut m.statements {
+    for stmt in &mut parsed.module.statements {
         let pos = match stmt {
             Statement::Import(i) => &mut i.pos,
             Statement::Block(b) => &mut b.pos,
@@ -36,7 +67,7 @@ pub fn parse(input: &str, filename: &str) -> Result<Module, ParseError> {
         pos.line = prefix.chars().filter(|&c| c == '\n').count() + 1;
         pos.col = prefix.len() - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0) + 1;
     }
-    Ok(m)
+    Ok(parsed)
 }
 
 fn format_parse_error(input: &str, filename: &str, position: usize, err: &ContextError) -> String {
@@ -88,26 +119,43 @@ fn is_comment_start(input: &str) -> bool {
     }
 }
 
-/// Skip whitespace and comment lines.
-fn ws_and_comments(input: &mut &str) -> ModalResult<()> {
+fn comment_line<'i>(input: &mut &'i str) -> &'i str {
+    let before = *input;
+    let end = before.find('\n').unwrap_or(before.len());
+    *input = &before[end..];
+    if input.starts_with('\n') {
+        *input = &input[1..];
+    }
+    &before[..end]
+}
+
+/// Skip whitespace and comment lines, retaining their offsets in this slice.
+fn ws_and_comments<'i>(input: &mut &'i str) -> ModalResult<Vec<Comment<'i>>> {
+    let start_len = input.len();
+    let mut comments = Vec::new();
     loop {
         ws(input)?;
         if is_comment_start(input) {
-            take_while(0.., |c: char| c != '\n').void().parse_next(input)?;
-            opt('\n').parse_next(input)?;
+            let offset = start_len - input.len();
+            comments.push(Comment {
+                offset,
+                text: comment_line(input),
+            });
         } else {
             break;
         }
     }
-    Ok(())
+    Ok(comments)
 }
 
 /// Skip whitespace and comments, capturing the comment block directly
 /// adjacent to the following statement as a doc string. A blank line
-/// between a comment block and the statement detaches it — the
-/// comment is consumed but discarded.
-fn ws_capturing_doc(input: &mut &str) -> Option<String> {
+/// between a comment block and the statement detaches it as documentation.
+/// All comments remain available in the parsed source details.
+fn ws_capturing_doc<'i>(input: &mut &'i str) -> (Option<String>, Vec<Comment<'i>>) {
+    let start_len = input.len();
     let mut doc_lines: Vec<String> = Vec::new();
+    let mut comments = Vec::new();
     let mut had_blank_line = false;
     loop {
         // Skip whitespace, tracking blank lines
@@ -131,16 +179,13 @@ fn ws_capturing_doc(input: &mut &str) -> Option<String> {
                 doc_lines.clear();
             }
             had_blank_line = false;
-            // Consume `#`, optional space, then the rest of the line
-            *input = &input[1..];
-            if input.starts_with(' ') {
-                *input = &input[1..];
-            }
-            let line: &str = take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| c != '\n')
-                .parse_next(input)
-                .unwrap_or_default();
-            doc_lines.push(line.to_owned());
-            let _ = opt::<_, _, ErrMode<ContextError>, _>('\n').parse_next(input);
+            let offset = start_len - input.len();
+            let text = comment_line(input);
+            comments.push(Comment { offset, text });
+            let line = text
+                .strip_prefix("# ")
+                .unwrap_or_else(|| text.strip_prefix('#').unwrap_or(text));
+            doc_lines.push(line.trim_end_matches('\r').to_owned());
         } else {
             // A blank line between the final comment block and the statement
             // means the comment is not attached — discard it.
@@ -151,9 +196,9 @@ fn ws_capturing_doc(input: &mut &str) -> Option<String> {
         }
     }
     if doc_lines.is_empty() {
-        None
+        (None, comments)
     } else {
-        Some(doc_lines.join("\n"))
+        (Some(doc_lines.join("\n")), comments)
     }
 }
 
@@ -754,41 +799,68 @@ fn strip_indent(parts: &mut [StringPart]) {
 
 // ── Fields ──
 
-fn field(input: &mut &str) -> ModalResult<Field> {
+fn field<'i>(input: &mut &'i str) -> ModalResult<(Field, &'i str)> {
     let name = ident_string.parse_next(input)?;
     cut_err(lex('='))
         .context(StrContext::Label("'=' in field"))
         .parse_next(input)?;
+    let before_value = *input;
     let value = cut_err(expr)
         .context(StrContext::Label("field value"))
         .parse_next(input)?;
-    Ok(Field { name, value })
+    let value_source = &before_value[..before_value.len() - input.len()];
+    Ok((Field { name, value }, value_source))
 }
 
 // ── Statements ──
 
-fn module(input: &mut &str) -> ModalResult<Module> {
+fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
     let full_len = input.len();
 
     // Capture the leading comment block at the top of the file.
-    let module_doc = leading_module_doc(input);
+    let (module_doc, mut comments) = leading_module_doc(input);
 
     let mut statements = Vec::new();
+    let mut sources = Vec::new();
     loop {
-        let doc = ws_capturing_doc(input);
+        let preceding = full_len - input.len();
+        let (doc, mut leading_comments) = ws_capturing_doc(input);
+        for comment in &mut leading_comments {
+            comment.offset += preceding;
+        }
+        comments.extend(leading_comments);
         if input.is_empty() {
             break;
         }
         // Byte offset of the statement start (stored temporarily in pos.line,
         // converted to real line:col by parse() after parsing completes).
         let offset = full_len - input.len();
-        let mut stmt = alt((
-            import_stmt.map(Statement::Import),
-            let_stmt.map(Statement::Let),
-            |input: &mut &str| param_stmt(doc.clone(), input).map(Statement::Param),
-            |input: &mut &str| target_stmt(doc.clone(), input).map(Statement::Target),
-            |input: &mut &str| output_stmt(doc.clone(), input).map(Statement::Output),
-            |input: &mut &str| block_stmt(doc.clone(), input).map(Statement::Block),
+        let (mut stmt, mut inner_comments, fields, expression, param_type_explicit) = alt((
+            import_stmt.map(|(value, source)| (Statement::Import(value), Vec::new(), Vec::new(), source, false)),
+            let_stmt.map(|(value, source)| (Statement::Let(value), Vec::new(), Vec::new(), source, false)),
+            |input: &mut &'i str| {
+                param_stmt(doc.clone(), input).map(|(value, explicit, source)| {
+                    (
+                        Statement::Param(value),
+                        Vec::new(),
+                        Vec::new(),
+                        source.unwrap_or(""),
+                        explicit,
+                    )
+                })
+            },
+            |input: &mut &'i str| {
+                target_stmt(doc.clone(), input)
+                    .map(|value| (Statement::Target(value), Vec::new(), Vec::new(), "", false))
+            },
+            |input: &mut &'i str| {
+                output_stmt(doc.clone(), input)
+                    .map(|(value, source)| (Statement::Output(value), Vec::new(), Vec::new(), source, false))
+            },
+            |input: &mut &'i str| {
+                block_stmt(doc.clone(), input)
+                    .map(|(value, comments, fields)| (Statement::Block(value), comments, fields, "", false))
+            },
         ))
         .context(StrContext::Label("statement"))
         .parse_next(input)?;
@@ -801,11 +873,32 @@ fn module(input: &mut &str) -> ModalResult<Module> {
             Statement::Target(t) => t.pos.line = offset,
             Statement::Output(o) => o.pos.line = offset,
         }
+        for comment in &mut inner_comments {
+            comment.offset += offset;
+        }
+        comments.extend(inner_comments);
+        sources.push(StatementSource {
+            start: offset,
+            end: full_len - input.len(),
+            expression,
+            param_type_explicit,
+            fields: fields
+                .into_iter()
+                .map(|(start, expression)| FieldSource {
+                    start: offset + start,
+                    expression,
+                })
+                .collect(),
+        });
         statements.push(stmt);
     }
-    Ok(Module {
-        doc: module_doc,
-        statements,
+    Ok(ParsedModule {
+        module: Module {
+            doc: module_doc,
+            statements,
+        },
+        comments,
+        statements: sources,
     })
 }
 
@@ -814,13 +907,14 @@ fn module(input: &mut &str) -> ModalResult<Module> {
 /// trailing blank line(s). If the comment runs directly into a statement
 /// without a blank line separator, nothing is consumed and None is returned
 /// (ws_capturing_doc will pick it up for the first statement instead).
-fn leading_module_doc(input: &mut &str) -> Option<String> {
+fn leading_module_doc<'i>(input: &mut &'i str) -> (Option<String>, Vec<Comment<'i>>) {
+    let start_len = input.len();
     // Skip leading whitespace (but not comments)
     let _ = take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n')
         .parse_next(input);
 
     if !input.starts_with('#') {
-        return None;
+        return (None, Vec::new());
     }
 
     // Save position — we'll only commit if we find a blank line after
@@ -828,19 +922,18 @@ fn leading_module_doc(input: &mut &str) -> Option<String> {
 
     // Collect comment lines
     let mut doc_lines: Vec<String> = Vec::new();
+    let mut comments = Vec::new();
     loop {
         if !input.starts_with('#') {
             break;
         }
-        *input = &input[1..];
-        if input.starts_with(' ') {
-            *input = &input[1..];
-        }
-        let line: &str = take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| c != '\n')
-            .parse_next(input)
-            .unwrap_or_default();
-        doc_lines.push(line.to_owned());
-        let _ = opt::<_, _, ErrMode<ContextError>, _>('\n').parse_next(input);
+        let offset = start_len - input.len();
+        let text = comment_line(input);
+        comments.push(Comment { offset, text });
+        let line = text
+            .strip_prefix("# ")
+            .unwrap_or_else(|| text.strip_prefix('#').unwrap_or(text));
+        doc_lines.push(line.trim_end_matches('\r').to_owned());
     }
 
     // Check if there's a blank line (or EOF) separating this block from what follows
@@ -851,21 +944,23 @@ fn leading_module_doc(input: &mut &str) -> Option<String> {
     if has_blank {
         // Unattached comment — consume and return as module doc
         if !doc_lines.is_empty() {
-            return Some(doc_lines.join("\n"));
+            return (Some(doc_lines.join("\n")), comments);
         }
-        None
+        (None, comments)
     } else {
         // Comment is directly attached to a statement — rewind
         *input = saved;
-        None
+        (None, Vec::new())
     }
 }
 
-fn import_stmt(input: &mut &str) -> ModalResult<Import> {
+fn import_stmt<'i>(input: &mut &'i str) -> ModalResult<(Import, &'i str)> {
     keyword("import").parse_next(input)?;
+    let before_url = *input;
     let url = cut_err(alt((plain_raw_string, plain_string)))
         .context(StrContext::Label("import URL string"))
         .parse_next(input)?;
+    let url_source = &before_url[..before_url.len() - input.len()];
     // `plain_string` / `plain_raw_string` don't eat trailing whitespace, so
     // do it here before probing for the optional `as <ident>` clause.
     ws(input)?;
@@ -874,14 +969,17 @@ fn import_stmt(input: &mut &str) -> ModalResult<Import> {
         cut_err(ident_string).context(StrContext::Label("import alias")),
     ))
     .parse_next(input)?;
-    Ok(Import {
-        pos: Pos::default(),
-        url,
-        alias,
-    })
+    Ok((
+        Import {
+            pos: Pos::default(),
+            url,
+            alias,
+        },
+        url_source,
+    ))
 }
 
-fn let_stmt(input: &mut &str) -> ModalResult<Let> {
+fn let_stmt<'i>(input: &mut &'i str) -> ModalResult<(Let, &'i str)> {
     keyword("let").parse_next(input)?;
     let name = cut_err(ident_string)
         .context(StrContext::Label("let binding name"))
@@ -890,18 +988,23 @@ fn let_stmt(input: &mut &str) -> ModalResult<Let> {
     cut_err(lex('='))
         .context(StrContext::Label("'=' in let"))
         .parse_next(input)?;
+    let before_value = *input;
     let value = cut_err(expr)
         .context(StrContext::Label("let value"))
         .parse_next(input)?;
-    Ok(Let {
-        pos: Pos::default(),
-        name,
-        typ,
-        value,
-    })
+    let value_source = &before_value[..before_value.len() - input.len()];
+    Ok((
+        Let {
+            pos: Pos::default(),
+            name,
+            typ,
+            value,
+        },
+        value_source,
+    ))
 }
 
-fn param_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Param> {
+fn param_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<(Param, bool, Option<&'i str>)> {
     keyword("param").parse_next(input)?;
     let name = cut_err(ident_string)
         .context(StrContext::Label("param name"))
@@ -909,32 +1012,43 @@ fn param_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Param> {
 
     // Type annotation is optional if a default value is provided.
     let explicit_type = opt(preceded(lex(':'), typ)).parse_next(input)?;
-    let default = opt(preceded(lex('='), expr)).parse_next(input)?;
+    let has_explicit_type = explicit_type.is_some();
+    let (default, default_source) = if opt(lex('=')).parse_next(input)?.is_some() {
+        let before_value = *input;
+        let value = cut_err(expr).parse_next(input)?;
+        (Some(value), Some(&before_value[..before_value.len() - input.len()]))
+    } else {
+        (None, None)
+    };
 
     let t = match (explicit_type, &default) {
         (Some(t), _) => t,
         (None, Some(d)) => match infer_type(d) {
             Some(t) => t,
             None => {
-                return cut_err(winnow::combinator::fail::<_, Param, _>)
+                return cut_err(winnow::combinator::fail::<_, (Param, bool, Option<&'i str>), _>)
                     .context(StrContext::Label("cannot infer type for param; add explicit : type"))
                     .parse_next(input);
             }
         },
         (None, None) => {
-            return cut_err(winnow::combinator::fail::<_, Param, _>)
+            return cut_err(winnow::combinator::fail::<_, (Param, bool, Option<&'i str>), _>)
                 .context(StrContext::Label("param requires a type or default value"))
                 .parse_next(input);
         }
     };
 
-    Ok(Param {
-        pos: Pos::default(),
-        name,
-        doc,
-        typ: t,
-        default,
-    })
+    Ok((
+        Param {
+            pos: Pos::default(),
+            name,
+            doc,
+            typ: t,
+            default,
+        },
+        has_explicit_type,
+        default_source,
+    ))
 }
 
 /// Infer the type of a parameter from its default expression.
@@ -994,7 +1108,7 @@ fn dotted_ident(input: &mut &str) -> ModalResult<String> {
     }
 }
 
-fn output_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Output> {
+fn output_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<(Output, &'i str)> {
     keyword("output").parse_next(input)?;
     let name = cut_err(ident_string)
         .context(StrContext::Label("output name"))
@@ -1002,27 +1116,41 @@ fn output_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Output> {
     cut_err(lex('='))
         .context(StrContext::Label("'=' in output"))
         .parse_next(input)?;
+    let before_value = *input;
     let value = cut_err(expr)
         .context(StrContext::Label("output value"))
         .parse_next(input)?;
-    Ok(Output {
-        pos: Pos::default(),
-        name,
-        doc,
-        value,
-    })
+    let value_source = &before_value[..before_value.len() - input.len()];
+    Ok((
+        Output {
+            pos: Pos::default(),
+            name,
+            doc,
+            value,
+        },
+        value_source,
+    ))
 }
 
 /// A field inside a block body, with optional trailing comma.
-fn block_field(input: &mut &str) -> ModalResult<Field> {
-    let f = field(input)?;
+fn block_field<'i>(input: &mut &'i str) -> ModalResult<(Field, &'i str, Vec<Comment<'i>>)> {
+    let start_len = input.len();
+    let (field, expression) = field(input)?;
     opt(lex(',')).parse_next(input)?;
     // Skip any comments after this field (before the next field or closing brace)
-    ws_and_comments(input)?;
-    Ok(f)
+    let consumed = start_len - input.len();
+    let mut comments = ws_and_comments(input)?;
+    for comment in &mut comments {
+        comment.offset += consumed;
+    }
+    Ok((field, expression, comments))
 }
 
-fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
+fn block_stmt<'i>(
+    doc: Option<String>,
+    input: &mut &'i str,
+) -> ModalResult<(Block, Vec<Comment<'i>>, Vec<(usize, &'i str)>)> {
+    let start_len = input.len();
     let phase = if opt(keyword("pre")).parse_next(input)?.is_some() {
         Phase::Pre
     } else if opt(keyword("post")).parse_next(input)?.is_some() {
@@ -1089,8 +1217,32 @@ fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
     };
 
     cut_err(lex('{')).context(StrContext::Label("'{'")).parse_next(input)?;
-    ws_and_comments(input)?;
-    let fields: Vec<Field> = repeat(0.., block_field).parse_next(input)?;
+    let comment_start = start_len - input.len();
+    let mut comments = ws_and_comments(input)?;
+    for comment in &mut comments {
+        comment.offset += comment_start;
+    }
+    let mut fields = Vec::new();
+    let mut field_starts = Vec::new();
+    loop {
+        let before = *input;
+        let field_start = start_len - input.len();
+        match block_field(input) {
+            Ok((field, expression, mut field_comments)) => {
+                for comment in &mut field_comments {
+                    comment.offset += field_start;
+                }
+                comments.extend(field_comments);
+                field_starts.push((field_start, expression));
+                fields.push(field);
+            }
+            Err(ErrMode::Backtrack(_)) => {
+                *input = before;
+                break;
+            }
+            Err(error) => return Err(error),
+        }
+    }
     cut_err(lex('}')).context(StrContext::Label("'}'")).parse_next(input)?;
 
     let (provider, resource) = if resource.is_empty() {
@@ -1099,18 +1251,22 @@ fn block_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Block> {
         (provider, resource)
     };
 
-    Ok(Block {
-        pos: Pos::default(),
-        name,
-        doc,
-        phase,
-        protected,
-        explicit,
-        matrix_keys,
-        provider,
-        resource,
-        fields,
-    })
+    Ok((
+        Block {
+            pos: Pos::default(),
+            name,
+            doc,
+            phase,
+            protected,
+            explicit,
+            matrix_keys,
+            provider,
+            resource,
+            fields,
+        },
+        comments,
+        field_starts,
+    ))
 }
 
 #[cfg(test)]
@@ -1688,6 +1844,24 @@ server = exec {
         let input = "# This is a comment\nlet x = 42  # inline comment\n# Another comment\nlet y = 10\n";
         let result = parse(input, "<test>").unwrap();
         assert_eq!(result.statements.len(), 2);
+    }
+
+    #[test]
+    fn parsed_source_records_comments_and_field_boundaries() {
+        let input = "# Heading\n\njob = exec {\n  command = \"# literal\" # inline\n  # field note\n  inputs = [1]\n}\n# section\n\nnext = exec {}\n";
+        let parsed = parse_with_comments(input, "<test>").unwrap();
+        assert_eq!(
+            parsed.comments.iter().map(|comment| comment.text).collect::<Vec<_>>(),
+            ["# Heading", "# inline", "# field note", "# section"]
+        );
+        for comment in &parsed.comments {
+            assert!(input[comment.offset..].starts_with(comment.text));
+        }
+        assert_eq!(parsed.statements.len(), 2);
+        assert_eq!(parsed.statements[0].fields.len(), 2);
+        assert!(input[parsed.statements[0].fields[0].start..].starts_with("command"));
+        assert!(input[parsed.statements[0].fields[1].start..].starts_with("inputs"));
+        assert!(parsed.statements[0].fields[0].expression.starts_with("\"# literal\""));
     }
 
     #[test]
