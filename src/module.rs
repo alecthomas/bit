@@ -151,6 +151,7 @@ pub fn expand_module(
         .map_err(|e| LoadError::ModuleLoad(module_path.display().to_string(), e.to_string()))?;
     let module_ast = crate::parser::parse(&source, &module_path.display().to_string())
         .map_err(|e| LoadError::ModuleParse(module_path.display().to_string(), e.message))?;
+    crate::loader::validate_names(&module_ast)?;
 
     let iface = parse_module_interface(&module_ast);
     let inner_block_names: HashSet<String> = iface.blocks.iter().map(|b| b.name.clone()).collect();

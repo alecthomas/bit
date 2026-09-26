@@ -35,7 +35,7 @@ server-linux = go.exe {
   goarch = "arm64"
 }
 
-test = go.test {
+unit-test = go.test {
   package = "./..."
   flags = ["-race"]
 }
@@ -58,7 +58,7 @@ app = docker.container {
 }
 
 target build = [server]
-target test = [test, lint]
+target test = [unit-test, lint]
 target deploy = [app]
 ```
 
@@ -189,6 +189,7 @@ protected explicit prod_db = aws.aurora { ... }
 `explicit` blocks are skipped by the `...` selector (and the no-target/no-`default` fallback) for every action, including `--clean ...`. They still run when named directly or pulled in as a dependency of another selected block.
 
 If a `default` target is defined, `bit` with no arguments runs only that target. Pass explicit targets or block names (`bit build release`) to run a specific subset, or `bit ...` to run every non-`explicit` block regardless of the default.
+Params, variables, blocks, and targets must have distinct names within a `.bit` file.
 
 ```hcl
 target default = [server, test]
@@ -395,14 +396,14 @@ image = docker.image {
   depends_on = [server]
 }
 
-deploy = docker.container {
+service = docker.container {
   image    = image.ref
   replicas = replicas
 }
 
-output endpoint = deploy.endpoint
+output endpoint = service.endpoint
 
-target deploy = [deploy]
+target deploy = [service]
 ```
 
 Use it like any other provider:

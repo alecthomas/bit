@@ -101,6 +101,7 @@ pub fn load_selected(
     import_roots: &[crate::import::ImportRoot],
     invocations: &[crate::invocation::Invocation],
 ) -> Result<(Dag, BaseScope, Vec<String>), LoadError> {
+    validate_names(module)?;
     let mut scope = Scope::with_providers(registry.clone());
     let mut dag = Dag::new();
     let mut concrete_blocks = Vec::new();
@@ -386,6 +387,29 @@ pub fn load_selected(
     }
 
     Ok((dag, BaseScope { scope, missing_params }, selected_names))
+}
+
+/// Reject ambiguous top-level declarations before parameterized declarations
+/// are collected into maps or deferred values can bypass scope checks.
+pub(crate) fn validate_names(module: &Module) -> Result<(), LoadError> {
+    let mut names = HashMap::new();
+    for statement in &module.statements {
+        let (name, pos, kind) = match statement {
+            Statement::Param(param) => (&param.name, &param.pos, "param"),
+            Statement::Let(binding) => (&binding.name, &binding.pos, "variable"),
+            Statement::Block(block) => (&block.name, &block.pos, "block"),
+            Statement::Target(target) => (&target.name, &target.pos, "target"),
+            Statement::Import(_) | Statement::Output(_) => continue,
+        };
+        if let Some(existing) = names.insert(name.as_str(), kind) {
+            return Err(LoadError::DuplicateName {
+                pos: pos.clone(),
+                name: name.clone(),
+                existing,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn dependency_destinations(name: &str, include_module_children: bool, dag: &Dag) -> Vec<String> {
@@ -736,6 +760,64 @@ target build = [server]
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         let order = dag.target_order("build").unwrap();
         assert_eq!(order, vec!["server"]);
+    }
+
+    #[test]
+    fn duplicate_declaration_names_are_rejected() {
+        let cases = [
+            (
+                "clippy = exec { command = \"lint\" output = \"out\" }\ntarget clippy = [clippy]\n",
+                "block",
+            ),
+            (
+                "target clippy = [clippy]\nclippy = exec { command = \"lint\" output = \"out\" }\n",
+                "target",
+            ),
+            ("target clippy = []\ntarget clippy = []\n", "target"),
+            (
+                "clippy(value : string) = exec { command = value output = \"out\" }\ntarget clippy = []\n",
+                "block",
+            ),
+            ("param clippy : string\ntarget clippy = []\n", "param"),
+        ];
+        for (input, existing) in cases {
+            let module = parser::parse(input, "<test>").unwrap();
+            let error = match load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]) {
+                Err(error) => error,
+                Ok(_) => panic!("expected duplicate name error for {input}"),
+            };
+            assert_eq!(
+                error.to_string(),
+                format!("<test>:2:1: name 'clippy' is already used by a {existing}")
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_declaration_names_in_modules_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_module(
+            dir.path(),
+            "mymod",
+            "mymod",
+            "clippy = exec { command = \"lint\" output = \"out\" }\ntarget clippy = [clippy]\n",
+        );
+        let module = parser::parse("inst = mymod {}\n", "<test>").unwrap();
+        let error = match load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &roots(dir.path(), "mymod"),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("expected duplicate name error"),
+        };
+        assert!(matches!(
+            error,
+            LoadError::DuplicateName { name, existing: "block", pos }
+                if name == "clippy" && pos.line == 2 && pos.col == 1
+        ));
     }
 
     #[test]
