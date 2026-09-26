@@ -547,7 +547,7 @@ block = docker.container {
   restart = string                      # Restart policy
   network = string?                     # Docker network
   working_dir = string?                 # Working directory
-  healthcheck = string | {test = string, interval = duration, timeout = duration, retries = number, start_period = duration?}?  # Health check command or config
+  healthcheck = (string | {test = string, interval = duration, timeout = duration, retries = number, start_period = duration?})?  # Health check command or config
   extra_hosts = {string = string}?      # Extra /etc/hosts entries (hostname → address). On Linux, `host.docker.internal: host-gateway` is auto-added if not present.
 }
 ```
@@ -604,13 +604,13 @@ block = docker.network_attach {
 
 ```bit
 block = exec {
-  command = string    # Shell command to execute
-  output = [string]?  # Output file or list of output files
-  inputs = [string]?  # Input file glob patterns
-  dir = string?       # Working directory for the command
-  clean = string?     # Shell command to run on `bit --clean` (replaces the default removal of outputs)
-  resolve = string?   # Shell command whose stdout is captured as state. Used to detect whether the resource exists and whether it has drifted.
-  outputs = string?   # Shell command whose stdout is parsed as JSON and exposed as block outputs.
+  command = string               # Shell command to execute
+  output = (string | [string])?  # Output file or list of output files
+  inputs = [string]?             # Input file glob patterns
+  dir = string?                  # Working directory for the command
+  clean = string?                # Shell command to run on `bit --clean` (replaces the default removal of outputs)
+  resolve = string?              # Shell command whose stdout is captured as state. Used to detect whether the resource exists and whether it has drifted.
+  outputs = string?              # Shell command whose stdout is parsed as JSON and exposed as block outputs.
 }
 ```
 
@@ -772,12 +772,12 @@ block = pnpm.install {
 
 ```bit
 block = pnpm.run {
-  script = string     # Script name from `package.json` (e.g. "build")
-  package = string?   # Package name from its `package.json`. Omit to run at the workspace root.
-  args = [string]?    # Additional arguments passed to the script after `--`
-  output = [string]?  # Output file or list of output files/directories produced by the script
-  inputs = [string]?  # Extra input file globs (added to auto-detected sources)
-  dir = string        # Workspace root directory (defaults to the current directory)
+  script = string                # Script name from `package.json` (e.g. "build")
+  package = string?              # Package name from its `package.json`. Omit to run at the workspace root.
+  args = [string]?               # Additional arguments passed to the script after `--`
+  output = (string | [string])?  # Output file or list of output files/directories produced by the script
+  inputs = [string]?             # Extra input file globs (added to auto-detected sources)
+  dir = string                   # Workspace root directory (defaults to the current directory)
 }
 ```
 

@@ -1465,6 +1465,27 @@ mod tests {
     }
 
     #[test]
+    fn schema_reports_string_or_list_outputs() {
+        for name in ["exec", "pnpm.run"] {
+            let entries = collect_schema_entries(&registry(), &[], Some(name));
+            let json: serde_json::Value = serde_json::from_str(&render_schema_json(&entries)).unwrap();
+            let resource = json
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["inputs"].is_object())
+                .unwrap();
+            let output = resource["inputs"]["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|field| field["name"] == "output")
+                .unwrap();
+            assert_eq!(output["type"], "(string | [string])?", "{name}");
+        }
+    }
+
+    #[test]
     fn schema_includes_every_registered_builtin_and_filters_by_name() {
         let entries = collect_schema_entries(&registry(), &[], None);
         let listed: Vec<_> = entries

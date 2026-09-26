@@ -23,6 +23,7 @@ pub struct ExecInputs {
     pub command: String,
     /// Output file or list of output files
     #[serde(default, deserialize_with = "string_or_vec_opt")]
+    #[schema(typ = crate::schema::optional_string_or_list())]
     pub output: Vec<String>,
     /// Input file glob patterns
     #[serde(default)]

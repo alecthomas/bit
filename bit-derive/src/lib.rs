@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    Data, DataEnum, DataStruct, DeriveInput, Fields, FnArg, GenericArgument, Ident, ItemFn, Lit, Meta, Pat,
+    Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, FnArg, GenericArgument, Ident, ItemFn, Lit, Meta, Pat,
     PathArguments, ReturnType, Type, parse_macro_input,
 };
 
@@ -215,6 +215,7 @@ fn result_ok_type(ty: &Type) -> syn::Result<Type> {
 /// - `Option<T>`, `Vec<T>`, `HashMap<_, V>`, `bool`, `String`, numerics;
 ///   any other named type is resolved via its `SchemaType` impl
 /// - `#[schema(description = "...")]` to override the description
+/// - `#[schema(typ = ...)]` to describe fields with custom deserialization
 #[proc_macro_derive(Schema, attributes(schema, serde))]
 pub fn derive_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -262,7 +263,11 @@ fn derive_schema_struct(name: &Ident, attrs: &[syn::Attribute], data: &DataStruc
         let schema_name = get_serde_rename(&field.attrs).unwrap_or_else(|| name_str.clone());
         let desc_expr = description_expr(&field.attrs);
         let has_default = has_serde_attr(&field.attrs, "default");
-        let type_expr = rust_type_to_schema_type(&field.ty, has_default);
+        let type_expr = match get_schema_type(&field.attrs) {
+            Ok(Some(expr)) => quote! { #expr },
+            Ok(None) => rust_type_to_schema_type(&field.ty, has_default),
+            Err(error) => return error.to_compile_error().into(),
+        };
 
         field_exprs.push(quote! {
             fields.push((
@@ -473,6 +478,26 @@ fn get_schema_description(attrs: &[syn::Attribute]) -> Option<String> {
         }
     }
     None
+}
+
+/// Get a field's explicit schema type when serde's deserializer accepts more
+/// than the Rust storage type represents.
+fn get_schema_type(attrs: &[syn::Attribute]) -> syn::Result<Option<Expr>> {
+    let mut typ = None;
+    for attr in attrs {
+        if !attr.path().is_ident("schema") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("typ") {
+                typ = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("description") {
+                let _: Expr = meta.value()?.parse()?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(typ)
 }
 
 /// Map a Rust type to a `crate::value::Type` token expression.

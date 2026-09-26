@@ -467,7 +467,10 @@ impl std::fmt::Display for Type {
                 }
                 write!(f, "}}")
             }
-            Type::Optional(inner) => write!(f, "{inner}?"),
+            Type::Optional(inner) => match inner.as_ref() {
+                Type::Union(_) => write!(f, "({inner})?"),
+                _ => write!(f, "{inner}?"),
+            },
             Type::Path => write!(f, "path"),
             Type::Secret => write!(f, "secret"),
             Type::Union(types) => {
@@ -786,5 +789,14 @@ mod tests {
     fn display_union_type() {
         let typ = Type::Union(vec![Type::String, Type::List(Box::new(Type::String))]);
         assert_eq!(typ.to_string(), "string | [string]");
+    }
+
+    #[test]
+    fn display_optional_union_type() {
+        let typ = Type::Optional(Box::new(Type::Union(vec![
+            Type::String,
+            Type::List(Box::new(Type::String)),
+        ])));
+        assert_eq!(typ.to_string(), "(string | [string])?");
     }
 }

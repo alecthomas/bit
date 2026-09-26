@@ -22,3 +22,11 @@ impl Schema for Map {
 pub trait SchemaType {
     fn schema_type() -> Type;
 }
+
+/// Schema for a defaulted string-or-list field deserialized into `Vec<String>`.
+pub fn optional_string_or_list() -> Type {
+    Type::Optional(Box::new(Type::Union(vec![
+        Type::String,
+        Type::List(Box::new(Type::String)),
+    ])))
+}

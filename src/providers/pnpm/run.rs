@@ -145,6 +145,7 @@ pub struct PnpmRunInputs {
     pub args: Vec<String>,
     /// Output file or list of output files/directories produced by the script
     #[serde(default, deserialize_with = "string_or_vec")]
+    #[schema(typ = crate::schema::optional_string_or_list())]
     pub output: Vec<String>,
     /// Extra input file globs (added to auto-detected sources)
     #[serde(default)]
