@@ -89,7 +89,8 @@ bit --quiet      # suppress output unless an error occurs (also -q)
 bit --since origin/master  # apply blocks affected since the branch point
 ```
 
-`--fmt` separates top-level declarations with one empty line and puts each
+`--fmt` separates top-level declarations with one empty line, except consecutive
+`param` or `let` directives of the same kind, which stay together. It puts each
 block field on its own line. It retains comments and their attachment to
 declarations, as well as expression spelling such as heredocs and quoted strings.
 

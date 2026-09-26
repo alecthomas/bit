@@ -48,7 +48,13 @@ pub fn format(source: &str, filename: &str) -> Result<String, FormatError> {
                     break;
                 }
             }
-            result.push('\n');
+            let previous = &parsed.module.statements[index - 1];
+            if !matches!(
+                (previous, statement),
+                (Statement::Let(_), Statement::Let(_)) | (Statement::Param(_), Statement::Param(_))
+            ) {
+                result.push('\n');
+            }
         }
 
         for comment in &leading[ordinary_start..ordinary_count] {
@@ -285,6 +291,14 @@ mod tests {
     fn formats_comments_and_block_spacing() {
         let source = "# Heading\n\n# Block docs\njob=exec{\n  # Field docs\ncommand='echo' # inline\n}\nother=exec{}\n";
         let expected = "# Heading\n\n# Block docs\njob = exec {\n  # Field docs\n  command = 'echo'  # inline\n}\n\nother = exec {}\n";
+        assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
+        assert_eq!(format(expected, "BUILD.bit").unwrap(), expected);
+    }
+
+    #[test]
+    fn groups_consecutive_params_and_lets_without_blank_lines() {
+        let source = "param tag:string=''\n\nparam attribution:string='yes'\nlet git_head=exec('git rev-parse HEAD')|trim\n\nlet current_tag=tag\n\nlet cargo_profile='dev'\njob=exec{}\n";
+        let expected = "param tag : string = ''\nparam attribution : string = 'yes'\n\nlet git_head = exec('git rev-parse HEAD')|trim\nlet current_tag = tag\nlet cargo_profile = 'dev'\n\njob = exec {}\n";
         assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
         assert_eq!(format(expected, "BUILD.bit").unwrap(), expected);
     }
