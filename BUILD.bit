@@ -27,7 +27,7 @@ clippy = rust.clippy {
 integration-test = exec.test {
   depends_on = [debug]
   inputs = ["BUILD.bit"]
-  command  = <<-EOF
+  command = <<-EOF
   #{debug.path} --version
   #{debug.path} --plan ...
   EOF

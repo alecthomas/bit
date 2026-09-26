@@ -78,6 +78,8 @@ bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
 bit --schema [provider.member]  # show provider resource and function schemas
 bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
+bit --fmt        # format the project's BUILD.bit, preserving comments
+bit --fmt path/to/file.bit  # format a specified .bit file in place
 bit --cache      # show the size of the shared build cache
 bit --cache --clean  # delete every cached receipt and artifact
 bit --long       # disable live scrolling regions and stream every output line

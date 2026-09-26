@@ -4,6 +4,7 @@ pub mod dag;
 pub mod engine;
 pub mod expr;
 pub mod file_tracker;
+pub mod fmt;
 pub mod git;
 pub mod graph;
 pub mod import;

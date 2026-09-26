@@ -82,6 +82,10 @@ struct Cli {
     #[arg(short = 'u', long)]
     update: bool,
 
+    /// Format BUILD.bit, or a specified .bit file, in place
+    #[arg(long)]
+    fmt: bool,
+
     /// Output in JSON format (currently applies to --schema)
     #[arg(long)]
     json: bool,
@@ -339,6 +343,7 @@ enum Operation {
     Cache,
     Clean,
     Dump,
+    Fmt,
     Graph,
     Info,
     List,
@@ -362,6 +367,7 @@ impl Cli {
             self.test.then_some(Operation::Test),
             (self.list > 0).then_some(Operation::List),
             self.dump.then_some(Operation::Dump),
+            self.fmt.then_some(Operation::Fmt),
         ]
         .into_iter()
         .flatten()
@@ -475,6 +481,24 @@ fn main() {
     if cli.since.is_some() && cli.list == 1 {
         eprintln!("{} --since requires -ll when listing blocks", "error:".red().bold());
         process::exit(1);
+    }
+
+    if matches!(operation, Operation::Fmt) {
+        if cli.targets.len() > 1 || cli.targets.first().is_some_and(|path| !path.ends_with(".bit")) {
+            eprintln!("{} --fmt accepts zero or one .bit file path", "error:".red().bold());
+            process::exit(1);
+        }
+        let path = if let Some(path) = cli.targets.first() {
+            std::path::Path::new(path)
+        } else {
+            find_and_chdir_project_root();
+            std::path::Path::new("BUILD.bit")
+        };
+        if let Err(error) = format_bit_file(path) {
+            eprintln!("{} {}: {error}", "error:".red().bold(), path.display());
+            process::exit(1);
+        }
+        return;
     }
 
     // --schema doesn't need the full DAG, but it does need imports resolved
@@ -697,6 +721,15 @@ fn main() {
             process::exit(1);
         }
     }
+}
+
+fn format_bit_file(path: &std::path::Path) -> anyhow::Result<()> {
+    let source = fs::read_to_string(path)?;
+    let formatted = bit::fmt::format(&source, &path.display().to_string())?;
+    if formatted != source {
+        fs::write(path, formatted)?;
+    }
+    Ok(())
 }
 
 fn print_targets(dag: &bit::dag::Dag) {

@@ -27,6 +27,67 @@ fn run_git(project: &std::path::Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn fmt_formats_a_named_file_without_a_project_and_preserves_comments() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("example.bit");
+    fs::write(
+        &path,
+        "# Header\n\n# Command\njob=exec{\ncommand='echo # hello' # inline\n}\n",
+    )
+    .unwrap();
+
+    let output = run_bit(directory.path(), &["--fmt", "example.bit"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "# Header\n\n# Command\njob = exec {\n  command = 'echo # hello'  # inline\n}\n"
+    );
+
+    let second = run_bit(directory.path(), &["--fmt", "example.bit"]);
+    assert!(second.status.success(), "{}", String::from_utf8_lossy(&second.stderr));
+    assert!(second.stdout.is_empty());
+}
+
+#[test]
+fn fmt_without_a_path_formats_the_project_build_file() {
+    let project = tempfile::tempdir().unwrap();
+    let nested = project.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    let path = project.path().join("BUILD.bit");
+    fs::write(&path, "# Comment\njob=exec{command='true'}\n").unwrap();
+    fs::write(project.path().join("other.bit"), "let x=1\n").unwrap();
+
+    let output = run_bit(&nested, &["--fmt"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "# Comment\njob = exec { command = 'true' }\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project.path().join("other.bit")).unwrap(),
+        "let x=1\n"
+    );
+}
+
+#[test]
+fn fmt_rejects_invalid_input_without_rewriting_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("example.bit");
+    let source = "job = exec {\n";
+    fs::write(&path, source).unwrap();
+    let output = run_bit(directory.path(), &["--fmt", "example.bit"]);
+    assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(&path).unwrap(), source);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("example.bit"));
+
+    let output = run_bit(directory.path(), &["--fmt", "example.bit", "another.bit"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("accepts zero or one .bit file"));
+}
+
+#[test]
 fn quiet_suppresses_success_output_across_modes() {
     let project = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
