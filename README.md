@@ -145,7 +145,8 @@ name = provider.resource {
 ```
 
 Blocks can declare typed parameters. A parameter may have a default, in which
-case its type can be inferred:
+case its type can be inferred. Defaults may also refer to earlier `let` or
+`param` declarations, or to earlier parameters in the same block or target:
 
 ```hcl
 package(name : string, profile = "release") = exec {

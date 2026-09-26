@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use winnow::combinator::{alt, cut_err, delimited, opt, preceded, repeat, separated};
 use winnow::error::{AddContext, ContextError, ErrMode, StrContext};
 use winnow::prelude::*;
@@ -855,6 +857,7 @@ fn field<'i>(input: &mut &'i str) -> ModalResult<(Field, &'i str)> {
 
 fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
     let full_len = input.len();
+    let mut known_types = HashMap::new();
 
     // Capture the leading comment block at the top of the file.
     let (module_doc, mut comments) = leading_module_doc(input);
@@ -878,7 +881,7 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
             import_stmt.map(|(value, source)| (Statement::Import(value), Vec::new(), Vec::new(), source, false)),
             let_stmt.map(|(value, source)| (Statement::Let(value), Vec::new(), Vec::new(), source, false)),
             |input: &mut &'i str| {
-                param_stmt(doc.clone(), input).map(|(value, explicit, source)| {
+                param_stmt(doc.clone(), &known_types, input).map(|(value, explicit, source)| {
                     (
                         Statement::Param(value),
                         Vec::new(),
@@ -889,7 +892,7 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
                 })
             },
             |input: &mut &'i str| {
-                target_stmt(doc.clone(), input)
+                target_stmt(doc.clone(), &known_types, input)
                     .map(|value| (Statement::Target(value), Vec::new(), Vec::new(), "", false))
             },
             |input: &mut &'i str| {
@@ -897,7 +900,7 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
                     .map(|(value, source)| (Statement::Output(value), Vec::new(), Vec::new(), source, false))
             },
             |input: &mut &'i str| {
-                block_stmt(doc.clone(), input).map(|parsed| {
+                block_stmt(doc.clone(), &known_types, input).map(|parsed| {
                     (
                         Statement::Block(parsed.block),
                         parsed.comments,
@@ -918,6 +921,17 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
             Statement::Param(p) => p.pos.line = offset,
             Statement::Target(t) => t.pos.line = offset,
             Statement::Output(o) => o.pos.line = offset,
+        }
+        match &stmt {
+            Statement::Let(binding) => {
+                if let Some(typ) = binding.typ.clone().or_else(|| infer_type(&binding.value, &known_types)) {
+                    known_types.insert(binding.name.clone(), typ);
+                }
+            }
+            Statement::Param(param) => {
+                known_types.insert(param.name.clone(), param.typ.clone());
+            }
+            _ => {}
         }
         for comment in &mut inner_comments {
             comment.offset += offset;
@@ -1050,7 +1064,11 @@ fn let_stmt<'i>(input: &mut &'i str) -> ModalResult<(Let, &'i str)> {
     ))
 }
 
-fn param_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<(Param, bool, Option<&'i str>)> {
+fn param_stmt<'i>(
+    doc: Option<String>,
+    known_types: &HashMap<String, Type>,
+    input: &mut &'i str,
+) -> ModalResult<(Param, bool, Option<&'i str>)> {
     keyword("param").parse_next(input)?;
     let name = cut_err(ident_string)
         .context(StrContext::Label("param name"))
@@ -1069,7 +1087,7 @@ fn param_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<(Para
 
     let t = match (explicit_type, &default) {
         (Some(t), _) => t,
-        (None, Some(d)) => match infer_type(d) {
+        (None, Some(d)) => match infer_type(d, known_types) {
             Some(t) => t,
             None => {
                 return cut_err(winnow::combinator::fail::<_, (Param, bool, Option<&'i str>), _>)
@@ -1097,7 +1115,7 @@ fn param_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<(Para
     ))
 }
 
-fn formal_param(input: &mut &str) -> ModalResult<Param> {
+fn formal_param(input: &mut &str, known_types: &HashMap<String, Type>) -> ModalResult<Param> {
     let name = ident_string.parse_next(input)?;
     let explicit_type = opt(preceded(lex(':'), typ)).parse_next(input)?;
     let default = if opt(lex('=')).parse_next(input)?.is_some() {
@@ -1111,7 +1129,7 @@ fn formal_param(input: &mut &str) -> ModalResult<Param> {
     };
     let typ = match (explicit_type, &default) {
         (Some(typ), _) => typ,
-        (None, Some(value)) => match infer_type(value) {
+        (None, Some(value)) => match infer_type(value, known_types) {
             Some(typ) => typ,
             None => {
                 return cut_err(winnow::combinator::fail::<_, Param, _>)
@@ -1134,25 +1152,37 @@ fn formal_param(input: &mut &str) -> ModalResult<Param> {
     })
 }
 
-fn formal_params(input: &mut &str) -> ModalResult<Vec<Param>> {
+fn formal_params(input: &mut &str, known_types: &HashMap<String, Type>) -> ModalResult<Vec<Param>> {
+    let mut known_types = known_types.clone();
     delimited(
         lex('('),
-        opt((separated(1.., formal_param, lex(',')), opt(lex(','))))
-            .map(|params| params.map(|(values, _)| values).unwrap_or_default()),
+        opt((
+            separated(
+                1..,
+                |input: &mut &str| {
+                    let param = formal_param(input, &known_types)?;
+                    known_types.insert(param.name.clone(), param.typ.clone());
+                    Ok(param)
+                },
+                lex(','),
+            ),
+            opt(lex(',')),
+        ))
+        .map(|params| params.map(|(values, _)| values).unwrap_or_default()),
         lex(')'),
     )
     .parse_next(input)
 }
 
-/// Infer the type of a parameter from its default expression.
-fn infer_type(expr: &Expr) -> Option<Type> {
+/// Infer an expression's type from its shape and earlier bindings.
+fn infer_type(expr: &Expr, known_types: &HashMap<String, Type>) -> Option<Type> {
     match expr {
         Expr::Str(_) => Some(Type::String),
         Expr::Number(_) => Some(Type::Number),
         Expr::Bool(_) => Some(Type::Bool),
         Expr::Duration(_) => Some(Type::Duration),
         Expr::List(items) => {
-            let elem = infer_type(items.first()?)?;
+            let elem = infer_type(items.first()?, known_types)?;
             Some(Type::List(Box::new(elem)))
         }
         Expr::Map(fields) => {
@@ -1162,7 +1192,7 @@ fn infer_type(expr: &Expr) -> Option<Type> {
                     let typ = field
                         .typ
                         .clone()
-                        .or_else(|| infer_type(&field.value))
+                        .or_else(|| infer_type(&field.value, known_types))
                         .or_else(|| matches!(field.value, Expr::Null).then_some(Type::String))?;
                     let typ = if matches!(field.value, Expr::Null) {
                         Type::Optional(Box::new(typ))
@@ -1186,18 +1216,21 @@ fn infer_type(expr: &Expr) -> Option<Type> {
         }
         Expr::Call(name, _) => crate::expr::builtin_return_type(name),
         Expr::Pipe(_, name, _) => crate::expr::builtin_return_type(name),
-        Expr::If(_, then_val, _) => infer_type(then_val),
-        Expr::Add(lhs, _) => infer_type(lhs),
+        Expr::Ref(parts) if parts.len() == 1 => known_types.get(&parts[0]).cloned(),
+        Expr::If(_, then_val, _) => infer_type(then_val, known_types),
+        Expr::Add(lhs, _) => infer_type(lhs, known_types),
         _ => None,
     }
 }
 
-fn target_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Target> {
+fn target_stmt(doc: Option<String>, known_types: &HashMap<String, Type>, input: &mut &str) -> ModalResult<Target> {
     keyword("target").parse_next(input)?;
     let name = cut_err(ident_string)
         .context(StrContext::Label("target name"))
         .parse_next(input)?;
-    let params = opt(formal_params).parse_next(input)?.unwrap_or_default();
+    let params = opt(|input: &mut &str| formal_params(input, known_types))
+        .parse_next(input)?
+        .unwrap_or_default();
     cut_err(lex('='))
         .context(StrContext::Label("'=' in target"))
         .parse_next(input)?;
@@ -1278,7 +1311,11 @@ fn block_field<'i>(input: &mut &'i str) -> ModalResult<(Field, &'i str, Vec<Comm
     Ok((field, expression, comments))
 }
 
-fn block_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<ParsedBlock<'i>> {
+fn block_stmt<'i>(
+    doc: Option<String>,
+    known_types: &HashMap<String, Type>,
+    input: &mut &'i str,
+) -> ModalResult<ParsedBlock<'i>> {
     let start_len = input.len();
     let phase = if opt(keyword("pre")).parse_next(input)?.is_some() {
         Phase::Pre
@@ -1316,7 +1353,9 @@ fn block_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<Parse
         }
     }
     let name = ident_string.parse_next(input)?;
-    let params = opt(formal_params).parse_next(input)?.unwrap_or_default();
+    let params = opt(|input: &mut &str| formal_params(input, known_types))
+        .parse_next(input)?
+        .unwrap_or_default();
 
     // Optional matrix keys: name[key1, key2]
     let matrix_keys = if opt(lex('[')).parse_next(input)?.is_some() {
@@ -2468,6 +2507,40 @@ server = exec {
             Statement::Param(p) => assert_eq!(p.typ, Type::String),
             _ => panic!("expected Param"),
         }
+    }
+
+    #[test]
+    fn infer_parameter_type_through_let_bindings() {
+        let result = parse(
+            "let head_tag = exec('git describe --tags')\nlet tag = head_tag\nrelease-notes-file(tag = tag, attribution = 'yes') = exec {}",
+            "<test>",
+        )
+        .unwrap();
+        let Statement::Block(block) = &result.statements[2] else {
+            panic!("expected Block");
+        };
+        assert_eq!(block.params[0].typ, Type::String);
+        assert_eq!(block.params[1].typ, Type::String);
+    }
+
+    #[test]
+    fn infer_parameter_type_from_prior_param() {
+        let result = parse(
+            "param tag : string\ntarget publish(name = tag, copy = name) = []",
+            "<test>",
+        )
+        .unwrap();
+        let Statement::Target(target) = &result.statements[1] else {
+            panic!("expected Target");
+        };
+        assert_eq!(target.params[0].typ, Type::String);
+        assert_eq!(target.params[1].typ, Type::String);
+    }
+
+    #[test]
+    fn unknown_parameter_default_still_needs_type() {
+        let error = parse("job(tag = unknown) = exec {}", "<test>").unwrap_err();
+        assert!(error.message.contains("cannot infer parameter type"));
     }
 
     #[test]
