@@ -40,6 +40,12 @@ pub(crate) struct FieldSource<'a> {
     pub(crate) expression: &'a str,
 }
 
+struct ParsedBlock<'a> {
+    block: Block,
+    comments: Vec<Comment<'a>>,
+    fields: Vec<FieldSource<'a>>,
+}
+
 pub fn parse(input: &str, filename: &str) -> Result<Module, ParseError> {
     Ok(parse_with_comments(input, filename)?.module)
 }
@@ -858,8 +864,15 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
                     .map(|(value, source)| (Statement::Output(value), Vec::new(), Vec::new(), source, false))
             },
             |input: &mut &'i str| {
-                block_stmt(doc.clone(), input)
-                    .map(|(value, comments, fields)| (Statement::Block(value), comments, fields, "", false))
+                block_stmt(doc.clone(), input).map(|parsed| {
+                    (
+                        Statement::Block(parsed.block),
+                        parsed.comments,
+                        parsed.fields,
+                        "",
+                        false,
+                    )
+                })
             },
         ))
         .context(StrContext::Label("statement"))
@@ -884,9 +897,9 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
             param_type_explicit,
             fields: fields
                 .into_iter()
-                .map(|(start, expression)| FieldSource {
-                    start: offset + start,
-                    expression,
+                .map(|mut field| {
+                    field.start += offset;
+                    field
                 })
                 .collect(),
         });
@@ -1146,10 +1159,7 @@ fn block_field<'i>(input: &mut &'i str) -> ModalResult<(Field, &'i str, Vec<Comm
     Ok((field, expression, comments))
 }
 
-fn block_stmt<'i>(
-    doc: Option<String>,
-    input: &mut &'i str,
-) -> ModalResult<(Block, Vec<Comment<'i>>, Vec<(usize, &'i str)>)> {
+fn block_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<ParsedBlock<'i>> {
     let start_len = input.len();
     let phase = if opt(keyword("pre")).parse_next(input)?.is_some() {
         Phase::Pre
@@ -1233,7 +1243,10 @@ fn block_stmt<'i>(
                     comment.offset += field_start;
                 }
                 comments.extend(field_comments);
-                field_starts.push((field_start, expression));
+                field_starts.push(FieldSource {
+                    start: field_start,
+                    expression,
+                });
                 fields.push(field);
             }
             Err(ErrMode::Backtrack(_)) => {
@@ -1251,8 +1264,8 @@ fn block_stmt<'i>(
         (provider, resource)
     };
 
-    Ok((
-        Block {
+    Ok(ParsedBlock {
+        block: Block {
             pos: Pos::default(),
             name,
             doc,
@@ -1265,8 +1278,8 @@ fn block_stmt<'i>(
             fields,
         },
         comments,
-        field_starts,
-    ))
+        fields: field_starts,
+    })
 }
 
 #[cfg(test)]
