@@ -102,7 +102,7 @@ struct Cli {
     #[arg(short = 'L', long)]
     long: bool,
 
-    /// Targets or blocks to operate on
+    /// Targets or blocks to operate on, followed by name=value arguments
     targets: Vec<String>,
 }
 
@@ -138,6 +138,30 @@ fn parse_params(raw: &[String]) -> Map {
         params.insert(key.to_owned(), value);
     }
     params
+}
+
+fn parse_invocations(raw: &[String]) -> Result<Vec<bit::invocation::Invocation>, String> {
+    let mut invocations: Vec<bit::invocation::Invocation> = Vec::new();
+    for item in raw {
+        if let Some((name, value)) = item.split_once('=') {
+            let Some(invocation) = invocations.last_mut() else {
+                return Err(format!("target argument '{item}' must follow a target or block name"));
+            };
+            let mut chars = name.chars();
+            let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if !valid {
+                return Err(format!("invalid target argument '{item}' (expected name=value)"));
+            }
+            invocation.args.push((name.to_owned(), value.to_owned()));
+        } else {
+            invocations.push(bit::invocation::Invocation {
+                name: item.clone(),
+                args: Vec::new(),
+            });
+        }
+    }
+    Ok(invocations)
 }
 
 /// Search for BUILD.bit in the current directory and parent directories.
@@ -207,11 +231,13 @@ fn resolve_imports_or_exit(module: &bit::ast::Module, mode: bit::import::UpdateM
 fn load_module(
     registry: &ProviderRegistry,
     params: &Map,
+    invocations: &[bit::invocation::Invocation],
 ) -> (
     bit::ast::Module,
     bit::dag::Dag,
     loader::BaseScope,
     Box<dyn bit::state::StateStore>,
+    Vec<String>,
 ) {
     let root = std::path::Path::new(".");
     let store = match state::default_store(root) {
@@ -223,14 +249,15 @@ fn load_module(
     };
     let module = parse_build_bit();
     let imports = resolve_imports_or_exit(&module, bit::import::UpdateMode::None);
-    let (dag, base) = match loader::load(&module, params, registry, store.as_ref(), &imports.roots) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{} {e}", "error:".red().bold());
-            process::exit(1);
-        }
-    };
-    (module, dag, base, store)
+    let (dag, base, selectors) =
+        match loader::load_selected(&module, params, registry, store.as_ref(), &imports.roots, invocations) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{} {e}", "error:".red().bold());
+                process::exit(1);
+            }
+        };
+    (module, dag, base, store, selectors)
 }
 
 /// `bit --cache`: print the shared cache size, or with `--clean` delete it.
@@ -565,19 +592,24 @@ fn main() {
     find_and_chdir_project_root();
     let registry = default_registry(&tracker);
     let params = parse_params(&cli.params);
+    let invocations = match parse_invocations(&cli.targets) {
+        Ok(invocations) => invocations,
+        Err(error) => {
+            eprintln!("{} {error}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
     let cache = open_build_cache(cli.quiet);
     let jobs = cli
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
-    let targets = &cli.targets;
-
     if matches!(operation, Operation::Graph) {
-        let (_module, mut dag, base, _store) = load_module(&registry, &params);
+        let (_module, mut dag, base, _store, targets) = load_module(&registry, &params, &invocations);
         let Some(names) = selected_order_or_exit(
             &dag,
             &base,
             &cache,
-            targets,
+            &targets,
             cli.since.as_deref(),
             SelectionMode::Targets,
             &tracker,
@@ -600,12 +632,12 @@ fn main() {
             println!("{}", bit::graph::render(&dag, &names, &styles));
         }
     } else if matches!(operation, Operation::Plan) {
-        let (_module, mut dag, base, _store) = load_module(&registry, &params);
+        let (_module, mut dag, base, _store, targets) = load_module(&registry, &params, &invocations);
         let Some(names) = selected_order_or_exit(
             &dag,
             &base,
             &cache,
-            targets,
+            &targets,
             cli.since.as_deref(),
             SelectionMode::Targets,
             &tracker,
@@ -619,19 +651,19 @@ fn main() {
             process::exit(1);
         }
     } else if matches!(operation, Operation::Clean) {
-        let (_module, mut dag, _base, store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets, cli.debug, cli.long, cli.quiet);
-        if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, targets, cli.force) {
+        let (_module, mut dag, _base, store, targets) = load_module(&registry, &params, &invocations);
+        let output = make_output(&dag, &targets, cli.debug, cli.long, cli.quiet);
+        if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, &targets, cli.force) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
     } else if matches!(operation, Operation::Test) {
-        let (_module, mut dag, base, store) = load_module(&registry, &params);
+        let (_module, mut dag, base, store, targets) = load_module(&registry, &params, &invocations);
         let Some(names) = selected_order_or_exit(
             &dag,
             &base,
             &cache,
-            targets,
+            &targets,
             cli.since.as_deref(),
             SelectionMode::Tests,
             &tracker,
@@ -646,13 +678,13 @@ fn main() {
             process::exit(1);
         }
     } else if matches!(operation, Operation::List) {
-        let (_module, dag, base, _store) = load_module(&registry, &params);
+        let (module, dag, base, _store, targets) = load_module(&registry, &params, &invocations);
         if cli.since.is_some() {
             let Some(names) = selected_order_or_exit(
                 &dag,
                 &base,
                 &cache,
-                targets,
+                &targets,
                 cli.since.as_deref(),
                 SelectionMode::AllBlocks,
                 &tracker,
@@ -665,7 +697,7 @@ fn main() {
             }
         } else if cli.list == 1 {
             if !cli.quiet {
-                print_targets(&dag);
+                print_targets(&dag, &module);
             }
         } else {
             match dag.topo_order() {
@@ -678,12 +710,12 @@ fn main() {
             }
         }
     } else if matches!(operation, Operation::Dump) {
-        let (_module, mut dag, base, _store) = load_module(&registry, &params);
+        let (_module, mut dag, base, _store, targets) = load_module(&registry, &params, &invocations);
         let Some(names) = selected_order_or_exit(
             &dag,
             &base,
             &cache,
-            targets,
+            &targets,
             cli.since.as_deref(),
             SelectionMode::Targets,
             &tracker,
@@ -697,12 +729,12 @@ fn main() {
         }
     } else {
         // Default: apply
-        let (_module, mut dag, base, store) = load_module(&registry, &params);
+        let (_module, mut dag, base, store, targets) = load_module(&registry, &params, &invocations);
         let Some(names) = selected_order_or_exit(
             &dag,
             &base,
             &cache,
-            targets,
+            &targets,
             cli.since.as_deref(),
             SelectionMode::Targets,
             &tracker,
@@ -732,26 +764,55 @@ fn format_bit_file(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_targets(dag: &bit::dag::Dag) {
-    let mut targets: Vec<_> = dag.targets().iter().collect();
-    targets.sort_by_key(|(name, _)| name.as_str());
+fn print_targets(dag: &bit::dag::Dag, module: &bit::ast::Module) {
+    let mut declarations: std::collections::HashMap<&str, &bit::ast::Target> = dag
+        .target_declarations()
+        .iter()
+        .map(|(name, target)| (name.as_str(), target))
+        .collect();
+    declarations.extend(module.statements.iter().filter_map(|statement| match statement {
+        bit::ast::Statement::Target(target) => Some((target.name.as_str(), target)),
+        _ => None,
+    }));
+    let mut targets: Vec<_> = declarations.values().copied().collect();
+    targets.sort_by(|left, right| left.name.cmp(&right.name));
 
     if targets.is_empty() {
         println!("No targets defined.");
         return;
     }
 
-    for (name, target) in targets {
-        match &target.doc {
+    for target in targets {
+        let signature = format!("{}{}", target.name, format_formal_params(&target.params));
+        match target.doc.as_deref() {
             Some(doc) => {
                 let mut lines = doc.lines();
                 let first = lines.next().unwrap_or("");
                 let suffix = if lines.next().is_some() { "…" } else { "" };
-                println!("{} — {}{}", name.bold(), first.dim(), suffix.dim());
+                println!("{} — {}{}", signature.bold(), first.dim(), suffix.dim());
             }
-            None => println!("{}", name.bold()),
+            None => println!("{}", signature.bold()),
         }
     }
+}
+
+fn format_formal_params(params: &[bit::ast::Param]) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
+    let values = params
+        .iter()
+        .map(|param| {
+            let default = param
+                .default
+                .as_ref()
+                .map(|value| format!(" = {value}"))
+                .unwrap_or_default();
+            format!("{} : {}{default}", param.name, param.typ)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("({values})")
 }
 
 /// Render the DAG as a tree, grouping blocks under their primary parent
@@ -877,9 +938,10 @@ fn print_info(quiet: bool) {
     if !targets.is_empty() {
         println!("{}:", "Targets".bold());
         for t in &targets {
+            let signature = format!("{}{}", t.name, format_formal_params(&t.params));
             match &t.doc {
-                Some(doc) => println!("  {} — {}", t.name.bold(), doc.dim()),
-                None => println!("  {}", t.name.bold()),
+                Some(doc) => println!("  {} — {}", signature.bold(), doc.dim()),
+                None => println!("  {}", signature.bold()),
             }
         }
         println!();
@@ -1239,6 +1301,22 @@ mod tests {
 
     fn registry() -> ProviderRegistry {
         default_registry(&Arc::new(Mutex::new(FileTracker::new())))
+    }
+
+    #[test]
+    fn invocation_arguments_attach_to_the_preceding_selector() {
+        let parsed =
+            parse_invocations(&["publish".into(), "tag=v1".into(), "deploy".into(), "query=a=b".into()]).unwrap();
+        assert_eq!(parsed[0].name, "publish");
+        assert_eq!(parsed[0].args, vec![("tag".into(), "v1".into())]);
+        assert_eq!(parsed[1].name, "deploy");
+        assert_eq!(parsed[1].args, vec![("query".into(), "a=b".into())]);
+    }
+
+    #[test]
+    fn invocation_argument_requires_a_selector() {
+        assert!(parse_invocations(&["tag=v1".into()]).is_err());
+        assert!(parse_invocations(&["publish".into(), "bad.name=v1".into()]).is_err());
     }
 
     #[test]

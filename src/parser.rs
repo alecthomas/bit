@@ -498,8 +498,21 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
         return Err(ErrMode::Backtrack(ContextError::new()));
     }
 
-    // Built-in function call: name(args)
+    // A named-argument call is a parameterized block reference. Positional
+    // calls remain built-in functions.
     if opt(lex('(')).parse_next(input)?.is_some() {
+        let args_checkpoint = input.checkpoint();
+        match named_argument_list.parse_next(input) {
+            Ok(args) => {
+                cut_err(lex(')'))
+                    .context(StrContext::Label("closing ')'"))
+                    .parse_next(input)?;
+                let fields: Vec<String> = repeat(0.., preceded(lex('.'), ident_string)).parse_next(input)?;
+                return Ok(Expr::BlockCall { name, args, fields });
+            }
+            Err(ErrMode::Backtrack(_)) => input.reset(&args_checkpoint),
+            Err(error) => return Err(error),
+        }
         let args = arg_list.parse_next(input)?;
         cut_err(lex(')'))
             .context(StrContext::Label("closing ')'"))
@@ -539,6 +552,25 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
 
 fn arg_list(input: &mut &str) -> ModalResult<Vec<Expr>> {
     separated(0.., expr, lex(',')).parse_next(input)
+}
+
+fn named_argument(input: &mut &str) -> ModalResult<Field> {
+    let checkpoint = input.checkpoint();
+    let name = ident_string.parse_next(input)?;
+    if opt(lex('=')).parse_next(input)?.is_none() {
+        input.reset(&checkpoint);
+        return Err(ErrMode::Backtrack(ContextError::new()));
+    }
+    let value = cut_err(expr)
+        .context(StrContext::Label("named argument value"))
+        .parse_next(input)?;
+    Ok(Field { name, value })
+}
+
+fn named_argument_list(input: &mut &str) -> ModalResult<Vec<Field>> {
+    (separated(1.., named_argument, lex(',')), opt(lex(',')))
+        .map(|(args, _)| args)
+        .parse_next(input)
 }
 
 // ── String Parsing ──
@@ -1064,6 +1096,53 @@ fn param_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<(Para
     ))
 }
 
+fn formal_param(input: &mut &str) -> ModalResult<Param> {
+    let name = ident_string.parse_next(input)?;
+    let explicit_type = opt(preceded(lex(':'), typ)).parse_next(input)?;
+    let default = if opt(lex('=')).parse_next(input)?.is_some() {
+        Some(
+            cut_err(expr)
+                .context(StrContext::Label("parameter default"))
+                .parse_next(input)?,
+        )
+    } else {
+        None
+    };
+    let typ = match (explicit_type, &default) {
+        (Some(typ), _) => typ,
+        (None, Some(value)) => match infer_type(value) {
+            Some(typ) => typ,
+            None => {
+                return cut_err(winnow::combinator::fail::<_, Param, _>)
+                    .context(StrContext::Label("cannot infer parameter type; add : type"))
+                    .parse_next(input);
+            }
+        },
+        (None, None) => {
+            return cut_err(winnow::combinator::fail::<_, Param, _>)
+                .context(StrContext::Label("parameter requires a type or default value"))
+                .parse_next(input);
+        }
+    };
+    Ok(Param {
+        pos: Pos::default(),
+        name,
+        doc: None,
+        typ,
+        default,
+    })
+}
+
+fn formal_params(input: &mut &str) -> ModalResult<Vec<Param>> {
+    delimited(
+        lex('('),
+        opt((separated(1.., formal_param, lex(',')), opt(lex(','))))
+            .map(|params| params.map(|(values, _)| values).unwrap_or_default()),
+        lex(')'),
+    )
+    .parse_next(input)
+}
+
 /// Infer the type of a parameter from its default expression.
 fn infer_type(expr: &Expr) -> Option<Type> {
     match expr {
@@ -1092,18 +1171,32 @@ fn target_stmt(doc: Option<String>, input: &mut &str) -> ModalResult<Target> {
     let name = cut_err(ident_string)
         .context(StrContext::Label("target name"))
         .parse_next(input)?;
+    let params = opt(formal_params).parse_next(input)?.unwrap_or_default();
     cut_err(lex('='))
         .context(StrContext::Label("'=' in target"))
         .parse_next(input)?;
-    let blocks = cut_err(delimited(lex('['), separated(0.., dotted_ident, lex(',')), lex(']')))
+    let blocks = cut_err(delimited(lex('['), separated(0.., target_call, lex(',')), lex(']')))
         .context(StrContext::Label("target block list"))
         .parse_next(input)?;
     Ok(Target {
         pos: Pos::default(),
         name,
         doc,
+        params,
         blocks,
     })
+}
+
+fn target_call(input: &mut &str) -> ModalResult<TargetCall> {
+    let name = dotted_ident.parse_next(input)?;
+    let args = opt(delimited(
+        lex('('),
+        opt(named_argument_list).map(Option::unwrap_or_default),
+        lex(')'),
+    ))
+    .parse_next(input)?
+    .unwrap_or_default();
+    Ok(TargetCall { name, args })
 }
 
 fn dotted_ident(input: &mut &str) -> ModalResult<String> {
@@ -1197,9 +1290,15 @@ fn block_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<Parse
         }
     }
     let name = ident_string.parse_next(input)?;
+    let params = opt(formal_params).parse_next(input)?.unwrap_or_default();
 
     // Optional matrix keys: name[key1, key2]
     let matrix_keys = if opt(lex('[')).parse_next(input)?.is_some() {
+        if !params.is_empty() {
+            return cut_err(winnow::combinator::fail::<_, ParsedBlock<'i>, _>)
+                .context(StrContext::Label("a block cannot combine parameters and matrix keys"))
+                .parse_next(input);
+        }
         let keys: Vec<String> = separated(1.., ident_string, lex(',')).parse_next(input)?;
         cut_err(lex(']'))
             .context(StrContext::Label("closing ']' in matrix keys"))
@@ -1268,6 +1367,7 @@ fn block_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<Parse
         block: Block {
             pos: Pos::default(),
             name,
+            params,
             doc,
             phase,
             protected,
@@ -1651,6 +1751,67 @@ server = exec {
     }
 
     #[test]
+    fn parse_parameterized_block() {
+        let result = parse(
+            r#"image(tag : string, push = false) = exec { command = "build #{tag} #{push}" }"#,
+            "<test>",
+        )
+        .unwrap();
+        let Statement::Block(block) = &result.statements[0] else {
+            panic!("expected block");
+        };
+        assert_eq!(block.name, "image");
+        assert_eq!(block.params.len(), 2);
+        assert_eq!(block.params[0].name, "tag");
+        assert_eq!(block.params[0].typ, Type::String);
+        assert_eq!(block.params[1].default, Some(Expr::Bool(false)));
+    }
+
+    #[test]
+    fn parse_parameterized_target_calls_block_with_named_arguments() {
+        let result = parse(
+            r#"target publish(tag : string) = [image(tag = tag), notify(message = "done")]"#,
+            "<test>",
+        )
+        .unwrap();
+        let Statement::Target(target) = &result.statements[0] else {
+            panic!("expected target");
+        };
+        assert_eq!(target.params.len(), 1);
+        assert_eq!(target.blocks[0].name, "image");
+        assert_eq!(target.blocks[0].args[0].name, "tag");
+        assert_eq!(target.blocks[0].args[0].value, Expr::Ref(vec!["tag".into()]));
+        assert_eq!(target.blocks[1].name, "notify");
+    }
+
+    #[test]
+    fn parse_parameterized_block_reference_with_output() {
+        let result = parse(
+            r#"consumer = exec { command = compile(package = "api").path depends_on = [prepare(env = "prod")] }"#,
+            "<test>",
+        )
+        .unwrap();
+        let Statement::Block(block) = &result.statements[0] else {
+            panic!("expected block");
+        };
+        assert_eq!(
+            block.fields[0].value,
+            Expr::BlockCall {
+                name: "compile".into(),
+                args: vec![Field {
+                    name: "package".into(),
+                    value: Expr::Str(vec![StringPart::Literal("api".into())]),
+                }],
+                fields: vec!["path".into()],
+            }
+        );
+        let Expr::List(items) = &block.fields[1].value else {
+            panic!("expected list");
+        };
+        assert!(matches!(&items[0], Expr::BlockCall { name, fields, .. } if name == "prepare" && fields.is_empty()));
+    }
+
+    #[test]
     fn parse_param_inferred_type() {
         let result = parse("param verbose = false", "<test>").unwrap();
         match &result.statements[0] {
@@ -1743,7 +1904,10 @@ server = exec {
         match &result.statements[0] {
             Statement::Target(t) => {
                 assert_eq!(t.name, "build");
-                assert_eq!(t.blocks, vec!["server", "image"]);
+                assert_eq!(
+                    t.blocks.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
+                    vec!["server", "image"]
+                );
             }
             _ => panic!("expected Target"),
         }
@@ -1754,7 +1918,10 @@ server = exec {
         let result = parse("target deploy = [staging.deploy]", "<test>").unwrap();
         match &result.statements[0] {
             Statement::Target(t) => {
-                assert_eq!(t.blocks, vec!["staging.deploy"]);
+                assert_eq!(
+                    t.blocks.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
+                    vec!["staging.deploy"]
+                );
             }
             _ => panic!("expected Target"),
         }

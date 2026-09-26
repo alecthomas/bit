@@ -66,6 +66,7 @@ target deploy = [app]
 bit              # apply the default target (or every non-`explicit` block if no default)
 bit ...          # apply every non-`explicit` block regardless of the default target
 bit build        # apply a specific target or block
+bit publish tag=v1  # pass a named argument to a target
 bit --force      # rebuild selected blocks without change detection or cache
 bit --plan       # show what would change
 bit --test       # run test blocks
@@ -119,7 +120,7 @@ locally, and cannot be combined with `--clean`.
 
 ## Language
 
-### Variables and Parameters
+### Variables and Module Parameters
 
 ```hcl
 let version = "1.0.0"
@@ -129,6 +130,9 @@ param environment : string
 param replicas : int = 1
 ```
 
+Top-level `param` declarations are inputs to the `.bit` module. Supply them
+with `-P`, for example `bit -P environment=production deploy`.
+
 ### Blocks
 
 ```hcl
@@ -137,6 +141,34 @@ name = provider.resource {
   other = [1, 2, 3]
 }
 ```
+
+Blocks can declare typed parameters. A parameter may have a default, in which
+case its type can be inferred:
+
+```hcl
+package(name : string, profile = "release") = exec {
+  command = "cargo build --package #{name} --profile #{profile}"
+}
+```
+
+Parameterized blocks are instantiated by a target call or by naming the block
+on the command line. The bound values form part of the instance identity, so
+equal calls share one graph node while different values have independent state.
+
+A parameterized block can also be referenced anywhere an ordinary block can.
+Pass named arguments before selecting an output, or use the call directly in
+`depends_on` and `after`:
+
+```hcl
+release(name : string) = exec {
+  command = package(name = name).path
+  depends_on = [test(name = name)]
+  after = [prepare(name = name)]
+}
+```
+
+Arguments are configuration-time expressions in the caller's scope. Repeating
+a call with equal bound values refers to the same graph node.
 
 Special fields:
 
@@ -160,6 +192,29 @@ If a `default` target is defined, `bit` with no arguments runs only that target.
 ```hcl
 target default = [server, test]
 ```
+
+Targets can also declare parameters and pass them explicitly to blocks or
+other targets:
+
+```hcl
+target publish(name : string, profile = "release") = [
+  package(name = name, profile = profile),
+]
+```
+
+Invoke a parameterized target with named `name=value` arguments immediately
+after its name:
+
+```sh
+bit publish name=server
+bit --plan publish name=server profile=debug
+bit publish name=server test package=api
+```
+
+An argument belongs to the preceding target or block. A bare word begins the
+next selection, so existing multi-target invocations such as `bit build test`
+retain their meaning. Required arguments must be supplied. Defaults may refer
+to parameters declared earlier in the same parameter list.
 
 ### Phases
 
@@ -239,6 +294,8 @@ expr | trim             # pipes
 if cond then a else b   # conditionals
 func(arg1, arg2)        # function calls
 block.field             # block output references
+block(name = value)     # parameterized block references
+block(name = value).out # parameterized block output references
 ```
 
 ### Durations

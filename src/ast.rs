@@ -63,6 +63,8 @@ pub enum Phase {
 pub struct Block {
     pub pos: Pos,
     pub name: String,
+    /// Inputs supplied when this block is invoked by a target or the CLI.
+    pub params: Vec<Param>,
     pub doc: Option<String>,
     pub phase: Phase,
     pub protected: bool,
@@ -105,7 +107,15 @@ pub struct Target {
     pub pos: Pos,
     pub name: String,
     pub doc: Option<String>,
-    pub blocks: Vec<String>,
+    pub params: Vec<Param>,
+    pub blocks: Vec<TargetCall>,
+}
+
+/// A block or target selected from a target definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TargetCall {
+    pub name: String,
+    pub args: Vec<Field>,
 }
 
 /// `output name = expr`
@@ -171,6 +181,20 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
+            Expr::BlockCall { name, args, fields } => {
+                write!(f, "{name}(")?;
+                for (index, arg) in args.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} = {}", arg.name, arg.value)?;
+                }
+                write!(f, ")")?;
+                for field in fields {
+                    write!(f, ".{field}")?;
+                }
+                Ok(())
+            }
             Expr::Call(name, args) => {
                 write!(f, "{name}(")?;
                 for (i, arg) in args.iter().enumerate() {
@@ -208,6 +232,12 @@ pub enum Expr {
         keys: Vec<Expr>,
         fields: Vec<String>,
     },
+    /// A parameterized block reference: `name(arg = value).field`.
+    BlockCall {
+        name: String,
+        args: Vec<Field>,
+        fields: Vec<String>,
+    },
     /// `func(args...)`
     Call(String, Vec<Expr>),
     /// `expr | pipe` or `expr | pipe(args...)`
@@ -241,6 +271,7 @@ mod tests {
         let block = Block {
             pos: Pos::default(),
             name: "server".into(),
+            params: vec![],
             doc: None,
             phase: Phase::Default,
             protected: false,
@@ -343,7 +374,17 @@ mod tests {
                     pos: Pos::default(),
                     name: "build".into(),
                     doc: None,
-                    blocks: vec!["server".into(), "image".into()],
+                    params: vec![],
+                    blocks: vec![
+                        TargetCall {
+                            name: "server".into(),
+                            args: vec![],
+                        },
+                        TargetCall {
+                            name: "image".into(),
+                            args: vec![],
+                        },
+                    ],
                 }),
             ],
         };

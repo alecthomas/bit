@@ -6,7 +6,7 @@ use petgraph::algo::{tarjan_scc, toposort};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 
-use crate::ast::{Expr, Field, Phase, StringPart};
+use crate::ast::{Block, Expr, Field, Phase, StringPart, Target};
 use crate::expr::{self, EvalError, Scope};
 use crate::provider::DynResource;
 use crate::value::{Type, Value};
@@ -67,6 +67,8 @@ pub struct Dag {
     graph: DiGraph<DagNode, EdgeKind>,
     indices: HashMap<String, NodeIndex>,
     targets: HashMap<String, DagTarget>,
+    block_declarations: HashMap<String, Block>,
+    target_declarations: HashMap<String, Target>,
 }
 
 impl Dag {
@@ -75,6 +77,8 @@ impl Dag {
             graph: DiGraph::new(),
             indices: HashMap::new(),
             targets: HashMap::new(),
+            block_declarations: HashMap::new(),
+            target_declarations: HashMap::new(),
         }
     }
 
@@ -107,13 +111,37 @@ impl Dag {
             .get(from)
             .ok_or_else(|| DagError::UnknownBlock(from.into()))?;
         let to_idx = self.indices.get(to).ok_or_else(|| DagError::UnknownBlock(to.into()))?;
-        self.graph.add_edge(*from_idx, *to_idx, kind);
+        if !self
+            .graph
+            .edges_connecting(*from_idx, *to_idx)
+            .any(|edge| *edge.weight() == kind)
+        {
+            self.graph.add_edge(*from_idx, *to_idx, kind);
+        }
         Ok(())
     }
 
     /// Register a target.
     pub fn add_target(&mut self, name: String, blocks: Vec<String>, doc: Option<String>) {
         self.targets.insert(name, DagTarget { blocks, doc });
+    }
+
+    /// Register a parameterized block declaration discovered in an imported module.
+    pub(crate) fn add_block_declaration(&mut self, block: Block) {
+        self.block_declarations.insert(block.name.clone(), block);
+    }
+
+    pub(crate) fn block_declarations(&self) -> &HashMap<String, Block> {
+        &self.block_declarations
+    }
+
+    /// Register a target declaration discovered in an imported module.
+    pub(crate) fn add_target_declaration(&mut self, target: Target) {
+        self.target_declarations.insert(target.name.clone(), target);
+    }
+
+    pub fn target_declarations(&self) -> &HashMap<String, Target> {
+        &self.target_declarations
     }
 
     /// Add synthetic ordering edges between phases.
@@ -482,7 +510,7 @@ fn collect_transitive_dependents(graph: &DiGraph<DagNode, EdgeKind>, node: NodeI
 pub fn collect_block_refs(fields: &[Field], scope: &Scope) -> Result<HashSet<String>, EvalError> {
     let mut refs = HashSet::new();
     for field in fields {
-        if field.name == "concurrency" {
+        if field.name == "depends_on" || field.name == "after" || field.name == "concurrency" {
             continue;
         }
         collect_expr_refs(&field.value, scope, &mut refs)?;
@@ -518,6 +546,10 @@ pub fn collect_dependency_refs(fields: &[Field], field_name: &str, scope: &Scope
     };
 
     if let Expr::List(items) = &field.value {
+        if items.iter().any(|item| matches!(item, Expr::BlockCall { .. })) {
+            // Parameterized calls are resolved by the materialization pass.
+            return Ok(Vec::new());
+        }
         let mut references = Vec::with_capacity(items.len());
         for item in items {
             let reference = match item {
@@ -539,7 +571,12 @@ pub fn collect_dependency_refs(fields: &[Field], field_name: &str, scope: &Scope
         }
     }
 
-    match expr::eval(&field.value, scope)? {
+    let value = match expr::eval(&field.value, scope) {
+        Ok(value) => value,
+        Err(EvalError::UnmaterializedBlockCall(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    match value {
         Value::List(Type::BlockRef, references) => references
             .into_iter()
             .map(|reference| match reference {
@@ -602,6 +639,12 @@ fn collect_all_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
                 collect_all_expr_refs(key, refs);
             }
         }
+        Expr::BlockCall { name, args, .. } => {
+            refs.insert(name.clone());
+            for arg in args {
+                collect_all_expr_refs(&arg.value, refs);
+            }
+        }
         Expr::Str(parts) => {
             for part in parts {
                 if let StringPart::Interpolation(e) = part {
@@ -655,6 +698,12 @@ fn collect_expr_refs(expr: &Expr, scope: &Scope, refs: &mut HashSet<String>) -> 
             refs.insert(expr::eval_matrix_ref_name(name, keys, scope)?);
             for key in keys {
                 collect_expr_refs(key, scope, refs)?;
+            }
+        }
+        Expr::BlockCall { name, args, .. } => {
+            refs.insert(name.clone());
+            for arg in args {
+                collect_expr_refs(&arg.value, scope, refs)?;
             }
         }
         Expr::Str(parts) => {

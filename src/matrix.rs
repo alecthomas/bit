@@ -230,6 +230,17 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs
                 .collect(),
             fields: fields.clone(),
         },
+        Expr::BlockCall { name, args, fields } => Expr::BlockCall {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| Field {
+                    name: arg.name.clone(),
+                    value: rewrite_matrix_expr(&arg.value, key_subs, block_subs),
+                })
+                .collect(),
+            fields: fields.clone(),
+        },
         Expr::Str(parts) => {
             let new_parts: Vec<StringPart> = parts
                 .iter()

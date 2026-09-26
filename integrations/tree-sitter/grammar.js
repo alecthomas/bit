@@ -56,13 +56,59 @@ module.exports = grammar({
     target_statement: $ => seq(
       'target',
       field('name', $.identifier),
+      optional(field('parameters', $.parameter_list)),
       '=',
       '[',
       optional(seq(
-        $.dotted_identifier,
-        repeat(seq(',', $.dotted_identifier)),
+        $.target_call,
+        repeat(seq(',', $.target_call)),
       )),
       ']',
+    ),
+
+    parameter_list: $ => seq(
+      '(',
+      optional(seq(
+        $.parameter,
+        repeat(seq(',', $.parameter)),
+        optional(','),
+      )),
+      ')',
+    ),
+
+    parameter: $ => seq(
+      field('name', $.identifier),
+      optional(seq(':', field('type', $.type))),
+      optional(seq('=', field('default', $._expression))),
+    ),
+
+    target_call: $ => seq(
+      field('name', $.dotted_identifier),
+      optional(field('arguments', $.argument_list)),
+    ),
+
+    argument_list: $ => seq(
+      '(',
+      optional(seq(
+        $.named_argument,
+        repeat(seq(',', $.named_argument)),
+        optional(','),
+      )),
+      ')',
+    ),
+
+    named_argument: $ => seq(
+      field('name', $.identifier),
+      '=',
+      field('value', $._expression),
+    ),
+
+    block_argument_list: $ => seq(
+      '(',
+      $.named_argument,
+      repeat(seq(',', $.named_argument)),
+      optional(','),
+      ')',
     ),
 
     output_statement: $ => seq(
@@ -82,6 +128,7 @@ module.exports = grammar({
         field('explicit', $.explicit_modifier),
       )),
       field('name', $.identifier),
+      optional(field('parameters', $.parameter_list)),
       optional(field('matrix_keys', $.block_matrix_keys)),
       '=',
       field('provider', $.identifier),
@@ -193,6 +240,7 @@ module.exports = grammar({
       $.null,
       $.list,
       $.map,
+      $.block_call,
       $.call,
       $.reference,
     ),
@@ -290,6 +338,12 @@ module.exports = grammar({
     ),
 
     // ── Calls & References ──
+
+    block_call: $ => seq(
+      field('name', $.identifier),
+      field('arguments', $.block_argument_list),
+      repeat(seq('.', field('field', $.identifier))),
+    ),
 
     call: $ => seq(
       field('name', choice($.identifier, $.provider_function)),

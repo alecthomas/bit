@@ -8,6 +8,7 @@ pub mod fmt;
 pub mod git;
 pub mod graph;
 pub mod import;
+pub mod invocation;
 pub mod loader;
 pub mod matrix;
 pub mod module;

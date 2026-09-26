@@ -175,10 +175,21 @@ fn render_statement(
             }
         }
         Statement::Target(value) => {
+            if !value.params.is_empty() || value.blocks.iter().any(|call| !call.args.is_empty()) {
+                result.push_str(source[syntax.start..syntax.end].trim_end());
+                return;
+            }
             result.push_str("target ");
             result.push_str(&value.name);
             result.push_str(" = [");
-            result.push_str(&value.blocks.join(", "));
+            result.push_str(
+                &value
+                    .blocks
+                    .iter()
+                    .map(|call| call.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
             result.push(']');
         }
         Statement::Output(value) => {
@@ -186,6 +197,9 @@ fn render_statement(
             result.push_str(&value.name);
             result.push_str(" = ");
             result.push_str(syntax.expression.trim_end());
+        }
+        Statement::Block(value) if !value.params.is_empty() => {
+            result.push_str(source[syntax.start..syntax.end].trim_end());
         }
         Statement::Block(value) => render_block(result, value, syntax, comments, source),
     }

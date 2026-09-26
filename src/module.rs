@@ -154,6 +154,7 @@ pub fn expand_module(
 
     let iface = parse_module_interface(&module_ast);
     let inner_block_names: HashSet<String> = iface.blocks.iter().map(|b| b.name.clone()).collect();
+    let inner_target_names: HashSet<String> = iface.targets.iter().map(|target| target.name.clone()).collect();
     let param_names: HashSet<String> = iface.params.iter().map(|p| p.name.clone()).collect();
 
     // Map outer fields to param expressions
@@ -225,6 +226,27 @@ pub fn expand_module(
     // Create inner block DagNodes
     for block in &iface.blocks {
         let qualified_name = format!("{instance_name}.{}", block.name);
+
+        if !block.params.is_empty() {
+            let mut declaration = block.clone();
+            declaration.name = qualified_name;
+            declaration.fields = block
+                .fields
+                .iter()
+                .map(|field| Field {
+                    name: field.name.clone(),
+                    value: rewrite_expr(&field.value, &inner_block_names, &substitutions, instance_name),
+                })
+                .collect();
+            for param in &mut declaration.params {
+                param.default = param
+                    .default
+                    .as_ref()
+                    .map(|value| rewrite_expr(value, &inner_block_names, &substitutions, instance_name));
+            }
+            ctx.dag.add_block_declaration(declaration);
+            continue;
+        }
 
         // Check for nested module
         if let Some(nested_path) = resolve_module_path(ctx.import_roots, &block.provider, &block.resource) {
@@ -447,25 +469,27 @@ pub fn expand_module(
         }
     }
 
-    // Register module targets with namespaced block names
+    // Register module targets as declarations. The invocation pass resolves
+    // their arguments and materializes any parameterized block calls.
     for target in &iface.targets {
-        let qualified_blocks: Vec<String> = target
-            .blocks
-            .iter()
-            .map(|b| {
-                let root_name = b.split('.').next().unwrap_or(b);
-                if inner_block_names.contains(root_name) {
-                    format!("{instance_name}.{b}")
-                } else {
-                    b.clone()
-                }
-            })
-            .collect();
-        ctx.dag.add_target(
-            format!("{instance_name}.{}", target.name),
-            qualified_blocks,
-            target.doc.clone(),
-        );
+        let mut declaration = target.clone();
+        declaration.name = format!("{instance_name}.{}", target.name);
+        for param in &mut declaration.params {
+            param.default = param
+                .default
+                .as_ref()
+                .map(|value| rewrite_expr(value, &inner_block_names, &substitutions, instance_name));
+        }
+        for call in &mut declaration.blocks {
+            let root_name = call.name.split('.').next().unwrap_or(&call.name);
+            if inner_block_names.contains(root_name) || inner_target_names.contains(root_name) {
+                call.name = format!("{instance_name}.{}", call.name);
+            }
+            for arg in &mut call.args {
+                arg.value = rewrite_expr(&arg.value, &inner_block_names, &substitutions, instance_name);
+            }
+        }
+        ctx.dag.add_target_declaration(declaration);
     }
 
     ctx.scope
@@ -489,7 +513,7 @@ pub fn expand_module(
 ///   (using a dotted first-part so scope lookup finds the namespaced key)
 /// - Refs to params/lets are substituted with their value expressions
 /// - All other refs pass through unchanged (outer scope)
-fn rewrite_expr(
+pub(crate) fn rewrite_expr(
     expr: &Expr,
     inner_blocks: &HashSet<String>,
     substitutions: &HashMap<String, Expr>,
@@ -524,6 +548,21 @@ fn rewrite_expr(
             keys: keys
                 .iter()
                 .map(|key| rewrite_expr(key, inner_blocks, substitutions, prefix))
+                .collect(),
+            fields: fields.clone(),
+        },
+        Expr::BlockCall { name, args, fields } => Expr::BlockCall {
+            name: if inner_blocks.contains(name) {
+                format!("{prefix}.{name}")
+            } else {
+                name.clone()
+            },
+            args: args
+                .iter()
+                .map(|arg| Field {
+                    name: arg.name.clone(),
+                    value: rewrite_expr(&arg.value, inner_blocks, substitutions, prefix),
+                })
                 .collect(),
             fields: fields.clone(),
         },

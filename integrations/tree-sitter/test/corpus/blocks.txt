@@ -15,6 +15,31 @@ server = go.binary {
       value: (string))))
 
 ================================================================================
+parameterized block
+================================================================================
+image(tag : string, push = false) = docker.image {
+  tag = tag
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        type: (type
+          (scalar_type)))
+      (parameter
+        name: (identifier)
+        default: (boolean)))
+    provider: (identifier)
+    resource: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (reference
+        (identifier)))))
+
+================================================================================
 empty block
 ================================================================================
 fmt = rust.fmt {}

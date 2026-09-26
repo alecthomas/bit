@@ -16,6 +16,10 @@
             "named": true
           },
           {
+            "type": "block_call",
+            "named": true
+          },
+          {
             "type": "boolean",
             "named": true
           },
@@ -74,6 +78,10 @@
             "named": true
           },
           {
+            "type": "block_call",
+            "named": true
+          },
+          {
             "type": "boolean",
             "named": true
           },
@@ -126,6 +134,21 @@
     }
   },
   {
+    "type": "argument_list",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "named_argument",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "binary_expression",
     "named": true,
     "fields": {
@@ -133,6 +156,10 @@
         "multiple": false,
         "required": true,
         "types": [
+          {
+            "type": "block_call",
+            "named": true
+          },
           {
             "type": "boolean",
             "named": true
@@ -197,6 +224,10 @@
         "multiple": false,
         "required": true,
         "types": [
+          {
+            "type": "block_call",
+            "named": true
+          },
           {
             "type": "boolean",
             "named": true
@@ -279,6 +310,16 @@
           }
         ]
       },
+      "parameters": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "parameter_list",
+            "named": true
+          }
+        ]
+      },
       "phase": {
         "multiple": false,
         "required": false,
@@ -332,6 +373,57 @@
     }
   },
   {
+    "type": "block_argument_list",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "named_argument",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "block_call",
+    "named": true,
+    "fields": {
+      "arguments": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block_argument_list",
+            "named": true
+          }
+        ]
+      },
+      "field": {
+        "multiple": true,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "block_matrix_keys",
     "named": true,
     "fields": {},
@@ -380,6 +472,10 @@
         },
         {
           "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "block_call",
           "named": true
         },
         {
@@ -476,6 +572,10 @@
           },
           {
             "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "block_call",
             "named": true
           },
           {
@@ -581,6 +681,10 @@
             "named": true
           },
           {
+            "type": "block_call",
+            "named": true
+          },
+          {
             "type": "boolean",
             "named": true
           },
@@ -647,6 +751,10 @@
             "named": true
           },
           {
+            "type": "block_call",
+            "named": true
+          },
+          {
             "type": "boolean",
             "named": true
           },
@@ -710,6 +818,10 @@
           },
           {
             "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "block_call",
             "named": true
           },
           {
@@ -815,6 +927,10 @@
           "named": true
         },
         {
+          "type": "block_call",
+          "named": true
+        },
+        {
           "type": "boolean",
           "named": true
         },
@@ -906,6 +1022,10 @@
             "named": true
           },
           {
+            "type": "block_call",
+            "named": true
+          },
+          {
             "type": "boolean",
             "named": true
           },
@@ -975,6 +1095,10 @@
         },
         {
           "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "block_call",
           "named": true
         },
         {
@@ -1097,6 +1221,10 @@
             "named": true
           },
           {
+            "type": "block_call",
+            "named": true
+          },
+          {
             "type": "boolean",
             "named": true
           },
@@ -1195,6 +1323,10 @@
           "named": true
         },
         {
+          "type": "block_call",
+          "named": true
+        },
+        {
           "type": "boolean",
           "named": true
         },
@@ -1250,6 +1382,92 @@
     }
   },
   {
+    "type": "named_argument",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "add_expression",
+            "named": true
+          },
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "block_call",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call",
+            "named": true
+          },
+          {
+            "type": "duration",
+            "named": true
+          },
+          {
+            "type": "heredoc",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "list",
+            "named": true
+          },
+          {
+            "type": "map",
+            "named": true
+          },
+          {
+            "type": "null",
+            "named": true
+          },
+          {
+            "type": "number",
+            "named": true
+          },
+          {
+            "type": "pipe_expression",
+            "named": true
+          },
+          {
+            "type": "raw_string",
+            "named": true
+          },
+          {
+            "type": "reference",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "output_statement",
     "named": true,
     "fields": {
@@ -1273,6 +1491,10 @@
           },
           {
             "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "block_call",
             "named": true
           },
           {
@@ -1345,6 +1567,10 @@
           },
           {
             "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "block_call",
             "named": true
           },
           {
@@ -1424,6 +1650,117 @@
     }
   },
   {
+    "type": "parameter",
+    "named": true,
+    "fields": {
+      "default": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "add_expression",
+            "named": true
+          },
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "block_call",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call",
+            "named": true
+          },
+          {
+            "type": "duration",
+            "named": true
+          },
+          {
+            "type": "heredoc",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "list",
+            "named": true
+          },
+          {
+            "type": "map",
+            "named": true
+          },
+          {
+            "type": "null",
+            "named": true
+          },
+          {
+            "type": "number",
+            "named": true
+          },
+          {
+            "type": "pipe_expression",
+            "named": true
+          },
+          {
+            "type": "raw_string",
+            "named": true
+          },
+          {
+            "type": "reference",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "parameter_list",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "parameter",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "phase_modifier",
     "named": true,
     "fields": {}
@@ -1448,6 +1785,10 @@
         "types": [
           {
             "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "block_call",
             "named": true
           },
           {
@@ -1511,6 +1852,10 @@
         },
         {
           "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "block_call",
           "named": true
         },
         {
@@ -1668,6 +2013,32 @@
     }
   },
   {
+    "type": "target_call",
+    "named": true,
+    "fields": {
+      "arguments": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "argument_list",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "dotted_identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "target_statement",
     "named": true,
     "fields": {
@@ -1680,6 +2051,16 @@
             "named": true
           }
         ]
+      },
+      "parameters": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "parameter_list",
+            "named": true
+          }
+        ]
       }
     },
     "children": {
@@ -1687,7 +2068,7 @@
       "required": false,
       "types": [
         {
-          "type": "dotted_identifier",
+          "type": "target_call",
           "named": true
         }
       ]

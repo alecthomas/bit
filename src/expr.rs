@@ -13,6 +13,8 @@ pub enum EvalError {
     UndefinedField(String),
     #[error("unknown function: {0}")]
     UnknownFunc(String),
+    #[error("parameterized block call was not materialized: {0}")]
+    UnmaterializedBlockCall(String),
     #[error("provider function '{name}' failed: {message}")]
     ProviderFunction { name: String, message: String },
     #[error("type error: {0}")]
@@ -149,6 +151,7 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
             parts.extend(fields.iter().cloned());
             eval_ref(&parts, scope, mode)
         }
+        Expr::BlockCall { name, .. } => Err(EvalError::UnmaterializedBlockCall(name.clone())),
         Expr::Call(name, args) => {
             let values: Result<Vec<_>, _> = args.iter().map(|e| eval_inner(e, scope, mode)).collect();
             let values = values?;

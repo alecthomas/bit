@@ -49,6 +49,9 @@
 (param_statement
   name: (identifier) @variable)
 
+(parameter
+  name: (identifier) @variable)
+
 (target_statement
   name: (identifier) @function)
 
@@ -65,6 +68,9 @@
 (field_assignment
   name: (identifier) @property)
 
+(named_argument
+  name: (identifier) @property)
+
 (map_entry
   key: (identifier) @property)
 
@@ -72,6 +78,9 @@
   key: (string) @property)
 
 ; Function calls
+(block_call
+  name: (identifier) @variable)
+
 (call
   name: (identifier) @function)
 

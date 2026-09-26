@@ -53,6 +53,12 @@ pub enum LoadError {
         name: String,
         existing: &'static str,
     },
+    #[error("{pos}: invalid invocation of '{name}': {message}")]
+    InvalidInvocation {
+        pos: crate::ast::Pos,
+        name: String,
+        message: String,
+    },
 }
 
 /// The base scope of evaluated params and let bindings, shared with the engine
@@ -82,12 +88,24 @@ pub fn load(
     store: &dyn StateStore,
     import_roots: &[crate::import::ImportRoot],
 ) -> Result<(Dag, BaseScope), LoadError> {
+    let (dag, base, _) = load_selected(module, params, registry, store, import_roots, &[])?;
+    Ok((dag, base))
+}
+
+/// Load the graph and bind parameters for explicitly selected targets or blocks.
+pub fn load_selected(
+    module: &Module,
+    params: &Map,
+    registry: &ProviderRegistry,
+    store: &dyn StateStore,
+    import_roots: &[crate::import::ImportRoot],
+    invocations: &[crate::invocation::Invocation],
+) -> Result<(Dag, BaseScope, Vec<String>), LoadError> {
     let mut scope = Scope::with_providers(registry.clone());
     let mut dag = Dag::new();
-    let mut block_names = Vec::new();
+    let mut concrete_blocks = Vec::new();
     let mut matrix_blocks: HashMap<String, Vec<String>> = HashMap::new();
     let mut deferred_matrix: Vec<crate::ast::Block> = Vec::new();
-    let mut deferred_targets: Vec<crate::ast::Target> = Vec::new();
     let mut missing_params: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut declared_params: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -158,6 +176,11 @@ pub fn load(
                 }
             }
             Statement::Block(b) => {
+                if !b.params.is_empty() {
+                    // A parameterized block is a declaration, not a graph node.
+                    continue;
+                }
+                concrete_blocks.push(b.clone());
                 if !b.matrix_keys.is_empty() {
                     // Defer matrix blocks — full define happens in expand_matrix.
                     // Check here only for conflicts with params/lets.
@@ -170,7 +193,6 @@ pub fn load(
                     }
                     matrix_blocks.insert(b.name.clone(), b.matrix_keys.clone());
                     deferred_matrix.push(b.clone());
-                    block_names.push(b.name.clone());
                 } else if let Some(module_path) = module::resolve_module_path(import_roots, &b.provider, &b.resource) {
                     // Full define happens in expand_module.
                     // Check here only for conflicts with params/lets.
@@ -189,7 +211,6 @@ pub fn load(
                         import_roots,
                     };
                     module::expand_module(&b.name, &module_path, &b.fields, &mut ctx)?;
-                    block_names.push(b.name.clone());
                 } else {
                     let resource =
                         registry
@@ -217,7 +238,6 @@ pub fn load(
                         prior_state,
                     })?;
 
-                    block_names.push(b.name.clone());
                     scope
                         .define(&b.name, expr::SymbolKind::Block, Value::strct(Map::new()))
                         .map_err(|existing| LoadError::DuplicateName {
@@ -227,9 +247,7 @@ pub fn load(
                         })?;
                 }
             }
-            Statement::Target(t) => {
-                deferred_targets.push(t.clone());
-            }
+            Statement::Target(_) => {}
             Statement::Output(_) => {
                 // Outputs are deferred — they reference block outputs
                 // which aren't available until execution.
@@ -242,73 +260,99 @@ pub fn load(
         matrix::expand_matrix(block, &mut scope, registry, store, &mut dag, &matrix_blocks)?;
     }
 
-    for target in &deferred_targets {
-        let mut blocks = Vec::new();
-        for name in &target.blocks {
-            match resolve_dep(name, &dag, &matrix_blocks, &scope) {
-                Some(resolved) => blocks.extend(resolved),
-                None => blocks.push(name.clone()),
-            }
-        }
-        dag.add_target(target.name.clone(), blocks, target.doc.clone());
-    }
+    let selected_names = crate::invocation::materialize(
+        module,
+        invocations,
+        &mut concrete_blocks,
+        &mut module::ExpandContext {
+            scope: &mut scope,
+            registry,
+            store,
+            dag: &mut dag,
+            import_roots,
+        },
+    )?;
 
-    // Build dependency edges from field refs, depends_on, and after.
-    // Skip matrix blocks — their edges are wired during expansion.
-    // For non-matrix blocks referencing a matrix block name, create edges
-    // to all expanded slices.
-    for stmt in &module.statements {
-        if let Statement::Block(b) = stmt {
-            if !b.matrix_keys.is_empty() {
-                continue;
-            }
-            // Implicit deps from expression refs — these may reference
-            // scope variables (not blocks), so we only create edges for
-            // names that exist in the DAG or as matrix blocks.
-            let refs = collect_block_refs(&b.fields, &scope).map_err(|source| LoadError::Eval {
-                pos: b.pos.clone(),
-                source,
-            })?;
-            for dep in &refs {
-                if let Some(resolved) = resolve_dep(dep, &dag, &matrix_blocks, &scope) {
-                    for r in &resolved {
-                        if *r != b.name {
-                            dag.add_dep_edge(r, &b.name)?;
+    // Include every actual DAG node so dependencies introduced by block calls
+    // inside matrix slices and expanded modules are wired too. Source blocks
+    // remain in the list for module-level depends_on/after handling.
+    let mut wired_blocks: Vec<(String, crate::ast::Pos, Vec<crate::ast::Field>, bool)> = dag
+        .block_names()
+        .into_iter()
+        .map(|name| {
+            let node = dag.get_node(&name).expect("listed block exists");
+            (name, node.pos.clone(), node.fields.clone(), false)
+        })
+        .collect();
+    wired_blocks.extend(
+        concrete_blocks
+            .iter()
+            .filter(|block| block.matrix_keys.is_empty())
+            .map(|block| {
+                (
+                    block.name.clone(),
+                    block.pos.clone(),
+                    block.fields.clone(),
+                    module::resolve_module_path(import_roots, &block.provider, &block.resource).is_some(),
+                )
+            }),
+    );
+
+    // Build dependency edges from field refs, depends_on, and after. Matrix
+    // and module expansion may have wired some edges already; Dag deduplicates
+    // them while this pass adds references created during materialization.
+    for (block_name, block_pos, block_fields, is_module_source) in &wired_blocks {
+        let destinations = dependency_destinations(block_name, *is_module_source, &dag);
+        // Implicit deps from expression refs — these may reference
+        // scope variables (not blocks), so we only create edges for
+        // names that exist in the DAG or as matrix blocks.
+        let refs = collect_block_refs(block_fields, &scope).map_err(|source| LoadError::Eval {
+            pos: block_pos.clone(),
+            source,
+        })?;
+        for dep in &refs {
+            if let Some(resolved) = resolve_dep(dep, &dag, &matrix_blocks, &scope) {
+                for r in &resolved {
+                    for destination in &destinations {
+                        if r != destination {
+                            dag.add_dep_edge(r, destination)?;
                         }
                     }
                 }
             }
-            // Explicit depends_on — must reference known blocks.
-            for dep in collect_dependency_refs(&b.fields, "depends_on", &scope).map_err(|source| LoadError::Eval {
-                pos: b.pos.clone(),
-                source,
-            })? {
-                let resolved =
-                    resolve_dep(&dep, &dag, &matrix_blocks, &scope).ok_or_else(|| LoadError::UnknownBlock {
-                        pos: b.pos.clone(),
-                        name: dep.clone(),
-                        from: b.name.clone(),
-                    })?;
-                for r in &resolved {
-                    if *r != b.name {
-                        dag.add_dep_edge(r, &b.name)?;
+        }
+        // Explicit depends_on — must reference known blocks.
+        for dep in collect_dependency_refs(block_fields, "depends_on", &scope).map_err(|source| LoadError::Eval {
+            pos: block_pos.clone(),
+            source,
+        })? {
+            let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope).ok_or_else(|| LoadError::UnknownBlock {
+                pos: block_pos.clone(),
+                name: dep.clone(),
+                from: block_name.clone(),
+            })?;
+            for r in &resolved {
+                for destination in &destinations {
+                    if r != destination {
+                        dag.add_dep_edge(r, destination)?;
                     }
                 }
             }
-            // Explicit after — must reference known blocks.
-            for dep in collect_dependency_refs(&b.fields, "after", &scope).map_err(|source| LoadError::Eval {
-                pos: b.pos.clone(),
-                source,
-            })? {
-                let resolved =
-                    resolve_dep(&dep, &dag, &matrix_blocks, &scope).ok_or_else(|| LoadError::UnknownBlock {
-                        pos: b.pos.clone(),
-                        name: dep.clone(),
-                        from: b.name.clone(),
-                    })?;
-                for r in &resolved {
-                    if *r != b.name {
-                        dag.add_ordering_edge(r, &b.name)?;
+        }
+        // Explicit after — must reference known blocks.
+        for dep in collect_dependency_refs(block_fields, "after", &scope).map_err(|source| LoadError::Eval {
+            pos: block_pos.clone(),
+            source,
+        })? {
+            let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope).ok_or_else(|| LoadError::UnknownBlock {
+                pos: block_pos.clone(),
+                name: dep.clone(),
+                from: block_name.clone(),
+            })?;
+            for r in &resolved {
+                for destination in &destinations {
+                    if r != destination {
+                        dag.add_ordering_edge(r, destination)?;
                     }
                 }
             }
@@ -316,23 +360,18 @@ pub fn load(
     }
 
     // Validate that all expression refs in block fields resolve to known names.
-    for stmt in &module.statements {
-        if let Statement::Block(b) = stmt {
-            if !b.matrix_keys.is_empty() {
-                continue; // matrix blocks are rewritten, refs validated during expansion
-            }
-            for name in collect_all_refs(&b.fields) {
-                if scope.get(&name).is_none()
-                    && !dag.has_block(&name)
-                    && !matrix_blocks.contains_key(&name)
-                    && !missing_params.contains(&name)
-                {
-                    return Err(LoadError::UnknownBlock {
-                        pos: b.pos.clone(),
-                        name,
-                        from: b.name.clone(),
-                    });
-                }
+    for (block_name, block_pos, block_fields, _) in &wired_blocks {
+        for name in collect_all_refs(block_fields) {
+            if scope.get(&name).is_none()
+                && !dag.has_block(&name)
+                && !matrix_blocks.contains_key(&name)
+                && !missing_params.contains(&name)
+            {
+                return Err(LoadError::UnknownBlock {
+                    pos: block_pos.clone(),
+                    name,
+                    from: block_name.clone(),
+                });
             }
         }
     }
@@ -346,7 +385,18 @@ pub fn load(
         }
     }
 
-    Ok((dag, BaseScope { scope, missing_params }))
+    Ok((dag, BaseScope { scope, missing_params }, selected_names))
+}
+
+fn dependency_destinations(name: &str, include_module_children: bool, dag: &Dag) -> Vec<String> {
+    if !include_module_children {
+        return vec![name.to_owned()];
+    }
+    let prefix = format!("{name}.");
+    dag.block_names()
+        .into_iter()
+        .filter(|candidate| candidate == name || candidate.starts_with(&prefix))
+        .collect()
 }
 
 /// Resolve a dependency name to actual DAG node names.
@@ -656,6 +706,135 @@ target build = [server]
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
         let order = dag.target_order("build").unwrap();
         assert_eq!(order, vec!["server"]);
+    }
+
+    #[test]
+    fn load_parameterized_target_materializes_bound_block() {
+        let input = r#"
+image(tag : string) = exec {
+  command = "build #{tag}"
+  output = "out"
+}
+target publish(tag : string) = [image(tag = tag)]
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let invocations = [crate::invocation::Invocation {
+            name: "publish".into(),
+            args: vec![("tag".into(), "v1".into())],
+        }];
+        let (dag, _scope, selected) =
+            load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
+
+        assert_eq!(selected, vec![r#"publish["v1"]"#]);
+        assert_eq!(dag.target_order(&selected[0]).unwrap(), vec![r#"image["v1"]"#]);
+        let node = dag.get_node(r#"image["v1"]"#).unwrap();
+        assert_eq!(
+            node.fields.iter().find(|field| field.name == "command").unwrap().value,
+            crate::ast::Expr::Str(vec![
+                crate::ast::StringPart::Literal("build ".into()),
+                crate::ast::StringPart::Interpolation(crate::ast::Expr::Str(vec![crate::ast::StringPart::Literal(
+                    "v1".into()
+                ),])),
+            ])
+        );
+    }
+
+    #[test]
+    fn parameterized_invocations_share_equal_arguments_and_separate_different_arguments() {
+        let input = r#"
+job(value : string) = exec { command = value output = "out" }
+target first(value : string) = [job(value = value)]
+target second(value : string) = [job(value = value)]
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let invocations = [
+            crate::invocation::Invocation {
+                name: "first".into(),
+                args: vec![("value".into(), "a".into())],
+            },
+            crate::invocation::Invocation {
+                name: "second".into(),
+                args: vec![("value".into(), "a".into())],
+            },
+            crate::invocation::Invocation {
+                name: "second".into(),
+                args: vec![("value".into(), "b".into())],
+            },
+        ];
+        let (dag, _scope, selected) =
+            load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
+
+        assert_eq!(selected.len(), 3);
+        assert!(dag.has_block(r#"job["a"]"#));
+        assert!(dag.has_block(r#"job["b"]"#));
+        assert_eq!(dag.block_names().len(), 2);
+    }
+
+    #[test]
+    fn block_references_materialize_parameterized_blocks_in_fields_and_dependencies() {
+        let input = r#"
+prepare(package : string) = exec {
+  command = "prepare #{package}"
+  output = "prepared"
+}
+compile(package : string) = exec {
+  command = prepare(package = package).path
+  output = "compiled"
+  depends_on = [prepare(package = package)]
+}
+release(package : string) = exec {
+  command = compile(package = package).path
+  output = "released"
+  after = [prepare(package = package)]
+}
+target publish(package : string) = [release(package = package)]
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let invocations = [crate::invocation::Invocation {
+            name: "publish".into(),
+            args: vec![("package".into(), "api".into())],
+        }];
+        let (dag, _scope, _) =
+            load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
+
+        let prepare = r#"prepare["api"]"#;
+        let compile = r#"compile["api"]"#;
+        let release = r#"release["api"]"#;
+        assert!(dag.has_block(prepare));
+        assert!(dag.has_block(compile));
+        assert!(dag.has_block(release));
+        assert_eq!(dag.block_names().len(), 3);
+        assert!(dag.content_deps(compile).contains(&prepare.to_owned()));
+        assert!(dag.content_deps(release).contains(&compile.to_owned()));
+        assert!(dag.deps(release).contains(&prepare.to_owned()));
+        assert!(!dag.content_deps(release).contains(&prepare.to_owned()));
+    }
+
+    #[test]
+    fn matrix_dependencies_can_invoke_parameterized_blocks() {
+        let input = r#"
+let arch = ["amd64", "arm64"]
+
+prepare(arch : string) = exec {
+  command = "prepare #{arch}"
+  output = "prepared"
+}
+
+build[arch] = exec {
+  command = "build #{arch}"
+  output = "built"
+  depends_on = [prepare(arch = arch)]
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+
+        for arch in ["amd64", "arm64"] {
+            let prepare = format!(r#"prepare["{arch}"]"#);
+            let build = format!(r#"build["{arch}"]"#);
+            assert!(dag.has_block(&prepare));
+            assert!(dag.content_deps(&build).contains(&prepare));
+        }
     }
 
     #[test]
@@ -1121,6 +1300,121 @@ inst = mymod {
         let outer_pos = order.iter().position(|n| n == "outer").unwrap();
         let inner_pos = order.iter().position(|n| n == "inst.a").unwrap();
         assert!(outer_pos < inner_pos);
+    }
+
+    #[test]
+    fn module_dependencies_can_invoke_parameterized_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        write_module(
+            dir.path(),
+            "mymod",
+            "mymod",
+            r#"
+a = exec {
+  command = "build"
+  output = "a"
+}
+"#,
+        );
+
+        let input = r#"
+prepare(env : string) = exec {
+  command = "prepare #{env}"
+  output = "prepared"
+}
+
+inst = mymod {
+  depends_on = [prepare(env = "prod")]
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &roots(dir.path(), "mymod"),
+        )
+        .unwrap();
+
+        let prepare = r#"prepare["prod"]"#.to_owned();
+        assert!(dag.has_block(&prepare));
+        assert!(dag.content_deps("inst.a").contains(&prepare));
+    }
+
+    #[test]
+    fn imported_module_blocks_can_declare_and_pass_parameters() {
+        let dir = tempfile::tempdir().unwrap();
+        write_module(
+            dir.path(),
+            "mymod",
+            "mymod",
+            r#"
+param package : string
+
+compile(package : string) = exec {
+  command = "compile #{package}"
+  output = "compiled"
+}
+
+image = exec {
+  command = compile(package = package).path
+  output = "image"
+}
+
+output path = image.path
+"#,
+        );
+
+        let module = parser::parse(r#"inst = mymod { package = "api" }"#, "<test>").unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &roots(dir.path(), "mymod"),
+        )
+        .unwrap();
+
+        let compile = r#"inst.compile["api"]"#.to_owned();
+        assert!(dag.has_block(&compile));
+        assert!(dag.content_deps("inst.image").contains(&compile));
+    }
+
+    #[test]
+    fn imported_module_targets_can_declare_parameters() {
+        let dir = tempfile::tempdir().unwrap();
+        write_module(
+            dir.path(),
+            "mymod",
+            "mymod",
+            r#"
+job(value : string) = exec {
+  command = value
+  output = "out"
+}
+
+target run(value : string) = [job(value = value)]
+"#,
+        );
+
+        let module = parser::parse("inst = mymod {}", "<test>").unwrap();
+        let invocations = [crate::invocation::Invocation {
+            name: "inst.run".into(),
+            args: vec![("value".into(), "hello".into())],
+        }];
+        let (dag, _scope, selected) = load_selected(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &roots(dir.path(), "mymod"),
+            &invocations,
+        )
+        .unwrap();
+
+        assert_eq!(selected, vec![r#"inst.run["hello"]"#]);
+        assert_eq!(dag.target_order(&selected[0]).unwrap(), vec![r#"inst.job["hello"]"#]);
     }
 
     #[test]

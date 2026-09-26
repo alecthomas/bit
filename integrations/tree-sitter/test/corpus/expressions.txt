@@ -412,3 +412,36 @@ param timeout : duration = 30s
     type: (type
       (scalar_type))
     default: (duration)))
+
+================================================================================
+parameterized block reference
+================================================================================
+let x = compile(package = package).path
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (block_call
+      name: (identifier)
+      arguments: (block_argument_list
+        (named_argument
+          name: (identifier)
+          value: (reference
+            (identifier))))
+      field: (identifier))))
+
+================================================================================
+parameterized block dependency
+================================================================================
+let x = [prepare(env = "prod")]
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (list
+      (block_call
+        name: (identifier)
+        arguments: (block_argument_list
+          (named_argument
+            name: (identifier)
+            value: (string)))))))
