@@ -85,17 +85,31 @@ fn expand_provider_function(function: ItemFn) -> syn::Result<TokenStream2> {
 
     let argument_bindings = params.iter().enumerate().map(|(index, (param, typ, optional, _))| {
         let param_name = param.to_string();
-        if *optional {
+        let deserialize = if is_dynamic_json_type(typ) {
+            quote! { crate::provider::deserialize_dynamic_function_value }
+        } else {
+            quote! { crate::provider::deserialize_function_value }
+        };
+        // A supplied JSON null is a value, unlike an omitted argument.
+        if *optional && option_inner(typ).is_some_and(|inner| is_json_value(&inner)) {
             quote! {
                 let #param: #typ = match args.get(#index) {
-                    Some(value) => crate::provider::deserialize_function_value(value)
+                    Some(value) => Some(#deserialize(value)
+                        .map_err(|error| format!("{} argument '{}': {error}", stringify!(#name), #param_name))?),
+                    None => None,
+                };
+            }
+        } else if *optional {
+            quote! {
+                let #param: #typ = match args.get(#index) {
+                    Some(value) => #deserialize(value)
                         .map_err(|error| format!("{} argument '{}': {error}", stringify!(#name), #param_name))?,
                     None => None,
                 };
             }
         } else {
             quote! {
-                let #param: #typ = crate::provider::deserialize_function_value(&args[#index])
+                let #param: #typ = #deserialize(&args[#index])
                     .map_err(|error| format!("{} argument '{}': {error}", stringify!(#name), #param_name))?;
             }
         }
@@ -152,6 +166,26 @@ fn expand_provider_function(function: ItemFn) -> syn::Result<TokenStream2> {
             }
         }
     })
+}
+
+fn is_json_value(ty: &Type) -> bool {
+    let Type::Path(path) = ty else { return false };
+    let mut segments = path.path.segments.iter();
+    matches!(
+        (segments.next(), segments.next(), segments.next()),
+        (Some(namespace), Some(value), None) if namespace.ident == "serde_json" && value.ident == "Value"
+    )
+}
+
+fn is_dynamic_json_type(ty: &Type) -> bool {
+    if is_json_value(ty) {
+        return true;
+    }
+    let Type::Path(path) = ty else { return false };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    (segment.ident == "Vec" || segment.ident == "Option") && is_dynamic_json_type(&extract_generic_arg(segment))
 }
 
 fn option_inner(ty: &Type) -> Option<Type> {

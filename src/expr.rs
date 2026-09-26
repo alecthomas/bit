@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::process::Command;
 
+use serde::{Deserialize, Serialize};
+
 use crate::ast::{BinOp, Expr, MapEntry, StringPart};
-use crate::provider::ProviderRegistry;
+use crate::provider::{FuncSignature, ProviderRegistry};
+use crate::schema::SchemaType;
 use crate::value::{Map, StructField, StructType, Type, Value, validate_type};
 
 #[derive(Debug, thiserror::Error)]
@@ -295,203 +298,105 @@ fn has_placeholder(v: &Value) -> bool {
     matches!(v, Value::Str(s) if s.contains("#{"))
 }
 
-fn check_arity(name: &str, args: &[Value], expected: usize) -> Result<(), EvalError> {
-    if args.len() != expected {
-        return Err(EvalError::Arity {
-            name: name.into(),
-            expected,
-            got: args.len(),
-        });
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum StringOrList {
+    String(String),
+    List(Vec<String>),
+}
+
+impl SchemaType for StringOrList {
+    fn schema_type() -> Type {
+        Type::Union(vec![Type::String, Type::List(Box::new(Type::String))])
     }
-    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum EnvironmentValue {
+    String(String),
+    Fallback(serde_json::Value),
+}
+
+impl SchemaType for EnvironmentValue {
+    fn schema_type() -> Type {
+        Type::Union(vec![Type::String, Type::Any])
+    }
+}
+
+impl SchemaType for serde_json::Value {
+    fn schema_type() -> Type {
+        Type::Any
+    }
 }
 
 /// Definition of a built-in function/pipe.
 struct BuiltinDef {
-    func: fn(&[Value]) -> Result<Value, EvalError>,
+    func: fn(&[Value]) -> Result<Value, crate::provider::BoxError>,
+    // Parser inference keeps its existing, narrower type for polymorphic calls.
     return_type: Type,
-    description: &'static str,
-    params: &'static [(&'static str, &'static str)],
-    returns: &'static str,
+    signature: FuncSignature,
 }
 
 impl BuiltinDef {
     fn new(
-        func: fn(&[Value]) -> Result<Value, EvalError>,
+        func: fn(&[Value]) -> Result<Value, crate::provider::BoxError>,
         return_type: Type,
-        description: &'static str,
-        params: &'static [(&'static str, &'static str)],
-        returns: &'static str,
+        signature: FuncSignature,
     ) -> Self {
         Self {
             func,
             return_type,
-            description,
-            params,
-            returns,
+            signature,
         }
     }
 }
 
-/// Display schema for a built-in function, drawn from the evaluator's registry.
-pub struct BuiltinSignature {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub params: &'static [(&'static str, &'static str)],
-    pub returns: &'static str,
-}
-
 /// Static registry of all built-in functions and pipes.
-fn builtins() -> &'static HashMap<&'static str, BuiltinDef> {
+fn builtins() -> &'static HashMap<String, BuiltinDef> {
     use std::sync::OnceLock;
-    static BUILTINS: OnceLock<HashMap<&str, BuiltinDef>> = OnceLock::new();
+    static BUILTINS: OnceLock<HashMap<String, BuiltinDef>> = OnceLock::new();
     BUILTINS.get_or_init(|| {
-        HashMap::from([
-            (
-                "env",
-                BuiltinDef::new(
-                    builtin_env,
-                    Type::String,
-                    "Read an environment variable, with an optional fallback.",
-                    &[("name", "string"), ("default", "any?")],
-                    "string | any",
-                ),
+        [
+            BuiltinDef::new(__bit_call_env, Type::String, __bit_signature_env()),
+            BuiltinDef::new(__bit_call_exec, Type::String, __bit_signature_exec()),
+            BuiltinDef::new(
+                __bit_call_glob,
+                Type::List(Box::new(Type::String)),
+                __bit_signature_glob(),
             ),
-            (
-                "exec",
-                BuiltinDef::new(
-                    builtin_exec,
-                    Type::String,
-                    "Run a shell command and return stdout.",
-                    &[("command", "string")],
-                    "string",
-                ),
+            BuiltinDef::new(__bit_call_secret, Type::String, __bit_signature_secret()),
+            BuiltinDef::new(__bit_call_trim, Type::String, __bit_signature_trim()),
+            BuiltinDef::new(
+                __bit_call_lines,
+                Type::List(Box::new(Type::String)),
+                __bit_signature_lines(),
             ),
-            (
-                "glob",
-                BuiltinDef::new(
-                    builtin_glob,
-                    Type::List(Box::new(Type::String)),
-                    "Expand a filesystem glob.",
-                    &[("pattern", "string")],
-                    "[string]",
-                ),
+            BuiltinDef::new(
+                __bit_call_split,
+                Type::List(Box::new(Type::String)),
+                __bit_signature_split(),
             ),
-            (
-                "secret",
-                BuiltinDef::new(
-                    builtin_secret,
-                    Type::String,
-                    "Read a secret by name.",
-                    &[("name", "string")],
-                    "string",
-                ),
+            BuiltinDef::new(
+                __bit_call_uniq,
+                Type::List(Box::new(Type::String)),
+                __bit_signature_uniq(),
             ),
-            (
-                "trim",
-                BuiltinDef::new(
-                    builtin_trim,
-                    Type::String,
-                    "Trim whitespace from a string or each string in a list.",
-                    &[("value", "string | [string]")],
-                    "string | [string]",
-                ),
-            ),
-            (
-                "lines",
-                BuiltinDef::new(
-                    builtin_lines,
-                    Type::List(Box::new(Type::String)),
-                    "Split a string into nonempty lines.",
-                    &[("value", "string")],
-                    "[string]",
-                ),
-            ),
-            (
-                "split",
-                BuiltinDef::new(
-                    builtin_split,
-                    Type::List(Box::new(Type::String)),
-                    "Split a string by a separator.",
-                    &[("value", "string"), ("separator", "string")],
-                    "[string]",
-                ),
-            ),
-            (
-                "uniq",
-                BuiltinDef::new(
-                    builtin_uniq,
-                    Type::List(Box::new(Type::String)),
-                    "Deduplicate a list while preserving order.",
-                    &[("list", "[any]")],
-                    "[any]",
-                ),
-            ),
-            (
-                "basename",
-                BuiltinDef::new(
-                    builtin_basename,
-                    Type::String,
-                    "Extract file names from a path or list of paths.",
-                    &[("path", "string | [string]")],
-                    "string | [string]",
-                ),
-            ),
-            (
-                "dirname",
-                BuiltinDef::new(
-                    builtin_dirname,
-                    Type::String,
-                    "Extract directories from a path or list of paths.",
-                    &[("path", "string | [string]")],
-                    "string | [string]",
-                ),
-            ),
-            (
-                "prefix",
-                BuiltinDef::new(
-                    builtin_prefix,
-                    Type::String,
-                    "Prepend text to a string or each string in a list.",
-                    &[("value", "string | [string]"), ("text", "string")],
-                    "string | [string]",
-                ),
-            ),
-            (
-                "suffix",
-                BuiltinDef::new(
-                    builtin_suffix,
-                    Type::String,
-                    "Append text to a string or each string in a list.",
-                    &[("value", "string | [string]"), ("text", "string")],
-                    "string | [string]",
-                ),
-            ),
-            (
-                "sha256",
-                BuiltinDef::new(
-                    builtin_sha256,
-                    Type::String,
-                    "Hash a string with SHA-256.",
-                    &[("value", "string")],
-                    "string",
-                ),
-            ),
-        ])
+            BuiltinDef::new(__bit_call_basename, Type::String, __bit_signature_basename()),
+            BuiltinDef::new(__bit_call_dirname, Type::String, __bit_signature_dirname()),
+            BuiltinDef::new(__bit_call_prefix, Type::String, __bit_signature_prefix()),
+            BuiltinDef::new(__bit_call_suffix, Type::String, __bit_signature_suffix()),
+            BuiltinDef::new(__bit_call_sha256, Type::String, __bit_signature_sha256()),
+        ]
+        .into_iter()
+        .map(|def| (def.signature.name.clone(), def))
+        .collect()
     })
 }
 
-pub fn builtin_functions() -> Vec<BuiltinSignature> {
-    let mut functions: Vec<_> = builtins()
-        .iter()
-        .map(|(&name, def)| BuiltinSignature {
-            name,
-            description: def.description,
-            params: def.params,
-            returns: def.returns,
-        })
-        .collect();
-    functions.sort_by_key(|function| function.name);
+pub fn builtin_functions() -> Vec<FuncSignature> {
+    let mut functions: Vec<_> = builtins().values().map(|def| def.signature.clone()).collect();
+    functions.sort_by(|a, b| a.name.cmp(&b.name));
     functions
 }
 
@@ -504,7 +409,23 @@ fn call_builtin(name: &str, args: &[Value]) -> Result<Value, EvalError> {
     let def = builtins()
         .get(name)
         .ok_or_else(|| EvalError::UnknownFunc(name.into()))?;
-    (def.func)(args)
+    let required = def
+        .signature
+        .params
+        .iter()
+        .take_while(|(_, field)| !matches!(field.typ, Type::Optional(_)))
+        .count();
+    if args.len() < required || args.len() > def.signature.params.len() {
+        return Err(EvalError::Arity {
+            name: name.into(),
+            expected: required,
+            got: args.len(),
+        });
+    }
+    (def.func)(args).map_err(|error| match error.downcast::<EvalError>() {
+        Ok(error) => *error,
+        Err(error) => EvalError::Type(error.to_string()),
+    })
 }
 
 fn call_function(name: &str, args: &[Value], scope: &Scope) -> Result<Value, EvalError> {
@@ -523,256 +444,147 @@ fn call_function(name: &str, args: &[Value], scope: &Scope) -> Result<Value, Eva
         })
 }
 
-/// `env(name)` or `env(name, default)`
-fn builtin_env(args: &[Value]) -> Result<Value, EvalError> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(EvalError::Arity {
-            name: "env".into(),
-            expected: 1,
-            got: args.len(),
-        });
-    }
-    let name = args[0]
-        .as_str()
-        .ok_or_else(|| EvalError::Type("env() name must be a string".into()))?;
-    match std::env::var(name) {
-        Ok(val) => Ok(Value::Str(val)),
-        Err(_) => {
-            if args.len() == 2 {
-                Ok(args[1].clone())
-            } else {
-                Err(EvalError::Exec(format!("environment variable '{name}' not set")))
-            }
-        }
+/// Read an environment variable, with an optional fallback.
+#[bit_derive::provider_function]
+fn env(name: String, default: Option<serde_json::Value>) -> Result<EnvironmentValue, EvalError> {
+    match std::env::var(&name) {
+        Ok(value) => Ok(EnvironmentValue::String(value)),
+        Err(_) => default
+            .map(EnvironmentValue::Fallback)
+            .ok_or_else(|| EvalError::Exec(format!("environment variable '{name}' not set"))),
     }
 }
 
-/// `exec(cmd)` — run shell command, return stdout
-fn builtin_exec(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("exec", args, 1)?;
-    let cmd = args[0]
-        .as_str()
-        .ok_or_else(|| EvalError::Type("exec() argument must be a string".into()))?;
+/// Run a shell command and return stdout.
+#[bit_derive::provider_function]
+fn exec(command: String) -> Result<String, EvalError> {
     let output = Command::new("sh")
         .arg("-c")
-        .arg(cmd)
+        .arg(&command)
         .output()
-        .map_err(|e| EvalError::Exec(format!("failed to run '{cmd}': {e}")))?;
+        .map_err(|e| EvalError::Exec(format!("failed to run '{command}': {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(EvalError::Exec(format!("command '{cmd}' failed: {stderr}")));
+        return Err(EvalError::Exec(format!("command '{command}' failed: {stderr}")));
     }
-    Ok(Value::Str(String::from_utf8_lossy(&output.stdout).into_owned()))
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// `glob(pattern)` — expand filesystem glob
-fn builtin_glob(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("glob", args, 1)?;
-    let pattern = args[0]
-        .as_str()
-        .ok_or_else(|| EvalError::Type("glob() argument must be a string".into()))?;
-    let paths = glob::glob(pattern).map_err(|e| EvalError::Glob(format!("invalid pattern '{pattern}': {e}")))?;
+/// Expand a filesystem glob.
+#[bit_derive::provider_function]
+fn glob(pattern: String) -> Result<Vec<String>, EvalError> {
+    let paths = glob::glob(&pattern).map_err(|e| EvalError::Glob(format!("invalid pattern '{pattern}': {e}")))?;
     let mut result = Vec::new();
     for entry in paths {
         match entry {
-            Ok(path) => result.push(Value::Str(path.to_string_lossy().into_owned())),
+            Ok(path) => result.push(path.to_string_lossy().into_owned()),
             Err(e) => return Err(EvalError::Glob(e.to_string())),
         }
     }
-    Ok(Value::List(Type::String, result))
+    Ok(result)
 }
 
-/// `secret(name)` — placeholder, TBD per spec
-fn builtin_secret(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("secret", args, 1)?;
-    let name = args[0]
-        .as_str()
-        .ok_or_else(|| EvalError::Type("secret() argument must be a string".into()))?;
+/// Read a secret by name.
+#[bit_derive::provider_function]
+fn secret(name: String) -> Result<String, EvalError> {
     // Fall back to env var for now
-    std::env::var(name)
-        .map(Value::Str)
-        .map_err(|_| EvalError::Exec(format!("secret '{name}' not found")))
+    std::env::var(&name).map_err(|_| EvalError::Exec(format!("secret '{name}' not found")))
 }
 
-/// `trim(value)` — strip whitespace from string or each element of list
-fn builtin_trim(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("trim", args, 1)?;
-    match &args[0] {
-        Value::Str(s) => Ok(Value::Str(s.trim().to_owned())),
-        Value::List(typ, items) => {
-            let trimmed = items
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => Ok(Value::Str(s.trim().to_owned())),
-                    _ => Err(EvalError::Type("trim on list requires string elements".into())),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::List(typ.clone(), trimmed))
+/// Trim whitespace from a string or each string in a list.
+#[bit_derive::provider_function]
+fn trim(value: StringOrList) -> Result<StringOrList, EvalError> {
+    Ok(match value {
+        StringOrList::String(value) => StringOrList::String(value.trim().to_owned()),
+        StringOrList::List(values) => {
+            StringOrList::List(values.into_iter().map(|value| value.trim().to_owned()).collect())
         }
-        _ => Err(EvalError::Type("trim() requires a string or list".into())),
+    })
+}
+
+/// Split a string into nonempty lines.
+#[bit_derive::provider_function]
+fn lines(value: String) -> Result<Vec<String>, EvalError> {
+    Ok(value.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect())
+}
+
+/// Split a string by a separator.
+#[bit_derive::provider_function]
+fn split(value: String, separator: String) -> Result<Vec<String>, EvalError> {
+    Ok(value.split(&separator).map(str::to_owned).collect())
+}
+
+/// Deduplicate a list while preserving order.
+#[bit_derive::provider_function]
+fn uniq(list: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>, EvalError> {
+    let mut seen = Vec::new();
+    for item in list {
+        if !seen.contains(&item) {
+            seen.push(item);
+        }
     }
+    Ok(seen)
 }
 
-/// `lines(value)` — split string on newlines, drop empties
-fn builtin_lines(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("lines", args, 1)?;
-    let s = args[0]
-        .as_str()
-        .ok_or_else(|| EvalError::Type("lines() requires a string".into()))?;
-    let items = s
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| Value::Str(l.to_owned()))
-        .collect();
-    Ok(Value::List(Type::String, items))
+/// Extract file names from a path or list of paths.
+#[bit_derive::provider_function]
+fn basename(path: StringOrList) -> Result<StringOrList, EvalError> {
+    let basename = |path: String| {
+        std::path::Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    Ok(match path {
+        StringOrList::String(path) => StringOrList::String(basename(path)),
+        StringOrList::List(paths) => StringOrList::List(paths.into_iter().map(basename).collect()),
+    })
 }
 
-/// `split(value, separator)`
-fn builtin_split(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("split", args, 2)?;
-    let s = args[0]
-        .as_str()
-        .ok_or_else(|| EvalError::Type("split() first argument must be a string".into()))?;
-    let sep = args[1]
-        .as_str()
-        .ok_or_else(|| EvalError::Type("split() separator must be a string".into()))?;
-    let items = s.split(sep).map(|p| Value::Str(p.to_owned())).collect();
-    Ok(Value::List(Type::String, items))
+/// Extract directories from a path or list of paths.
+#[bit_derive::provider_function]
+fn dirname(path: StringOrList) -> Result<StringOrList, EvalError> {
+    let dirname = |path: String| {
+        std::path::Path::new(&path)
+            .parent()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    Ok(match path {
+        StringOrList::String(path) => StringOrList::String(dirname(path)),
+        StringOrList::List(paths) => StringOrList::List(paths.into_iter().map(dirname).collect()),
+    })
 }
 
-/// `uniq(list)` — deduplicate a list preserving order
-fn builtin_uniq(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("uniq", args, 1)?;
-    match &args[0] {
-        Value::List(typ, items) => {
-            let mut seen = Vec::new();
-            for item in items {
-                if !seen.contains(item) {
-                    seen.push(item.clone());
-                }
-            }
-            Ok(Value::List(typ.clone(), seen))
+/// Prepend text to a string or each string in a list.
+#[bit_derive::provider_function]
+fn prefix(value: StringOrList, text: String) -> Result<StringOrList, EvalError> {
+    Ok(match value {
+        StringOrList::String(value) => StringOrList::String(format!("{text}{value}")),
+        StringOrList::List(values) => {
+            StringOrList::List(values.into_iter().map(|value| format!("{text}{value}")).collect())
         }
-        _ => Err(EvalError::Type("uniq() requires a list".into())),
-    }
+    })
 }
 
-/// `basename(path)` — extract the file name from a path, or map over a list
-fn builtin_basename(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("basename", args, 1)?;
-    match &args[0] {
-        Value::Str(s) => {
-            let name = std::path::Path::new(s)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            Ok(Value::Str(name))
+/// Append text to a string or each string in a list.
+#[bit_derive::provider_function]
+fn suffix(value: StringOrList, text: String) -> Result<StringOrList, EvalError> {
+    Ok(match value {
+        StringOrList::String(value) => StringOrList::String(format!("{value}{text}")),
+        StringOrList::List(values) => {
+            StringOrList::List(values.into_iter().map(|value| format!("{value}{text}")).collect())
         }
-        Value::List(typ, items) => {
-            let mapped = items
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => {
-                        let name = std::path::Path::new(s)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        Ok(Value::Str(name))
-                    }
-                    _ => Err(EvalError::Type("basename on list requires string elements".into())),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::List(typ.clone(), mapped))
-        }
-        _ => Err(EvalError::Type("basename() requires a string or list".into())),
-    }
+    })
 }
 
-/// `dirname(path)` — extract the directory from a path, or map over a list
-fn builtin_dirname(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("dirname", args, 1)?;
-    match &args[0] {
-        Value::Str(s) => {
-            let dir = std::path::Path::new(s)
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            Ok(Value::Str(dir))
-        }
-        Value::List(typ, items) => {
-            let mapped = items
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => {
-                        let dir = std::path::Path::new(s)
-                            .parent()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        Ok(Value::Str(dir))
-                    }
-                    _ => Err(EvalError::Type("dirname on list requires string elements".into())),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::List(typ.clone(), mapped))
-        }
-        _ => Err(EvalError::Type("dirname() requires a string or list".into())),
-    }
-}
-
-/// `prefix(value, prefix)` — prepend a string to a value, or each element of a list
-fn builtin_prefix(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("prefix", args, 2)?;
-    let pfx = args[1]
-        .as_str()
-        .ok_or_else(|| EvalError::Type("prefix() second argument must be a string".into()))?;
-    match &args[0] {
-        Value::Str(s) => Ok(Value::Str(format!("{pfx}{s}"))),
-        Value::List(typ, items) => {
-            let mapped = items
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => Ok(Value::Str(format!("{pfx}{s}"))),
-                    _ => Err(EvalError::Type("prefix on list requires string elements".into())),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::List(typ.clone(), mapped))
-        }
-        _ => Err(EvalError::Type("prefix() requires a string or list".into())),
-    }
-}
-
-/// `suffix(value, suffix)` — append a string to a value, or each element of a list
-fn builtin_suffix(args: &[Value]) -> Result<Value, EvalError> {
-    check_arity("suffix", args, 2)?;
-    let sfx = args[1]
-        .as_str()
-        .ok_or_else(|| EvalError::Type("suffix() second argument must be a string".into()))?;
-    match &args[0] {
-        Value::Str(s) => Ok(Value::Str(format!("{s}{sfx}"))),
-        Value::List(typ, items) => {
-            let mapped = items
-                .iter()
-                .map(|v| match v {
-                    Value::Str(s) => Ok(Value::Str(format!("{s}{sfx}"))),
-                    _ => Err(EvalError::Type("suffix on list requires string elements".into())),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Value::List(typ.clone(), mapped))
-        }
-        _ => Err(EvalError::Type("suffix() requires a string or list".into())),
-    }
-}
-
-/// `sha256(value)` — hex-encoded SHA-256 digest of a string
-fn builtin_sha256(args: &[Value]) -> Result<Value, EvalError> {
+/// Hash a string with SHA-256.
+#[bit_derive::provider_function]
+fn sha256(value: String) -> Result<String, EvalError> {
     use sha2::{Digest, Sha256};
-    check_arity("sha256", args, 1)?;
-    let s = args[0]
-        .as_str()
-        .ok_or_else(|| EvalError::Type("sha256() requires a string".into()))?;
-    let digest = Sha256::digest(s.as_bytes());
+    let digest = Sha256::digest(value.as_bytes());
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(Value::Str(hex))
+    Ok(hex)
 }
 
 #[cfg(test)]
@@ -1269,6 +1081,54 @@ mod tests {
             ],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("fallback".into()));
+    }
+
+    #[test]
+    fn builtin_dynamic_values_roundtrip() {
+        let missing = Value::Str("BIT_TEST_NONEXISTENT_VAR_12345".into());
+        assert_eq!(
+            call_builtin("env", &[missing.clone(), Value::Number(42.into())]).unwrap(),
+            Value::Number(42.into())
+        );
+        assert_eq!(call_builtin("env", &[missing, Value::Null]).unwrap(), Value::Null);
+        let precise = Value::Number("12345678901234567890.123456789".parse().unwrap());
+        assert_eq!(
+            call_builtin(
+                "env",
+                &[Value::Str("BIT_TEST_NONEXISTENT_VAR_12345".into()), precise.clone()]
+            )
+            .unwrap(),
+            precise
+        );
+        let reference = Value::BlockRef("build[core]".into());
+        assert_eq!(
+            call_builtin(
+                "env",
+                &[Value::Str("BIT_TEST_NONEXISTENT_VAR_12345".into()), reference.clone()]
+            )
+            .unwrap(),
+            reference.clone()
+        );
+        assert_eq!(
+            call_builtin(
+                "uniq",
+                &[Value::list(vec![
+                    Value::Number(1.into()),
+                    Value::Number(1.into()),
+                    Value::Number(2.into())
+                ])]
+            )
+            .unwrap(),
+            Value::list(vec![Value::Number(1.into()), Value::Number(2.into())])
+        );
+        assert_eq!(
+            call_builtin(
+                "uniq",
+                &[Value::List(Type::BlockRef, vec![reference.clone(), reference.clone()])]
+            )
+            .unwrap(),
+            Value::List(Type::BlockRef, vec![reference])
+        );
     }
 
     #[test]

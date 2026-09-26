@@ -450,6 +450,7 @@ fn value_from_json(raw: serde_json::Value) -> Result<Value, String> {
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Type::Any => write!(f, "any"),
             Type::String => write!(f, "string"),
             Type::BlockRef => write!(f, "block"),
             Type::Number => write!(f, "number"),
@@ -489,6 +490,7 @@ impl std::fmt::Display for Type {
 /// Types used in the .bit language for param declarations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
+    Any,
     String,
     BlockRef,
     Number,
@@ -508,6 +510,7 @@ pub enum Type {
 /// Returns a human-readable error message on mismatch.
 pub fn validate_type(value: &Value, typ: &Type) -> Result<(), String> {
     match (typ, value) {
+        (Type::Any, _) => Ok(()),
         (Type::String | Type::Path | Type::Secret, Value::Str(_)) => Ok(()),
         (Type::BlockRef, Value::BlockRef(_)) => Ok(()),
         (Type::Number, Value::Number(_)) => Ok(()),

@@ -21,9 +21,34 @@ pub fn deserialize_function_value<T: DeserializeOwned>(value: &Value) -> Result<
 }
 
 #[doc(hidden)]
+pub fn deserialize_dynamic_function_value<T: DeserializeOwned>(value: &Value) -> Result<T, BoxError> {
+    Ok(serde_json::from_value(function_json_value(value)?)?)
+}
+
+fn function_json_value(value: &Value) -> Result<serde_json::Value, BoxError> {
+    match value {
+        // BigDecimal's normal serde representation is a string; dynamic
+        // arguments must keep the original numeric kind.
+        Value::Number(number) => Ok(serde_json::Value::Number(number.to_string().parse()?)),
+        Value::BlockRef(name) => Ok(serde_json::to_value(crate::value::BlockRef::new(name))?),
+        Value::List(_, items) => Ok(serde_json::Value::Array(
+            items.iter().map(function_json_value).collect::<Result<_, _>>()?,
+        )),
+        Value::Map(_, map) | Value::Struct(_, map) => Ok(serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| Ok((key.clone(), function_json_value(value)?)))
+                .collect::<Result<_, BoxError>>()?,
+        )),
+        _ => Ok(serde_json::to_value(value)?),
+    }
+}
+
+#[doc(hidden)]
 pub fn serialize_function_value<T: Serialize>(value: &T, typ: &crate::value::Type) -> Result<Value, BoxError> {
     let mut value: Value = serde_json::from_value(serde_json::to_value(value)?)?;
-    if let (Value::List(actual, _), crate::value::Type::List(expected)) = (&mut value, typ) {
+    if let (Value::List(actual, _), crate::value::Type::List(expected)) = (&mut value, typ)
+        && !matches!(expected.as_ref(), crate::value::Type::Any)
+    {
         *actual = expected.as_ref().clone();
     }
     Ok(value)

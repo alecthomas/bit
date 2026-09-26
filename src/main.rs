@@ -1026,7 +1026,7 @@ fn print_info(quiet: bool) {
 enum SchemaEntry {
     Resource { name: String, schema: ResourceSchema },
     Function { name: String, signature: FuncSignature },
-    Builtin(bit::expr::BuiltinSignature),
+    Builtin(FuncSignature),
 }
 
 /// Collect all matching built-ins, native providers, and imported module resources.
@@ -1177,20 +1177,14 @@ fn render_schema_json(entries: &[SchemaEntry]) -> String {
     }
 
     #[derive(serde::Serialize)]
-    struct BuiltinParam<'a> {
-        name: &'a str,
-        #[serde(rename = "type")]
-        typ: &'a str,
-    }
-
-    #[derive(serde::Serialize)]
     struct BuiltinEntry<'a> {
         name: &'a str,
         kind: &'static str,
         origin: &'static str,
-        description: &'a str,
-        params: Vec<BuiltinParam<'a>>,
-        returns: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<&'a str>,
+        params: Vec<FunctionParam<'a>>,
+        returns: String,
     }
 
     #[derive(Default, serde::Serialize)]
@@ -1232,16 +1226,16 @@ fn render_schema_json(entries: &[SchemaEntry]) -> String {
             }
             SchemaEntry::Builtin(signature) => {
                 let function = BuiltinEntry {
-                    name: signature.name,
+                    name: &signature.name,
                     kind: "function",
                     origin: "builtin",
-                    description: signature.description,
+                    description: signature.description.as_deref(),
                     params: signature
                         .params
                         .iter()
-                        .map(|&(name, typ)| BuiltinParam { name, typ })
+                        .map(|(name, field)| FunctionParam { name, field })
                         .collect(),
-                    returns: signature.returns,
+                    returns: signature.returns.to_string(),
                 };
                 sections
                     .entry("builtins")
@@ -1309,15 +1303,8 @@ fn print_function_schema(name: &str, signature: &FuncSignature) {
     }
 }
 
-fn print_builtin_schema(signature: &bit::expr::BuiltinSignature) {
-    let params = signature
-        .params
-        .iter()
-        .map(|(name, typ)| format!("{name}: {typ}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let display = format!("{}({params}) -> {}", signature.name, signature.returns);
-    println!("{} — {}", display.bold(), signature.description.dim());
+fn print_builtin_schema(signature: &FuncSignature) {
+    print_function_schema(&signature.name, signature);
 }
 
 fn format_function_signature(name: &str, signature: &FuncSignature) -> String {
@@ -1528,7 +1515,7 @@ mod tests {
         let listed: Vec<_> = entries
             .iter()
             .filter_map(|entry| match entry {
-                SchemaEntry::Builtin(signature) => Some(signature.name),
+                SchemaEntry::Builtin(signature) => Some(signature.name.as_str()),
                 _ => None,
             })
             .collect();
@@ -1546,6 +1533,13 @@ mod tests {
         assert_eq!(json["builtins"]["functions"][0]["kind"], "function");
         assert_eq!(json["builtins"]["functions"][0]["origin"], "builtin");
         assert_eq!(json["builtins"]["functions"][0]["params"][0]["name"], "name");
+        assert_eq!(json["builtins"]["functions"][0]["params"][1]["type"], "any?");
+        assert_eq!(json["builtins"]["functions"][0]["returns"], "string | any");
+
+        let unique = collect_schema_entries(&registry(), &[], Some("uniq"));
+        let json: serde_json::Value = serde_json::from_str(&render_schema_json(&unique)).unwrap();
+        assert_eq!(json["builtins"]["functions"][0]["params"][0]["type"], "[any]");
+        assert_eq!(json["builtins"]["functions"][0]["returns"], "[any]");
     }
 
     #[test]
