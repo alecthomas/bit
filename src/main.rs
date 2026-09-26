@@ -1124,7 +1124,11 @@ fn print_schema(
         return;
     }
     for (i, entry) in entries.iter().enumerate() {
-        if i > 0 {
+        if i == 0 && matches!(entry, SchemaEntry::Builtin(_)) {
+            println!("{}\n", "Builtins".bold());
+        } else if i > 0
+            && (matches!(entries[i - 1], SchemaEntry::Resource { .. }) || matches!(entry, SchemaEntry::Resource { .. }))
+        {
             println!();
         }
         match entry {
@@ -1189,37 +1193,65 @@ fn render_schema_json(entries: &[SchemaEntry]) -> String {
         returns: &'a str,
     }
 
-    let values: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|entry| match entry {
-            SchemaEntry::Resource { name, schema } => serde_json::to_value(ResourceEntry { name, schema }),
-            SchemaEntry::Function { name, signature } => serde_json::to_value(FunctionEntry {
-                name,
-                kind: "function",
-                description: signature.description.as_deref(),
-                params: signature
-                    .params
-                    .iter()
-                    .map(|(name, field)| FunctionParam { name, field })
-                    .collect(),
-                returns: signature.returns.to_string(),
-            }),
-            SchemaEntry::Builtin(signature) => serde_json::to_value(BuiltinEntry {
-                name: signature.name,
-                kind: "function",
-                origin: "builtin",
-                description: signature.description,
-                params: signature
-                    .params
-                    .iter()
-                    .map(|&(name, typ)| BuiltinParam { name, typ })
-                    .collect(),
-                returns: signature.returns,
-            }),
-        })
-        .collect::<Result<_, _>>()
-        .expect("JSON serialization failed");
-    serde_json::to_string_pretty(&values).expect("JSON serialization failed")
+    #[derive(Default, serde::Serialize)]
+    struct SchemaSection {
+        functions: Vec<serde_json::Value>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        resources: Vec<serde_json::Value>,
+    }
+
+    let mut sections: std::collections::BTreeMap<&str, SchemaSection> = std::collections::BTreeMap::new();
+    for entry in entries {
+        match entry {
+            SchemaEntry::Resource { name, schema } => {
+                let section = name.split('.').next().unwrap_or(name);
+                sections
+                    .entry(section)
+                    .or_default()
+                    .resources
+                    .push(serde_json::to_value(ResourceEntry { name, schema }).expect("JSON serialization failed"));
+            }
+            SchemaEntry::Function { name, signature } => {
+                let section = name.split('.').next().unwrap_or(name);
+                let function = FunctionEntry {
+                    name,
+                    kind: "function",
+                    description: signature.description.as_deref(),
+                    params: signature
+                        .params
+                        .iter()
+                        .map(|(name, field)| FunctionParam { name, field })
+                        .collect(),
+                    returns: signature.returns.to_string(),
+                };
+                sections
+                    .entry(section)
+                    .or_default()
+                    .functions
+                    .push(serde_json::to_value(function).expect("JSON serialization failed"));
+            }
+            SchemaEntry::Builtin(signature) => {
+                let function = BuiltinEntry {
+                    name: signature.name,
+                    kind: "function",
+                    origin: "builtin",
+                    description: signature.description,
+                    params: signature
+                        .params
+                        .iter()
+                        .map(|&(name, typ)| BuiltinParam { name, typ })
+                        .collect(),
+                    returns: signature.returns,
+                };
+                sections
+                    .entry("builtins")
+                    .or_default()
+                    .functions
+                    .push(serde_json::to_value(function).expect("JSON serialization failed"));
+            }
+        }
+    }
+    serde_json::to_string_pretty(&sections).expect("JSON serialization failed")
 }
 
 fn print_resource_schema(name: &str, schema: &bit::provider::ResourceSchema) {
@@ -1446,14 +1478,18 @@ mod tests {
         assert_eq!(entries.len(), 1);
 
         let json: serde_json::Value = serde_json::from_str(&render_schema_json(&entries)).unwrap();
-        assert_eq!(json[0]["name"], "go.packages");
-        assert_eq!(json[0]["kind"], "function");
-        assert_eq!(json[0]["description"], "List Go packages matching a package pattern.");
-        assert_eq!(json[0]["params"][0]["name"], "pattern");
-        assert_eq!(json[0]["params"][0]["type"], "string");
-        assert_eq!(json[0]["params"][1]["name"], "dir");
-        assert_eq!(json[0]["params"][1]["type"], "string?");
-        assert_eq!(json[0]["returns"], "[string]");
+        assert_eq!(json.as_object().unwrap().len(), 1);
+        assert_eq!(json["go"]["functions"][0]["name"], "go.packages");
+        assert_eq!(json["go"]["functions"][0]["kind"], "function");
+        assert_eq!(
+            json["go"]["functions"][0]["description"],
+            "List Go packages matching a package pattern."
+        );
+        assert_eq!(json["go"]["functions"][0]["params"][0]["name"], "pattern");
+        assert_eq!(json["go"]["functions"][0]["params"][0]["type"], "string");
+        assert_eq!(json["go"]["functions"][0]["params"][1]["name"], "dir");
+        assert_eq!(json["go"]["functions"][0]["params"][1]["type"], "string?");
+        assert_eq!(json["go"]["functions"][0]["returns"], "[string]");
 
         let SchemaEntry::Function { name, signature } = &entries[0] else {
             panic!("expected function schema");
@@ -1504,9 +1540,29 @@ mod tests {
         let filtered = collect_schema_entries(&registry(), &[], Some("env"));
         assert_eq!(filtered.len(), 1);
         let json: serde_json::Value = serde_json::from_str(&render_schema_json(&filtered)).unwrap();
-        assert_eq!(json[0]["name"], "env");
-        assert_eq!(json[0]["kind"], "function");
-        assert_eq!(json[0]["origin"], "builtin");
-        assert_eq!(json[0]["params"][0]["name"], "name");
+        assert_eq!(json.as_object().unwrap().len(), 1);
+        assert_eq!(json["builtins"]["functions"][0]["name"], "env");
+        assert_eq!(json["builtins"]["functions"][0]["kind"], "function");
+        assert_eq!(json["builtins"]["functions"][0]["origin"], "builtin");
+        assert_eq!(json["builtins"]["functions"][0]["params"][0]["name"], "name");
+    }
+
+    #[test]
+    fn schema_json_groups_builtins_and_providers() {
+        let entries = collect_schema_entries(&registry(), &[], None);
+        let json: serde_json::Value = serde_json::from_str(&render_schema_json(&entries)).unwrap();
+        assert_eq!(
+            json["builtins"]["functions"].as_array().unwrap().len(),
+            bit::expr::builtin_functions().len()
+        );
+        assert!(json["builtins"].get("resources").is_none());
+        assert!(
+            json["docker"]["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == "docker.image")
+        );
+        assert!(json["docker"]["functions"].is_array());
     }
 }

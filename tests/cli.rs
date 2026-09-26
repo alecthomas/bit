@@ -222,6 +222,54 @@ fn quiet_preserves_errors() {
 }
 
 #[test]
+fn schema_prints_builtins_under_their_own_header() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("BUILD.bit"), "").unwrap();
+
+    let output = run_bit(project.path(), &["--schema"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let schema = String::from_utf8(output.stdout).unwrap();
+    assert!(schema.lines().next().unwrap().contains("Builtins"));
+    assert_eq!(schema.lines().nth(1), Some(""));
+    assert!(schema.contains("env(name: string"));
+    assert!(schema.contains("docker.image"));
+    let lines: Vec<_> = schema.lines().collect();
+    let basename = lines.iter().position(|line| line.contains("basename(path:")).unwrap();
+    assert!(lines[basename + 1].contains("dirname(path:"));
+    let rust_packages = lines.iter().position(|line| line.contains("rust.packages(")).unwrap();
+    assert!(lines[rust_packages + 1].contains("rust.dependencies("));
+    assert!(lines[rust_packages - 1].is_empty());
+
+    let filtered = run_bit(project.path(), &["--schema", "env"]);
+    assert!(
+        filtered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&filtered.stderr)
+    );
+    let schema = String::from_utf8(filtered.stdout).unwrap();
+    assert!(schema.lines().next().unwrap().contains("Builtins"));
+    assert_eq!(schema.lines().nth(1), Some(""));
+    assert!(!schema.contains("docker.image"));
+}
+
+#[test]
+fn schema_json_separates_imported_module_resources() {
+    let project = tempfile::tempdir().unwrap();
+    let module_dir = project.path().join("tools");
+    fs::create_dir(&module_dir).unwrap();
+    fs::write(project.path().join("BUILD.bit"), "import \"./tools\" as tools\n").unwrap();
+    fs::write(module_dir.join("image.bit"), "param tag: string\n").unwrap();
+
+    let output = run_bit(project.path(), &["--schema", "--json"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(schema["builtins"]["functions"].is_array());
+    assert!(schema["docker"]["resources"].is_array());
+    assert_eq!(schema["tools"]["resources"][0]["name"], "tools.image");
+    assert!(schema["tools"]["functions"].is_array());
+}
+
+#[test]
 fn list_shows_targets_and_repeated_list_shows_blocks() {
     let project = tempfile::tempdir().unwrap();
     fs::write(

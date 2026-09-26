@@ -63,7 +63,7 @@ sync-readme = exec {
         .name + "(" + (.params | map(.name + ": " + .type) | join(", ")) + ") -> " + .returns;
       "### Built-in Functions\n",
       "`bit --schema` lists these functions and their signatures. Filter to one with\nits unqualified name, for example `bit --schema env`.\n",
-      (.[] | select(.origin == "builtin") |
+      (.builtins.functions[] |
         "**`\(function_signature)`** — \(.description)\n")
     ' "$SCHEMA" > "$BUILTINS"
     jq -r '
@@ -71,10 +71,10 @@ sync-readme = exec {
       def function_signature:
         .name + "(" + (.params | map(.name + ": " + .type) | join(", ")) + ") -> " + .returns;
       "## Providers\n",
-      (map(select(.origin != "builtin")) | group_by(.name | split(".")[0]) | .[] |
-      (.[0].name | split(".")[0]) as $prov |
+      (to_entries[] | select(.key != "builtins") |
+      .key as $prov |
       "### \($prov)\n",
-      (.[] |
+      ((.value.resources // []) + .value.functions | .[] |
         if .kind == "function" then
           "**`\(function_signature)`**\(.description // "" | if . != "" then " — \(.)" else "" end)\n"
         else

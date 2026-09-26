@@ -79,6 +79,7 @@ bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
 bit --help       # show CLI options and a BUILD.bit language overview
 bit --schema [name]  # show built-in functions and provider resource/function schemas
+bit --schema --json  # group schemas by builtins, provider, or imported module
 bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
 bit --fmt        # canonically format the project's BUILD.bit, preserving comments
 bit --fmt path/to/file.bit  # format a specified .bit file in place
@@ -88,6 +89,10 @@ bit --long       # disable live scrolling regions and stream every output line
 bit --quiet      # suppress output unless an error occurs (also -q)
 bit --since origin/master  # apply blocks affected since the branch point
 ```
+
+The JSON schema output is an object whose keys are `builtins` and the names of
+providers or imported modules. Each section has a `functions` array and, when
+applicable, a `resources` array.
 
 `--fmt` separates top-level declarations with one empty line, except consecutive
 `param` or `let` directives of the same kind, which stay together. It puts each
