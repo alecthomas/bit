@@ -81,6 +81,7 @@ bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
 bit --cache      # show the size of the shared build cache
 bit --cache --clean  # delete every cached receipt and artifact
 bit --long       # disable live scrolling regions and stream every output line
+bit --quiet      # suppress output unless an error occurs (also -q)
 bit --since origin/master  # apply blocks affected since the branch point
 ```
 

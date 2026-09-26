@@ -90,6 +90,10 @@ struct Cli {
     #[arg(short = 'D', long)]
     debug: bool,
 
+    /// Suppress all output unless an error occurs
+    #[arg(short = 'q', long)]
+    quiet: bool,
+
     /// Disable live scrolling regions; stream all output line-by-line.
     #[arg(short = 'L', long)]
     long: bool,
@@ -226,7 +230,7 @@ fn load_module(
 }
 
 /// `bit --cache`: print the shared cache size, or with `--clean` delete it.
-fn manage_cache(clean: bool) {
+fn manage_cache(clean: bool, quiet: bool) {
     let root = match bit::cache::cache_root() {
         Ok(root) => root,
         Err(e) => {
@@ -238,8 +242,10 @@ fn manage_cache(clean: bool) {
         bit::cache::clean(&root)
     } else {
         bit::cache::stats(&root).map(|stats| {
-            println!("{}", root.display());
-            println!("{stats}");
+            if !quiet {
+                println!("{}", root.display());
+                println!("{stats}");
+            }
         })
     };
     if let Err(e) = result {
@@ -250,12 +256,14 @@ fn manage_cache(clean: bool) {
 
 /// Open the shared build cache for the project in the current directory.
 /// Failure to open it only disables sharing; builds still run locally.
-fn open_build_cache() -> BuildCache {
+fn open_build_cache(quiet: bool) -> BuildCache {
     let root = std::path::Path::new(".");
     match BuildCache::open(root) {
         Ok(cache) => cache,
         Err(e) => {
-            eprintln!("{} shared build cache unavailable: {e}", "warning:".yellow().bold());
+            if !quiet {
+                eprintln!("{} shared build cache unavailable: {e}", "warning:".yellow().bold());
+            }
             BuildCache::local_only(root)
         }
     }
@@ -267,12 +275,15 @@ fn short_sha(sha: &str) -> &str {
 }
 
 /// Create an Output formatter sized to the blocks that will actually run.
-fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool, long: bool) -> Output {
+fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool, long: bool, quiet: bool) -> Output {
     let names = engine::resolve_order(dag, targets).unwrap_or_default();
-    output_for_names(&names, debug, long)
+    output_for_names(&names, debug, long, quiet)
 }
 
-fn output_for_names(names: &[String], debug: bool, long: bool) -> Output {
+fn output_for_names(names: &[String], debug: bool, long: bool, quiet: bool) -> Output {
+    if quiet {
+        return Output::silent();
+    }
     let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
     Output::new(&name_refs).with_debug(debug).with_long(long)
 }
@@ -418,6 +429,7 @@ fn selected_order_or_exit(
     since: Option<&str>,
     mode: SelectionMode,
     tracker: &Arc<Mutex<FileTracker>>,
+    quiet: bool,
 ) -> Option<Vec<String>> {
     let order = match selected_order(dag, base, cache, targets, since, mode, tracker) {
         Ok(order) => order,
@@ -427,7 +439,9 @@ fn selected_order_or_exit(
         }
     };
     if since.is_some() && order.is_empty() {
-        println!("No affected blocks.");
+        if !quiet {
+            println!("No affected blocks.");
+        }
         None
     } else {
         Some(order)
@@ -473,9 +487,9 @@ fn main() {
         let imports = resolve_imports_or_exit(&module, bit::import::UpdateMode::None);
         let filter = if filter.is_empty() { None } else { Some(filter) };
         if cli.json {
-            print_schema_json(&registry, &imports.roots, filter);
+            print_schema_json(&registry, &imports.roots, filter, cli.quiet);
         } else {
-            print_schema(&registry, &imports.roots, filter);
+            print_schema(&registry, &imports.roots, filter, cli.quiet);
         }
         return;
     }
@@ -483,7 +497,7 @@ fn main() {
     // --info doesn't need the full DAG
     if matches!(operation, Operation::Info) {
         find_and_chdir_project_root();
-        print_info();
+        print_info(cli.quiet);
         return;
     }
 
@@ -497,16 +511,18 @@ fn main() {
             Some(cli.targets.clone())
         };
         let res = resolve_imports_or_exit(&module, bit::import::UpdateMode::Update(filter));
-        for f in &res.unmatched_filters {
-            eprintln!("{} --update filter {f:?} matched no repos", "warning:".yellow().bold());
-        }
-        if res.changes.is_empty() {
-            println!("no changes");
-        } else {
-            for change in &res.changes {
-                let old = change.old.as_deref().map(short_sha).unwrap_or("—");
-                let new = short_sha(&change.new);
-                println!("{} {old} -> {new}", change.repo);
+        if !cli.quiet {
+            for f in &res.unmatched_filters {
+                eprintln!("{} --update filter {f:?} matched no repos", "warning:".yellow().bold());
+            }
+            if res.changes.is_empty() {
+                println!("no changes");
+            } else {
+                for change in &res.changes {
+                    let old = change.old.as_deref().map(short_sha).unwrap_or("—");
+                    let new = short_sha(&change.new);
+                    println!("{} {old} -> {new}", change.repo);
+                }
             }
         }
         return;
@@ -518,14 +534,14 @@ fn main() {
             eprintln!("{} --cache does not accept targets", "error:".red().bold());
             process::exit(1);
         }
-        manage_cache(cli.clean);
+        manage_cache(cli.clean, cli.quiet);
         return;
     }
 
     find_and_chdir_project_root();
     let registry = default_registry(&tracker);
     let params = parse_params(&cli.params);
-    let cache = open_build_cache();
+    let cache = open_build_cache(cli.quiet);
     let jobs = cli
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
@@ -541,6 +557,7 @@ fn main() {
             cli.since.as_deref(),
             SelectionMode::Targets,
             &tracker,
+            cli.quiet,
         ) else {
             return;
         };
@@ -555,7 +572,9 @@ fn main() {
         } else {
             std::collections::HashMap::new()
         };
-        println!("{}", bit::graph::render(&dag, &names, &styles));
+        if !cli.quiet {
+            println!("{}", bit::graph::render(&dag, &names, &styles));
+        }
     } else if matches!(operation, Operation::Plan) {
         let (_module, mut dag, base, _store) = load_module(&registry, &params);
         let Some(names) = selected_order_or_exit(
@@ -566,17 +585,18 @@ fn main() {
             cli.since.as_deref(),
             SelectionMode::Targets,
             &tracker,
+            cli.quiet,
         ) else {
             return;
         };
-        let output = output_for_names(&names, cli.debug, cli.long);
+        let output = output_for_names(&names, cli.debug, cli.long, cli.quiet);
         if let Err(e) = engine::plan_selected(&mut dag, &base, &cache, &output, &names, &tracker) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
     } else if matches!(operation, Operation::Clean) {
         let (_module, mut dag, _base, store) = load_module(&registry, &params);
-        let output = make_output(&dag, targets, cli.debug, cli.long);
+        let output = make_output(&dag, targets, cli.debug, cli.long, cli.quiet);
         if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, targets, cli.force) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
@@ -591,10 +611,11 @@ fn main() {
             cli.since.as_deref(),
             SelectionMode::Tests,
             &tracker,
+            cli.quiet,
         ) else {
             return;
         };
-        let output = output_for_names(&names, cli.debug, cli.long);
+        let output = output_for_names(&names, cli.debug, cli.long, cli.quiet);
         if let Err(e) = engine::apply_selected(&mut dag, &base, store.as_ref(), &cache, &output, &names, jobs, &tracker)
         {
             eprintln!("{} {e}", "error:".red().bold());
@@ -611,15 +632,21 @@ fn main() {
                 cli.since.as_deref(),
                 SelectionMode::AllBlocks,
                 &tracker,
+                cli.quiet,
             ) else {
                 return;
             };
-            print_block_tree(&dag, &names);
+            if !cli.quiet {
+                print_block_tree(&dag, &names);
+            }
         } else if cli.list == 1 {
-            print_targets(&dag);
+            if !cli.quiet {
+                print_targets(&dag);
+            }
         } else {
             match dag.topo_order() {
-                Ok(names) => print_block_tree(&dag, &names),
+                Ok(names) if !cli.quiet => print_block_tree(&dag, &names),
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} {e}", "error:".red().bold());
                     process::exit(1);
@@ -636,10 +663,11 @@ fn main() {
             cli.since.as_deref(),
             SelectionMode::Targets,
             &tracker,
+            cli.quiet,
         ) else {
             return;
         };
-        if let Err(e) = engine::dump_selected(&mut dag, &base, &names) {
+        if let Err(e) = engine::dump_selected(&mut dag, &base, &names, cli.quiet) {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
@@ -654,10 +682,11 @@ fn main() {
             cli.since.as_deref(),
             SelectionMode::Targets,
             &tracker,
+            cli.quiet,
         ) else {
             return;
         };
-        let output = output_for_names(&names, cli.debug, cli.long);
+        let output = output_for_names(&names, cli.debug, cli.long, cli.quiet);
         let result = if cli.force {
             engine::apply_selected_forced(&mut dag, &base, store.as_ref(), &cache, &output, &names, jobs, &tracker)
         } else {
@@ -751,7 +780,7 @@ fn print_block_tree_node(
     }
 }
 
-fn print_info() {
+fn print_info(quiet: bool) {
     use bit::ast::Statement;
 
     let source = match fs::read_to_string("BUILD.bit") {
@@ -768,6 +797,10 @@ fn print_info() {
             process::exit(1);
         }
     };
+
+    if quiet {
+        return;
+    }
 
     let module_params: Vec<_> = module
         .statements
@@ -918,8 +951,16 @@ fn collect_schema_entries(
     entries
 }
 
-fn print_schema(registry: &ProviderRegistry, import_roots: &[bit::import::ImportRoot], filter: Option<&str>) {
+fn print_schema(
+    registry: &ProviderRegistry,
+    import_roots: &[bit::import::ImportRoot],
+    filter: Option<&str>,
+    quiet: bool,
+) {
     let entries = collect_schema_entries(registry, import_roots, filter);
+    if quiet {
+        return;
+    }
     for (i, entry) in entries.iter().enumerate() {
         if i > 0 {
             println!();
@@ -931,9 +972,16 @@ fn print_schema(registry: &ProviderRegistry, import_roots: &[bit::import::Import
     }
 }
 
-fn print_schema_json(registry: &ProviderRegistry, import_roots: &[bit::import::ImportRoot], filter: Option<&str>) {
+fn print_schema_json(
+    registry: &ProviderRegistry,
+    import_roots: &[bit::import::ImportRoot],
+    filter: Option<&str>,
+    quiet: bool,
+) {
     let entries = collect_schema_entries(registry, import_roots, filter);
-    println!("{}", render_schema_json(&entries));
+    if !quiet {
+        println!("{}", render_schema_json(&entries));
+    }
 }
 
 fn render_schema_json(entries: &[SchemaEntry]) -> String {

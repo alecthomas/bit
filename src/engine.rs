@@ -1516,11 +1516,11 @@ pub fn destroy(
 /// Dump evaluated inputs and stored outputs for all blocks (or a target subset).
 pub fn dump(dag: &mut Dag, base: &BaseScope, targets: &[String]) -> Result<(), EngineError> {
     let order = resolve_order(dag, targets)?;
-    dump_selected(dag, base, &order)
+    dump_selected(dag, base, &order, false)
 }
 
 /// Dump evaluated inputs and stored outputs for an exact block order.
-pub fn dump_selected(dag: &mut Dag, base: &BaseScope, order: &[String]) -> Result<(), EngineError> {
+pub fn dump_selected(dag: &mut Dag, base: &BaseScope, order: &[String], quiet: bool) -> Result<(), EngineError> {
     let mut scope = base.scope.clone();
 
     for (i, name) in order.iter().enumerate() {
@@ -1564,6 +1564,10 @@ pub fn dump_selected(dag: &mut Dag, base: &BaseScope, order: &[String]) -> Resul
 
         // Populate scope with stored outputs for downstream refs
         scope.set(name, Value::strct(prior.outputs.clone()));
+
+        if quiet {
+            continue;
+        }
 
         if i > 0 {
             println!();

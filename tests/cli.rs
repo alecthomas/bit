@@ -27,6 +27,69 @@ fn run_git(project: &std::path::Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn quiet_suppresses_success_output_across_modes() {
+    let project = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("BUILD.bit"),
+        "task = exec { command = \"printf build-output\" }\ntarget build = [task]\n",
+    )
+    .unwrap();
+
+    for args in [
+        vec!["-q"],
+        vec!["--quiet", "--debug", "--long"],
+        vec!["-q", "--plan"],
+        vec!["-q", "--list"],
+        vec!["-q", "-ll"],
+        vec!["-q", "--graph"],
+        vec!["-q", "--dump"],
+        vec!["-q", "--info"],
+        vec!["-q", "--schema", "go"],
+        vec!["-q", "--schema", "--json"],
+        vec!["-q", "--update", "missing"],
+        vec!["-q", "--cache"],
+    ] {
+        let output = run_bit_with_cache(project.path(), cache.path(), &args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn quiet_preserves_errors() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("BUILD.bit"),
+        "task = exec { command = \"false\" }\n",
+    )
+    .unwrap();
+
+    let output = run_bit(project.path(), &["-q"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error:"));
+
+    let output = run_bit(project.path(), &["--quiet", "--schema", "missing"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown provider/resource"));
+}
+
+#[test]
 fn list_shows_targets_and_repeated_list_shows_blocks() {
     let project = tempfile::tempdir().unwrap();
     fs::write(
