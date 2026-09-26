@@ -268,6 +268,7 @@ module.exports = grammar({
       optional(seq(
         $._expression,
         repeat(seq(',', $._expression)),
+        optional(','),
       )),
       ']',
     ),
@@ -277,6 +278,7 @@ module.exports = grammar({
       optional(seq(
         $.map_entry,
         repeat(seq(',', $.map_entry)),
+        optional(','),
       )),
       '}',
     ),

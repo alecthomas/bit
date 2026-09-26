@@ -215,6 +215,17 @@ EOF
 
 ### Expressions
 
+Lists and maps can span lines and may end with a trailing comma:
+
+```bit
+let items = [
+  "bar",
+]
+let settings = {
+  name = "bar",
+}
+```
+
 ```hcl
 list1 + list2           # list concatenation
 a == b                  # equality / inequality

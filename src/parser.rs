@@ -401,15 +401,25 @@ fn null_expr(input: &mut &str) -> ModalResult<Expr> {
 }
 
 fn list_expr(input: &mut &str) -> ModalResult<Expr> {
-    delimited(lex('['), separated(0.., expr, lex(',')), lex(']'))
-        .map(Expr::List)
-        .parse_next(input)
+    delimited(
+        lex('['),
+        opt((separated(1.., expr, lex(',')), opt(lex(','))))
+            .map(|items| items.map(|(values, _)| values).unwrap_or_default()),
+        lex(']'),
+    )
+    .map(Expr::List)
+    .parse_next(input)
 }
 
 fn map_expr(input: &mut &str) -> ModalResult<Expr> {
-    delimited(lex('{'), separated(0.., map_entry, lex(',')), lex('}'))
-        .map(Expr::Map)
-        .parse_next(input)
+    delimited(
+        lex('{'),
+        opt((separated(1.., map_entry, lex(',')), opt(lex(','))))
+            .map(|items| items.map(|(values, _)| values).unwrap_or_default()),
+        lex('}'),
+    )
+    .map(Expr::Map)
+    .parse_next(input)
 }
 
 /// `"key" = value` or `'key' = value` or `key = value`
@@ -1304,6 +1314,17 @@ server = exec {
     }
 
     #[test]
+    fn parse_list_with_trailing_comma() {
+        let result = parse("let x = [\n  \"a\",\n  \"b\",\n]", "<test>").unwrap();
+        assert!(
+            matches!(&result.statements[0], Statement::Let(l) if matches!(&l.value, Expr::List(items) if items.len() == 2))
+        );
+        assert!(parse("let x = []", "<test>").is_ok());
+        assert!(parse("let x = [,]", "<test>").is_err());
+        assert!(parse("let x = [1,,]", "<test>").is_err());
+    }
+
+    #[test]
     fn parse_map() {
         let result = parse(r#"let x = { a = 1, b = 2 }"#, "<test>").unwrap();
         match &result.statements[0] {
@@ -1317,6 +1338,17 @@ server = exec {
             },
             _ => panic!("expected Let"),
         }
+    }
+
+    #[test]
+    fn parse_map_with_trailing_comma() {
+        let result = parse("let x = {\n  a = 1,\n  b = 2,\n}", "<test>").unwrap();
+        assert!(
+            matches!(&result.statements[0], Statement::Let(l) if matches!(&l.value, Expr::Map(fields) if fields.len() == 2))
+        );
+        assert!(parse("let x = {}", "<test>").is_ok());
+        assert!(parse("let x = {,}", "<test>").is_err());
+        assert!(parse("let x = {a = 1,,}", "<test>").is_err());
     }
 
     #[test]
