@@ -1505,11 +1505,12 @@ mod tests {
         for name in ["exec", "pnpm.run"] {
             let entries = collect_schema_entries(&registry(), &[], Some(name));
             let json: serde_json::Value = serde_json::from_str(&render_schema_json(&entries)).unwrap();
-            let resource = json
+            let provider = name.split('.').next().unwrap();
+            let resource = json[provider]["resources"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|entry| entry["inputs"].is_object())
+                .find(|entry| entry["name"] == name)
                 .unwrap();
             let output = resource["inputs"]["fields"]
                 .as_array()
