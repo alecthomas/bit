@@ -174,7 +174,7 @@ module.exports = grammar({
 
     map_type: $ => seq('{', 'string', '=', $.type, '}'),
 
-    scalar_type: _ => choice('string', 'number', 'bool', 'duration', 'path', 'secret'),
+    scalar_type: _ => choice('string', 'number', 'int', 'bool', 'duration', 'path', 'secret'),
 
     // ── Expressions ──
 
@@ -333,6 +333,7 @@ module.exports = grammar({
 
     map_entry: $ => seq(
       field('key', choice($.identifier, $.string, $.raw_string)),
+      optional(seq(':', field('type', $.type))),
       '=',
       field('value', $._expression),
     ),

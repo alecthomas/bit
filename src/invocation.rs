@@ -350,7 +350,18 @@ impl Instantiator<'_> {
                     .map(|item| self.materialize_expr(item, caller, stack))
                     .collect::<Result<_, _>>()?,
             ),
-            Expr::Map(fields) => Expr::Map(self.materialize_fields(fields, caller, stack)?),
+            Expr::Map(fields) => Expr::Map(
+                fields
+                    .iter()
+                    .map(|field| {
+                        Ok(crate::ast::MapEntry {
+                            name: field.name.clone(),
+                            typ: field.typ.clone(),
+                            value: self.materialize_expr(&field.value, caller, stack)?,
+                        })
+                    })
+                    .collect::<Result<_, LoadError>>()?,
+            ),
             Expr::MatrixRef { name, keys, fields } => Expr::MatrixRef {
                 name: name.clone(),
                 keys: keys

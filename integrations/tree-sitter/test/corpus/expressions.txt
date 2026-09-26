@@ -143,6 +143,27 @@ let x = {
         value: (number)))))
 
 ================================================================================
+map with typed keys and null
+================================================================================
+let person = {name: string = "Bob", age:int = null, active = true}
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (map
+      (map_entry
+        key: (identifier)
+        type: (type (scalar_type))
+        value: (string))
+      (map_entry
+        key: (identifier)
+        type: (type (scalar_type))
+        value: (null))
+      (map_entry
+        key: (identifier)
+        value: (boolean)))))
+
+================================================================================
 map with string keys
 ================================================================================
 let x = { "host.docker.internal" = "10.0.0.1" }

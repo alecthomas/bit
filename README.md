@@ -77,7 +77,8 @@ bit --graph      # render the DAG as an ASCII graph
 bit --plan --graph  # …and colour each node by its planned action
 bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
-bit --schema [provider.member]  # show provider resource and function schemas
+bit --help       # show CLI options and a BUILD.bit language overview
+bit --schema [name]  # show built-in functions and provider resource/function schemas
 bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
 bit --fmt        # canonically format the project's BUILD.bit, preserving comments
 bit --fmt path/to/file.bit  # format a specified .bit file in place
@@ -276,14 +277,18 @@ EOF
 
 ### Expressions
 
-Lists and maps can span lines and may end with a trailing comma:
+Lists and maps can span lines and may end with a trailing comma. Map values
+may have different types. A key can declare its value type; `int` is an alias
+for `number`. An annotated key can have a `null` value:
 
 ```bit
 let items = [
   "bar",
 ]
 let settings = {
-  name = "bar",
+  name: string = "bar",
+  retries = 2,
+  age: int = null,
 }
 ```
 
@@ -312,21 +317,34 @@ Supported units: `ns`, `us`, `ms`, `s`, `m`, `h`, `d`. A bare `5` is a number; `
 
 ### Built-in Functions
 
-| Function                          | Description                              |
-| --------------------------------- | ---------------------------------------- |
-| `env(name)`, `env(name, default)` | Environment variable                     |
-| `exec(command)`                   | Run shell command, return stdout         |
-| `glob(pattern)`                   | Expand filesystem glob                   |
-| `trim(value)`                     | Strip whitespace                         |
-| `lines(string)`                   | Split into lines                         |
-| `split(string, sep)`              | Split by separator                       |
-| `uniq(list)`                      | Deduplicate list                         |
-| `basename(path)`                  | Extract file name from path              |
-| `dirname(path)`                   | Extract directory from path              |
-| `prefix(value, str)`              | Prepend string to value or list elements |
-| `suffix(value, str)`              | Append string to value or list elements  |
-| `secret(name)`                    | Access secret                            |
-| `sha256(value)`                   | Hex-encoded SHA-256 digest               |
+`bit --schema` lists these functions and their signatures. Filter to one with
+its unqualified name, for example `bit --schema env`.
+
+**`basename(path: string | [string]) -> string | [string]`** — Extract file names from a path or list of paths.
+
+**`dirname(path: string | [string]) -> string | [string]`** — Extract directories from a path or list of paths.
+
+**`env(name: string, default: any?) -> string | any`** — Read an environment variable, with an optional fallback.
+
+**`exec(command: string) -> string`** — Run a shell command and return stdout.
+
+**`glob(pattern: string) -> [string]`** — Expand a filesystem glob.
+
+**`lines(value: string) -> [string]`** — Split a string into nonempty lines.
+
+**`prefix(value: string | [string], text: string) -> string | [string]`** — Prepend text to a string or each string in a list.
+
+**`secret(name: string) -> string`** — Read a secret by name.
+
+**`sha256(value: string) -> string`** — Hash a string with SHA-256.
+
+**`split(value: string, separator: string) -> [string]`** — Split a string by a separator.
+
+**`suffix(value: string | [string], text: string) -> string | [string]`** — Append text to a string or each string in a list.
+
+**`trim(value: string | [string]) -> string | [string]`** — Trim whitespace from a string or each string in a list.
+
+**`uniq(list: [any]) -> [any]`** — Deduplicate a list while preserving order.
 
 ### Provider Functions
 

@@ -27,6 +27,53 @@ fn run_git(project: &std::path::Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn help_explains_build_file_and_points_to_schema() {
+    let project = tempfile::tempdir().unwrap();
+    let output = run_bit(project.path(), &["--help"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let help = String::from_utf8(output.stdout).unwrap();
+    for text in [
+        "BUILD.bit example (illustrative):",
+        "import \"./modules/app\" as app",
+        "import \"github.com/acme/build\" as tools",
+        "param version: string = \"dev\"",
+        "name: string = \"Bob\", retries = 2, age: int = null",
+        "binary[arch] = go.exe",
+        "target default = [binary]",
+        "output artifact = binary[\"amd64\"].path",
+        "Use --schema to list all available resources and functions.",
+    ] {
+        assert!(help.contains(text), "missing {text:?} from --help");
+    }
+    for section in ["param version", "let arch", "binary[arch]", "output artifact"] {
+        assert!(
+            help.contains(&format!("\n\n  {section}")),
+            "missing blank line before {section}"
+        );
+    }
+
+    let example = help
+        .split_once("BUILD.bit example (illustrative):\n")
+        .unwrap()
+        .1
+        .split_once("\nUse --schema")
+        .unwrap()
+        .0
+        .lines()
+        .map(|line| line.strip_prefix("  ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let comment_columns: Vec<_> = example
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("# "))
+        .filter_map(|line| line.find("# "))
+        .collect();
+    assert!(!comment_columns.is_empty());
+    assert!(comment_columns.iter().all(|column| *column == comment_columns[0]));
+    bit::parser::parse(&example, "BUILD.bit").unwrap();
+}
+
+#[test]
 fn fmt_formats_a_named_file_without_a_project_and_preserves_comments() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("example.bit");
@@ -171,7 +218,7 @@ fn quiet_preserves_errors() {
     let output = run_bit(project.path(), &["--quiet", "--schema", "missing"]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown provider/resource"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown resource/function"));
 }
 
 #[test]

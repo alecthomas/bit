@@ -194,7 +194,7 @@ impl StructType {
 /// Runtime value in the .bit language.
 ///
 /// `List` and `Map` carry their element/value `Type` for homogeneous type checking.
-/// `Struct` carries per-field types for heterogeneous named fields (e.g. block outputs).
+/// `Struct` carries per-field types for map literals and block outputs.
 /// Types are **not** serialised — they are inferred on deserialisation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -297,7 +297,7 @@ impl Value {
 
     /// Convert a runtime Value into an AST Expr.
     pub fn to_expr(&self) -> crate::ast::Expr {
-        use crate::ast::{Expr, Field, StringPart};
+        use crate::ast::{Expr, MapEntry, StringPart};
         match self {
             Value::Str(s) => Expr::Str(vec![StringPart::Literal(s.clone())]),
             Value::BlockRef(name) => Expr::BlockRef(name.clone()),
@@ -306,10 +306,30 @@ impl Value {
             Value::Duration(d) => Expr::Duration(*d),
             Value::Null => Expr::Null,
             Value::List(_, items) => Expr::List(items.iter().map(|v| v.to_expr()).collect()),
-            Value::Map(_, map) | Value::Struct(_, map) => Expr::Map(
+            Value::Map(_, map) => Expr::Map(
                 map.iter()
-                    .map(|(k, v)| Field {
+                    .map(|(k, v)| MapEntry {
                         name: k.clone(),
+                        typ: None,
+                        value: v.to_expr(),
+                    })
+                    .collect(),
+            ),
+            Value::Struct(st, map) => Expr::Map(
+                st.fields
+                    .iter()
+                    .filter_map(|(k, field)| map.get(k).map(|v| (k, v, Some(&field.typ))))
+                    .chain(
+                        map.iter()
+                            .filter(|(k, _)| st.field(k).is_none())
+                            .map(|(k, v)| (k, v, None)),
+                    )
+                    .map(|(k, v, typ)| MapEntry {
+                        name: k.clone(),
+                        typ: typ.map(|typ| match typ {
+                            Type::Optional(inner) if matches!(v, Value::Null) => *inner.clone(),
+                            typ => typ.clone(),
+                        }),
                         value: v.to_expr(),
                     })
                     .collect(),
@@ -496,7 +516,7 @@ pub fn validate_type(value: &Value, typ: &Type) -> Result<(), String> {
             }
             Ok(())
         }
-        (Type::Map(val_type), Value::Map(_, map)) => {
+        (Type::Map(val_type), Value::Map(_, map) | Value::Struct(_, map)) => {
             for (k, v) in map {
                 validate_type(v, val_type).map_err(|e| format!(".{k}: {e}"))?;
             }
@@ -695,6 +715,16 @@ mod tests {
         m.insert("a".into(), Value::Number(1.into()));
         m.insert("b".into(), Value::Number(2.into()));
         assert!(validate_type(&Value::Map(Type::Number, m), &Type::Map(Box::new(Type::Number))).is_ok());
+    }
+
+    #[test]
+    fn validate_homogeneous_map_type_against_struct_value() {
+        let mut map = Map::new();
+        map.insert("a".into(), Value::Number(1.into()));
+        assert!(validate_type(&Value::strct(map.clone()), &Type::Map(Box::new(Type::Number))).is_ok());
+        map.insert("b".into(), Value::Bool(true));
+        let error = validate_type(&Value::strct(map), &Type::Map(Box::new(Type::Number))).unwrap_err();
+        assert!(error.contains(".b"));
     }
 
     #[test]

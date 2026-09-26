@@ -587,8 +587,9 @@ pub(crate) fn rewrite_expr(
         Expr::Map(fields) => Expr::Map(
             fields
                 .iter()
-                .map(|f| Field {
+                .map(|f| crate::ast::MapEntry {
                     name: f.name.clone(),
+                    typ: f.typ.clone(),
                     value: rewrite_expr(&f.value, inner_blocks, substitutions, prefix),
                 })
                 .collect(),

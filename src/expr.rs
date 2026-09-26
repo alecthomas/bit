@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::process::Command;
 
-use crate::ast::{BinOp, Expr, Field, StringPart};
+use crate::ast::{BinOp, Expr, MapEntry, StringPart};
 use crate::provider::ProviderRegistry;
-use crate::value::{Map, Type, Value};
+use crate::value::{Map, StructField, StructType, Type, Value, validate_type};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EvalError {
@@ -230,14 +230,38 @@ fn eval_string(parts: &[StringPart], scope: &Scope, mode: EvalMode) -> Result<Va
     Ok(Value::Str(result))
 }
 
-fn eval_map(fields: &[Field], scope: &Scope, mode: EvalMode) -> Result<Value, EvalError> {
+fn eval_map(fields: &[MapEntry], scope: &Scope, mode: EvalMode) -> Result<Value, EvalError> {
     let mut map = Map::new();
+    let mut types = Vec::with_capacity(fields.len());
     for field in fields {
-        map.insert(field.name.clone(), eval_inner(&field.value, scope, mode)?);
+        let value = eval_inner(&field.value, scope, mode)?;
+        let typ = match &field.typ {
+            Some(typ) if matches!(value, Value::Null) => Type::Optional(Box::new(typ.clone())),
+            Some(typ) => {
+                validate_type(&value, typ)
+                    .map_err(|message| EvalError::Type(format!("map field '{}': {message}", field.name)))?;
+                typ.clone()
+            }
+            None if matches!(value, Value::Null) => Type::Optional(Box::new(Type::String)),
+            None => value.value_type(),
+        };
+        types.push((
+            field.name.clone(),
+            StructField {
+                typ,
+                default: None,
+                description: None,
+            },
+        ));
+        map.insert(field.name.clone(), value);
     }
-    // Infer value type from first entry; default to String for empty maps.
-    let typ = map.values().next().map(Value::value_type).unwrap_or(Type::String);
-    Ok(Value::Map(typ, map))
+    Ok(Value::Struct(
+        StructType {
+            description: None,
+            fields: types,
+        },
+        map,
+    ))
 }
 
 fn eval_ref(parts: &[String], scope: &Scope, mode: EvalMode) -> Result<Value, EvalError> {
@@ -286,6 +310,35 @@ fn check_arity(name: &str, args: &[Value], expected: usize) -> Result<(), EvalEr
 struct BuiltinDef {
     func: fn(&[Value]) -> Result<Value, EvalError>,
     return_type: Type,
+    description: &'static str,
+    params: &'static [(&'static str, &'static str)],
+    returns: &'static str,
+}
+
+impl BuiltinDef {
+    fn new(
+        func: fn(&[Value]) -> Result<Value, EvalError>,
+        return_type: Type,
+        description: &'static str,
+        params: &'static [(&'static str, &'static str)],
+        returns: &'static str,
+    ) -> Self {
+        Self {
+            func,
+            return_type,
+            description,
+            params,
+            returns,
+        }
+    }
+}
+
+/// Display schema for a built-in function, drawn from the evaluator's registry.
+pub struct BuiltinSignature {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub params: &'static [(&'static str, &'static str)],
+    pub returns: &'static str,
 }
 
 /// Static registry of all built-in functions and pipes.
@@ -296,97 +349,150 @@ fn builtins() -> &'static HashMap<&'static str, BuiltinDef> {
         HashMap::from([
             (
                 "env",
-                BuiltinDef {
-                    func: builtin_env,
-                    return_type: Type::String,
-                },
+                BuiltinDef::new(
+                    builtin_env,
+                    Type::String,
+                    "Read an environment variable, with an optional fallback.",
+                    &[("name", "string"), ("default", "any?")],
+                    "string | any",
+                ),
             ),
             (
                 "exec",
-                BuiltinDef {
-                    func: builtin_exec,
-                    return_type: Type::String,
-                },
+                BuiltinDef::new(
+                    builtin_exec,
+                    Type::String,
+                    "Run a shell command and return stdout.",
+                    &[("command", "string")],
+                    "string",
+                ),
             ),
             (
                 "glob",
-                BuiltinDef {
-                    func: builtin_glob,
-                    return_type: Type::List(Box::new(Type::String)),
-                },
+                BuiltinDef::new(
+                    builtin_glob,
+                    Type::List(Box::new(Type::String)),
+                    "Expand a filesystem glob.",
+                    &[("pattern", "string")],
+                    "[string]",
+                ),
             ),
             (
                 "secret",
-                BuiltinDef {
-                    func: builtin_secret,
-                    return_type: Type::String,
-                },
+                BuiltinDef::new(
+                    builtin_secret,
+                    Type::String,
+                    "Read a secret by name.",
+                    &[("name", "string")],
+                    "string",
+                ),
             ),
             (
                 "trim",
-                BuiltinDef {
-                    func: builtin_trim,
-                    return_type: Type::String,
-                },
+                BuiltinDef::new(
+                    builtin_trim,
+                    Type::String,
+                    "Trim whitespace from a string or each string in a list.",
+                    &[("value", "string | [string]")],
+                    "string | [string]",
+                ),
             ),
             (
                 "lines",
-                BuiltinDef {
-                    func: builtin_lines,
-                    return_type: Type::List(Box::new(Type::String)),
-                },
+                BuiltinDef::new(
+                    builtin_lines,
+                    Type::List(Box::new(Type::String)),
+                    "Split a string into nonempty lines.",
+                    &[("value", "string")],
+                    "[string]",
+                ),
             ),
             (
                 "split",
-                BuiltinDef {
-                    func: builtin_split,
-                    return_type: Type::List(Box::new(Type::String)),
-                },
+                BuiltinDef::new(
+                    builtin_split,
+                    Type::List(Box::new(Type::String)),
+                    "Split a string by a separator.",
+                    &[("value", "string"), ("separator", "string")],
+                    "[string]",
+                ),
             ),
             (
                 "uniq",
-                BuiltinDef {
-                    func: builtin_uniq,
-                    return_type: Type::List(Box::new(Type::String)),
-                },
+                BuiltinDef::new(
+                    builtin_uniq,
+                    Type::List(Box::new(Type::String)),
+                    "Deduplicate a list while preserving order.",
+                    &[("list", "[any]")],
+                    "[any]",
+                ),
             ),
             (
                 "basename",
-                BuiltinDef {
-                    func: builtin_basename,
-                    return_type: Type::String,
-                },
+                BuiltinDef::new(
+                    builtin_basename,
+                    Type::String,
+                    "Extract file names from a path or list of paths.",
+                    &[("path", "string | [string]")],
+                    "string | [string]",
+                ),
             ),
             (
                 "dirname",
-                BuiltinDef {
-                    func: builtin_dirname,
-                    return_type: Type::String,
-                },
+                BuiltinDef::new(
+                    builtin_dirname,
+                    Type::String,
+                    "Extract directories from a path or list of paths.",
+                    &[("path", "string | [string]")],
+                    "string | [string]",
+                ),
             ),
             (
                 "prefix",
-                BuiltinDef {
-                    func: builtin_prefix,
-                    return_type: Type::String,
-                },
+                BuiltinDef::new(
+                    builtin_prefix,
+                    Type::String,
+                    "Prepend text to a string or each string in a list.",
+                    &[("value", "string | [string]"), ("text", "string")],
+                    "string | [string]",
+                ),
             ),
             (
                 "suffix",
-                BuiltinDef {
-                    func: builtin_suffix,
-                    return_type: Type::String,
-                },
+                BuiltinDef::new(
+                    builtin_suffix,
+                    Type::String,
+                    "Append text to a string or each string in a list.",
+                    &[("value", "string | [string]"), ("text", "string")],
+                    "string | [string]",
+                ),
             ),
             (
                 "sha256",
-                BuiltinDef {
-                    func: builtin_sha256,
-                    return_type: Type::String,
-                },
+                BuiltinDef::new(
+                    builtin_sha256,
+                    Type::String,
+                    "Hash a string with SHA-256.",
+                    &[("value", "string")],
+                    "string",
+                ),
             ),
         ])
     })
+}
+
+pub fn builtin_functions() -> Vec<BuiltinSignature> {
+    let mut functions: Vec<_> = builtins()
+        .iter()
+        .map(|(&name, def)| BuiltinSignature {
+            name,
+            description: def.description,
+            params: def.params,
+            returns: def.returns,
+        })
+        .collect();
+    functions.sort_by_key(|function| function.name);
+    functions
 }
 
 /// Look up the return type of a built-in function or pipe.
@@ -884,15 +990,94 @@ mod tests {
     #[test]
     fn eval_map() {
         let scope = Scope::new();
-        let expr = Expr::Map(vec![Field {
-            name: "a".into(),
-            value: Expr::Number(1.into()),
-        }]);
+        let expr = Expr::Map(vec![
+            MapEntry {
+                name: "a".into(),
+                typ: None,
+                value: Expr::Number(1.into()),
+            },
+            MapEntry {
+                name: "b".into(),
+                typ: None,
+                value: Expr::Number(2.into()),
+            },
+        ]);
         let result = eval(&expr, &scope).unwrap();
         match result {
-            Value::Map(_, m) => assert_eq!(m.get("a"), Some(&Value::Number(1.into()))),
-            _ => panic!("expected Map"),
+            Value::Struct(st, m) => {
+                assert_eq!(m.get("a"), Some(&Value::Number(1.into())));
+                assert_eq!(m.get("b"), Some(&Value::Number(2.into())));
+                assert_eq!(st.field("a").unwrap().typ, Type::Number);
+            }
+            _ => panic!("expected Struct"),
         }
+    }
+
+    #[test]
+    fn eval_map_accepts_mixed_value_types() {
+        let expr = Expr::Map(vec![
+            MapEntry {
+                name: "name".into(),
+                typ: Some(Type::String),
+                value: Expr::Str(vec![StringPart::Literal("Bob".into())]),
+            },
+            MapEntry {
+                name: "age".into(),
+                typ: Some(Type::Number),
+                value: Expr::Null,
+            },
+        ]);
+        let value = eval(&expr, &Scope::new()).unwrap();
+        let Value::Struct(st, map) = &value else {
+            panic!("expected Struct");
+        };
+        assert_eq!(map.get("age"), Some(&Value::Null));
+        assert_eq!(st.field("name").unwrap().typ, Type::String);
+        assert_eq!(st.field("age").unwrap().typ, Type::Optional(Box::new(Type::Number)));
+        assert!(validate_type(&value, &value.value_type()).is_ok());
+        assert_eq!(eval(&value.to_expr(), &Scope::new()).unwrap(), value);
+    }
+
+    #[test]
+    fn eval_map_rejects_invalid_annotated_value() {
+        let expr = Expr::Map(vec![MapEntry {
+            name: "more".into(),
+            typ: Some(Type::List(Box::new(Type::Number))),
+            value: Expr::List(vec![Expr::Number(3.into()), Expr::Bool(true)]),
+        }]);
+        let error = eval(&expr, &Scope::new()).unwrap_err();
+        assert!(
+            matches!(error, EvalError::Type(message) if message == "map field 'more': [1]: expected number, got bool")
+        );
+    }
+
+    #[test]
+    fn eval_map_accepts_unannotated_mixed_values() {
+        let expr = Expr::Map(vec![
+            MapEntry {
+                name: "count".into(),
+                typ: None,
+                value: Expr::Number(2.into()),
+            },
+            MapEntry {
+                name: "enabled".into(),
+                typ: None,
+                value: Expr::Bool(true),
+            },
+            MapEntry {
+                name: "unset".into(),
+                typ: None,
+                value: Expr::Null,
+            },
+        ]);
+        let value = eval(&expr, &Scope::new()).unwrap();
+        assert!(validate_type(&value, &value.value_type()).is_ok());
+        let Value::Struct(st, _) = value else {
+            panic!("expected Struct")
+        };
+        assert_eq!(st.field("count").unwrap().typ, Type::Number);
+        assert_eq!(st.field("enabled").unwrap().typ, Type::Bool);
+        assert_eq!(st.field("unset").unwrap().typ, Type::Optional(Box::new(Type::String)));
     }
 
     #[test]

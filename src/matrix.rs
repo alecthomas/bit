@@ -262,8 +262,9 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs
         Expr::Map(fields) => Expr::Map(
             fields
                 .iter()
-                .map(|f| Field {
+                .map(|f| crate::ast::MapEntry {
                     name: f.name.clone(),
+                    typ: f.typ.clone(),
                     value: rewrite_matrix_expr(&f.value, key_subs, block_subs),
                 })
                 .collect(),

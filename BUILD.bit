@@ -49,18 +49,29 @@ protected sync-zed-rev = exec {
   output = "integrations/zed/extension.toml"
 }
 
-# Regenerate the Providers section of README.md from `bit --schema --json`.
+# Regenerate the Built-in Functions and Providers sections from `bit --schema --json`.
 sync-readme = exec {
-  inputs = ["bit-derive/src/**/*.rs", "dprint.json", "src/main.rs", "src/provider.rs", "src/providers/**/*.rs", "src/schema.rs"]
+  inputs = ["bit-derive/src/**/*.rs", "dprint.json", "src/expr.rs", "src/main.rs", "src/provider.rs", "src/providers/**/*.rs", "src/schema.rs"]
   command = <<-EOF
+    export SCHEMA=$(mktemp)
+    export BUILTINS=$(mktemp)
     export SECTION=$(mktemp)
-    trap 'rm -f "$SECTION"' EXIT
-    #{debug.path} --schema --json | jq -r '
+    trap 'rm -f "$SCHEMA" "$BUILTINS" "$SECTION"' EXIT
+    #{debug.path} --schema --json > "$SCHEMA"
+    jq -r '
+      def function_signature:
+        .name + "(" + (.params | map(.name + ": " + .type) | join(", ")) + ") -> " + .returns;
+      "### Built-in Functions\n",
+      "`bit --schema` lists these functions and their signatures. Filter to one with\nits unqualified name, for example `bit --schema env`.\n",
+      (.[] | select(.origin == "builtin") |
+        "**`\(function_signature)`** — \(.description)\n")
+    ' "$SCHEMA" > "$BUILTINS"
+    jq -r '
       def pad($n): . as $s | ([($n - ($s|length)), 2] | max) as $p | $s + (" " * $p);
       def function_signature:
         .name + "(" + (.params | map(.name + ": " + .type) | join(", ")) + ") -> " + .returns;
       "## Providers\n",
-      (group_by(.name | split(".")[0]) | .[] |
+      (map(select(.origin != "builtin")) | group_by(.name | split(".")[0]) | .[] |
       (.[0].name | split(".")[0]) as $prov |
       "### \($prov)\n",
       (.[] |
@@ -91,8 +102,10 @@ sync-readme = exec {
             else empty end))
         end
       ))
-    ' > "$SECTION"
+    ' "$SCHEMA" > "$SECTION"
     awk '
+      /^### Built-in Functions$/ { skip=1; system("cat " ENVIRON["BUILTINS"]); next }
+      /^### Provider Functions$/ { skip=0 }
       /^## Providers/ { skip=1; system("cat " ENVIRON["SECTION"]); next }
       /^## How It Works/ { skip=0 }
       !skip { print }

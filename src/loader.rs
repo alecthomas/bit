@@ -545,6 +545,36 @@ server = exec {
     }
 
     #[test]
+    fn load_heterogeneous_map_param_default() {
+        let module = parser::parse(
+            r#"param person = {name: string = "Bob", age:int = null, enabled = true, unset = null}"#,
+            "<test>",
+        )
+        .unwrap();
+        let (_, scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+        let person = scope.scope.get("person").unwrap();
+        let fields = person.as_map().unwrap();
+        assert_eq!(fields.get("name").and_then(Value::as_str), Some("Bob"));
+        assert_eq!(fields.get("age"), Some(&Value::Null));
+        assert_eq!(fields.get("enabled").and_then(Value::as_bool), Some(true));
+        assert_eq!(fields.get("unset"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn load_rejects_mismatched_map_field_annotation() {
+        let module = parser::parse(r#"let person = {age: int = "Bob"}"#, "<test>").unwrap();
+        let error = match load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]) {
+            Err(error) => error,
+            Ok(_) => panic!("expected an annotation mismatch"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("map field 'age': expected number, got string")
+        );
+    }
+
+    #[test]
     fn load_missing_param_deferred() {
         // Missing params don't error at load time — they're deferred
         let input = "param env : string\n";

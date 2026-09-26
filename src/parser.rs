@@ -277,7 +277,7 @@ fn typ_list(input: &mut &str) -> ModalResult<Type> {
     Ok(Type::List(Box::new(inner)))
 }
 
-/// `{string: type}`
+/// `{string = type}`
 fn typ_map(input: &mut &str) -> ModalResult<Type> {
     lex('{').parse_next(input)?;
     cut_err(keyword("string")).parse_next(input)?;
@@ -291,7 +291,7 @@ fn typ_scalar(input: &mut &str) -> ModalResult<Type> {
     lex(ident)
         .verify_map(|s| match s {
             "string" => Some(Type::String),
-            "number" => Some(Type::Number),
+            "number" | "int" => Some(Type::Number),
             "bool" => Some(Type::Bool),
             "duration" => Some(Type::Duration),
             "path" => Some(Type::Path),
@@ -473,16 +473,17 @@ fn map_expr(input: &mut &str) -> ModalResult<Expr> {
     .parse_next(input)
 }
 
-/// `"key" = value` or `'key' = value` or `key = value`
-fn map_entry(input: &mut &str) -> ModalResult<Field> {
+/// `"key" = value` or `key: type = value`
+fn map_entry(input: &mut &str) -> ModalResult<MapEntry> {
     let name = alt((lex(plain_string), lex(plain_raw_string), ident_string)).parse_next(input)?;
+    let typ = opt(preceded(lex(':'), cut_err(typ))).parse_next(input)?;
     cut_err(lex('='))
         .context(StrContext::Label("'=' in map entry"))
         .parse_next(input)?;
     let value = cut_err(expr)
         .context(StrContext::Label("map entry value"))
         .parse_next(input)?;
-    Ok(Field { name, value })
+    Ok(MapEntry { name, typ, value })
 }
 
 fn matrix_ref_key(input: &mut &str) -> ModalResult<Expr> {
@@ -1155,8 +1156,33 @@ fn infer_type(expr: &Expr) -> Option<Type> {
             Some(Type::List(Box::new(elem)))
         }
         Expr::Map(fields) => {
-            let val_type = infer_type(&fields.first()?.value)?;
-            Some(Type::Map(Box::new(val_type)))
+            let fields = fields
+                .iter()
+                .map(|field| {
+                    let typ = field
+                        .typ
+                        .clone()
+                        .or_else(|| infer_type(&field.value))
+                        .or_else(|| matches!(field.value, Expr::Null).then_some(Type::String))?;
+                    let typ = if matches!(field.value, Expr::Null) {
+                        Type::Optional(Box::new(typ))
+                    } else {
+                        typ
+                    };
+                    Some((
+                        field.name.clone(),
+                        crate::value::StructField {
+                            typ,
+                            default: None,
+                            description: None,
+                        },
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(Type::Struct(crate::value::StructType {
+                description: None,
+                fields,
+            }))
         }
         Expr::Call(name, _) => crate::expr::builtin_return_type(name),
         Expr::Pipe(_, name, _) => crate::expr::builtin_return_type(name),
@@ -1607,6 +1633,33 @@ server = exec {
             },
             _ => panic!("expected Let"),
         }
+    }
+
+    #[test]
+    fn parse_map_with_typed_keys_and_null() {
+        let result = parse(r#"let person = {name: string = "Bob", age:int = null}"#, "<test>").unwrap();
+        let Statement::Let(binding) = &result.statements[0] else {
+            panic!("expected Let");
+        };
+        let Expr::Map(fields) = &binding.value else {
+            panic!("expected Map");
+        };
+        assert_eq!(fields[0].typ, Some(Type::String));
+        assert_eq!(fields[1].typ, Some(Type::Number));
+        assert_eq!(fields[1].value, Expr::Null);
+    }
+
+    #[test]
+    fn infer_heterogeneous_map_type() {
+        let result = parse(r#"param person = {name: string = "Bob", age:int = null}"#, "<test>").unwrap();
+        let Statement::Param(param) = &result.statements[0] else {
+            panic!("expected Param");
+        };
+        let Type::Struct(st) = &param.typ else {
+            panic!("expected per-field map type");
+        };
+        assert_eq!(st.field("name").unwrap().typ, Type::String);
+        assert_eq!(st.field("age").unwrap().typ, Type::Optional(Box::new(Type::Number)));
     }
 
     #[test]

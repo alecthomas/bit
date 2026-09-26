@@ -82,6 +82,13 @@ pub struct Field {
     pub value: Expr,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapEntry {
+    pub name: String,
+    pub typ: Option<Type>,
+    pub value: Expr,
+}
+
 /// `let name = expr` or `let name : type = expr`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Let {
@@ -220,8 +227,8 @@ pub enum Expr {
     Null,
     /// `[a, b, c]`
     List(Vec<Expr>),
-    /// `{ key = value, ... }`
-    Map(Vec<Field>),
+    /// `{ key = value, typed: type = value, ... }`
+    Map(Vec<MapEntry>),
     /// Variable or block reference: `name` or `block.field`
     Ref(Vec<String>),
     /// A typed block-reference value.

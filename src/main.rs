@@ -20,7 +20,67 @@ use bit::state;
 use bit::value::Map;
 
 #[derive(Parser)]
-#[command(name = "bit", about = "bit — Build It", version = env!("CARGO_PKG_VERSION"))]
+#[command(
+    name = "bit",
+    about = "bit — Build It",
+    long_about = r##"Bit is a declarative build tool. It reads BUILD.bit, tracks dependencies and state, and runs only the blocks that need work.
+
+BUILD.bit example (illustrative):
+  import "./modules/app" as app               # Load a local module.
+  import "github.com/acme/build" as tools     # Load a Git module under this alias.
+
+  param version: string = "dev"               # Set with -P version=v1; defaults are optional.
+  # Types: string, number (or int), bool, duration, path, secret, [type], {string = type}, type | type.
+
+  let arch = ["amd64", "arm64"]               # Bind a list for matrix expansion.
+  let label = "app-#{version}"                # Double quotes interpolate expressions.
+  let literal = 'app-#{version}'              # Single quotes keep text literal.
+
+  # Conditionals use if/then/else; comparisons support == and !=.
+  let mode = if version == "dev" then "debug" else "release"
+
+  # Map values may differ; annotate a key to check its value's type.
+  let options = { name: string = "Bob", retries = 2, age: int = null }
+  let timeout = 5s
+  let enabled = true
+  let absent = null
+  let names = ["api"] + ["web"]               # + adds numbers, strings, or lists.
+
+  # Calls and pipes can compute values during configuration.
+  let revision = exec("git rev-parse --short HEAD") | trim
+
+  # <<-EOL strips common indentation; <<EOL preserves it.
+  let script = <<-EOL
+    echo #{label}
+  EOL
+
+  # pre blocks run before default-phase blocks.
+  pre prepare = exec { command = "mkdir -p dist" }
+
+  binary[arch] = go.exe {                     # One block per arch; provider.resource form.
+    package = "./cmd/app"
+    goarch = arch
+    depends_on = [prepare]                    # Content dependency; block.output also adds one.
+    concurrency = 1                           # Limit concurrent slices of this matrix block.
+  }
+
+  # protected needs --force to clean; explicit excludes the block from bit ...
+  protected explicit publish(name: string, profile = "release") = exec {
+    command = "echo #{name} #{profile}"       # Interpolate block parameters.
+    after = [binary]                          # Ordering only, without change propagation.
+  }
+
+  post report = exec { command = script }     # Run after default-phase blocks.
+
+  target default = [binary]                   # Run with bit; target names select other groups.
+  # Target arguments are named on the command line: bit deploy name=app.
+  target deploy(name: string) = [publish(name = name)]
+
+  output artifact = binary["amd64"].path      # Export a value from a module.
+
+Use --schema to list all available resources and functions."##,
+    version = env!("CARGO_PKG_VERSION")
+)]
 struct Cli {
     /// Number of parallel jobs (default: number of CPUs)
     #[arg(short = 'j', long = "jobs")]
@@ -72,7 +132,7 @@ struct Cli {
     #[arg(short = 'g', long)]
     graph: bool,
 
-    /// Show provider resource/function schema (optional filter: "go", "go.packages")
+    /// Show built-in functions and provider schemas (optional filter: "env", "go.packages")
     #[arg(short = 's', long, num_args = 0..=1, default_missing_value = "")]
     schema: Option<String>,
 
@@ -966,9 +1026,10 @@ fn print_info(quiet: bool) {
 enum SchemaEntry {
     Resource { name: String, schema: ResourceSchema },
     Function { name: String, signature: FuncSignature },
+    Builtin(bit::expr::BuiltinSignature),
 }
 
-/// Collect all matching resource and function schemas from native + module providers.
+/// Collect all matching built-ins, native providers, and imported module resources.
 fn collect_schema_entries(
     registry: &ProviderRegistry,
     import_roots: &[bit::import::ImportRoot],
@@ -982,6 +1043,12 @@ fn collect_schema_entries(
         Some((p, r)) => (p, Some(r)),
         None => (f, None),
     });
+
+    for builtin in bit::expr::builtin_functions() {
+        if filter.is_none_or(|name| name == builtin.name) {
+            entries.push(SchemaEntry::Builtin(builtin));
+        }
+    }
 
     for provider_name in registry.provider_names() {
         if let Some((fp, _)) = filter_parts
@@ -1039,7 +1106,7 @@ fn collect_schema_entries(
     if entries.is_empty()
         && let Some(f) = filter
     {
-        eprintln!("{} unknown provider/resource: {f}", "error:".red().bold());
+        eprintln!("{} unknown resource/function: {f}", "error:".red().bold());
         process::exit(1);
     }
 
@@ -1063,6 +1130,7 @@ fn print_schema(
         match entry {
             SchemaEntry::Resource { name, schema } => print_resource_schema(name, schema),
             SchemaEntry::Function { name, signature } => print_function_schema(name, signature),
+            SchemaEntry::Builtin(signature) => print_builtin_schema(signature),
         }
     }
 }
@@ -1104,6 +1172,23 @@ fn render_schema_json(entries: &[SchemaEntry]) -> String {
         returns: String,
     }
 
+    #[derive(serde::Serialize)]
+    struct BuiltinParam<'a> {
+        name: &'a str,
+        #[serde(rename = "type")]
+        typ: &'a str,
+    }
+
+    #[derive(serde::Serialize)]
+    struct BuiltinEntry<'a> {
+        name: &'a str,
+        kind: &'static str,
+        origin: &'static str,
+        description: &'a str,
+        params: Vec<BuiltinParam<'a>>,
+        returns: &'a str,
+    }
+
     let values: Vec<serde_json::Value> = entries
         .iter()
         .map(|entry| match entry {
@@ -1118,6 +1203,18 @@ fn render_schema_json(entries: &[SchemaEntry]) -> String {
                     .map(|(name, field)| FunctionParam { name, field })
                     .collect(),
                 returns: signature.returns.to_string(),
+            }),
+            SchemaEntry::Builtin(signature) => serde_json::to_value(BuiltinEntry {
+                name: signature.name,
+                kind: "function",
+                origin: "builtin",
+                description: signature.description,
+                params: signature
+                    .params
+                    .iter()
+                    .map(|&(name, typ)| BuiltinParam { name, typ })
+                    .collect(),
+                returns: signature.returns,
             }),
         })
         .collect::<Result<_, _>>()
@@ -1178,6 +1275,17 @@ fn print_function_schema(name: &str, signature: &FuncSignature) {
         Some(description) => println!("{} — {}", display.bold(), description.dim()),
         None => println!("{}", display.bold()),
     }
+}
+
+fn print_builtin_schema(signature: &bit::expr::BuiltinSignature) {
+    let params = signature
+        .params
+        .iter()
+        .map(|(name, typ)| format!("{name}: {typ}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let display = format!("{}({params}) -> {}", signature.name, signature.returns);
+    println!("{} — {}", display.bold(), signature.description.dim());
 }
 
 fn format_function_signature(name: &str, signature: &FuncSignature) -> String {
@@ -1325,6 +1433,7 @@ mod tests {
         let contains = |expected| {
             entries.iter().any(|entry| match entry {
                 SchemaEntry::Resource { name, .. } | SchemaEntry::Function { name, .. } => name == expected,
+                SchemaEntry::Builtin(_) => false,
             })
         };
         assert!(contains("go.build"));
@@ -1353,5 +1462,30 @@ mod tests {
             format_function_signature(name, signature),
             "go.packages(pattern: string, dir: string?) -> [string]"
         );
+    }
+
+    #[test]
+    fn schema_includes_every_registered_builtin_and_filters_by_name() {
+        let entries = collect_schema_entries(&registry(), &[], None);
+        let listed: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                SchemaEntry::Builtin(signature) => Some(signature.name),
+                _ => None,
+            })
+            .collect();
+        let registered: Vec<_> = bit::expr::builtin_functions()
+            .into_iter()
+            .map(|signature| signature.name)
+            .collect();
+        assert_eq!(listed, registered);
+
+        let filtered = collect_schema_entries(&registry(), &[], Some("env"));
+        assert_eq!(filtered.len(), 1);
+        let json: serde_json::Value = serde_json::from_str(&render_schema_json(&filtered)).unwrap();
+        assert_eq!(json[0]["name"], "env");
+        assert_eq!(json[0]["kind"], "function");
+        assert_eq!(json[0]["origin"], "builtin");
+        assert_eq!(json[0]["params"][0]["name"], "name");
     }
 }
