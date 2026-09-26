@@ -40,6 +40,34 @@ image(tag : string, push = false) = docker.image {
         (identifier)))))
 
 ================================================================================
+parameterized matrix block
+================================================================================
+build[arch](tag : string) = exec {
+  command = "build #{arch} #{tag}"
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    matrix_keys: (block_matrix_keys
+      (identifier))
+    parameters: (parameter_list
+      (parameter
+        name: (identifier)
+        type: (type
+          (scalar_type))))
+    provider: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (string
+        (interpolation
+          (reference
+            (identifier)))
+        (interpolation
+          (reference
+            (identifier)))))))
+
+================================================================================
 empty block
 ================================================================================
 fmt = rust.fmt {}

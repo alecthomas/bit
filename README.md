@@ -261,6 +261,26 @@ all of its slices.
 Matrix slice selectors are expressions. For example, `binary[selected_arch].path`
 evaluates `selected_arch` and selects the slice with that typed key.
 
+A matrix block can also declare parameters after its matrix keys. The keys
+select slices; named arguments configure an instance of the whole matrix:
+
+```hcl
+let arch = ["amd64", "arm64"]
+
+binary[arch](tag : string) = exec {
+  command = "build #{arch} with tag #{tag}"
+}
+
+target release = [binary(tag = "1.2.3")]
+target arm_release = [binary["arm64"](tag = "1.2.3")]
+```
+
+`binary(tag = "1.2.3")` selects every slice for that argument set. A slice
+call such as `binary["arm64"](tag = "1.2.3")` selects one slice and can also
+be used in expressions, `depends_on`, and `after`. Equal argument sets share
+the same slices; different values create independent instances. Matrix key
+lists can come from module bindings or list-valued block parameters.
+
 Set `concurrency` to a positive integer to cap simultaneous slices from that
 matrix block without reducing parallelism for unrelated blocks. The global
 `-j` limit still caps the total number of running blocks.

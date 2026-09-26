@@ -6,6 +6,7 @@ use crate::ast::{Block, Expr, Field, Module, Param, Statement, Target};
 use crate::dag::{Dag, DagNode};
 use crate::expr::{self, Scope, SymbolKind};
 use crate::loader::LoadError;
+use crate::matrix;
 use crate::module;
 use crate::provider::ProviderRegistry;
 use crate::state::StateStore;
@@ -27,6 +28,7 @@ struct Bound {
 struct Instantiator<'a> {
     blocks: HashMap<String, Block>,
     targets: HashMap<String, Target>,
+    matrix_blocks: &'a mut HashMap<String, Vec<String>>,
     scope: &'a mut Scope,
     dag: &'a mut Dag,
     registry: &'a ProviderRegistry,
@@ -38,6 +40,7 @@ pub(crate) fn materialize(
     module: &Module,
     invocations: &[Invocation],
     concrete_blocks: &mut [Block],
+    matrix_blocks: &mut HashMap<String, Vec<String>>,
     environment: &mut module::ExpandContext<'_>,
 ) -> Result<Vec<String>, LoadError> {
     let mut blocks = environment.dag.block_declarations().clone();
@@ -53,6 +56,7 @@ pub(crate) fn materialize(
     let mut context = Instantiator {
         blocks,
         targets,
+        matrix_blocks,
         scope: environment.scope,
         dag: environment.dag,
         registry: environment.registry,
@@ -108,7 +112,11 @@ pub(crate) fn materialize(
         } else if let Some(block) = context.blocks.get(&invocation.name).cloned() {
             let args = cli_args(&block.params, &invocation.args, &block.name, &block.pos)?;
             let name = context.instantiate_block(&block, &args, &context.scope.clone(), &mut Vec::new())?;
-            selected.push(name);
+            if block.matrix_keys.is_empty() {
+                selected.push(name);
+            } else {
+                selected.extend(context.matrix_slices(&name));
+            }
         } else {
             if !invocation.args.is_empty() {
                 return Err(invalid(
@@ -124,6 +132,15 @@ pub(crate) fn materialize(
 }
 
 impl Instantiator<'_> {
+    fn matrix_slices(&self, name: &str) -> Vec<String> {
+        let Some(Value::Struct(_, slices)) = self.scope.get(name) else {
+            return Vec::new();
+        };
+        let mut names: Vec<_> = slices.keys().map(|key| format!("{name}[{key}]")).collect();
+        names.sort();
+        names
+    }
+
     fn target_name(&self, target: &Target, args: &[Field], caller: &Scope) -> Result<String, LoadError> {
         let bound = bind(&target.name, &target.pos, &target.params, args, caller)?;
         instance_name(&target.name, &target.params, &bound.values)
@@ -163,19 +180,23 @@ impl Instantiator<'_> {
         let mut blocks = Vec::new();
         for call in &target.blocks {
             if self.targets.contains_key(&call.name) || self.dag.targets().contains_key(&call.name) {
+                if call.keys.is_some() {
+                    return Err(invalid(&target.pos, &call.name, "a target cannot have matrix keys"));
+                }
                 blocks.extend(self.instantiate_target(&call.name, &call.args, &bound.scope, stack)?);
             } else if let Some(block) = self.blocks.get(&call.name).cloned() {
-                if !block.matrix_keys.is_empty() && call.args.is_empty() {
-                    if let Some(Value::Struct(_, slices)) = self.scope.get(&block.name) {
-                        let mut names: Vec<_> = slices.keys().map(|key| format!("{}[{key}]", block.name)).collect();
-                        names.sort();
-                        blocks.extend(names);
-                    }
+                if let Some(keys) = &call.keys {
+                    blocks.push(self.select_matrix_slice(&block, keys, &call.args, &bound.scope, &mut Vec::new())?);
                 } else {
-                    blocks.push(self.instantiate_block(&block, &call.args, &bound.scope, &mut Vec::new())?);
+                    let name = self.instantiate_block(&block, &call.args, &bound.scope, &mut Vec::new())?;
+                    if block.matrix_keys.is_empty() {
+                        blocks.push(name);
+                    } else {
+                        blocks.extend(self.matrix_slices(&name));
+                    }
                 }
             } else {
-                if !call.args.is_empty() {
+                if !call.args.is_empty() || call.keys.is_some() {
                     return Err(invalid(&target.pos, &call.name, "unknown block or target"));
                 }
                 blocks.push(call.name.clone());
@@ -184,6 +205,44 @@ impl Instantiator<'_> {
         stack.pop();
         self.dag.add_target(instance, blocks.clone(), target.doc);
         Ok(blocks)
+    }
+
+    fn select_matrix_slice(
+        &mut self,
+        block: &Block,
+        keys: &[Expr],
+        args: &[Field],
+        caller: &Scope,
+        stack: &mut Vec<String>,
+    ) -> Result<String, LoadError> {
+        if block.matrix_keys.is_empty() || keys.len() != block.matrix_keys.len() {
+            return Err(invalid(&block.pos, &block.name, "invalid matrix slice"));
+        }
+        let rewritten_keys: Vec<_> = keys
+            .iter()
+            .map(|key| self.materialize_expr(key, caller, stack))
+            .collect::<Result<_, _>>()?;
+        let rewritten_args = self.materialize_fields(args, caller, stack)?;
+        let group = self.instantiate_block(block, &rewritten_args, caller, stack)?;
+        let values: Vec<_> = rewritten_keys
+            .iter()
+            .map(|key| {
+                expr::eval(key, caller).map_err(|source| LoadError::Eval {
+                    pos: block.pos.clone(),
+                    source,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let value_refs: Vec<_> = values.iter().collect();
+        let slice = matrix::matrix_key(&group, &value_refs);
+        if !self.dag.has_block(&slice) {
+            return Err(invalid(
+                &block.pos,
+                &block.name,
+                &format!("unknown matrix slice '{slice}'"),
+            ));
+        }
+        Ok(slice)
     }
 
     fn instantiate_block(
@@ -201,7 +260,7 @@ impl Instantiator<'_> {
         }
         let bound = bind(&block.name, &block.pos, &block.params, args, caller)?;
         let name = instance_name(&block.name, &block.params, &bound.values)?;
-        if self.dag.has_block(&name) {
+        if self.dag.has_block(&name) || self.matrix_blocks.contains_key(&name) {
             return Ok(name);
         }
         if stack.iter().any(|entry| entry == &block.name) {
@@ -212,14 +271,78 @@ impl Instantiator<'_> {
         concrete.name = name.clone();
         concrete.params.clear();
         concrete.explicit = block.explicit;
+        let substitutions: HashMap<_, _> = bound
+            .substitutions
+            .iter()
+            .filter(|(key, _)| !block.matrix_keys.contains(*key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         let substituted: Vec<Field> = block
             .fields
             .iter()
             .map(|field| Field {
                 name: field.name.clone(),
-                value: module::rewrite_expr(&field.value, &HashSet::new(), &bound.substitutions, ""),
+                value: module::rewrite_expr(&field.value, &HashSet::new(), &substitutions, ""),
             })
             .collect();
+        if !block.matrix_keys.is_empty() {
+            concrete.fields = substituted;
+            // Matrix keys may be bound block parameters. Expand in that scope,
+            // then publish only the resulting nodes to the module scope.
+            let mut expansion_scope = bound.scope.clone();
+            let before: HashSet<_> = self.dag.block_names().into_iter().collect();
+            matrix::expand_matrix(
+                &concrete,
+                &mut expansion_scope,
+                self.registry,
+                self.store,
+                self.dag,
+                self.matrix_blocks,
+            )?;
+            let group = expansion_scope.get(&name).cloned().ok_or_else(|| {
+                invalid(
+                    &block.pos,
+                    &block.name,
+                    "matrix expansion did not register its instance",
+                )
+            })?;
+            self.scope
+                .define(&name, SymbolKind::Block, group)
+                .map_err(|existing| LoadError::DuplicateName {
+                    pos: block.pos.clone(),
+                    name: name.clone(),
+                    existing: existing.as_str(),
+                })?;
+            let expanded: Vec<_> = self
+                .dag
+                .block_names()
+                .into_iter()
+                .filter(|node_name| !before.contains(node_name))
+                .collect();
+            for node_name in expanded {
+                self.scope
+                    .define(&node_name, SymbolKind::Block, Value::strct(Map::new()))
+                    .map_err(|existing| LoadError::DuplicateName {
+                        pos: block.pos.clone(),
+                        name: node_name.clone(),
+                        existing: existing.as_str(),
+                    })?;
+                let fields = self
+                    .dag
+                    .get_node(&node_name)
+                    .ok_or_else(|| invalid(&block.pos, &block.name, "matrix slice was not registered"))?
+                    .fields
+                    .clone();
+                let rewritten = self.materialize_fields(&fields, &expansion_scope, stack)?;
+                self.dag
+                    .get_node_mut(&node_name)
+                    .ok_or_else(|| invalid(&block.pos, &block.name, "matrix slice was not registered"))?
+                    .fields = rewritten;
+            }
+            self.matrix_blocks.insert(name.clone(), block.matrix_keys.clone());
+            stack.pop();
+            return Ok(name);
+        }
         concrete.fields = self.materialize_fields(&substituted, &bound.scope, stack)?;
 
         if let Some(path) = module::resolve_module_path(self.import_roots, &block.provider, &block.resource) {
@@ -316,14 +439,23 @@ impl Instantiator<'_> {
         stack: &mut Vec<String>,
     ) -> Result<Expr, LoadError> {
         Ok(match expression {
-            Expr::BlockCall { name, args, fields } => {
-                let rewritten_args = self.materialize_fields(args, caller, stack)?;
+            Expr::BlockCall {
+                name,
+                keys,
+                args,
+                fields,
+            } => {
                 let block = self
                     .blocks
                     .get(name)
                     .cloned()
                     .ok_or_else(|| invalid(&crate::ast::Pos::default(), name, "unknown parameterized block"))?;
-                let instance = self.instantiate_block(&block, &rewritten_args, caller, stack)?;
+                let instance = if let Some(keys) = keys {
+                    self.select_matrix_slice(&block, keys, args, caller, stack)?
+                } else {
+                    let rewritten_args = self.materialize_fields(args, caller, stack)?;
+                    self.instantiate_block(&block, &rewritten_args, caller, stack)?
+                };
                 if fields.is_empty() {
                     Expr::BlockRef(instance)
                 } else {
@@ -362,14 +494,23 @@ impl Instantiator<'_> {
                     })
                     .collect::<Result<_, LoadError>>()?,
             ),
-            Expr::MatrixRef { name, keys, fields } => Expr::MatrixRef {
-                name: name.clone(),
-                keys: keys
-                    .iter()
-                    .map(|key| self.materialize_expr(key, caller, stack))
-                    .collect::<Result<_, _>>()?,
-                fields: fields.clone(),
-            },
+            Expr::MatrixRef { name, keys, fields } => {
+                if self.blocks.get(name).is_some_and(|block| !block.params.is_empty()) {
+                    return Err(invalid(
+                        &crate::ast::Pos::default(),
+                        name,
+                        "matrix block requires arguments",
+                    ));
+                }
+                Expr::MatrixRef {
+                    name: name.clone(),
+                    keys: keys
+                        .iter()
+                        .map(|key| self.materialize_expr(key, caller, stack))
+                        .collect::<Result<_, _>>()?,
+                    fields: fields.clone(),
+                }
+            }
             Expr::Call(name, args) => Expr::Call(
                 name.clone(),
                 args.iter()

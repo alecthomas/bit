@@ -639,8 +639,13 @@ fn collect_all_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
                 collect_all_expr_refs(key, refs);
             }
         }
-        Expr::BlockCall { name, args, .. } => {
+        Expr::BlockCall { name, keys, args, .. } => {
             refs.insert(name.clone());
+            if let Some(keys) = keys {
+                for key in keys {
+                    collect_all_expr_refs(key, refs);
+                }
+            }
             for arg in args {
                 collect_all_expr_refs(&arg.value, refs);
             }
@@ -700,8 +705,13 @@ fn collect_expr_refs(expr: &Expr, scope: &Scope, refs: &mut HashSet<String>) -> 
                 collect_expr_refs(key, scope, refs)?;
             }
         }
-        Expr::BlockCall { name, args, .. } => {
+        Expr::BlockCall { name, keys, args, .. } => {
             refs.insert(name.clone());
+            if let Some(keys) = keys {
+                for key in keys {
+                    collect_expr_refs(key, scope, refs)?;
+                }
+            }
             for arg in args {
                 collect_expr_refs(&arg.value, scope, refs)?;
             }

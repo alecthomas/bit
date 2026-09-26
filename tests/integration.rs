@@ -735,6 +735,38 @@ fn matrix_end_to_end() {
     assert_eq!(fs::read_to_string(&out_arm64).unwrap().trim(), "arm64");
 }
 
+#[test]
+fn parameterized_matrix_slice_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let arm_output = dir.path().join("out-arm64.txt");
+    let amd_output = dir.path().join("out-amd64.txt");
+    let chosen_output = dir.path().join("chosen.txt");
+    let input = format!(
+        concat!(
+            "let arch = [\"amd64\", \"arm64\"]\n",
+            "build[arch](tag : string) = exec {{\n",
+            "  command = \"echo #{{tag}}-#{{arch}} > {dir}/out-#{{arch}}.txt\"\n",
+            "  output = \"{dir}/out-#{{arch}}.txt\"\n",
+            "  inputs = []\n",
+            "}}\n",
+            "chosen = exec {{\n",
+            "  command = \"cat #{{build[\"arm64\"](tag = \"1.2.3\").path}} > {dir}/chosen.txt\"\n",
+            "  output = \"{dir}/chosen.txt\"\n",
+            "  inputs = []\n",
+            "}}\n",
+            "target default = [chosen]\n",
+        ),
+        dir = dir.path().display(),
+    );
+    let store = MemoryStore::new();
+    let results = run_apply(&input, &store);
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(fs::read_to_string(&arm_output).unwrap().trim(), "1.2.3-arm64");
+    assert_eq!(fs::read_to_string(&chosen_output).unwrap().trim(), "1.2.3-arm64");
+    assert!(!amd_output.exists());
+}
+
 // ── Shared build cache: go.exe acceptance ────────────────────────────────
 
 /// Build a Go binary in worktree A, delete A, and confirm worktree B

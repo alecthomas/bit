@@ -181,7 +181,12 @@ fn render_statement(
             }
         }
         Statement::Target(value) => {
-            if !value.params.is_empty() || value.blocks.iter().any(|call| !call.args.is_empty()) {
+            if !value.params.is_empty()
+                || value
+                    .blocks
+                    .iter()
+                    .any(|call| call.keys.is_some() || !call.args.is_empty())
+            {
                 result.push_str(source[syntax.start..syntax.end].trim_end());
                 return;
             }

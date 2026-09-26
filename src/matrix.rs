@@ -230,8 +230,18 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs
                 .collect(),
             fields: fields.clone(),
         },
-        Expr::BlockCall { name, args, fields } => Expr::BlockCall {
+        Expr::BlockCall {
+            name,
+            keys,
+            args,
+            fields,
+        } => Expr::BlockCall {
             name: name.clone(),
+            keys: keys.as_ref().map(|keys| {
+                keys.iter()
+                    .map(|key| rewrite_matrix_expr(key, key_subs, block_subs))
+                    .collect()
+            }),
             args: args
                 .iter()
                 .map(|arg| Field {

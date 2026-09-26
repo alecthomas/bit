@@ -511,7 +511,12 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
                     .context(StrContext::Label("closing ')'"))
                     .parse_next(input)?;
                 let fields: Vec<String> = repeat(0.., preceded(lex('.'), ident_string)).parse_next(input)?;
-                return Ok(Expr::BlockCall { name, args, fields });
+                return Ok(Expr::BlockCall {
+                    name,
+                    keys: None,
+                    args,
+                    fields,
+                });
             }
             Err(ErrMode::Backtrack(_)) => input.reset(&args_checkpoint),
             Err(error) => return Err(error),
@@ -546,6 +551,19 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
         cut_err(lex(']'))
             .context(StrContext::Label("closing ']' in matrix ref"))
             .parse_next(input)?;
+        if opt(lex('(')).parse_next(input)?.is_some() {
+            let args = opt(named_argument_list).parse_next(input)?.unwrap_or_default();
+            cut_err(lex(')'))
+                .context(StrContext::Label("closing ')' in matrix call"))
+                .parse_next(input)?;
+            let fields: Vec<String> = repeat(0.., preceded(lex('.'), ident_string)).parse_next(input)?;
+            return Ok(Expr::BlockCall {
+                name,
+                keys: Some(keys),
+                args,
+                fields,
+            });
+        }
         let fields: Vec<String> = repeat(0.., preceded(lex('.'), ident_string)).parse_next(input)?;
         return Ok(Expr::MatrixRef { name, keys, fields });
     }
@@ -1248,6 +1266,7 @@ fn target_stmt(doc: Option<String>, known_types: &HashMap<String, Type>, input: 
 
 fn target_call(input: &mut &str) -> ModalResult<TargetCall> {
     let name = dotted_ident.parse_next(input)?;
+    let keys = opt(delimited(lex('['), separated(1.., matrix_ref_key, lex(',')), lex(']'))).parse_next(input)?;
     let args = opt(delimited(
         lex('('),
         opt(named_argument_list).map(Option::unwrap_or_default),
@@ -1255,7 +1274,7 @@ fn target_call(input: &mut &str) -> ModalResult<TargetCall> {
     ))
     .parse_next(input)?
     .unwrap_or_default();
-    Ok(TargetCall { name, args })
+    Ok(TargetCall { name, keys, args })
 }
 
 fn dotted_ident(input: &mut &str) -> ModalResult<String> {
@@ -1353,17 +1372,8 @@ fn block_stmt<'i>(
         }
     }
     let name = ident_string.parse_next(input)?;
-    let params = opt(|input: &mut &str| formal_params(input, known_types))
-        .parse_next(input)?
-        .unwrap_or_default();
-
     // Optional matrix keys: name[key1, key2]
     let matrix_keys = if opt(lex('[')).parse_next(input)?.is_some() {
-        if !params.is_empty() {
-            return cut_err(winnow::combinator::fail::<_, ParsedBlock<'i>, _>)
-                .context(StrContext::Label("a block cannot combine parameters and matrix keys"))
-                .parse_next(input);
-        }
         let keys: Vec<String> = separated(1.., ident_string, lex(',')).parse_next(input)?;
         cut_err(lex(']'))
             .context(StrContext::Label("closing ']' in matrix keys"))
@@ -1372,6 +1382,9 @@ fn block_stmt<'i>(
     } else {
         vec![]
     };
+    let params = opt(|input: &mut &str| formal_params(input, known_types))
+        .parse_next(input)?
+        .unwrap_or_default();
 
     // Once we see `name =`, this must be a block statement — commit to it
     cut_err(lex('='))
@@ -1890,6 +1903,7 @@ server = exec {
             block.fields[0].value,
             Expr::BlockCall {
                 name: "compile".into(),
+                keys: None,
                 args: vec![Field {
                     name: "package".into(),
                     value: Expr::Str(vec![StringPart::Literal("api".into())]),
@@ -2638,6 +2652,33 @@ image[arch, region] = exec {
             }
             _ => panic!("expected Block"),
         }
+    }
+
+    #[test]
+    fn parse_parameterized_matrix_block_and_slice_call() {
+        let source = r#"
+build[arch](tag : string) = exec { command = "build #{arch} #{tag}" }
+consumer = exec { depends_on = [build["arm64"](tag = "1.2.3")] }
+target release = [build["arm64"](tag = "1.2.3")]
+"#;
+        let module = parse(source, "<test>").unwrap();
+        let Statement::Block(build) = &module.statements[0] else {
+            panic!("expected block");
+        };
+        assert_eq!(build.matrix_keys, ["arch"]);
+        assert_eq!(build.params[0].name, "tag");
+        let Statement::Block(consumer) = &module.statements[1] else {
+            panic!("expected block");
+        };
+        let Expr::List(deps) = &consumer.fields[0].value else {
+            panic!("expected dependency list");
+        };
+        assert!(matches!(&deps[0], Expr::BlockCall { name, keys: Some(keys), args, .. }
+            if name == "build" && keys.len() == 1 && args[0].name == "tag"));
+        let Statement::Target(release) = &module.statements[2] else {
+            panic!("expected target");
+        };
+        assert_eq!(release.blocks[0].keys.as_ref().unwrap().len(), 1);
     }
 
     #[test]

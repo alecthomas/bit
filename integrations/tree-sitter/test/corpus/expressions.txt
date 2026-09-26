@@ -345,6 +345,24 @@ let x = image["amd64"].ref
       (identifier))))
 
 ================================================================================
+parameterized matrix slice call
+================================================================================
+let x = build["arm64"](tag = "1.2.3").path
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (block_call
+      slice: (matrix_slice_ref
+        name: (identifier)
+        (string))
+      arguments: (argument_list
+        (named_argument
+          name: (identifier)
+          value: (string)))
+      field: (identifier))))
+
+================================================================================
 matrix slice reference with typed keys
 ================================================================================
 let x = image["1", 1, true, 5s].ref

@@ -122,6 +122,7 @@ pub struct Target {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TargetCall {
     pub name: String,
+    pub keys: Option<Vec<Expr>>,
     pub args: Vec<Field>,
 }
 
@@ -188,8 +189,24 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::BlockCall { name, args, fields } => {
-                write!(f, "{name}(")?;
+            Expr::BlockCall {
+                name,
+                keys,
+                args,
+                fields,
+            } => {
+                write!(f, "{name}")?;
+                if let Some(keys) = keys {
+                    write!(f, "[")?;
+                    for (index, key) in keys.iter().enumerate() {
+                        if index > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{key}")?;
+                    }
+                    write!(f, "]")?;
+                }
+                write!(f, "(")?;
                 for (index, arg) in args.iter().enumerate() {
                     if index > 0 {
                         write!(f, ", ")?;
@@ -242,6 +259,7 @@ pub enum Expr {
     /// A parameterized block reference: `name(arg = value).field`.
     BlockCall {
         name: String,
+        keys: Option<Vec<Expr>>,
         args: Vec<Field>,
         fields: Vec<String>,
     },
@@ -385,10 +403,12 @@ mod tests {
                     blocks: vec![
                         TargetCall {
                             name: "server".into(),
+                            keys: None,
                             args: vec![],
                         },
                         TargetCall {
                             name: "image".into(),
+                            keys: None,
                             args: vec![],
                         },
                     ],

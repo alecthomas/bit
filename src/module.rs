@@ -486,6 +486,11 @@ pub fn expand_module(
             if inner_block_names.contains(root_name) || inner_target_names.contains(root_name) {
                 call.name = format!("{instance_name}.{}", call.name);
             }
+            if let Some(keys) = &mut call.keys {
+                for key in keys {
+                    *key = rewrite_expr(key, &inner_block_names, &substitutions, instance_name);
+                }
+            }
             for arg in &mut call.args {
                 arg.value = rewrite_expr(&arg.value, &inner_block_names, &substitutions, instance_name);
             }
@@ -552,12 +557,22 @@ pub(crate) fn rewrite_expr(
                 .collect(),
             fields: fields.clone(),
         },
-        Expr::BlockCall { name, args, fields } => Expr::BlockCall {
+        Expr::BlockCall {
+            name,
+            keys,
+            args,
+            fields,
+        } => Expr::BlockCall {
             name: if inner_blocks.contains(name) {
                 format!("{prefix}.{name}")
             } else {
                 name.clone()
             },
+            keys: keys.as_ref().map(|keys| {
+                keys.iter()
+                    .map(|key| rewrite_expr(key, inner_blocks, substitutions, prefix))
+                    .collect()
+            }),
             args: args
                 .iter()
                 .map(|arg| Field {

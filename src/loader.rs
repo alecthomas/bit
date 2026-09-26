@@ -265,6 +265,7 @@ pub fn load_selected(
         module,
         invocations,
         &mut concrete_blocks,
+        &mut matrix_blocks,
         &mut module::ExpandContext {
             scope: &mut scope,
             registry,
@@ -950,6 +951,73 @@ build[arch] = exec {
     }
 
     #[test]
+    fn parameterized_matrix_calls_select_slices_and_share_instances() {
+        let input = r#"
+let arch = ["amd64", "arm64"]
+
+prepare[arch](tag : string) = exec {
+  command = "prepare #{arch} #{tag}"
+  output = "prepared"
+}
+build[arch](tag : string) = exec {
+  command = prepare[arch](tag = tag).path
+  output = "built"
+  depends_on = [prepare[arch](tag = tag)]
+}
+target release(tag : string) = [build(tag = tag)]
+target arm(tag : string) = [build["arm64"](tag = tag)]
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let invocations = [
+            crate::invocation::Invocation {
+                name: "release".into(),
+                args: vec![("tag".into(), "1.2.3".into())],
+            },
+            crate::invocation::Invocation {
+                name: "arm".into(),
+                args: vec![("tag".into(), "1.2.3".into())],
+            },
+            crate::invocation::Invocation {
+                name: "arm".into(),
+                args: vec![("tag".into(), "2.0.0".into())],
+            },
+        ];
+        let (dag, _scope, selected) =
+            load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
+
+        for tag in ["1.2.3", "2.0.0"] {
+            for arch in ["amd64", "arm64"] {
+                let build = format!(r#"build["{tag}"]["{arch}"]"#);
+                let prepare = format!(r#"prepare["{tag}"]["{arch}"]"#);
+                assert!(dag.has_block(&build));
+                assert!(dag.content_deps(&build).contains(&prepare));
+            }
+        }
+        assert_eq!(dag.block_names().len(), 8);
+        assert_eq!(dag.targets()[&selected[0]].blocks.len(), 2);
+        assert_eq!(dag.targets()[&selected[1]].blocks, vec![r#"build["1.2.3"]["arm64"]"#]);
+        assert_eq!(dag.targets()[&selected[2]].blocks, vec![r#"build["2.0.0"]["arm64"]"#]);
+    }
+
+    #[test]
+    fn matrix_key_list_can_be_a_block_parameter() {
+        let input = r#"
+work[arch](arch : [string], tag : string) = exec {
+  command = "build #{arch} #{tag}"
+  output = "built"
+}
+target release = [work(arch = ["arm64"], tag = "1.2.3")]
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+        let order = dag.target_order("release").unwrap();
+        assert_eq!(order.len(), 1);
+        let node = dag.get_node(&order[0]).unwrap();
+        let command = node.fields.iter().find(|field| field.name == "command").unwrap();
+        assert_eq!(command.value.to_string(), r#""build #{"arm64"} #{"1.2.3"}""#);
+    }
+
+    #[test]
     fn load_cycle_detected() {
         let input = r#"
 a = exec {
@@ -1527,6 +1595,38 @@ target run(value : string) = [job(value = value)]
 
         assert_eq!(selected, vec![r#"inst.run["hello"]"#]);
         assert_eq!(dag.target_order(&selected[0]).unwrap(), vec![r#"inst.job["hello"]"#]);
+    }
+
+    #[test]
+    fn imported_module_target_selects_parameterized_matrix_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        write_module(
+            dir.path(),
+            "mymod",
+            "mymod",
+            r#"
+job[arch](arch : [string], tag : string) = exec {
+  command = "build #{arch} #{tag}"
+  output = "out"
+}
+target run = [job["arm64"](arch = ["amd64", "arm64"], tag = "v1")]
+"#,
+        );
+
+        let module = parser::parse("inst = mymod {}", "<test>").unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &roots(dir.path(), "mymod"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            dag.target_order("inst.run").unwrap(),
+            vec![r#"inst.job[["amd64","arm64"], "v1"]["arm64"]"#]
+        );
     }
 
     #[test]

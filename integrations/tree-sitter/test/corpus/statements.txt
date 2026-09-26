@@ -114,6 +114,23 @@ target deploy = [app.deploy, lib.api]
         (identifier)))))
 
 ================================================================================
+target selects parameterized matrix slice
+================================================================================
+target release = [build["arm64"](tag = "1.2.3")]
+--------------------------------------------------------------------------------
+(source_file
+  (target_statement
+    name: (identifier)
+    (target_call
+      name: (dotted_identifier
+        (identifier))
+      (string)
+      arguments: (argument_list
+        (named_argument
+          name: (identifier)
+          value: (string))))))
+
+================================================================================
 parameterized target with block arguments
 ================================================================================
 target publish(tag : string, push = false) = [image(tag = tag, push = push)]

@@ -84,6 +84,7 @@ module.exports = grammar({
 
     target_call: $ => seq(
       field('name', $.dotted_identifier),
+      optional(seq('[', $._matrix_key, repeat(seq(',', $._matrix_key)), ']')),
       optional(field('arguments', $.argument_list)),
     ),
 
@@ -128,8 +129,8 @@ module.exports = grammar({
         field('explicit', $.explicit_modifier),
       )),
       field('name', $.identifier),
-      optional(field('parameters', $.parameter_list)),
       optional(field('matrix_keys', $.block_matrix_keys)),
+      optional(field('parameters', $.parameter_list)),
       '=',
       field('provider', $.identifier),
       optional(seq('.', field('resource', $.identifier))),
@@ -341,8 +342,10 @@ module.exports = grammar({
     // ── Calls & References ──
 
     block_call: $ => seq(
-      field('name', $.identifier),
-      field('arguments', $.block_argument_list),
+      choice(
+        seq(field('name', $.identifier), field('arguments', $.block_argument_list)),
+        seq(field('slice', $.matrix_slice_ref), field('arguments', $.argument_list)),
+      ),
       repeat(seq('.', field('field', $.identifier))),
     ),
 
