@@ -24,6 +24,7 @@ bump:
     test "$(svu current)" = "$(svu next)" && exit 0
     git tag "$(svu next)"
     echo "Bumped to $(svu next)"
+    git push --tags
 
 # Generate release notes from git log since previous tag
 release-notes tag="":
