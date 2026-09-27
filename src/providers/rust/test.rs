@@ -177,6 +177,30 @@ fn parse_failure_output(lines: &[String]) -> Vec<(String, String)> {
     results
 }
 
+fn running_suite_name(rest: &str) -> String {
+    let target = rest.split('(').next().unwrap_or(rest).trim();
+    let Some(source) = target.strip_prefix("unittests ") else {
+        return target.to_owned();
+    };
+    // Cargo's executable name identifies the crate when workspace members share src/lib.rs.
+    let Some(executable) = rest
+        .strip_prefix(target)
+        .and_then(|suffix| suffix.trim().strip_prefix('('))
+    else {
+        return source.to_owned();
+    };
+    let Some(crate_name) = executable
+        .trim_end_matches(')')
+        .rsplit(['/', '\\'])
+        .next()
+        .and_then(|filename| filename.trim_end_matches(".exe").rsplit_once('-'))
+        .map(|(name, _)| name)
+    else {
+        return source.to_owned();
+    };
+    format!("{crate_name} ({source})")
+}
+
 /// Process `cargo test` output, parsing test events and forwarding to the writer.
 ///
 /// Consumes lines lazily from `lines`, so callers that feed it from a live
@@ -227,18 +251,8 @@ fn process_test_output(
         }
 
         // Track which test binary is running (these come from stderr).
-        // Extract a clean name like "src/lib.rs" or "tests/integration.rs".
         if let Some(rest) = trimmed.strip_prefix("Running ") {
-            // "Running unittests src/lib.rs (target/debug/deps/bit-abc123)"
-            // or "Running tests/foo.rs (target/debug/deps/foo-abc123)"
-            current_suite = rest
-                .split('(')
-                .next()
-                .unwrap_or(rest)
-                .trim()
-                .strip_prefix("unittests ")
-                .unwrap_or(rest.split('(').next().unwrap_or(rest).trim())
-                .to_owned();
+            current_suite = running_suite_name(rest);
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("Doc-tests ") {
@@ -638,6 +652,22 @@ mod tests {
     fn parse_failure_output_empty() {
         let failures = parse_failure_output(&[]);
         assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn running_suite_names_distinguish_workspace_crates() {
+        assert_eq!(
+            running_suite_name("unittests src/lib.rs (target/debug/deps/bit-a1b2c3)"),
+            "bit (src/lib.rs)"
+        );
+        assert_eq!(
+            running_suite_name("unittests src/lib.rs (target/debug/deps/bit_derive-d4e5f6)"),
+            "bit_derive (src/lib.rs)"
+        );
+        assert_eq!(
+            running_suite_name("tests/integration.rs (target/debug/deps/integration-f7a8b9)"),
+            "tests/integration.rs"
+        );
     }
 
     #[test]

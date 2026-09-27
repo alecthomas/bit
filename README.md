@@ -95,8 +95,9 @@ bit --since origin/master  # apply blocks affected since the branch point
 indented beneath it; shared prerequisites name their other dependents with an
 `also:` suffix.
 
-`rust.test` summarizes test suites and prints Cargo compiler diagnostics when
-`cargo test` fails, including when another workspace suite has already passed.
+`rust.test` summarizes test suites with crate names for unit tests. It prints
+Cargo compiler diagnostics when `cargo test` fails, including when another
+workspace suite has already passed.
 
 The JSON schema output is an object whose keys are `builtins` and the names of
 providers or imported modules. Each section has a `functions` array and, when
