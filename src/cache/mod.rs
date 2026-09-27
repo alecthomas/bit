@@ -49,7 +49,8 @@ pub struct ActionKeyInput<'a> {
     pub arch: &'static str,
     /// Hash of the normalized evaluated inputs.
     pub inputs: SHA256,
-    /// Normalized provider-resolved source hashes, outputs excluded.
+    /// Normalized provider-resolved source hashes, including any source that
+    /// is also a declared output.
     pub sources: &'a BTreeMap<String, SHA256>,
     /// Result hashes of dependencies selected during the current run.
     pub deps: &'a BTreeMap<String, SHA256>,

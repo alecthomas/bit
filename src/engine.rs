@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::cache::{ActionKey, ActionKeyInput, BuildCache, PublishOutcome, RECEIPT_VERSION, Receipt};
@@ -391,6 +392,7 @@ pub fn affected_order(
         let tracked: HashSet<&str> = current
             .keys()
             .chain(prior.resolve_map.keys())
+            .chain(outputs.iter())
             .map(String::as_str)
             .collect();
         for path in &tracked {
@@ -445,8 +447,8 @@ struct CacheHit {
 struct Prepared {
     inputs: Map,
     prior: PriorState,
-    /// Normalized resolve map (project-internal keys made relative).
-    resolve_map: BTreeMap<String, SHA256>,
+    /// Normalized source hashes returned by the provider.
+    sources: BTreeMap<String, SHA256>,
     input_hash: SHA256,
     dep_hashes: BTreeMap<String, SHA256>,
     content_hash: SHA256,
@@ -495,6 +497,33 @@ fn output_files(node: &DagNode, inputs: &Map, cache: &BuildCache) -> Result<Vec<
         .collect())
 }
 
+/// Keep source provenance for the shared key while tracking output drift in
+/// the local content hash. An output that is also a source remains a source.
+#[derive(Default)]
+struct ResolvedHashes {
+    sources: BTreeMap<String, SHA256>,
+    tracked: BTreeMap<String, SHA256>,
+}
+
+fn resolve_hashes(
+    node: &DagNode,
+    inputs: &Map,
+    outputs: &[OutputFile],
+    cache: &BuildCache,
+    tracker: &Mutex<FileTracker>,
+) -> Result<ResolvedHashes, BoxError> {
+    let sources = cache.normalize_keys(&node.resource.resolve(inputs)?);
+    let mut tracked = sources.clone();
+    let mut tracker = tracker.lock().expect("tracker lock");
+    for output in outputs {
+        let path = Path::new(&output.path);
+        if path.is_file() {
+            tracked.insert(output.role.clone(), tracker.hash_file(path)?);
+        }
+    }
+    Ok(ResolvedHashes { sources, tracked })
+}
+
 /// The entries of `uncached`. A trailing slash marks a directory in `output`,
 /// so it is optional here too and matching ignores it.
 fn uncached_outputs(inputs: &Map) -> HashSet<&str> {
@@ -513,26 +542,19 @@ fn is_uncached(uncached: &HashSet<&str>, output: &OutputFile) -> bool {
     uncached.contains(output.path.trim_end_matches('/')) || uncached.contains(output.role.trim_end_matches('/'))
 }
 
-/// Compute the shared action key for a block from its normalized sources.
-/// `resolve_map` is the (normalized) resolve map at the moment the key is
-/// needed: before apply for lookup, after apply for publication.
+/// Compute the shared action key from provider-resolved source hashes.
+/// Sources are measured before apply for lookup and after apply for publication.
 fn action_key(
     name: &str,
     node: &DagNode,
     prepared: &Prepared,
-    resolve_map: &BTreeMap<String, SHA256>,
+    sources: &BTreeMap<String, SHA256>,
     toolchain: &BTreeMap<String, String>,
     cache: &BuildCache,
 ) -> Result<ActionKey, BoxError> {
     let CachePolicy::Shared { version } = node.resource.cache_policy(&prepared.inputs) else {
         return Err("resource is not shared".into());
     };
-    let produced: HashSet<&str> = prepared.outputs.iter().map(|o| o.role.as_str()).collect();
-    let sources: BTreeMap<String, SHA256> = resolve_map
-        .iter()
-        .filter(|(k, _)| !produced.contains(k.as_str()))
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
     Ok(ActionKeyInput {
         receipt_version: RECEIPT_VERSION,
         provider: &node.provider,
@@ -542,7 +564,7 @@ fn action_key(
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
         inputs: hash_inputs(&prepared.inputs, cache),
-        sources: &sources,
+        sources,
         deps: &prepared.dep_hashes,
         toolchain,
     }
@@ -570,16 +592,17 @@ fn prepare_block(
     dep_hashes: BTreeMap<String, SHA256>,
     dirty: &HashSet<String>,
     cache: &BuildCache,
+    tracker: &Mutex<FileTracker>,
     writer: &BlockWriter,
     mode: ApplyMode,
 ) -> Result<Prepared, EngineError> {
     let prior = restore_prior(writer, node.prior_state.as_ref());
 
-    let resolve_map = node
-        .resource
-        .resolve(&inputs)
-        .map_err(provider_error(node, name, "resolve"))?;
-    let resolve_map = cache.normalize_keys(&resolve_map);
+    let outputs = output_files(node, &inputs, cache).map_err(provider_error(node, name, "resolve"))?;
+    let ResolvedHashes {
+        sources,
+        tracked: resolve_map,
+    } = resolve_hashes(node, &inputs, &outputs, cache, tracker).map_err(provider_error(node, name, "resolve"))?;
     let input_hash = hash_inputs(&inputs, cache);
     let content_hash = compute_content_hash(&input_hash, &resolve_map, &dep_hashes);
 
@@ -634,12 +657,12 @@ fn prepare_block(
     let mut prepared = Prepared {
         inputs,
         prior,
-        resolve_map,
+        sources,
         input_hash,
         dep_hashes,
         content_hash,
         plan,
-        outputs: Vec::new(),
+        outputs,
         cached_outputs: Vec::new(),
         toolchain: None,
         hit: None,
@@ -652,7 +675,6 @@ fn prepare_block(
     {
         return Ok(prepared);
     }
-    prepared.outputs = output_files(node, &prepared.inputs, cache).map_err(provider_error(node, name, "resolve"))?;
     let uncached = uncached_outputs(&prepared.inputs);
     prepared.cached_outputs = prepared
         .outputs
@@ -667,7 +689,7 @@ fn prepare_block(
             return Ok(prepared);
         }
     };
-    let key = action_key(name, node, &prepared, &prepared.resolve_map, &toolchain, cache)
+    let key = action_key(name, node, &prepared, &prepared.sources, &toolchain, cache)
         .map_err(provider_error(node, name, "resolve"))?;
     prepared.toolchain = Some(toolchain);
 
@@ -760,6 +782,7 @@ pub fn plan_selected(
             dep_hashes,
             &dirty,
             cache,
+            tracker,
             &writer,
             ApplyMode::Normal,
         )?;
@@ -1187,7 +1210,7 @@ fn publish_receipt(
     name: &str,
     node: &DagNode,
     prepared: &Prepared,
-    post_resolve: &BTreeMap<String, SHA256>,
+    post_sources: &BTreeMap<String, SHA256>,
     post_hash: SHA256,
     state: &serde_json::Value,
     outputs: &Map,
@@ -1205,7 +1228,7 @@ fn publish_receipt(
         let artifacts = node
             .resource
             .capture_artifacts(&prepared.inputs, state, &prepared.cached_outputs, cas)?;
-        let key = action_key(name, node, prepared, post_resolve, toolchain, cache)?;
+        let key = action_key(name, node, prepared, post_sources, toolchain, cache)?;
         let receipt = Receipt {
             version: RECEIPT_VERSION,
             provider: node.provider.clone(),
@@ -1260,6 +1283,7 @@ fn execute_block(
         dep_hashes,
         &HashSet::new(),
         cache,
+        tracker,
         writer,
         mode,
     )?;
@@ -1346,7 +1370,10 @@ fn execute_block(
         // Re-resolve after apply: outputs now exist and mutating actions
         // such as formatters change their own inputs.
         tracker.lock().expect("tracker lock").clear_hash_cache();
-        let post_resolve = cache.normalize_keys(&node.resource.resolve(&prepared.inputs).unwrap_or_default());
+        let ResolvedHashes {
+            sources: post_sources,
+            tracked: post_resolve,
+        } = resolve_hashes(node, &prepared.inputs, &prepared.outputs, cache, tracker).unwrap_or_default();
         let post_hash = compute_content_hash(&prepared.input_hash, &post_resolve, &prepared.dep_hashes);
         crate::debug!(writer, "post-apply hash={}", short_hash(&post_hash));
         result_hash = Some(post_hash);
@@ -1361,7 +1388,7 @@ fn execute_block(
                 name,
                 node,
                 &prepared,
-                &post_resolve,
+                &post_sources,
                 post_hash,
                 new_state,
                 &apply_result.outputs,
@@ -2541,6 +2568,64 @@ other-b = probe.run { label = "other-b" }
         assert_eq!(results[0].plan.action, PlanAction::Update);
     }
 
+    #[test]
+    fn in_place_exec_uses_changed_input_in_shared_cache_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("BUILD.bit");
+        let cache = BuildCache::open_at(dir.path(), &dir.path().join("cache"));
+        let tracker = test_tracker();
+        let store = MemoryStore::new();
+        let output = Output::new(&[]);
+        let input = format!(
+            "fmt_build = exec {{\n  command = \"tr a-z A-Z < '{}' > '{}.tmp' && mv '{}.tmp' '{}'\"\n  inputs = [\"{}\"]\n  output = \"{}\"\n}}\n",
+            file.display(),
+            file.display(),
+            file.display(),
+            file.display(),
+            file.display(),
+            file.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let run = || {
+            let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+            apply(&mut dag, &base, &store, &cache, &output, &[], 1, &tracker).unwrap()
+        };
+
+        std::fs::write(&file, "first").unwrap();
+        assert_eq!(run()[0].plan.action, PlanAction::Create);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "FIRST");
+
+        std::fs::write(&file, "second").unwrap();
+        assert_eq!(run()[0].plan.action, PlanAction::Update);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "SECOND");
+        assert_eq!(run()[0].plan.action, PlanAction::None);
+    }
+
+    #[test]
+    fn declared_output_drift_still_triggers_local_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("out.txt");
+        let tracker = test_tracker();
+        let store = MemoryStore::new();
+        let output = Output::new(&[]);
+        let input = format!(
+            "build = exec {{\n  command = \"printf ok > '{}'\"\n  output = \"{}\"\n}}\n",
+            file.display(),
+            file.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let run = || {
+            let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+            apply(&mut dag, &base, &store, &test_cache(), &output, &[], 1, &tracker).unwrap()
+        };
+
+        assert_eq!(run()[0].plan.action, PlanAction::Create);
+        assert_eq!(run()[0].plan.action, PlanAction::None);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(run()[0].plan.action, PlanAction::Update);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ok");
+    }
+
     // -- Shared cache -----------------------------------------------------
 
     mod cached {
@@ -2646,11 +2731,9 @@ other-b = probe.run { label = "other-b" }
             }
             fn resolve(&self, inputs: &Inputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
                 let mut map = BTreeMap::new();
-                for name in ["src.txt", "out.txt"] {
-                    let path = Path::new(&inputs.dir).join(name);
-                    if path.is_file() {
-                        map.insert(path.to_string_lossy().into_owned(), crate::providers::hash_file(&path)?);
-                    }
+                let path = Path::new(&inputs.dir).join("src.txt");
+                if path.is_file() {
+                    map.insert(path.to_string_lossy().into_owned(), crate::providers::hash_file(&path)?);
                 }
                 Ok(map)
             }

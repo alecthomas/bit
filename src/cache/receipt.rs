@@ -11,7 +11,7 @@ use crate::sha256::SHA256;
 use crate::value::Map;
 
 /// Bump when the receipt layout or the action key composition changes.
-pub const RECEIPT_VERSION: u32 = 1;
+pub const RECEIPT_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptError {

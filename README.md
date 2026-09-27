@@ -975,7 +975,9 @@ the worktree that produced them has been deleted:
   exactly that — anything already at the path is replaced, not merged. An
   `exec` block that sets `resolve` or `outputs` is never shared: those fields
   describe state outside the worktree, which a result recorded elsewhere
-  cannot speak for.
+  cannot speak for. If a file is both in `inputs` and `output`, its current
+  contents participate in cache lookup. After the command runs, bit hashes
+  the new contents before storing the result.
 
 A directory captured this way must contain only ordinary files and
 directories. If it holds a symlink the block still runs and succeeds, but bit

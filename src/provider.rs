@@ -240,9 +240,9 @@ pub trait Resource {
             outputs: Self::Outputs::schema(),
         }
     }
-    /// Derive additional tracked inputs from the seed inputs and return a map
-    /// of key -> SHA256 hash. The engine uses this map for change detection:
-    /// if any hash differs from the prior run, the block is re-applied.
+    /// Derive tracked source inputs from the seed inputs and return their
+    /// path -> SHA256 hashes. An output that is also an input belongs here;
+    /// the engine hashes declared outputs separately for local change detection.
     fn resolve(&self, inputs: &Self::Inputs) -> Result<BTreeMap<String, SHA256>, BoxError>;
     fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
@@ -270,10 +270,9 @@ pub trait Resource {
     /// the latter, rather than publishing receipts nothing can use.
     fn cache_policy(&self, inputs: &Self::Inputs) -> CachePolicy;
 
-    /// Keys of `resolve` entries that describe produced outputs rather than
-    /// sources. They stay in the local content hash (so a deleted output
-    /// triggers a rebuild) but are excluded from the shared action key,
-    /// which must be computable before the output exists.
+    /// Paths of produced outputs. The engine hashes existing files for local
+    /// change detection, so a deleted output triggers a rebuild. Output hashes
+    /// enter the shared action key only when `resolve` also names them as sources.
     ///
     /// The engine also pairs each key with its project-relative form and
     /// hands the result to the cache methods below as [`OutputFile`]s, so

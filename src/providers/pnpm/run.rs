@@ -121,13 +121,6 @@ pub(super) fn resolve_inputs(
         for glob in extra_globs {
             files.extend(tracker.hash_glob(glob)?);
         }
-        for path in output {
-            let p = Path::new(path);
-            if p.is_file() {
-                files.insert(path.clone(), tracker.hash_file(p)?);
-            }
-        }
-
         Ok(files)
     })
 }
@@ -293,6 +286,14 @@ impl Resource for PnpmRunResource {
     /// commonly directories, which the CAS cannot store.
     fn cache_policy(&self, _inputs: &PnpmRunInputs) -> CachePolicy {
         CachePolicy::Local
+    }
+
+    fn output_keys(&self, inputs: &PnpmRunInputs) -> Vec<String> {
+        inputs
+            .output
+            .iter()
+            .map(|path| path.trim_end_matches('/').to_owned())
+            .collect()
     }
 }
 

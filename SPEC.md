@@ -349,7 +349,7 @@ Every block goes through up to four phases: **resolve**, **plan**, **apply**, an
 
 ### 6.1 Resolve
 
-Resolve discovers the full set of input and output files from the user-supplied configuration. The provider inspects source files, parses dependency graphs, and returns file paths. The engine handles all hashing.
+Resolve discovers source files from the user-supplied configuration. The provider inspects source files and parses dependency graphs, then returns their hashes. It declares produced paths separately through `output_keys()`, and the engine hashes existing output files for local change detection.
 
 For a `go.binary` block where the user writes `main = "./cmd/server"`, resolve follows the Go import graph and returns every `.go` file that contributes to the binary. A `kubernetes.deployment` provider may have no files to discover — resolve can return empty lists.
 
@@ -382,7 +382,7 @@ Apply executes the planned action and returns an `apply-result` containing `outp
 
 The engine persists a wrapped state containing the provider's state, the block's outputs, and the content hash. Outputs are persisted so that skipped blocks can still provide values to downstream blocks across runs. On the next run, this state is passed back to `plan` and `apply` as `prior_state`. If state is nil, nothing is persisted.
 
-After apply, the engine re-resolves files (since outputs now exist) and recomputes the content hash for persistence.
+After apply, the engine re-resolves sources and hashes declared outputs, then recomputes the content hash for persistence.
 
 **Test blocks** (`kind = "test"`) — apply runs the tests and returns `passed` (bool) and `report` (CTRF JSON). By default, test providers capture CTRF JSON from the command's stdout. If `passed` is false, the runtime stops downstream blocks. This is distinct from an error return, which indicates the test execution itself failed (e.g. the test binary crashed).
 
@@ -409,7 +409,7 @@ The runtime calls `refresh` with the prior state. The provider queries the real 
 |  | Resolve | Plan | Apply | Destroy |
 |--|---------|------|-------|---------|
 | **Engine** | Calls provider resolve, hashes files + parent states | Compares content hash, calls provider plan on mismatch | Calls provider apply, persists state + outputs + content hash | Calls provider destroy, removes state |
-| **Provider** | Returns input/output file paths | Compares domain-specific fields (tag, command, etc.) | Executes the action, returns outputs + state | Cleans up produced artifacts |
+| **Provider** | Returns source hashes and declares output paths | Compares domain-specific fields (tag, command, etc.) | Executes the action, returns outputs + state | Cleans up produced artifacts |
 | **Protected** | Normal | Refuses replace/destroy | Normal for create/update | No-op |
 | **Test** | Normal | Normal | Returns passed + report | Normal |
 
@@ -469,7 +469,7 @@ Each block's state includes a **content hash** computed by the engine:
 
 ```
 content_hash = sha256(
-  sorted(resolved_input_files + resolved_output_files),  # path + content hash per file
+  sorted(resolved_input_files + declared_output_files),  # path + content hash per file
   sorted(parent_block_persisted_states),                  # name + full JSON per parent
 )
 ```
@@ -478,8 +478,8 @@ This forms a Merkle tree over the DAG. A change in any leaf (source file) propag
 
 ### How It Works
 
-1. **Resolve** — the engine calls the provider's `resolve()` to get input and output file paths.
-2. **Hash** — the engine hashes all resolved files plus the persisted states of all parent blocks. File hashes are cached within a run so shared files (e.g. `src/**/*.rs` used by both `debug` and `release`) are only read once.
+1. **Resolve** — the engine calls the provider's `resolve()` for source hashes and `output_keys()` for declared output paths.
+2. **Hash** — the engine hashes sources, existing output files, and the persisted states of all parent blocks. File hashes are cached within a run so shared files (e.g. `src/**/*.rs` used by both `debug` and `release`) are only read once.
 3. **Compare** — if the computed content hash matches the stored one, the block is skipped.
 4. **Persist** — after apply, the engine re-resolves (outputs now exist), recomputes the content hash, and persists it alongside the provider's state and outputs.
 
@@ -638,7 +638,7 @@ parse .bit files
 build DAG from references
   ▼
 for each block (topological order, parallel where possible):
-  ├─ resolve → get input/output file paths
+  ├─ resolve inputs and declare output paths
   ├─ hash files + parent states → compute content hash
   ├─ content hash matches stored → skip (load stored outputs into scope)
   └─ mismatch or no prior state:

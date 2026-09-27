@@ -255,12 +255,6 @@ impl Resource for ExecResource {
         for pattern in &inputs.inputs {
             files.extend(tracker.hash_glob(pattern)?);
         }
-        for output in &inputs.output {
-            let path = Path::new(output);
-            if path.is_file() {
-                files.insert(output.clone(), tracker.hash_file(path)?);
-            }
-        }
         Ok(files)
     }
 
@@ -452,12 +446,6 @@ impl Resource for ExecTestResource {
         for pattern in &inputs.inputs {
             files.extend(tracker.hash_glob(pattern)?);
         }
-        for output in &inputs.output {
-            let path = Path::new(output);
-            if path.is_file() {
-                files.insert(output.clone(), tracker.hash_file(path)?);
-            }
-        }
         Ok(files)
     }
 
@@ -534,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_returns_globs_and_outputs() {
+    fn resolve_returns_only_input_globs() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         fs::create_dir_all(&src).unwrap();
@@ -559,7 +547,7 @@ mod tests {
         };
         let result = Resource::resolve(&resource, &inputs).unwrap();
         assert!(result.contains_key(&file.to_string_lossy().into_owned()));
-        assert!(result.contains_key(&out_file.to_string_lossy().into_owned()));
+        assert!(!result.contains_key(&out_file.to_string_lossy().into_owned()));
     }
 
     #[test]

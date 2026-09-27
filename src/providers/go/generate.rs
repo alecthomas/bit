@@ -81,12 +81,6 @@ impl Resource for GoGenerateResource {
         for pattern in &inputs.inputs {
             files.extend(tracker.hash_glob(pattern)?);
         }
-        for output in &inputs.outputs {
-            let path = Path::new(output);
-            if path.is_file() {
-                files.insert(output.clone(), tracker.hash_file(path)?);
-            }
-        }
         Ok(files)
     }
 
@@ -178,6 +172,10 @@ impl Resource for GoGenerateResource {
     /// generated files.
     fn cache_policy(&self, _inputs: &GoGenerateInputs) -> CachePolicy {
         CachePolicy::Local
+    }
+
+    fn output_keys(&self, inputs: &GoGenerateInputs) -> Vec<String> {
+        inputs.outputs.clone()
     }
 }
 

@@ -111,14 +111,7 @@ impl Resource for GoExeResource {
     fn resolve(&self, inputs: &GoExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(Path::new);
-        let mut files = super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)?;
-        let output = GoExeResource::output_path(inputs);
-        let output_path = Path::new(&output);
-        if output_path.exists() {
-            let hash = tracker.hash_file(output_path)?;
-            files.insert(output, hash);
-        }
-        Ok(files)
+        super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoExeInputs, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {

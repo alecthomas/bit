@@ -84,10 +84,6 @@ impl Resource for PnpmInstallResource {
                     files.insert(pj.to_string_lossy().into_owned(), tracker.hash_file(&pj)?);
                 }
             }
-            let marker = ws.root.join("node_modules").join(".modules.yaml");
-            if marker.is_file() {
-                files.insert(marker.to_string_lossy().into_owned(), tracker.hash_file(&marker)?);
-            }
             Ok(files)
         })
     }
@@ -165,6 +161,15 @@ impl Resource for PnpmInstallResource {
     /// stores single files, so there is nothing here it could capture.
     fn cache_policy(&self, _inputs: &PnpmInstallInputs) -> CachePolicy {
         CachePolicy::Local
+    }
+
+    fn output_keys(&self, inputs: &PnpmInstallInputs) -> Vec<String> {
+        vec![
+            Path::new(&inputs.dir)
+                .join("node_modules/.modules.yaml")
+                .to_string_lossy()
+                .into_owned(),
+        ]
     }
 }
 
