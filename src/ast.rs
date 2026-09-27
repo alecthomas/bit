@@ -57,7 +57,7 @@ pub enum Phase {
 /// or `name[key1, key2] = provider.resource { fields... }` (matrix expansion).
 ///
 /// `protected` and `explicit` may appear in either order and are independent:
-/// `protected` blocks refuse destroy without `--force`; `explicit` blocks are
+/// `protected` blocks must be named directly to destroy; `explicit` blocks are
 /// excluded from the `...` selector and must be named to run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {

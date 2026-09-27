@@ -64,7 +64,7 @@ BUILD.bit example (illustrative):
     concurrency = 1                           # Limit concurrent slices of this matrix block.
   }
 
-  # protected needs --force to clean; explicit excludes the block from bit ...
+  # protected must be named directly to clean; explicit excludes it from bit ...
   protected explicit publish(name: string, profile = "release") = exec {
     command = "echo #{name} #{profile}"       # Interpolate block parameters.
     after = [binary]                          # Ordering only, without change propagation.
@@ -98,7 +98,7 @@ struct Cli {
     #[arg(short = 'p', long)]
     plan: bool,
 
-    /// Destroy the named blocks and their dependents in reverse topological order
+    /// Destroy named blocks and their dependents; protected blocks must be named directly
     #[arg(short = 'c', long)]
     clean: bool,
 
@@ -107,8 +107,7 @@ struct Cli {
     #[arg(long)]
     cache: bool,
 
-    /// Force builds past change detection and cache; with --clean, destroy
-    /// protected blocks and continue past errors
+    /// Force builds past change detection and cache; with --clean, continue past errors
     #[arg(short = 'f', long)]
     force: bool,
 

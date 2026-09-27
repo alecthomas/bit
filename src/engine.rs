@@ -1414,22 +1414,23 @@ fn execute_block(
 ///   target list containing the literal `"..."`, destroys every non-`explicit`
 ///   block in the DAG (unioned with the transitive dependents of the other
 ///   named targets); `explicit` blocks must be named to be destroyed.
-/// * `force` - When true, destroy protected blocks and continue past provider
-///   errors (the failing block still shows an error, but remaining blocks
-///   proceed).
+///   Protected blocks are destroyed only when their exact block name appears
+///   in this list. Selecting them through a target or `...` is not sufficient.
+/// * `continue_on_error` - When true, continue past provider errors (the
+///   failing block still shows an error, but remaining blocks proceed).
 ///
 /// # Errors
 ///
 /// Returns [`EngineError`] if a target is unknown, a cycle exists, or a
-/// provider fails during teardown (unless `force` is set, in which case
-/// provider errors are collected and the first is returned after all blocks
-/// have been processed).
+/// provider fails during teardown (unless `continue_on_error` is set, in
+/// which case provider errors are collected and the first is returned after
+/// all blocks have been processed).
 pub fn destroy(
     dag: &mut Dag,
     store: &dyn StateStore,
     output: &Output,
     targets: &[String],
-    force: bool,
+    continue_on_error: bool,
 ) -> Result<(), EngineError> {
     let mut order: Vec<String> = if targets.is_empty() {
         dag.select_all()?
@@ -1470,7 +1471,7 @@ pub fn destroy(
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
         let writer = output.writer(name);
 
-        if node.protected && !force {
+        if node.protected && !targets.iter().any(|target| target == name) {
             writer.event(Event::Protected, "protected");
             continue;
         }
@@ -1494,7 +1495,7 @@ pub fn destroy(
                 source: e,
             };
             writer.event(Event::Failed, &format!("{err}"));
-            if !force {
+            if !continue_on_error {
                 return Err(err);
             }
             if first_error.is_none() {
@@ -2025,7 +2026,34 @@ other-b = probe.run { label = "other-b" }
     }
 
     #[test]
-    fn force_destroys_protected_block() {
+    fn explicitly_named_protected_block_is_destroyed() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out.txt");
+        let input = format!(
+            "protected build = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\ntarget all = [build]\n",
+            output.display(),
+            output.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        let out = Output::new(&[]);
+        apply(&mut dag, &base, &store, &test_cache(), &out, &[], 1, &tracker).unwrap();
+        assert!(!store.list().unwrap().is_empty());
+
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        destroy(&mut dag, &store, &out, &["all".into()], false).unwrap();
+        assert!(!store.list().unwrap().is_empty());
+
+        let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        destroy(&mut dag, &store, &out, &["build".into()], false).unwrap();
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn force_does_not_destroy_implicitly_selected_protected_block() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
@@ -2040,11 +2068,10 @@ other-b = probe.run { label = "other-b" }
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &test_cache(), &out, &[], 1, &tracker).unwrap();
-        assert!(!store.list().unwrap().is_empty());
 
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &[], true).unwrap();
-        assert!(store.list().unwrap().is_empty());
+        assert!(!store.list().unwrap().is_empty());
     }
 
     #[test]

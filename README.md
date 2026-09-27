@@ -71,6 +71,7 @@ bit --force      # rebuild selected blocks without change detection or cache
 bit --plan       # show what would change
 bit --test       # run test blocks
 bit --clean      # destroy targets and their dependents in reverse topological order
+bit --clean db   # explicitly destroy a protected block
 bit --list       # list explicitly defined targets
 bit -ll          # list all blocks
 bit --graph      # render the DAG as an ASCII graph
@@ -104,11 +105,13 @@ accept the same positional selector: no argument uses the `default` target
 (or every non-`explicit` block if none), `...` forces every non-`explicit`
 block, or name one or more targets/blocks to scope the operation. `--clean
 <name>` destroys that block plus anything that depends on it, in reverse
-topological order.
+topological order. A `protected` block is destroyed only when its exact block
+name is one of these positional selectors. Bulk cleanup and target expansion
+skip protected blocks.
 
 `--force` (`-f`) rebuilds every block selected by a normal apply, ignoring
-change detection and the shared cache. With `--clean`, it instead allows
-protected blocks to be destroyed and continues cleanup past errors.
+change detection and the shared cache. With `--clean`, it instead continues
+cleanup past errors.
 
 `--since <ref>` limits apply, plan, test, graph, dump, and block-list operations to
 blocks affected by changes between `merge-base(<ref>, HEAD)` and the current
