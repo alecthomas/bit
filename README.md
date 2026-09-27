@@ -91,6 +91,10 @@ bit --quiet      # suppress output unless an error occurs (also -q)
 bit --since origin/master  # apply blocks affected since the branch point
 ```
 
+`bit -ll` renders blocks as a dependency tree. A block's prerequisites are
+indented beneath it; shared prerequisites name their other dependents with an
+`also:` suffix.
+
 `rust.test` summarizes test suites and prints Cargo compiler diagnostics when
 `cargo test` fails, including when another workspace suite has already passed.
 

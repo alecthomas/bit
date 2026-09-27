@@ -331,6 +331,29 @@ impl Dag {
             .or_else(|| ord_parents.into_iter().next())
     }
 
+    /// Return the preferred dependent for tree rendering: the first
+    /// content-coupled dependent sorted alphabetically, falling back to the
+    /// alphabetically-first ordering-only dependent. Returns `None` for
+    /// terminal nodes.
+    pub fn primary_dependent(&self, name: &str) -> Option<String> {
+        let idx = *self.indices.get(name)?;
+        let mut dep_children: Vec<String> = Vec::new();
+        let mut ord_children: Vec<String> = Vec::new();
+        for edge in self.graph.edges_directed(idx, Direction::Outgoing) {
+            let child = self.graph[edge.target()].name.clone();
+            match edge.weight() {
+                EdgeKind::Dependency => dep_children.push(child),
+                EdgeKind::Ordering => ord_children.push(child),
+            }
+        }
+        dep_children.sort();
+        ord_children.sort();
+        dep_children
+            .into_iter()
+            .next()
+            .or_else(|| ord_children.into_iter().next())
+    }
+
     /// Return block names for a target in topological order.
     /// Includes all transitive dependencies.
     pub fn target_order(&self, target: &str) -> Result<Vec<String>, DagError> {
@@ -447,6 +470,20 @@ impl Dag {
         for edge in self.graph.edges_directed(idx, petgraph::Direction::Incoming) {
             if *edge.weight() == EdgeKind::Dependency {
                 result.push(self.graph[edge.source()].name.clone());
+            }
+        }
+        result
+    }
+
+    /// Get child block names connected by content-coupled dependency edges.
+    pub fn content_dependents(&self, name: &str) -> Vec<String> {
+        let Some(&idx) = self.indices.get(name) else {
+            return vec![];
+        };
+        let mut result = Vec::new();
+        for edge in self.graph.edges_directed(idx, petgraph::Direction::Outgoing) {
+            if *edge.weight() == EdgeKind::Dependency {
+                result.push(self.graph[edge.target()].name.clone());
             }
         }
         result

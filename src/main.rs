@@ -874,16 +874,17 @@ fn format_formal_params(params: &[bit::ast::Param]) -> String {
     format!("({values})")
 }
 
-/// Render the DAG as a tree, grouping blocks under their primary parent
-/// (content-coupled dep preferred over synthetic ordering edges, ties
-/// broken alphabetically). Blocks with additional parents get an
-/// `(also: x, y)` suffix so the extra relationships aren't lost.
+/// Render the DAG as a tree with dependencies indented beneath the blocks
+/// that require them. Shared dependencies are grouped under their primary
+/// dependent (content-coupled edge preferred over synthetic ordering edges,
+/// ties broken alphabetically) and name the other dependents in an
+/// `(also: x, y)` suffix.
 fn print_block_tree(dag: &bit::dag::Dag, names: &[String]) {
     use std::collections::HashMap;
 
     let mut children: HashMap<Option<String>, Vec<String>> = HashMap::new();
     for name in names {
-        let parent = dag.primary_parent(name);
+        let parent = dag.primary_dependent(name);
         children.entry(parent).or_default().push(name.clone());
     }
     for kids in children.values_mut() {
@@ -904,14 +905,14 @@ fn print_block_tree_node(
         let Some(node) = dag.get_node(name) else { continue };
         let pad = "  ".repeat(depth);
         let typ = format!("{}.{}", node.provider, node.resource_name);
-        // Show extra content-coupled parents inline. Phase-edge
-        // ordering parents are omitted — they apply to every default
+        // Show extra content-coupled dependents inline. Phase-edge
+        // ordering dependents are omitted — they apply to every default
         // block and would just be noise.
-        let primary = dag.primary_parent(name);
+        let primary = dag.primary_dependent(name);
         let mut others: Vec<String> = dag
-            .content_deps(name)
+            .content_dependents(name)
             .into_iter()
-            .filter(|p| Some(p.as_str()) != primary.as_deref())
+            .filter(|dependent| Some(dependent.as_str()) != primary.as_deref())
             .collect();
         others.sort();
         let also = if others.is_empty() {

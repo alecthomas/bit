@@ -308,6 +308,47 @@ target deploy = [beta]
 }
 
 #[test]
+fn repeated_list_indents_dependencies_beneath_dependents() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("BUILD.bit"),
+        r#"
+toolchain-a = exec { command = "true" }
+toolchain-b = exec { command = "true" }
+shared = exec { command = "true" }
+binary-a = exec {
+  command = "true"
+  depends_on = [toolchain-a, shared]
+}
+binary-b = exec {
+  command = "true"
+  depends_on = [toolchain-b, shared]
+}
+package = exec {
+  command = "true"
+  depends_on = [binary-a, binary-b]
+}
+"#,
+    )
+    .unwrap();
+
+    let blocks = run_bit(project.path(), &["-ll"]);
+    assert!(blocks.status.success(), "{}", String::from_utf8_lossy(&blocks.stderr));
+    let stdout = String::from_utf8(blocks.stdout).unwrap();
+    let lines: Vec<_> = stdout.lines().collect();
+    assert!(lines.iter().any(|line| line.starts_with("package ")));
+    assert!(lines.iter().any(|line| line.starts_with("  binary-a ")));
+    assert!(lines.iter().any(|line| line.starts_with("    toolchain-a ")));
+    assert!(lines.iter().any(|line| line.starts_with("  binary-b ")));
+    assert!(lines.iter().any(|line| line.starts_with("    toolchain-b ")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("    shared ") && line.contains("(also: binary-b)"))
+    );
+}
+
+#[test]
 fn force_rebuilds_implicit_and_specified_blocks_without_cache() {
     let project = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
