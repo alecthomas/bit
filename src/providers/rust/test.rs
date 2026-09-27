@@ -141,7 +141,7 @@ fn parse_result_line(rest: &str) -> TestEvent {
 
 struct TestResult {
     passed: bool,
-    had_events: bool,
+    diagnostics: Vec<String>,
 }
 
 /// Parse the "failures:" section into per-test output.
@@ -181,16 +181,20 @@ fn parse_failure_output(lines: &[String]) -> Vec<(String, String)> {
 ///
 /// Consumes lines lazily from `lines`, so callers that feed it from a live
 /// pipe (see `apply`) will see events emitted as each suite finishes — not
-/// all at once at the end. The BufRead-based caller path uses
-/// `reader.lines().map_while(Result::ok)` to adapt.
-fn process_test_output(lines: impl IntoIterator<Item = String>, writer: &BlockWriter, verbose: bool) -> TestResult {
+/// all at once at the end. The boolean marks stderr so Cargo diagnostics can
+/// be retained until its exit status is known.
+fn process_test_output(
+    lines: impl IntoIterator<Item = (String, bool)>,
+    writer: &BlockWriter,
+    verbose: bool,
+) -> TestResult {
     let mut all_passed = true;
-    let mut had_events = false;
+    let mut diagnostics = Vec::new();
     let mut current_suite = String::new();
     let mut failure_lines: Vec<String> = Vec::new();
     let mut in_failures_section = false;
 
-    for line in lines {
+    for (line, stderr) in lines {
         // Detect the "failures:" section that cargo test prints with full output.
         if line.trim() == "failures:" {
             in_failures_section = true;
@@ -244,19 +248,16 @@ fn process_test_output(lines: impl IntoIterator<Item = String>, writer: &BlockWr
 
         match parse_test_line(&line) {
             TestEvent::TestPassed { name, duration } => {
-                had_events = true;
                 if verbose {
                     writer.test_passed(&current_suite, &name, duration);
                 }
             }
             TestEvent::TestFailed { name, duration } => {
-                had_events = true;
                 if verbose {
                     writer.test_failed(&current_suite, &name, duration, "");
                 }
             }
             TestEvent::TestIgnored { name } => {
-                had_events = true;
                 if verbose {
                     writer.test_skipped(&current_suite, &name);
                 }
@@ -267,7 +268,6 @@ fn process_test_output(lines: impl IntoIterator<Item = String>, writer: &BlockWr
                 ignored,
                 duration,
             } => {
-                had_events = true;
                 if failed > 0 {
                     all_passed = false;
                     if !verbose {
@@ -283,13 +283,17 @@ fn process_test_output(lines: impl IntoIterator<Item = String>, writer: &BlockWr
                 failure_lines.clear();
             }
             TestEvent::SuiteStart => {}
-            TestEvent::Other => {}
+            TestEvent::Other => {
+                if stderr {
+                    diagnostics.push(line);
+                }
+            }
         }
     }
 
     TestResult {
         passed: all_passed,
-        had_events,
+        diagnostics,
     }
 }
 
@@ -373,14 +377,15 @@ impl Resource for RustTestResource {
         // emit `test_suite_passed` / etc. events as each suite finishes,
         // giving the live region something to show during a long test run.
         // Stderr carries suite headers ("Running ...", "Doc-tests ...") and
-        // stdout carries results; both are interleaved by arrival time.
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        // compiler diagnostics; stdout carries results. Both are interleaved
+        // by arrival time, so each line retains its source.
+        let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
         let result = std::thread::scope(|s| {
             if let Some(out) = stdout {
                 let tx = tx.clone();
                 s.spawn(move || {
                     for line in BufReader::new(out).lines().map_while(Result::ok) {
-                        let _ = tx.send(line);
+                        let _ = tx.send((line, false));
                     }
                 });
             }
@@ -388,7 +393,7 @@ impl Resource for RustTestResource {
                 let tx = tx.clone();
                 s.spawn(move || {
                     for line in BufReader::new(err).lines().map_while(Result::ok) {
-                        let _ = tx.send(line);
+                        let _ = tx.send((line, true));
                     }
                 });
             }
@@ -402,11 +407,10 @@ impl Resource for RustTestResource {
             .wait()
             .map_err(|e| format!("failed to wait for `{}`: {e}", cargo.display()))?;
 
-        let passed = if result.had_events {
-            result.passed
-        } else {
-            status.success()
-        };
+        if !status.success() {
+            writer.stderr_details(&result.diagnostics);
+        }
+        let passed = status.success() && result.passed;
 
         Ok(ApplyResult {
             outputs: RustTestOutputs { passed },
@@ -564,9 +568,9 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(output.lines().map(String::from), &writer, false);
+        let result = process_test_output(output.lines().map(|line| (line.into(), false)), &writer, false);
         assert!(result.passed);
-        assert!(result.had_events);
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]
@@ -579,9 +583,9 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(output.lines().map(String::from), &writer, false);
+        let result = process_test_output(output.lines().map(|line| (line.into(), false)), &writer, false);
         assert!(!result.passed);
-        assert!(result.had_events);
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]
@@ -608,9 +612,9 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(output.lines().map(String::from), &writer, false);
+        let result = process_test_output(output.lines().map(|line| (line.into(), false)), &writer, false);
         assert!(!result.passed);
-        assert!(result.had_events);
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]
@@ -640,8 +644,38 @@ mod tests {
     fn process_output_no_events() {
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(std::iter::empty::<String>(), &writer, false);
+        let result = process_test_output(std::iter::empty::<(String, bool)>(), &writer, false);
         assert!(result.passed);
-        assert!(!result.had_events);
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn process_output_retains_compiler_diagnostics_after_passing_suite() {
+        let lines = [
+            ("Running unittests src/lib.rs (target/debug/deps/example)".into(), true),
+            (
+                "test result: ok. 1 passed; 0 failed; 0 ignored; finished in 0.1s".into(),
+                false,
+            ),
+            ("   Compiling broken-crate v0.1.0".into(), true),
+            ("error[E0283]: type annotations needed".into(), true),
+            (" --> src/lib.rs:318:13".into(), true),
+            (
+                "error: could not compile `broken-crate` due to 1 previous error".into(),
+                true,
+            ),
+        ];
+        let out = Output::silent();
+        let writer = out.writer("test");
+        let result = process_test_output(lines, &writer, false);
+        assert!(result.passed);
+        assert_eq!(
+            result.diagnostics,
+            [
+                "error[E0283]: type annotations needed",
+                " --> src/lib.rs:318:13",
+                "error: could not compile `broken-crate` due to 1 previous error",
+            ]
+        );
     }
 }

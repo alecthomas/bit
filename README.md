@@ -91,6 +91,9 @@ bit --quiet      # suppress output unless an error occurs (also -q)
 bit --since origin/master  # apply blocks affected since the branch point
 ```
 
+`rust.test` summarizes test suites and prints Cargo compiler diagnostics when
+`cargo test` fails, including when another workspace suite has already passed.
+
 The JSON schema output is an object whose keys are `builtins` and the names of
 providers or imported modules. Each section has a `functions` array and, when
 applicable, a `resources` array.

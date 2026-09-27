@@ -302,6 +302,20 @@ impl Output {
         inner.push_stream_many(&mut out, name, lines);
     }
 
+    fn dispatch_stderr_details(&self, name: &str, color: Color, indent: Option<usize>, details: &[String]) {
+        if self.silent || details.is_empty() {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let lines = details
+            .iter()
+            .flat_map(|line| inner.fmt_stream_line(name, color, indent, line, true))
+            .collect::<Vec<_>>();
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        inner.print_detached(&mut out, &lines);
+    }
+
     fn dispatch_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str, raw: bool) {
         if self.silent {
             return;
@@ -701,6 +715,13 @@ impl BlockWriter {
     pub fn stderr_line(&self, content: &str) {
         self.output
             .dispatch_stream(&self.name, self.color, self.indent, content, true);
+    }
+
+    /// Print complete failure diagnostics above the live region so its
+    /// rolling tail cannot hide the first compiler error.
+    pub fn stderr_details(&self, details: &[String]) {
+        self.output
+            .dispatch_stderr_details(&self.name, self.color, self.indent, details);
     }
 
     /// Write all lines from a reader, prefixed with the block name.
