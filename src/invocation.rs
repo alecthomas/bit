@@ -125,13 +125,45 @@ pub(crate) fn materialize(
                     "unknown target or block",
                 ));
             }
-            selected.push(invocation.name.clone());
+            selected.push(context.cli_matrix_slice(&invocation.name));
         }
     }
     Ok(selected)
 }
 
 impl Instantiator<'_> {
+    /// Resolve a CLI matrix selector whose string keys may be unquoted, so
+    /// `build[amd64]` selects `build["amd64"]`. Unlike `.bit` files, the CLI
+    /// has no scope in which a bare word could name a binding, so a bare
+    /// identifier key is a string and every other key must be a literal.
+    fn cli_matrix_slice(&self, selector: &str) -> String {
+        if self.dag.has_block(selector) || self.dag.targets().contains_key(selector) {
+            return selector.to_owned();
+        }
+        let Ok(Expr::MatrixRef { name, keys, fields }) = crate::parser::parse_expr(selector, "<selector>") else {
+            return selector.to_owned();
+        };
+        if !fields.is_empty() || !self.matrix_blocks.contains_key(&name) {
+            return selector.to_owned();
+        }
+        let values: Option<Vec<Value>> = keys
+            .iter()
+            .map(|key| match key {
+                Expr::Ref(parts) if parts.len() == 1 => Some(Value::Str(parts[0].clone())),
+                key => expr::eval(key, &Scope::new()).ok(),
+            })
+            .collect();
+        let Some(values) = values else {
+            return selector.to_owned();
+        };
+        let slice = matrix::matrix_key(&name, &values.iter().collect::<Vec<_>>());
+        if self.dag.has_block(&slice) {
+            slice
+        } else {
+            selector.to_owned()
+        }
+    }
+
     fn matrix_slices(&self, name: &str) -> Vec<String> {
         let Some(Value::Struct(_, slices)) = self.scope.get(name) else {
             return Vec::new();

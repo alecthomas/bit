@@ -277,6 +277,10 @@ all of its slices.
 Matrix slice selectors are expressions. For example, `binary[selected_arch].path`
 evaluates `selected_arch` and selects the slice with that typed key.
 
+On the command line, string keys may be unquoted: `bit 'binary[arm64]'` selects
+`binary["arm64"]`. Only identifier keys are read as strings; other keys are
+literals, so quote string values such as `"1.2"`.
+
 A matrix block can also declare parameters after its matrix keys. The keys
 select slices; named arguments configure an instance of the whole matrix:
 

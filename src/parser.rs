@@ -78,6 +78,13 @@ pub(crate) fn parse_with_comments<'a>(input: &'a str, filename: &str) -> Result<
     Ok(parsed)
 }
 
+/// Parse a complete standalone expression.
+pub(crate) fn parse_expr(input: &str, filename: &str) -> Result<Expr, ParseError> {
+    delimited(ws, expr, ws).parse(input).map_err(|e| ParseError {
+        message: format_parse_error(input, filename, e.offset(), e.inner()),
+    })
+}
+
 fn format_parse_error(input: &str, filename: &str, position: usize, err: &ContextError) -> String {
     let prefix = &input[..position];
     let line = prefix.chars().filter(|&c| c == '\n').count() + 1;

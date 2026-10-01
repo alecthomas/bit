@@ -1924,4 +1924,59 @@ target check = [tests]
             vec![r#"tests["github.com/block/spectre/internal"]"#]
         );
     }
+
+    fn select(input: &str, selectors: &[&str]) -> Result<Vec<String>, LoadError> {
+        let module = parser::parse(input, "<test>").unwrap();
+        let invocations: Vec<_> = selectors
+            .iter()
+            .map(|name| crate::invocation::Invocation {
+                name: (*name).into(),
+                args: Vec::new(),
+            })
+            .collect();
+        load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations)
+            .map(|(_dag, _scope, selected)| selected)
+    }
+
+    #[test]
+    fn cli_matrix_selector_accepts_unquoted_strings() {
+        let input = r#"
+let arch = ["amd64", "aarch64-apple-darwin"]
+let os = ["linux"]
+
+build[arch, os] = exec { command = "build #{arch} #{os}" }
+"#;
+        assert_eq!(
+            select(
+                input,
+                &[
+                    "build[amd64, linux]",
+                    r#"build["amd64",linux]"#,
+                    "build[aarch64-apple-darwin, linux]"
+                ]
+            )
+            .unwrap(),
+            vec![
+                r#"build["amd64", "linux"]"#,
+                r#"build["amd64", "linux"]"#,
+                r#"build["aarch64-apple-darwin", "linux"]"#,
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_matrix_selector_keeps_literal_keys_typed() {
+        let input = r#"
+let version = [1, "2", "1.2"]
+
+build[version] = exec { command = "build #{version}" }
+"#;
+        assert_eq!(
+            select(input, &["build[1]", "build[\"2\"]", "build[\"1.2\"]"]).unwrap(),
+            vec!["build[1]", r#"build["2"]"#, r#"build["1.2"]"#]
+        );
+        // Only identifiers are bare strings; `1.2` stays a number and is
+        // left unresolved.
+        assert_eq!(select(input, &["build[1.2]"]).unwrap(), vec!["build[1.2]"]);
+    }
 }
