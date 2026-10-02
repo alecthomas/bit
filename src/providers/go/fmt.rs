@@ -44,13 +44,13 @@ pub struct GoFmtState {
     pub dir: Option<String>,
 }
 
-/// Collect `.go` file paths (excluding test files) for the given package pattern.
+/// Collect `.go` file paths, including `_test.go` files, for the given package pattern.
 ///
 /// `dir` mirrors [`super::scanner::scan`]'s `base_dir`: when set, module-root
 /// discovery starts from that directory so a block targeting a separate-module
 /// subdirectory scans the right module.
 fn go_source_files(package: &str, dir: Option<&std::path::Path>) -> Result<Vec<String>, BoxError> {
-    let files = super::scanner::scan(package, false, dir)?;
+    let files = super::scanner::scan(package, true, dir)?;
     let mut paths: Vec<String> = files
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e == "go"))
@@ -88,7 +88,7 @@ impl Resource for GoFmtResource {
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, true, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -208,7 +208,7 @@ impl Resource for GoFmtCheckResource {
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, true, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -306,6 +306,24 @@ mod tests {
         GoFmtCheckResource::new(Arc::new(Mutex::new(FileTracker::default())))
     }
 
+    const UNFORMATTED_TEST: &str = "package pkg\nfunc helper( ) {}\n";
+    const FORMATTED_TEST: &str = "package pkg\n\nfunc helper() {}\n";
+
+    /// Create a module whose only unformatted file is `pkg/lib_test.go`.
+    fn module_with_unformatted_test_file() -> (tempfile::TempDir, GoFmtInputs) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        std::fs::write(root.join("pkg/lib.go"), "package pkg\n").unwrap();
+        std::fs::write(root.join("pkg/lib_test.go"), UNFORMATTED_TEST).unwrap();
+        let inputs = GoFmtInputs {
+            package: "./...".into(),
+            dir: Some(root.to_string_lossy().into_owned()),
+        };
+        (dir, inputs)
+    }
+
     #[test]
     fn fmt_resource_kind_is_build() {
         assert_eq!(Resource::kind(&test_fmt_resource()), ResourceKind::Build);
@@ -364,6 +382,33 @@ mod tests {
         };
         let result = Resource::plan(&test_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn fmt_apply_formats_test_files() {
+        let (dir, inputs) = module_with_unformatted_test_file();
+        let output = crate::output::Output::new(&[]);
+        Resource::apply(&test_fmt_resource(), &inputs, None, &output.writer("fmt")).unwrap();
+        let formatted = std::fs::read_to_string(dir.path().join("pkg/lib_test.go")).unwrap();
+        assert_eq!(formatted, FORMATTED_TEST);
+    }
+
+    #[test]
+    fn fmt_check_fails_on_unformatted_test_files() {
+        let (_dir, inputs) = module_with_unformatted_test_file();
+        let output = crate::output::Output::new(&[]);
+        let result = Resource::apply(&test_fmt_check_resource(), &inputs, None, &output.writer("fmt-l")).unwrap();
+        assert!(!result.outputs.passed);
+    }
+
+    #[test]
+    fn resolve_tracks_test_files() {
+        let (_dir, inputs) = module_with_unformatted_test_file();
+        let fmt_inputs = Resource::resolve(&test_fmt_resource(), &inputs).unwrap();
+        let check_inputs = Resource::resolve(&test_fmt_check_resource(), &inputs).unwrap();
+        for resolved in [fmt_inputs, check_inputs] {
+            assert!(resolved.keys().any(|p| p.ends_with("pkg/lib_test.go")), "{resolved:?}");
+        }
     }
 
     #[test]
