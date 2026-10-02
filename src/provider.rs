@@ -253,6 +253,13 @@ pub trait Resource {
     ) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
     fn destroy(&self, prior_state: &Self::State, writer: &BlockWriter) -> Result<(), BoxError>;
 
+    /// Concurrency limit for a block's matrix slices when the block sets no
+    /// `concurrency` field. Use it for tools that cannot run alongside
+    /// another instance of themselves.
+    fn default_concurrency(&self) -> Option<usize> {
+        None
+    }
+
     // -- Shared cache contract -------------------------------------------
     //
     // A resource opts into the shared action cache by returning
@@ -360,6 +367,9 @@ pub trait DynResource: Send + Sync {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError>;
+    fn default_concurrency(&self) -> Option<usize> {
+        None
+    }
 
     /// Returns [`CachePolicy::Local`] when the inputs cannot be deserialized
     /// for this resource, so an unusable block is never published.
@@ -466,6 +476,10 @@ impl<R: Resource + Send + Sync> DynResource for R {
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError> {
         let state: R::State = serde_json::from_value(prior_state.clone())?;
         Resource::destroy(self, &state, writer)
+    }
+
+    fn default_concurrency(&self) -> Option<usize> {
+        Resource::default_concurrency(self)
     }
 
     fn cache_policy(&self, inputs: &Map) -> CachePolicy {

@@ -193,7 +193,7 @@ Special fields:
 
 - `depends_on = [block, ...]` — content-coupled dependency (changes propagate)
 - `after = [block, ...]` — ordering-only dependency
-- `concurrency = N` — maximum number of this block's matrix slices that may run at once
+- `concurrency = N` — maximum number of this block's matrix slices that may run at once (`go.lint` defaults to 1)
 - `uncached = [output, ...]` — outputs to keep out of the [shared build cache](#shared-build-cache)
 
 Prefix with `protected` to prevent destruction, `explicit` to exclude from `...`, or both (in either order):
@@ -304,6 +304,10 @@ lists can come from module bindings or list-valued block parameters.
 Set `concurrency` to a positive integer to cap simultaneous slices from that
 matrix block without reducing parallelism for unrelated blocks. The global
 `-j` limit still caps the total number of running blocks.
+
+`go.lint` blocks default to `concurrency = 1`, because golangci-lint refuses
+to start while another instance is running. Set `concurrency` explicitly to
+override this.
 
 ### Strings
 

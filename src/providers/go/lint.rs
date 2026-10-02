@@ -183,6 +183,11 @@ impl Resource for GoLintResource {
         Ok(())
     }
 
+    /// golangci-lint takes a global lock and exits when another instance holds it.
+    fn default_concurrency(&self) -> Option<usize> {
+        Some(1)
+    }
+
     fn cache_policy(&self, _inputs: &GoLintInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }

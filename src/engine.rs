@@ -1693,7 +1693,10 @@ fn eval_fields_lenient(fields: &[crate::ast::Field], scope: &Scope) -> Result<Ma
 
 fn evaluate_concurrency(node: &DagNode, scope: &Scope) -> Result<Option<ConcurrencyLimit>, EngineError> {
     let Some(field) = node.fields.iter().find(|field| field.name == "concurrency") else {
-        return Ok(None);
+        return Ok(node.resource.default_concurrency().map(|limit| ConcurrencyLimit {
+            group: node.concurrency_group.clone(),
+            limit,
+        }));
     };
     let value = expr::eval(&field.value, scope).map_err(|source| EngineError::Eval {
         pos: node.pos.clone(),
@@ -1965,6 +1968,44 @@ other-b = probe.run { label = "other-b" }
             .err()
             .expect("invalid concurrency should fail");
         assert!(matches!(error, EngineError::InvalidConcurrency { .. }));
+    }
+
+    fn go_lint_concurrency_limits(input: &str) -> HashMap<String, Option<ConcurrencyLimit>> {
+        let tracker = test_tracker();
+        let mut registry = ProviderRegistry::new();
+        registry.register(Box::new(crate::providers::go::GoProvider::new(tracker.clone())));
+        let module = parser::parse(input, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let (dag, base) = loader::load(&module, &Map::new(), &registry, &store, &[]).unwrap();
+        let order = dag.topo_order().unwrap();
+        concurrency_limits(&dag, &base.scope, &order).unwrap()
+    }
+
+    #[test]
+    fn go_lint_runs_one_matrix_slice_at_a_time_by_default() {
+        let limits = go_lint_concurrency_limits(
+            r#"
+let module = ["a", "b"]
+lint[module] = go.lint { dir = module }
+"#,
+        );
+        let limit = limits[r#"lint["a"]"#].as_ref().expect("go.lint has a default limit");
+        assert_eq!((limit.group.as_str(), limit.limit), ("lint", 1));
+    }
+
+    #[test]
+    fn explicit_concurrency_overrides_go_lint_default() {
+        let limits = go_lint_concurrency_limits(
+            r#"
+let module = ["a", "b"]
+lint[module] = go.lint {
+  concurrency = 2
+  dir = module
+}
+"#,
+        );
+        let limit = limits[r#"lint["a"]"#].as_ref().expect("explicit limit");
+        assert_eq!(limit.limit, 2);
     }
 
     #[test]
