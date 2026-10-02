@@ -77,7 +77,8 @@ impl Resource for GoGenerateResource {
     fn resolve(&self, inputs: &GoGenerateInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(Path::new);
-        let mut files = super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)?;
+        // `go generate` also runs directives in `_test.go` files.
+        let mut files = super::resolve_go_inputs(&inputs.package, dir, true, &mut tracker)?;
         for pattern in &inputs.inputs {
             files.extend(tracker.hash_glob(pattern)?);
         }
@@ -185,6 +186,25 @@ mod tests {
 
     fn test_resource() -> GoGenerateResource {
         GoGenerateResource::new(Arc::new(Mutex::new(FileTracker::default())))
+    }
+
+    #[test]
+    fn resolve_tracks_test_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        std::fs::write(root.join("lib.go"), "package lib\n").unwrap();
+        std::fs::write(root.join("lib_test.go"), "package lib\n\n//go:generate echo test\n").unwrap();
+        let inputs = GoGenerateInputs {
+            package: "./...".into(),
+            flags: vec![],
+            inputs: vec![],
+            outputs: vec![],
+            dir: Some(root.to_string_lossy().into_owned()),
+            env: GoEnv::default(),
+        };
+        let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
+        assert!(resolved.keys().any(|p| p.ends_with("lib_test.go")), "{resolved:?}");
     }
 
     #[test]
