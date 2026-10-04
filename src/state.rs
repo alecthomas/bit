@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,11 @@ pub trait StateStore: Send + Sync {
 
 /// JSON file-backed state store. All block states are stored in a single
 /// JSON file as a map of block name to state value.
+///
+/// Concurrent `bit` processes share this file. Writes replace it atomically
+/// so readers never see a partial file, and mutations hold an exclusive lock
+/// on a sibling `.lock` file so concurrent read-modify-writes don't drop each
+/// other's block updates.
 pub struct JsonFileStore {
     path: PathBuf,
 }
@@ -49,13 +55,45 @@ impl JsonFileStore {
         Ok(serde_json::from_str(&contents)?)
     }
 
+    /// Writes to a temp file in the same directory and renames it over the
+    /// state file, so a concurrent reader sees either the old or new
+    /// contents. The rename must stay on one filesystem to be atomic.
     fn write_data(&self, data: &StoreData) -> Result<(), StateError> {
-        if let Some(parent) = self.path.parent() {
+        let parent = self.path.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        serde_json::to_writer_pretty(&mut tmp, data)?;
+        tmp.flush()?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(&self.path).map_err(|e| e.error)?;
+        Ok(())
+    }
+
+    /// Takes an exclusive advisory lock covering a whole read-modify-write.
+    /// The lock lives on a separate file because `write_data` replaces the
+    /// state file's inode, which would orphan a lock held on it. Released
+    /// when the returned handle drops.
+    fn lock(&self) -> Result<File, StateError> {
+        let mut lock_path = self.path.clone().into_os_string();
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+        if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(data)?;
-        fs::write(&self.path, json)?;
-        Ok(())
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path)?;
+        file.lock()?;
+        Ok(file)
+    }
+
+    fn update(&self, f: impl FnOnce(&mut StoreData)) -> Result<(), StateError> {
+        let _lock = self.lock()?;
+        let mut data = self.read_data()?;
+        f(&mut data);
+        self.write_data(&data)
     }
 }
 
@@ -66,15 +104,15 @@ impl StateStore for JsonFileStore {
     }
 
     fn save(&self, block: &str, state: &Value) -> Result<(), StateError> {
-        let mut data = self.read_data()?;
-        data.blocks.insert(block.to_owned(), state.clone());
-        self.write_data(&data)
+        self.update(|data| {
+            data.blocks.insert(block.to_owned(), state.clone());
+        })
     }
 
     fn remove(&self, block: &str) -> Result<(), StateError> {
-        let mut data = self.read_data()?;
-        data.blocks.remove(block);
-        self.write_data(&data)
+        self.update(|data| {
+            data.blocks.remove(block);
+        })
     }
 
     fn list(&self) -> Result<Vec<String>, StateError> {
@@ -167,6 +205,46 @@ mod tests {
         let store = JsonFileStore::new(dir.path().join("deep/nested/state.json"));
         store.save("block1", &json!("data")).unwrap();
         assert!(dir.path().join("deep/nested/state.json").exists());
+    }
+
+    #[test]
+    fn concurrent_reader_never_sees_partial_file() {
+        let (_dir, store) = temp_store();
+        store.save("seed", &json!("x")).unwrap();
+        let big = json!("y".repeat(256 * 1024));
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let writer = s.spawn(|| {
+                for i in 0..50 {
+                    store.save(&format!("b{}", i % 4), &big).unwrap();
+                }
+                done.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                // A truncated or partial file would surface as a JSON error.
+                store.list().unwrap();
+            }
+            writer.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn concurrent_writers_keep_every_update() {
+        let (dir, _store) = temp_store();
+        let path = dir.path().join("state.json");
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                let path = &path;
+                s.spawn(move || {
+                    // Separate stores model separate processes sharing the file.
+                    let store = JsonFileStore::new(path);
+                    for i in 0..10 {
+                        store.save(&format!("t{t}-{i}"), &json!(i)).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(JsonFileStore::new(&path).list().unwrap().len(), 80);
     }
 
     #[test]
