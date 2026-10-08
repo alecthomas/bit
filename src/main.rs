@@ -226,6 +226,9 @@ fn parse_invocations(raw: &[String]) -> Result<Vec<bit::invocation::Invocation>,
 /// Search for BUILD.bit in the current directory and parent directories.
 /// Changes to that directory so all relative paths resolve correctly.
 /// Exits with an error if not found.
+///
+/// Invariant: bit never changes its working directory again, because
+/// `project_dir()` reads it. Pass other directories to child processes.
 fn find_and_chdir_project_root() {
     let mut dir = std::env::current_dir().unwrap_or_else(|e| {
         eprintln!("{} cannot determine current directory: {e}", "error:".red().bold());

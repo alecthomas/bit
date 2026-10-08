@@ -381,6 +381,8 @@ its unqualified name, for example `bit --schema env`.
 
 **`prefix(value: string | [string], text: string) -> string | [string]`** — Prepend text to a string or each string in a list.
 
+**`project_dir() -> string`** — Return the absolute directory containing BUILD.bit.
+
 **`secret(name: string) -> string`** — Read a secret by name.
 
 **`sha256(value: string) -> string`** — Hash a string with SHA-256.

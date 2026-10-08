@@ -28,6 +28,8 @@ pub enum EvalError {
     Exec(String),
     #[error("glob error: {0}")]
     Glob(String),
+    #[error("cannot determine project directory: {0}")]
+    ProjectDir(std::io::Error),
 }
 
 /// What kind of symbol a name represents.
@@ -385,6 +387,7 @@ fn builtins() -> &'static HashMap<String, BuiltinDef> {
             BuiltinDef::new(__bit_call_basename, Type::String, __bit_signature_basename()),
             BuiltinDef::new(__bit_call_dirname, Type::String, __bit_signature_dirname()),
             BuiltinDef::new(__bit_call_prefix, Type::String, __bit_signature_prefix()),
+            BuiltinDef::new(__bit_call_project_dir, Type::String, __bit_signature_project_dir()),
             BuiltinDef::new(__bit_call_suffix, Type::String, __bit_signature_suffix()),
             BuiltinDef::new(__bit_call_sha256, Type::String, __bit_signature_sha256()),
         ]
@@ -482,6 +485,15 @@ fn glob(pattern: String) -> Result<Vec<String>, EvalError> {
         }
     }
     Ok(result)
+}
+
+/// Return the absolute directory containing BUILD.bit.
+#[bit_derive::provider_function]
+fn project_dir() -> Result<String, EvalError> {
+    // Relies on the invariant documented on `find_and_chdir_project_root`:
+    // bit changes into the BUILD.bit directory once and never again.
+    let dir = std::env::current_dir().map_err(EvalError::ProjectDir)?;
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 /// Read a secret by name.
@@ -1081,6 +1093,13 @@ mod tests {
             ],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("fallback".into()));
+    }
+
+    #[test]
+    fn project_dir_returns_working_directory() {
+        let expected = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let expression = Expr::Call("project_dir".into(), vec![]);
+        assert_eq!(eval(&expression, &Scope::new()).unwrap(), Value::Str(expected));
     }
 
     #[test]
