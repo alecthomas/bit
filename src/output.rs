@@ -15,7 +15,7 @@ const REGION_LINES: usize = 5;
 /// Size of the rolling buffer retained per task. On failure the full
 /// buffer is flushed above the failure event so the error context isn't
 /// lost to scrollback.
-const TAIL_LINES: usize = 20;
+const TAIL_LINES: usize = 50;
 
 /// Emit a debug message via an `Output` or `BlockWriter`, formatting the
 /// message only when debug is enabled on the target. Mirrors `log::debug!` /
