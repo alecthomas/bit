@@ -21,7 +21,8 @@ pub struct GoTestInputs {
     /// Extra flags passed to go test
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Show individual test results
+    /// Show individual test results and stream go's own output; otherwise
+    /// that output is shown only on failure
     #[serde(default)]
     pub verbose: bool,
     /// Working directory for the command
@@ -67,6 +68,9 @@ struct GoTestEvent {
 struct TestJsonResult {
     passed: bool,
     had_events: bool,
+    /// Package-level and build output captured instead of streamed when not
+    /// verbose, so it can be dumped if the run fails.
+    diagnostics: Vec<String>,
 }
 
 /// Per-package accumulated results.
@@ -86,7 +90,17 @@ struct PackageResults {
 fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, verbose: bool) -> TestJsonResult {
     let mut all_passed = true;
     let mut had_events = false;
+    let mut diagnostics = Vec::new();
     let mut packages: HashMap<String, PackageResults> = HashMap::new();
+    let mut emit = |text: &str| {
+        for line in text.lines() {
+            if verbose {
+                writer.stderr_line(line);
+            } else {
+                diagnostics.push(line.to_owned());
+            }
+        }
+    };
 
     for line in reader.lines() {
         let Ok(line) = line else { break };
@@ -174,22 +188,11 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, verbose: boo
             }
             // Package-level output (no Test): the per-package summary line emitted
             // before `fail`/`pass`, e.g. "FAIL\texample/cmd/server [build failed]".
-            "output" => {
-                if let Some(text) = &event.output {
-                    for line in text.lines() {
-                        writer.stderr_line(line);
-                    }
-                }
-            }
             // Compile-time diagnostics, emitted as JSON on stdout when `-json`
-            // is used (stderr is empty in that mode). Stream them so the rolling
-            // buffer captures the error text and `close_region` replays it on
-            // failure.
-            "build-output" => {
+            // is used (stderr is empty in that mode).
+            "output" | "build-output" => {
                 if let Some(text) = &event.output {
-                    for line in text.lines() {
-                        writer.stderr_line(line);
-                    }
+                    emit(text);
                 }
             }
             "build-fail" => {
@@ -202,6 +205,7 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, verbose: boo
     TestJsonResult {
         passed: all_passed,
         had_events,
+        diagnostics,
     }
 }
 
@@ -280,22 +284,35 @@ impl Resource for GoTestResource {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
+        let verbose = inputs.verbose;
         let mut result = TestJsonResult {
             passed: true,
             had_events: false,
+            diagnostics: Vec::new(),
         };
+        let mut stderr_lines = Vec::new();
         std::thread::scope(|s| {
-            let verbose = inputs.verbose;
             let json_handle =
                 stdout.map(|out| s.spawn(move || process_go_test_json(BufReader::new(out), writer, verbose)));
-            if let Some(err) = stderr {
-                s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
-            }
+            let stderr_handle = stderr.map(|err| {
+                s.spawn(move || {
+                    if verbose {
+                        writer.pipe_stderr(BufReader::new(err));
+                        Vec::new()
+                    } else {
+                        BufReader::new(err).lines().map_while(Result::ok).collect()
+                    }
+                })
+            });
             if let Some(handle) = json_handle {
                 result = handle.join().unwrap_or(TestJsonResult {
                     passed: false,
                     had_events: false,
+                    diagnostics: Vec::new(),
                 });
+            }
+            if let Some(handle) = stderr_handle {
+                stderr_lines = handle.join().unwrap_or_default();
             }
         });
 
@@ -308,6 +325,10 @@ impl Resource for GoTestResource {
         } else {
             status.success()
         };
+        if !passed {
+            result.diagnostics.extend(stderr_lines);
+            writer.stderr_details(&result.diagnostics);
+        }
 
         Ok(ApplyResult {
             outputs: GoTestOutputs { passed },
@@ -499,6 +520,28 @@ mod tests {
         let result = process_go_test_json(std::io::Cursor::new(json), &writer, false);
         assert!(!result.passed);
         assert!(result.had_events);
+        assert_eq!(
+            result.diagnostics,
+            vec![
+                "# internal/nettrace",
+                "compile: version mismatch",
+                "FAIL\texample/cmd/server [build failed]",
+            ]
+        );
+    }
+
+    #[test]
+    fn process_json_verbose_streams_instead_of_capturing() {
+        let json = concat!(
+            r#"{"ImportPath":"x","Action":"build-output","Output":"compile: error\n"}"#,
+            "\n",
+            r#"{"Action":"output","Package":"example.com/pkg","Output":"ok\texample.com/pkg\t0.1s\n"}"#,
+            "\n",
+        );
+        let out = Output::new(&[]);
+        let writer = out.writer("test");
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, true);
+        assert!(result.diagnostics.is_empty());
     }
 
     #[test]
