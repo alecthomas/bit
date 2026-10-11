@@ -99,6 +99,22 @@ indented beneath it; shared prerequisites name their other dependents with an
 Cargo compiler diagnostics when `cargo test` fails, including when another
 workspace suite has already passed.
 
+`exec.test` can report individual tests from any runner with JSON or JSONL
+output. Its `results` field is a jq filter that maps each JSON value to test
+results. For example, this maps `go test -json` events:
+
+```hcl
+unit = exec.test {
+  command = "go test -json ./..."
+  results = <<-EOF
+    select(.Test) | {suite: .Package, name: .Test} +
+      if .Action == "output" then {output: .Output}
+      elif .Action == "pass" or .Action == "fail" or .Action == "skip" then {status: .Action, duration: .Elapsed}
+      else empty end
+  EOF
+}
+```
+
 The JSON schema output is an object whose keys are `builtins` and the names of
 providers or imported modules. Each section has a `functions` array and, when
 applicable, a `resources` array.
@@ -647,7 +663,7 @@ block = exec {
 | `path`  | `string?`   | Output path (single-output blocks) |
 | `paths` | `[string]?` | Output paths (multi-output blocks) |
 
-**`exec.test`** (test) — Run a command as a test (pass/fail by exit code)
+**`exec.test`** (test) — Run a command as a test (pass/fail by exit code and any failures reported via `results`)
 
 ```bit
 block = exec.test {
@@ -656,6 +672,8 @@ block = exec.test {
   output = [string]?  # Output files to track
   dir = string?       # Working directory for the command
   clean = string?     # Shell command to run on `bit --clean`
+  results = string?   # jq filter mapping the command's JSON stdout to test results. Each JSON document or JSONL line is one filter input, and other stdout lines are shown as output. Each filter output is `{name, suite?, status?, duration?, output?}`, where `status` is `pass`, `fail`, or `skip` and `duration` is in seconds. A result without `status` adds its `output` to that test, for event streams that report output and status separately.
+  verbose = bool?     # Show individual test results from `results`
 }
 ```
 

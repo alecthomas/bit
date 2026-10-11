@@ -1,6 +1,8 @@
+mod results;
+
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -132,16 +134,22 @@ where
     deserializer.deserialize_any(StringOrVec)
 }
 
-/// Run a shell command under `sh -c`, piping stdout/stderr through the block
-/// writer. Returns `Err` if the command exits non-zero.
-fn run_command(command: &str, dir: Option<&str>, writer: &BlockWriter) -> Result<(), BoxError> {
+/// Build an `sh -c` command with piped stdout and stderr.
+fn shell(command: &str, dir: Option<&str>) -> Command {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
+    cmd
+}
 
-    let mut child = cmd.spawn().map_err(|e| format!("failed to execute command: {e}"))?;
+/// Run a shell command under `sh -c`, piping stdout/stderr through the block
+/// writer. Returns `Err` if the command exits non-zero.
+fn run_command(command: &str, dir: Option<&str>, writer: &BlockWriter) -> Result<(), BoxError> {
+    let mut child = shell(command, dir)
+        .spawn()
+        .map_err(|e| format!("failed to execute command: {e}"))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -165,12 +173,7 @@ fn run_command(command: &str, dir: Option<&str>, writer: &BlockWriter) -> Result
 /// Run a shell command silently and return its stdout. Used by `resolve` to
 /// capture external resource state without streaming through the block writer.
 fn run_capture(command: &str, dir: Option<&str>) -> Result<String, BoxError> {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(command).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(dir) = dir {
-        cmd.current_dir(dir);
-    }
-    let output = cmd
+    let output = shell(command, dir)
         .output()
         .map_err(|e| format!("failed to execute resolve command: {e}"))?;
     if !output.status.success() {
@@ -388,7 +391,7 @@ impl Resource for ExecResource {
 
 // --- exec.test resource ---
 
-/// Run a command as a test (pass/fail by exit code)
+/// Run a command as a test (pass/fail by exit code and any failures reported via `results`)
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct ExecTestInputs {
     /// Shell command to execute
@@ -405,6 +408,17 @@ pub struct ExecTestInputs {
     /// Shell command to run on `bit --clean`
     #[serde(default)]
     pub clean: Option<String>,
+    /// jq filter mapping the command's JSON stdout to test results. Each JSON
+    /// document or JSONL line is one filter input, and other stdout lines are
+    /// shown as output. Each filter output is `{name, suite?, status?,
+    /// duration?, output?}`, where `status` is `pass`, `fail`, or `skip` and
+    /// `duration` is in seconds. A result without `status` adds its `output`
+    /// to that test, for event streams that report output and status separately.
+    #[serde(default)]
+    pub results: Option<String>,
+    /// Show individual test results from `results`
+    #[serde(default)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Serialize, bit_derive::Schema)]
@@ -421,6 +435,47 @@ pub struct ExecTestState {
     pub dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<String>,
+}
+
+/// Run a test command whose stdout is mapped through `filter`, piping stderr
+/// through the writer. Returns whether the command exited zero and every
+/// mapped test passed.
+fn run_with_results(
+    filter: &results::ResultsFilter,
+    inputs: &ExecTestInputs,
+    writer: &BlockWriter,
+) -> Result<bool, BoxError> {
+    let mut child = shell(&inputs.command, inputs.dir.as_deref())
+        .spawn()
+        .map_err(|e| format!("failed to execute command: {e}"))?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let mut report = results::Report::new(filter, writer, inputs.verbose);
+    let mapped = std::thread::scope(|s| {
+        if let Some(err) = stderr {
+            s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
+        }
+        let mut mapped = Ok(());
+        if let Some(out) = stdout {
+            // Keep draining stdout after a mapping error so the command
+            // can't block on a full pipe.
+            for line in BufReader::new(out).lines().map_while(Result::ok) {
+                if mapped.is_ok() {
+                    mapped = report.line(&line);
+                }
+            }
+        }
+        mapped
+    });
+
+    let status = child.wait().map_err(|e| format!("failed to wait for command: {e}"))?;
+    mapped?;
+    let all_passed = report.finish();
+    Ok(status.success() && all_passed)
 }
 
 struct ExecTestResource {
@@ -450,6 +505,11 @@ impl Resource for ExecTestResource {
     }
 
     fn plan(&self, inputs: &ExecTestInputs, prior_state: Option<&ExecTestState>) -> Result<PlanResult, BoxError> {
+        // Surface filter syntax errors at plan time rather than after the tests run.
+        if let Some(code) = &inputs.results {
+            results::ResultsFilter::compile(code)?;
+        }
+
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
                 action: PlanAction::Create,
@@ -458,7 +518,11 @@ impl Resource for ExecTestResource {
             });
         };
 
-        let action = if prior.command != inputs.command || prior.dir != inputs.dir || prior.clean != inputs.clean {
+        let action = if prior.command != inputs.command
+            || prior.dir != inputs.dir
+            || prior.clean != inputs.clean
+            || prior.results != inputs.results
+        {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -477,7 +541,10 @@ impl Resource for ExecTestResource {
         _prior_state: Option<&ExecTestState>,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
-        let passed = run_command(&inputs.command, inputs.dir.as_deref(), writer).is_ok();
+        let passed = match &inputs.results {
+            Some(code) => run_with_results(&results::ResultsFilter::compile(code)?, inputs, writer)?,
+            None => run_command(&inputs.command, inputs.dir.as_deref(), writer).is_ok(),
+        };
 
         Ok(ApplyResult {
             outputs: ExecTestOutputs { passed },
@@ -485,6 +552,7 @@ impl Resource for ExecTestResource {
                 command: inputs.command.clone(),
                 dir: inputs.dir.clone(),
                 clean: inputs.clean.clone(),
+                results: inputs.results.clone(),
             }),
         })
     }
@@ -730,13 +798,7 @@ mod tests {
 
     #[test]
     fn test_resource_passes_on_success() {
-        let inputs = ExecTestInputs {
-            command: "true".into(),
-            inputs: vec![],
-            output: vec![],
-            dir: None,
-            clean: None,
-        };
+        let inputs = test_inputs("true", None);
         let resource = ExecTestResource {
             tracker: test_tracker(),
         };
@@ -748,13 +810,7 @@ mod tests {
 
     #[test]
     fn test_resource_fails_on_nonzero_exit() {
-        let inputs = ExecTestInputs {
-            command: "false".into(),
-            inputs: vec![],
-            output: vec![],
-            dir: None,
-            clean: None,
-        };
+        let inputs = test_inputs("false", None);
         let resource = ExecTestResource {
             tracker: test_tracker(),
         };
@@ -762,6 +818,88 @@ mod tests {
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
         assert!(!result.outputs.passed);
+    }
+
+    fn test_inputs(command: &str, results: Option<&str>) -> ExecTestInputs {
+        ExecTestInputs {
+            command: command.into(),
+            inputs: vec![],
+            output: vec![],
+            dir: None,
+            clean: None,
+            results: results.map(Into::into),
+            verbose: false,
+        }
+    }
+
+    fn apply_test(inputs: &ExecTestInputs) -> Result<bool, BoxError> {
+        let resource = ExecTestResource {
+            tracker: test_tracker(),
+        };
+        let out = crate::output::Output::silent();
+        let writer = out.writer("test");
+        Ok(Resource::apply(&resource, inputs, None, &writer)?.outputs.passed)
+    }
+
+    const JSONL_RESULTS: &str = r#"{name: .n, status: (if .ok then "pass" else "fail" end)}"#;
+
+    #[test]
+    fn test_results_pass_when_all_mapped_tests_pass() {
+        let command = r#"echo '{"n":"a","ok":true}'; echo '{"n":"b","ok":true}'"#;
+        assert!(apply_test(&test_inputs(command, Some(JSONL_RESULTS))).unwrap());
+    }
+
+    #[test]
+    fn test_results_fail_when_a_mapped_test_fails_despite_zero_exit() {
+        let command = r#"echo '{"n":"a","ok":true}'; echo '{"n":"b","ok":false}'"#;
+        assert!(!apply_test(&test_inputs(command, Some(JSONL_RESULTS))).unwrap());
+    }
+
+    #[test]
+    fn test_results_fail_on_nonzero_exit_despite_passing_tests() {
+        let command = r#"echo '{"n":"a","ok":true}'; exit 1"#;
+        assert!(!apply_test(&test_inputs(command, Some(JSONL_RESULTS))).unwrap());
+    }
+
+    #[test]
+    fn test_results_map_a_single_document() {
+        let command = r#"printf '[\n  {"n":"a","ok":true},\n  {"n":"b","ok":false}\n]\n'"#;
+        let results = format!(".[] | {JSONL_RESULTS}");
+        assert!(!apply_test(&test_inputs(command, Some(&results))).unwrap());
+    }
+
+    #[test]
+    fn test_results_filter_error_is_an_apply_error() {
+        let err = apply_test(&test_inputs("echo '{}'", Some(r#"error("boom")"#)))
+            .err()
+            .unwrap();
+        assert!(err.to_string().starts_with("results filter failed:"), "{err}");
+    }
+
+    #[test]
+    fn test_plan_rejects_invalid_results_filter() {
+        let resource = ExecTestResource {
+            tracker: test_tracker(),
+        };
+        let err = Resource::plan(&resource, &test_inputs("true", Some(".[")), None)
+            .err()
+            .unwrap();
+        assert!(err.to_string().starts_with("invalid results filter:"), "{err}");
+    }
+
+    #[test]
+    fn test_plan_update_when_results_changed() {
+        let prior = ExecTestState {
+            command: "true".into(),
+            dir: None,
+            clean: None,
+            results: None,
+        };
+        let resource = ExecTestResource {
+            tracker: test_tracker(),
+        };
+        let result = Resource::plan(&resource, &test_inputs("true", Some(".")), Some(&prior)).unwrap();
+        assert_eq!(result.action, PlanAction::Update);
     }
 
     fn exec_inputs(output: Vec<String>) -> ExecInputs {
@@ -882,11 +1020,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let canon = dir.path().canonicalize().unwrap();
         let inputs = ExecTestInputs {
-            command: format!("test \"$(pwd)\" = \"{}\"", canon.display()),
-            inputs: vec![],
-            output: vec![],
             dir: Some(canon.to_string_lossy().into_owned()),
-            clean: None,
+            ..test_inputs(&format!("test \"$(pwd)\" = \"{}\"", canon.display()), None)
         };
         let resource = ExecTestResource {
             tracker: test_tracker(),
@@ -987,6 +1122,7 @@ mod tests {
             command: "true".into(),
             dir: None,
             clean: Some(format!("touch {}", marker.display())),
+            results: None,
         };
         let resource = ExecTestResource {
             tracker: test_tracker(),
@@ -1003,6 +1139,7 @@ mod tests {
             command: "true".into(),
             dir: None,
             clean: None,
+            results: None,
         };
         let resource = ExecTestResource {
             tracker: test_tracker(),
@@ -1015,16 +1152,14 @@ mod tests {
     #[test]
     fn test_plan_update_when_dir_changed() {
         let inputs = ExecTestInputs {
-            command: "true".into(),
-            inputs: vec![],
-            output: vec![],
             dir: Some("/tmp".into()),
-            clean: None,
+            ..test_inputs("true", None)
         };
         let prior = ExecTestState {
             command: "true".into(),
             dir: None,
             clean: None,
+            results: None,
         };
         let resource = ExecTestResource {
             tracker: test_tracker(),
