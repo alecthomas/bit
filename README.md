@@ -95,20 +95,26 @@ bit --since origin/master  # apply blocks affected since the branch point
 indented beneath it; shared prerequisites name their other dependents with an
 `also:` suffix.
 
-`rust.test` summarizes test suites with crate names for unit tests. It prints
-Cargo compiler diagnostics when `cargo test` fails, including when another
-workspace suite has already passed.
+`exec.test`, `go.test`, and `rust.test` take a `report` field: `suites` (the
+default) prints a line per suite, `tests` a line per test, and `verbose` also
+streams the tool's output. `rust.test` names unit test suites by crate. It
+prints Cargo compiler diagnostics when `cargo test` fails, including when
+another workspace suite has already passed.
 
 `exec.test` can report individual tests from any runner with JSON or JSONL
 output. Its `results` field is a jq filter that maps each JSON value to test
-results. For example, this maps `go test -json` events:
+and suite results. Records without a `name` describe the suite, so a runner
+that reports when each suite starts and ends gets its summaries as each suite
+finishes. For example, this maps `go test -json` events, using package events
+as suite markers:
 
 ```hcl
 unit = exec.test {
   command = "go test -json ./..."
   results = <<-EOF
-    select(.Test) | {suite: .Package, name: .Test} +
-      if .Action == "output" then {output: .Output}
+    {suite: .Package} + (if .Test then {name: .Test} else {} end) +
+      if .Action == "start" or .Action == "run" then {event: "start"}
+      elif .Action == "output" and (.Output | test("^(=== |--- )") | not) then {output: .Output}
       elif .Action == "pass" or .Action == "fail" or .Action == "skip" then {status: .Action, duration: .Elapsed}
       else empty end
   EOF
@@ -667,13 +673,13 @@ block = exec {
 
 ```bit
 block = exec.test {
-  command = string    # Shell command to execute
-  inputs = [string]?  # Input file glob patterns
-  output = [string]?  # Output files to track
-  dir = string?       # Working directory for the command
-  clean = string?     # Shell command to run on `bit --clean`
-  results = string?   # jq filter mapping the command's JSON stdout to test results. Each JSON document or JSONL line is one filter input, and other stdout lines are shown as output. Each filter output is `{name, suite?, status?, duration?, output?}`, where `status` is `pass`, `fail`, or `skip` and `duration` is in seconds. A result without `status` adds its `output` to that test, for event streams that report output and status separately.
-  verbose = bool?     # Show individual test results from `results`
+  command = string                      # Shell command to execute
+  inputs = [string]?                    # Input file glob patterns
+  output = [string]?                    # Output files to track
+  dir = string?                         # Working directory for the command
+  clean = string?                       # Shell command to run on `bit --clean`
+  results = string?                     # jq filter mapping the command's JSON stdout to test results. Each JSON document or JSONL line is one filter input; other stdout lines are logs. Each filter output is `{suite?, name?, event?, status?, duration?, output?}`, about a test if it has a `name` and otherwise about its suite. `event` is `start` or `end`, and `status` (`pass`, `fail`, or `skip`) also ends the test or suite. `duration` is in seconds; without it, the time since `start` is used. A suite is summarized when it ends, or when the command exits.
+  report = ("suites" | "tests" | "verbose")?  # What to show from `results`: a line per suite (`suites`), a line per test (`tests`), or a line per test plus logs as they arrive (`verbose`). Outside `verbose`, logs are shown only if the test fails.
 }
 ```
 
@@ -737,13 +743,13 @@ block = go.generate {
 
 ```bit
 block = go.test {
-  package = string   # Go package pattern (e.g. "./...")
-  flags = [string]?  # Extra flags passed to go test
-  verbose = bool?    # Show individual test results and stream go's own output; otherwise that output is shown only on failure
-  dir = string?      # Working directory for the command
-  goos = string?     # Target OS
-  goarch = string?   # Target architecture
-  cgo = bool?        # Enable cgo
+  package = string                      # Go package pattern (e.g. "./...")
+  flags = [string]?                     # Extra flags passed to go test
+  report = ("suites" | "tests" | "verbose")?  # What to show: a line per package (`suites`), a line per test (`tests`), or a line per test plus go's output as it arrives (`verbose`). Outside `verbose`, go's output is shown only on failure.
+  dir = string?                         # Working directory for the command
+  goos = string?                        # Target OS
+  goarch = string?                      # Target architecture
+  cgo = bool?                           # Enable cgo
 }
 ```
 
@@ -893,14 +899,14 @@ block = rust.exe {
 
 ```bit
 block = rust.test {
-  package = string?     # Package to test (-p flag)
-  flags = [string]?     # Extra flags passed to cargo test
-  verbose = bool?       # Show individual test results
-  features = [string]?  # Features to enable
-  all_features = bool?  # Enable all features
-  target = string?      # Target triple (e.g. "x86_64-unknown-linux-musl")
-  profile = string?     # Build profile (e.g. "release")
-  toolchain = string?   # Rust toolchain (e.g. "nightly")
+  package = string?                     # Package to test (-p flag)
+  flags = [string]?                     # Extra flags passed to cargo test
+  report = ("suites" | "tests" | "verbose")?  # What to show: a line per test binary (`suites`), a line per test (`tests`), or a line per test plus cargo's output as it arrives (`verbose`). Outside `verbose`, cargo's diagnostics are shown only on failure.
+  features = [string]?                  # Features to enable
+  all_features = bool?                  # Enable all features
+  target = string?                      # Target triple (e.g. "x86_64-unknown-linux-musl")
+  profile = string?                     # Build profile (e.g. "release")
+  toolchain = string?                   # Rust toolchain (e.g. "nightly")
 }
 ```
 

@@ -734,19 +734,18 @@ impl BlockWriter {
         }
     }
 
-    /// Emit a passing test suite summary.
-    pub fn test_suite_passed(&self, suite: &str, duration: std::time::Duration, passed: usize, skipped: usize) {
-        let ms = duration.as_millis();
-        let detail = if skipped > 0 {
-            format!("({ms}ms, {passed} passed, {skipped} skipped)")
-        } else {
-            format!("({ms}ms, {passed} passed)")
-        };
+    /// Emit a passing test suite summary. A `None` duration means the tool
+    /// reported no timing, so none is shown.
+    pub fn test_suite_passed(&self, suite: &str, duration: Option<std::time::Duration>, passed: usize, skipped: usize) {
+        let mut counts = vec![format!("{passed} passed")];
+        if skipped > 0 {
+            counts.push(format!("{skipped} skipped"));
+        }
         let msg = format!(
-            "{} {} {}",
+            "{} {}{}",
             "PASS".paint(Color::Green).bold(),
             suite.bold(),
-            detail.dim()
+            test_detail(duration, &counts)
         );
         self.event_raw(Event::Ok, &msg);
     }
@@ -755,25 +754,20 @@ impl BlockWriter {
     pub fn test_suite_failed(
         &self,
         suite: &str,
-        duration: std::time::Duration,
+        duration: Option<std::time::Duration>,
         passed: usize,
         failed: usize,
-        failures: &[(String, std::time::Duration, String)],
+        failures: &[(String, Option<std::time::Duration>, String)],
     ) {
-        let ms = duration.as_millis();
+        let counts = [format!("{passed} passed"), format!("{failed} failed")];
         let mut msg = format!(
-            "{} {} {}",
+            "{} {}{}",
             "FAIL".paint(Color::Red).bold(),
             suite.bold(),
-            format!("({ms}ms, {passed} passed, {failed} failed)").dim(),
+            test_detail(duration, &counts),
         );
         for (name, dur, output) in failures {
-            let fms = dur.as_millis();
-            msg.push_str(&format!(
-                "\n  {} {}",
-                name.paint(Color::Red),
-                format!("({fms}ms)").dim()
-            ));
+            msg.push_str(&format!("\n  {}{}", name.paint(Color::Red), test_detail(*dur, &[])));
             for line in output.lines() {
                 msg.push_str(&format!("\n    {}", line.dim()));
             }
@@ -787,26 +781,24 @@ impl BlockWriter {
         self.event_raw(Event::Skipped, &msg);
     }
 
-    /// Emit a single passing test (verbose mode).
-    pub fn test_passed(&self, suite: &str, name: &str, duration: std::time::Duration) {
-        let ms = duration.as_millis();
+    /// Emit a single passing test.
+    pub fn test_passed(&self, suite: &str, name: &str, duration: Option<std::time::Duration>) {
         let msg = format!(
-            "{} {} {}",
+            "{} {}{}",
             "PASS".paint(Color::Green).bold(),
             format!("{suite}/{name}").bold(),
-            format!("({ms}ms)").dim(),
+            test_detail(duration, &[]),
         );
         self.event_raw(Event::Ok, &msg);
     }
 
-    /// Emit a single failing test with output (verbose mode).
-    pub fn test_failed(&self, suite: &str, name: &str, duration: std::time::Duration, output: &str) {
-        let ms = duration.as_millis();
+    /// Emit a single failing test with output.
+    pub fn test_failed(&self, suite: &str, name: &str, duration: Option<std::time::Duration>, output: &str) {
         let mut msg = format!(
-            "{} {} {}",
+            "{} {}{}",
             "FAIL".paint(Color::Red).bold(),
             format!("{suite}/{name}").bold(),
-            format!("({ms}ms)").dim(),
+            test_detail(duration, &[]),
         );
         for line in output.lines() {
             msg.push_str(&format!("\n  {}", line.dim()));
@@ -832,6 +824,21 @@ impl BlockWriter {
                 Err(_) => break,
             }
         }
+    }
+}
+
+/// Format the dimmed ` (12ms, 3 passed)` suffix of a test line, or nothing
+/// when there's neither a duration nor counts.
+fn test_detail(duration: Option<std::time::Duration>, counts: &[String]) -> String {
+    let parts: Vec<String> = duration
+        .map(|d| format!("{}ms", d.as_millis()))
+        .into_iter()
+        .chain(counts.iter().cloned())
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", format!("({})", parts.join(", ")).dim())
     }
 }
 
@@ -909,6 +916,19 @@ mod tests {
         let c1 = color_for_name("api");
         let c2 = color_for_name("worker");
         assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn test_detail_omits_unknown_duration() {
+        let plain = |d, counts: &[String]| console::strip_ansi_codes(&test_detail(d, counts)).into_owned();
+        let counts = ["2 passed".to_owned()];
+        assert_eq!(plain(None, &[]), "");
+        assert_eq!(plain(None, &counts), " (2 passed)");
+        assert_eq!(plain(Some(std::time::Duration::from_millis(12)), &[]), " (12ms)");
+        assert_eq!(
+            plain(Some(std::time::Duration::from_millis(12)), &counts),
+            " (12ms, 2 passed)"
+        );
     }
 
     /// Build an `OutputInner` in non-TTY mode for testing region bookkeeping

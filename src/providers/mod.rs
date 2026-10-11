@@ -15,6 +15,27 @@ pub mod go;
 pub mod pnpm;
 pub mod rust;
 
+/// How much of a test run to show. Shared by the test resources that report
+/// individual tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Deserialize, bit_derive::Schema)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportMode {
+    /// One line per suite.
+    #[default]
+    Suites,
+    /// One line per test.
+    Tests,
+    /// One line per test, plus the test command's logs as they arrive.
+    Verbose,
+}
+
+impl ReportMode {
+    /// Whether individual tests get their own lines.
+    pub fn per_test(self) -> bool {
+        self != Self::Suites
+    }
+}
+
 /// Remove a provider-owned file, directory, or symlink. Missing paths are
 /// already clean; every other filesystem error must reach the engine so it
 /// does not discard state after an incomplete destroy.

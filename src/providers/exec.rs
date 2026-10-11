@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use super::ReportMode;
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
@@ -409,16 +410,20 @@ pub struct ExecTestInputs {
     #[serde(default)]
     pub clean: Option<String>,
     /// jq filter mapping the command's JSON stdout to test results. Each JSON
-    /// document or JSONL line is one filter input, and other stdout lines are
-    /// shown as output. Each filter output is `{name, suite?, status?,
-    /// duration?, output?}`, where `status` is `pass`, `fail`, or `skip` and
-    /// `duration` is in seconds. A result without `status` adds its `output`
-    /// to that test, for event streams that report output and status separately.
+    /// document or JSONL line is one filter input; other stdout lines are
+    /// logs. Each filter output is `{suite?, name?, event?, status?,
+    /// duration?, output?}`, about a test if it has a `name` and otherwise
+    /// about its suite. `event` is `start` or `end`, and `status` (`pass`,
+    /// `fail`, or `skip`) also ends the test or suite. `duration` is in
+    /// seconds; without it, the time since `start` is used. A suite is
+    /// summarized when it ends, or when the command exits.
     #[serde(default)]
     pub results: Option<String>,
-    /// Show individual test results from `results`
+    /// What to show from `results`: a line per suite (`suites`), a line per
+    /// test (`tests`), or a line per test plus logs as they arrive
+    /// (`verbose`). Outside `verbose`, logs are shown only if the test fails.
     #[serde(default)]
-    pub verbose: bool,
+    pub report: ReportMode,
 }
 
 #[derive(Debug, Serialize, bit_derive::Schema)]
@@ -439,9 +444,10 @@ pub struct ExecTestState {
     pub results: Option<String>,
 }
 
-/// Run a test command whose stdout is mapped through `filter`, piping stderr
-/// through the writer. Returns whether the command exited zero and every
-/// mapped test passed.
+/// Run a test command whose stdout is mapped through `filter`. Stderr streams
+/// in verbose mode; otherwise it is held with the other logs and shown only
+/// if the run fails. Returns whether the command exited zero and every mapped
+/// test and suite passed.
 fn run_with_results(
     filter: &results::ResultsFilter,
     inputs: &ExecTestInputs,
@@ -454,11 +460,19 @@ fn run_with_results(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    let mut report = results::Report::new(filter, writer, inputs.verbose);
-    let mapped = std::thread::scope(|s| {
-        if let Some(err) = stderr {
-            s.spawn(|| writer.pipe_stderr(BufReader::new(err)));
-        }
+    let verbose = inputs.report == ReportMode::Verbose;
+    let mut report = results::Report::new(filter, writer, inputs.report);
+    let (mapped, stderr_lines) = std::thread::scope(|s| {
+        let stderr_handle = stderr.map(|err| {
+            s.spawn(move || {
+                if verbose {
+                    writer.pipe_stderr(BufReader::new(err));
+                    Vec::new()
+                } else {
+                    BufReader::new(err).lines().map_while(Result::ok).collect()
+                }
+            })
+        });
         let mut mapped = Ok(());
         if let Some(out) = stdout {
             // Keep draining stdout after a mapping error so the command
@@ -469,13 +483,21 @@ fn run_with_results(
                 }
             }
         }
-        mapped
+        let stderr_lines: Vec<String> = stderr_handle
+            .map(|handle| handle.join().unwrap_or_default())
+            .unwrap_or_default();
+        (mapped, stderr_lines)
     });
 
     let status = child.wait().map_err(|e| format!("failed to wait for command: {e}"))?;
     mapped?;
-    let all_passed = report.finish();
-    Ok(status.success() && all_passed)
+    let mut outcome = report.finish();
+    let passed = status.success() && outcome.passed;
+    if !passed {
+        outcome.logs.extend(stderr_lines);
+        writer.stderr_details(&outcome.logs);
+    }
+    Ok(passed)
 }
 
 struct ExecTestResource {
@@ -828,7 +850,7 @@ mod tests {
             dir: None,
             clean: None,
             results: results.map(Into::into),
-            verbose: false,
+            report: ReportMode::default(),
         }
     }
 
@@ -839,6 +861,14 @@ mod tests {
         let out = crate::output::Output::silent();
         let writer = out.writer("test");
         Ok(Resource::apply(&resource, inputs, None, &writer)?.outputs.passed)
+    }
+
+    #[test]
+    fn test_report_schema_lists_modes() {
+        use crate::schema::Schema;
+        let schema = ExecTestInputs::schema();
+        let (_, report) = schema.fields.iter().find(|(name, _)| name == "report").unwrap();
+        assert_eq!(report.typ.to_string(), r#"("suites" | "tests" | "verbose")?"#);
     }
 
     const JSONL_RESULTS: &str = r#"{name: .n, status: (if .ok then "pass" else "fail" end)}"#;

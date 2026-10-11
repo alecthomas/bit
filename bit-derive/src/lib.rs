@@ -236,7 +236,8 @@ fn result_ok_type(ty: &Type) -> syn::Result<Type> {
 /// - Enums (typically `#[serde(untagged)]`): produces `SchemaType` as a
 ///   `Type::Union` of each variant's schema. `Schema` is not implemented
 ///   for enums. Variants may be:
-///     - unit (no fields) — currently unsupported
+///     - unit (no fields) — a `Type::Literal` of the variant's serde name,
+///       honouring `#[serde(rename)]` and `#[serde(rename_all = "lowercase")]`
 ///     - newtype (one unnamed field) — uses the field's schema type
 ///     - struct variants (named fields) — produces a `Type::Struct`
 ///
@@ -257,7 +258,7 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
 
     match &input.data {
         Data::Struct(data) => derive_schema_struct(name, &input.attrs, data),
-        Data::Enum(data) => derive_schema_enum(name, data),
+        Data::Enum(data) => derive_schema_enum(name, &input.attrs, data),
         Data::Union(_) => syn::Error::new_spanned(name, "Schema cannot be derived for unions")
             .to_compile_error()
             .into(),
@@ -342,15 +343,27 @@ fn derive_schema_struct(name: &Ident, attrs: &[syn::Attribute], data: &DataStruc
     expanded.into()
 }
 
-fn derive_schema_enum(name: &Ident, data: &DataEnum) -> TokenStream {
+fn derive_schema_enum(name: &Ident, attrs: &[syn::Attribute], data: &DataEnum) -> TokenStream {
+    let lowercase = match get_serde_rename_all(attrs) {
+        None => false,
+        Some(rule) if rule == "lowercase" => true,
+        Some(rule) => {
+            return syn::Error::new_spanned(name, format!("Schema: unsupported rename_all = \"{rule}\""))
+                .to_compile_error()
+                .into();
+        }
+    };
+
     let mut variant_exprs: Vec<TokenStream2> = Vec::new();
 
     for variant in &data.variants {
         let type_expr = match &variant.fields {
             Fields::Unit => {
-                return syn::Error::new_spanned(variant, "Schema: unit enum variants are not supported")
-                    .to_compile_error()
-                    .into();
+                let literal = get_serde_rename(&variant.attrs).unwrap_or_else(|| {
+                    let ident = variant.ident.to_string();
+                    if lowercase { ident.to_lowercase() } else { ident }
+                });
+                quote! { crate::value::Type::Literal(#literal.into()) }
             }
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 // Newtype variant: delegate to the inner type's schema.
@@ -490,6 +503,31 @@ fn get_serde_rename(attrs: &[syn::Attribute]) -> Option<String> {
     None
 }
 
+/// Get the container's `#[serde(rename_all = "...")]` value if present.
+fn get_serde_rename_all(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        let mut rename_all = None;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("rename_all") {
+                if let Lit::Str(s) = meta.value()?.parse()? {
+                    rename_all = Some(s.value());
+                }
+            } else if meta.input.peek(syn::Token![=]) {
+                // Consume other `key = value` entries so parsing continues past them.
+                let _: Lit = meta.value()?.parse()?;
+            }
+            Ok(())
+        });
+        if rename_all.is_some() {
+            return rename_all;
+        }
+    }
+    None
+}
+
 /// Get `#[schema(description = "...")]` value if present.
 fn get_schema_description(attrs: &[syn::Attribute]) -> Option<String> {
     for attr in attrs {
@@ -535,7 +573,8 @@ fn get_schema_type(attrs: &[syn::Attribute]) -> syn::Result<Option<Expr>> {
 }
 
 /// Map a Rust type to a `crate::value::Type` token expression.
-/// `has_default` indicates `#[serde(default)]` — Vec/HashMap/bool become optional.
+/// `has_default` indicates `#[serde(default)]` — Vec/HashMap/bool and other
+/// named types become optional.
 fn rust_type_to_schema_type(ty: &Type, has_default: bool) -> TokenStream2 {
     match ty {
         Type::Path(tp) => {
@@ -582,7 +621,14 @@ fn rust_type_to_schema_type(ty: &Type, has_default: bool) -> TokenStream2 {
                     }
                 }
                 // Unknown named type — delegate to its SchemaType impl.
-                _ => quote! { <#ty as crate::schema::SchemaType>::schema_type() },
+                _ => {
+                    let named = quote! { <#ty as crate::schema::SchemaType>::schema_type() };
+                    if has_default {
+                        quote! { crate::value::Type::Optional(Box::new(#named)) }
+                    } else {
+                        named
+                    }
+                }
             }
         }
         // Unknown complex type shape — delegate to its SchemaType impl.

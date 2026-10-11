@@ -474,6 +474,7 @@ impl std::fmt::Display for Type {
             },
             Type::Path => write!(f, "path"),
             Type::Secret => write!(f, "secret"),
+            Type::Literal(s) => write!(f, "{s:?}"),
             Type::Union(types) => {
                 for (i, t) in types.iter().enumerate() {
                     if i > 0 {
@@ -503,6 +504,9 @@ pub enum Type {
     Path,
     Secret,
     Union(Vec<Type>),
+    /// One exact string. Only provider schemas produce this (from unit enum
+    /// variants); the language has no syntax for it.
+    Literal(String),
 }
 
 /// Check that a value matches a declared type, recursively.
@@ -512,6 +516,7 @@ pub fn validate_type(value: &Value, typ: &Type) -> Result<(), String> {
     match (typ, value) {
         (Type::Any, _) => Ok(()),
         (Type::String | Type::Path | Type::Secret, Value::Str(_)) => Ok(()),
+        (Type::Literal(expected), Value::Str(s)) if s == expected => Ok(()),
         (Type::BlockRef, Value::BlockRef(_)) => Ok(()),
         (Type::Number, Value::Number(_)) => Ok(()),
         (Type::Bool, Value::Bool(_)) => Ok(()),
@@ -792,6 +797,15 @@ mod tests {
     fn display_union_type() {
         let typ = Type::Union(vec![Type::String, Type::List(Box::new(Type::String))]);
         assert_eq!(typ.to_string(), "string | [string]");
+    }
+
+    #[test]
+    fn literal_union_validates_and_displays() {
+        let typ = Type::Union(vec![Type::Literal("a".into()), Type::Literal("b".into())]);
+        assert_eq!(typ.to_string(), r#""a" | "b""#);
+        assert!(validate_type(&Value::Str("b".into()), &typ).is_ok());
+        let err = validate_type(&Value::Str("c".into()), &typ).unwrap_err();
+        assert!(err.contains(r#"expected "a" | "b""#), "error: {err}");
     }
 
     #[test]

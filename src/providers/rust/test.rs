@@ -12,6 +12,7 @@ use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult
 use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv, RustFeatures};
+use crate::providers::ReportMode;
 
 /// Run Rust tests
 #[derive(Debug, Deserialize, bit_derive::Schema)]
@@ -22,9 +23,12 @@ pub struct RustTestInputs {
     /// Extra flags passed to cargo test
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Show individual test results
+    /// What to show: a line per test binary (`suites`), a line per test
+    /// (`tests`), or a line per test plus cargo's output as it arrives
+    /// (`verbose`). Outside `verbose`, cargo's diagnostics are shown only on
+    /// failure.
     #[serde(default)]
-    pub verbose: bool,
+    pub report: ReportMode,
     #[serde(flatten)]
     pub features: RustFeatures,
     #[serde(flatten)]
@@ -53,13 +57,12 @@ pub struct RustTestState {
 #[derive(Debug)]
 enum TestEvent {
     SuiteStart,
+    // Cargo reports no per-test durations, so test events carry none.
     TestPassed {
         name: String,
-        duration: Duration,
     },
     TestFailed {
         name: String,
-        duration: Duration,
     },
     TestIgnored {
         name: String,
@@ -68,7 +71,8 @@ enum TestEvent {
         passed: usize,
         failed: usize,
         ignored: usize,
-        duration: Duration,
+        /// From "finished in Ns", if present.
+        duration: Option<Duration>,
     },
     Other,
 }
@@ -78,16 +82,10 @@ fn parse_test_line(line: &str) -> TestEvent {
     let trimmed = line.trim();
     if let Some(rest) = trimmed.strip_prefix("test ") {
         if let Some(name) = rest.strip_suffix(" ... ok") {
-            return TestEvent::TestPassed {
-                name: name.to_owned(),
-                duration: Duration::ZERO,
-            };
+            return TestEvent::TestPassed { name: name.to_owned() };
         }
         if let Some(name) = rest.strip_suffix(" ... FAILED") {
-            return TestEvent::TestFailed {
-                name: name.to_owned(),
-                duration: Duration::ZERO,
-            };
+            return TestEvent::TestFailed { name: name.to_owned() };
         }
         if let Some(name) = rest.strip_suffix(" ... ignored") {
             return TestEvent::TestIgnored { name: name.to_owned() };
@@ -115,7 +113,7 @@ fn parse_result_line(rest: &str) -> TestEvent {
     let mut passed = 0;
     let mut failed = 0;
     let mut ignored = 0;
-    let mut duration = Duration::ZERO;
+    let mut duration = None;
 
     for part in rest.split(';') {
         let part = part.trim();
@@ -127,7 +125,7 @@ fn parse_result_line(rest: &str) -> TestEvent {
             ignored = n.trim().parse().unwrap_or(0);
         } else if let Some(t) = part.strip_prefix("finished in ") {
             let t = t.trim_end_matches('s').trim();
-            duration = Duration::from_secs_f64(t.parse().unwrap_or(0.0));
+            duration = t.parse().ok().and_then(|secs| Duration::try_from_secs_f64(secs).ok());
         }
     }
 
@@ -206,17 +204,30 @@ fn running_suite_name(rest: &str) -> String {
 /// Consumes lines lazily from `lines`, so callers that feed it from a live
 /// pipe (see `apply`) will see events emitted as each suite finishes — not
 /// all at once at the end. The boolean marks stderr so Cargo diagnostics can
-/// be retained until its exit status is known.
+/// be retained until its exit status is known; in verbose mode they stream
+/// instead.
 fn process_test_output(
     lines: impl IntoIterator<Item = (String, bool)>,
     writer: &BlockWriter,
-    verbose: bool,
+    mode: ReportMode,
 ) -> TestResult {
+    let verbose = mode == ReportMode::Verbose;
+    let per_test = mode.per_test();
     let mut all_passed = true;
     let mut diagnostics = Vec::new();
     let mut current_suite = String::new();
     let mut failure_lines: Vec<String> = Vec::new();
+    // Failing tests in the current suite. Cargo prints their output after
+    // every test in the suite, so their per-test lines wait for it.
+    let mut failed_tests: Vec<String> = Vec::new();
     let mut in_failures_section = false;
+    let log = |line: &str, stderr: bool| {
+        if stderr {
+            writer.stderr_line(line);
+        } else {
+            writer.line(line);
+        }
+    };
 
     for (line, stderr) in lines {
         // Detect the "failures:" section that cargo test prints with full output.
@@ -241,12 +252,15 @@ fn process_test_output(
 
         let trimmed = line.trim();
 
-        // Skip cargo progress lines.
+        // Skip cargo progress lines unless streaming everything.
         if trimmed.starts_with("Finished ")
             || trimmed.starts_with("Compiling ")
             || trimmed.starts_with("Downloading ")
             || trimmed.starts_with("Downloaded ")
         {
+            if verbose {
+                log(&line, stderr);
+            }
             continue;
         }
 
@@ -261,18 +275,14 @@ fn process_test_output(
         }
 
         match parse_test_line(&line) {
-            TestEvent::TestPassed { name, duration } => {
-                if verbose {
-                    writer.test_passed(&current_suite, &name, duration);
+            TestEvent::TestPassed { name } => {
+                if per_test {
+                    writer.test_passed(&current_suite, &name, None);
                 }
             }
-            TestEvent::TestFailed { name, duration } => {
-                if verbose {
-                    writer.test_failed(&current_suite, &name, duration, "");
-                }
-            }
+            TestEvent::TestFailed { name } => failed_tests.push(name),
             TestEvent::TestIgnored { name } => {
-                if verbose {
+                if per_test {
                     writer.test_skipped(&current_suite, &name);
                 }
             }
@@ -282,21 +292,31 @@ fn process_test_output(
                 ignored,
                 duration,
             } => {
+                let mut outputs = parse_failure_output(&failure_lines);
+                if per_test {
+                    for name in failed_tests.drain(..) {
+                        let output = outputs
+                            .iter()
+                            .position(|(n, _)| *n == name)
+                            .map(|i| outputs.swap_remove(i).1)
+                            .unwrap_or_default();
+                        writer.test_failed(&current_suite, &name, None, &output);
+                    }
+                }
+                failed_tests.clear();
                 if failed > 0 {
                     all_passed = false;
-                    if !verbose {
-                        let failures: Vec<_> = parse_failure_output(&failure_lines)
-                            .into_iter()
-                            .map(|(name, output)| (name, Duration::ZERO, output))
-                            .collect();
+                    if !per_test {
+                        let failures: Vec<_> = outputs.into_iter().map(|(name, output)| (name, None, output)).collect();
                         writer.test_suite_failed(&current_suite, duration, passed, failed, &failures);
                     }
-                } else if !verbose {
+                } else if !per_test {
                     writer.test_suite_passed(&current_suite, duration, passed, ignored);
                 }
                 failure_lines.clear();
             }
             TestEvent::SuiteStart => {}
+            TestEvent::Other if verbose => log(&line, stderr),
             TestEvent::Other => {
                 if stderr {
                     diagnostics.push(line);
@@ -414,7 +434,7 @@ impl Resource for RustTestResource {
             // Drop the original sender so `rx` closes once both pipe threads
             // have finished and dropped their clones.
             drop(tx);
-            process_test_output(rx, writer, inputs.verbose)
+            process_test_output(rx, writer, inputs.report)
         });
 
         let status = child
@@ -471,7 +491,7 @@ mod tests {
         let inputs = RustTestInputs {
             package: None,
             flags: vec![],
-            verbose: false,
+            report: ReportMode::default(),
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
@@ -485,7 +505,7 @@ mod tests {
         let inputs = RustTestInputs {
             package: Some("my-crate".into()),
             flags: vec![],
-            verbose: false,
+            report: ReportMode::default(),
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
@@ -498,7 +518,7 @@ mod tests {
         let inputs = RustTestInputs {
             package: None,
             flags: vec![],
-            verbose: false,
+            report: ReportMode::default(),
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
@@ -517,7 +537,7 @@ mod tests {
         let inputs = RustTestInputs {
             package: None,
             flags: vec!["--no-fail-fast".into()],
-            verbose: false,
+            report: ReportMode::default(),
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
@@ -582,7 +602,11 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(output.lines().map(|line| (line.into(), false)), &writer, false);
+        let result = process_test_output(
+            output.lines().map(|line| (line.into(), false)),
+            &writer,
+            ReportMode::Suites,
+        );
         assert!(result.passed);
         assert!(result.diagnostics.is_empty());
     }
@@ -597,7 +621,11 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(output.lines().map(|line| (line.into(), false)), &writer, false);
+        let result = process_test_output(
+            output.lines().map(|line| (line.into(), false)),
+            &writer,
+            ReportMode::Suites,
+        );
         assert!(!result.passed);
         assert!(result.diagnostics.is_empty());
     }
@@ -626,7 +654,11 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(output.lines().map(|line| (line.into(), false)), &writer, false);
+        let result = process_test_output(
+            output.lines().map(|line| (line.into(), false)),
+            &writer,
+            ReportMode::Suites,
+        );
         assert!(!result.passed);
         assert!(result.diagnostics.is_empty());
     }
@@ -674,7 +706,7 @@ mod tests {
     fn process_output_no_events() {
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(std::iter::empty::<(String, bool)>(), &writer, false);
+        let result = process_test_output(std::iter::empty::<(String, bool)>(), &writer, ReportMode::Suites);
         assert!(result.passed);
         assert!(result.diagnostics.is_empty());
     }
@@ -697,7 +729,7 @@ mod tests {
         ];
         let out = Output::silent();
         let writer = out.writer("test");
-        let result = process_test_output(lines, &writer, false);
+        let result = process_test_output(lines.clone(), &writer, ReportMode::Suites);
         assert!(result.passed);
         assert_eq!(
             result.diagnostics,
@@ -707,5 +739,8 @@ mod tests {
                 "error: could not compile `broken-crate` due to 1 previous error",
             ]
         );
+        // Verbose mode streams the same diagnostics instead of retaining them.
+        let result = process_test_output(lines, &writer, ReportMode::Verbose);
+        assert!(result.diagnostics.is_empty());
     }
 }
