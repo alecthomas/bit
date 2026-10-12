@@ -409,9 +409,9 @@ its unqualified name, for example `bit --schema env`.
 
 **`sha256(value: string) -> string`** — Hash a string with SHA-256.
 
-**`shell_quote(value: string | [string]) -> string`** — Quote a string, or a list of strings joined by spaces, as POSIX shell words.
+**`shell_join(value: string | [string]) -> string`** — Quote a string, or each string in a list, as POSIX shell words joined by spaces.
 
-**`shell_unquote(value: string) -> [string]`** — Split a POSIX shell string into its unquoted words.
+**`shell_split(value: string) -> [string]`** — Split a POSIX shell string into its unquoted words.
 
 **`split(value: string, separator: string) -> [string]`** — Split a string by a separator.
 

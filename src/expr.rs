@@ -381,11 +381,11 @@ fn builtins() -> &'static HashMap<String, BuiltinDef> {
                 Type::List(Box::new(Type::String)),
                 __bit_signature_split(),
             ),
-            BuiltinDef::new(__bit_call_shell_quote, Type::String, __bit_signature_shell_quote()),
+            BuiltinDef::new(__bit_call_shell_join, Type::String, __bit_signature_shell_join()),
             BuiltinDef::new(
-                __bit_call_shell_unquote,
+                __bit_call_shell_split,
                 Type::List(Box::new(Type::String)),
-                __bit_signature_shell_unquote(),
+                __bit_signature_shell_split(),
             ),
             BuiltinDef::new(
                 __bit_call_uniq,
@@ -534,9 +534,9 @@ fn split(value: String, separator: String) -> Result<Vec<String>, EvalError> {
     Ok(value.split(&separator).map(str::to_owned).collect())
 }
 
-/// Quote a string, or a list of strings joined by spaces, as POSIX shell words.
+/// Quote a string, or each string in a list, as POSIX shell words joined by spaces.
 #[bit_derive::provider_function]
-fn shell_quote(value: StringOrList) -> Result<String, EvalError> {
+fn shell_join(value: StringOrList) -> Result<String, EvalError> {
     let words = match value {
         StringOrList::String(value) => vec![value],
         StringOrList::List(values) => values,
@@ -546,7 +546,7 @@ fn shell_quote(value: StringOrList) -> Result<String, EvalError> {
 
 /// Split a POSIX shell string into its unquoted words.
 #[bit_derive::provider_function]
-fn shell_unquote(value: String) -> Result<Vec<String>, EvalError> {
+fn shell_split(value: String) -> Result<Vec<String>, EvalError> {
     shlex::split(&value).ok_or_else(|| EvalError::Shell(format!("unbalanced quotes or trailing escape in {value:?}")))
 }
 
@@ -1120,31 +1120,31 @@ mod tests {
     }
 
     #[test]
-    fn shell_quote_quotes_strings_and_joins_lists() {
-        let quote = |value| call_builtin("shell_quote", &[value]).unwrap();
-        assert_eq!(quote(Value::Str("plain".into())), Value::Str("plain".into()));
+    fn shell_join_quotes_strings_and_joins_lists() {
+        let join = |value| call_builtin("shell_join", &[value]).unwrap();
+        assert_eq!(join(Value::Str("plain".into())), Value::Str("plain".into()));
         assert_eq!(
-            quote(Value::Str("it's here".into())),
+            join(Value::Str("it's here".into())),
             Value::Str(r#""it's here""#.into())
         );
-        assert_eq!(quote(Value::Str("$HOME".into())), Value::Str("'$HOME'".into()));
-        assert_eq!(quote(Value::Str(String::new())), Value::Str("''".into()));
+        assert_eq!(join(Value::Str("$HOME".into())), Value::Str("'$HOME'".into()));
+        assert_eq!(join(Value::Str(String::new())), Value::Str("''".into()));
         assert_eq!(
-            quote(Value::list(vec![Value::Str("echo".into()), Value::Str("a b".into())])),
+            join(Value::list(vec![Value::Str("echo".into()), Value::Str("a b".into())])),
             Value::Str("echo 'a b'".into())
         );
     }
 
     #[test]
-    fn shell_quote_rejects_nul() {
-        let err = call_builtin("shell_quote", &[Value::Str("a\0b".into())]).unwrap_err();
+    fn shell_join_rejects_nul() {
+        let err = call_builtin("shell_join", &[Value::Str("a\0b".into())]).unwrap_err();
         assert!(matches!(err, EvalError::Shell(_)), "{err}");
     }
 
     #[test]
-    fn shell_unquote_splits_words() {
+    fn shell_split_splits_words() {
         assert_eq!(
-            call_builtin("shell_unquote", &[Value::Str(r#"echo 'a b' "c\"d" e\ f"#.into())]).unwrap(),
+            call_builtin("shell_split", &[Value::Str(r#"echo 'a b' "c\"d" e\ f"#.into())]).unwrap(),
             Value::list(vec![
                 Value::Str("echo".into()),
                 Value::Str("a b".into()),
@@ -1152,19 +1152,19 @@ mod tests {
                 Value::Str("e f".into()),
             ])
         );
-        let err = call_builtin("shell_unquote", &[Value::Str("'open".into())]).unwrap_err();
+        let err = call_builtin("shell_split", &[Value::Str("'open".into())]).unwrap_err();
         assert!(matches!(err, EvalError::Shell(_)), "{err}");
     }
 
     #[test]
-    fn shell_unquote_inverts_shell_quote() {
+    fn shell_split_inverts_shell_join() {
         let words = Value::list(vec![
             Value::Str("it's".into()),
             Value::Str(String::new()),
             Value::Str("$HOME *".into()),
         ]);
-        let quoted = call_builtin("shell_quote", std::slice::from_ref(&words)).unwrap();
-        assert_eq!(call_builtin("shell_unquote", &[quoted]).unwrap(), words);
+        let joined = call_builtin("shell_join", std::slice::from_ref(&words)).unwrap();
+        assert_eq!(call_builtin("shell_split", &[joined]).unwrap(), words);
     }
 
     #[test]
