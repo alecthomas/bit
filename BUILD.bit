@@ -33,6 +33,19 @@ integration-test = exec.test {
   EOF
 }
 
+# Demonstrate script messages at every level. The changing `resolve` output
+# makes the block re-run on every invocation.
+explicit messages-demo = exec {
+  command = <<-EOF
+    echo "plain output, collapsed on success"
+    echo "::info::published to crates.io"
+    echo "::warning file=CHANGELOG.md::CHANGELOG has no entry for v1.2.3"
+    echo "::error::example error (does not fail the block)"
+    echo "::success::released v1.2.3%0Atagged as v1.2.3"
+  EOF
+  resolve = "date +%s"
+}
+
 # Latest commit SHA touching the tree-sitter grammar; used to pin the Zed
 # extension's grammar revision.
 let tree_sitter_rev = exec("git log -1 --format=%H -- integrations/tree-sitter") | trim

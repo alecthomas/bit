@@ -993,6 +993,29 @@ workspace dependencies for change detection. Without `package`, they track the
 whole workspace. All Rust resources also track `rustfmt.toml` and
 `.cargo/config.toml` at the workspace root.
 
+### Messages
+
+A command's output is collapsed when its block succeeds. To keep a line
+visible, print it to stdout as a message, using the same syntax as GitHub
+Actions workflow commands:
+
+```sh
+echo "::success::released v$version"
+echo "::info::published to crates.io"
+echo "::warning::CHANGELOG has no entry for v$version"
+echo "::error::tag v$version already exists"
+```
+
+`::notice::` is an alias for `::info::`. GitHub parameters such as
+`::warning file=src/main.rs,line=12::...` are accepted but not shown. Write
+`%0A` for a newline and `%25` for a literal `%`.
+
+Messages appear as soon as they are printed, and stay on screen after the
+block finishes. A block that succeeds after printing messages ends with them
+instead of "ok". Messages don't affect whether a block passes; only its exit
+status does. Skipped and cached blocks don't run their command, so they
+don't repeat its messages.
+
 ### Shared build cache
 
 Successful results of some resources are also recorded in a shared cache so

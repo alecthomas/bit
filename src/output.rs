@@ -1,5 +1,5 @@
-use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, IsTerminal, StdoutLock, Write};
 use std::sync::{Arc, Mutex};
@@ -62,6 +62,8 @@ pub enum Event {
     Debug,
     /// Terminal: block was skipped because it is `protected` (destroy refused).
     Protected,
+    Info,
+    Warning,
 }
 
 impl Event {
@@ -78,6 +80,8 @@ impl Event {
             Event::NoChange => "·",
             Event::Debug => "⚙",
             Event::Protected => "⊘",
+            Event::Info => "ℹ",
+            Event::Warning => "▲",
         }
     }
 
@@ -98,7 +102,57 @@ impl Event {
             Event::NoChange => Color::Primary,
             Event::Debug => Color::Blue,
             Event::Protected => Color::Primary,
+            Event::Info => Color::Cyan,
+            Event::Warning => Color::Yellow,
         }
+    }
+}
+
+/// Severity of a [`Message`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageLevel {
+    Success,
+    Info,
+    Warning,
+    Error,
+}
+
+impl MessageLevel {
+    fn event(self) -> Event {
+        match self {
+            MessageLevel::Success => Event::Ok,
+            MessageLevel::Info => Event::Info,
+            MessageLevel::Warning => Event::Warning,
+            MessageLevel::Error => Event::Failed,
+        }
+    }
+}
+
+/// A message a command prints to stdout as a GitHub Actions style workflow
+/// command, e.g. `::warning::CHANGELOG has no entry`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    level: MessageLevel,
+    text: String,
+}
+
+impl Message {
+    /// Parse `::level[ params]::text`. GitHub parameters such as `file=` are
+    /// accepted but ignored. Other lines, including commands bit doesn't
+    /// handle such as `::group::`, return `None` and stay in the output.
+    pub fn parse(line: &str) -> Option<Self> {
+        let (head, text) = line.strip_prefix("::")?.split_once("::")?;
+        let command = head.split_once(' ').map_or(head, |(command, _)| command);
+        let level = match command {
+            "success" => MessageLevel::Success,
+            "info" | "notice" => MessageLevel::Info,
+            "warning" => MessageLevel::Warning,
+            "error" => MessageLevel::Error,
+            _ => return None,
+        };
+        // GitHub's escapes. `%25` goes last so `%250A` decodes to `%0A`.
+        let text = text.replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%");
+        Some(Self { level, text })
     }
 }
 
@@ -183,6 +237,8 @@ struct OutputInner {
     /// Number of terminal rows currently occupied by the live region, used
     /// to know how far up to move the cursor before clearing.
     live_rows: usize,
+    /// Blocks that printed a [`Message`] since they started.
+    messaged: HashSet<String>,
 }
 
 /// Format a `Duration` as a compact relative offset for debug output:
@@ -218,6 +274,7 @@ impl Output {
                 term_width,
                 active: IndexMap::new(),
                 live_rows: 0,
+                messaged: HashSet::new(),
             })),
             debug: false,
             silent: false,
@@ -334,26 +391,78 @@ impl Output {
         // when the region collapses on completion. Only `event` (non-raw)
         // Ok/Failed/Skipped/NoChange are terminal for the region.
         match (event, raw) {
-            (Event::Starting, _) => inner.open_region(&mut out, name, lines),
-            (Event::Failed, false) => inner.close_region(&mut out, name, lines, /*preserve_tail=*/ true),
+            (Event::Starting, _) => {
+                inner.messaged.remove(name);
+                inner.open_region(&mut out, name, lines)
+            }
+            (Event::Failed, false) => {
+                let lines = inner.finish_messages(name, event, message, lines);
+                inner.close_region(&mut out, name, lines, /*preserve_tail=*/ true)
+            }
             (Event::Ok | Event::Skipped | Event::NoChange | Event::Protected, false) => {
+                let lines = inner.finish_messages(name, event, message, lines);
                 inner.close_region(&mut out, name, lines, /*preserve_tail=*/ false)
             }
             (_, true) if inner.active.contains_key(name) => inner.push_stream_many(&mut out, name, lines),
             _ => inner.print_detached(&mut out, &lines),
         }
     }
+
+    /// Messages print above the live region rather than into it, so they
+    /// stay on screen when the region collapses on success.
+    fn dispatch_message(&self, name: &str, indent: Option<usize>, message: &Message) {
+        if self.silent {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let lines = inner.fmt_event(name, message.level.event(), indent, &message.text);
+        inner.messaged.insert(name.to_owned());
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        inner.print_detached(&mut out, &lines);
+    }
 }
 
 impl OutputInner {
+    /// Return the lines to print for a block's terminal event and stop
+    /// tracking its messages. A bare "ok" is dropped when the block printed
+    /// messages, because they say more.
+    fn finish_messages(&mut self, name: &str, event: Event, message: &str, lines: Vec<String>) -> Vec<String> {
+        let messaged = self.messaged.remove(name);
+        if messaged && event == Event::Ok && message.is_empty() {
+            Vec::new()
+        } else {
+            lines
+        }
+    }
+
     fn prefix(&self, name: &str, sep: &str, indent: Option<usize>) -> String {
+        format!("{} {sep}", self.label(name, indent))
+    }
+
+    /// The block name, indented (plan mode) or right-aligned (apply mode).
+    fn label(&self, name: &str, indent: Option<usize>) -> String {
         match indent {
             Some(n) => {
                 let pad = "  ".repeat(n);
-                format!("{pad}{name} {sep}")
+                format!("{pad}{name}")
             }
-            None => format!("{:>width$} {sep}", name, width = self.max_name_len),
+            None => format!("{:>width$}", name, width = self.max_name_len),
         }
+    }
+
+    /// Painted head and continuation prefixes for an event. The block name
+    /// takes its own colour and the event's sigil takes the event's colour.
+    fn event_prefixes(&self, name: &str, event: Event, indent: Option<usize>) -> (String, String) {
+        let color = color_for_name(name);
+        let dim = event.is_dim();
+        let head = format!(
+            "{} {}",
+            self.label(name, indent).paint(color).dim_if(dim),
+            event.symbol().paint(event.color()).dim_if(dim),
+        );
+        let cont = self.prefix(name, "┆", indent).paint(color).dim_if(dim).to_string();
+        (head, cont)
     }
 
     /// Split (possibly ANSI-styled) `content` into chunks whose display
@@ -421,9 +530,7 @@ impl OutputInner {
     }
 
     fn fmt_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str) -> Vec<String> {
-        let color = color_for_name(name);
-        let head_prefix = self.prefix(name, event.symbol(), indent);
-        let cont_prefix = self.prefix(name, "┆", indent);
+        let (head_prefix, cont_prefix) = self.event_prefixes(name, event, indent);
         let dim = event.is_dim();
 
         let body: String = if message.is_empty() {
@@ -443,11 +550,7 @@ impl OutputInner {
                 .enumerate()
             {
                 let p = if first && i == 0 { &head_prefix } else { &cont_prefix };
-                lines.push(format!(
-                    "{} {}",
-                    p.paint(color).dim_if(dim),
-                    chunk.paint(event.color()).dim_if(dim),
-                ));
+                lines.push(format!("{p} {}", chunk.paint(event.color()).dim_if(dim)));
             }
             first = false;
         }
@@ -455,10 +558,7 @@ impl OutputInner {
     }
 
     fn fmt_event_raw(&self, name: &str, event: Event, indent: Option<usize>, message: &str) -> Vec<String> {
-        let color = color_for_name(name);
-        let dim = event.is_dim();
-        let head_prefix = self.prefix(name, event.symbol(), indent);
-        let cont_prefix = self.prefix(name, "┆", indent);
+        let (head_prefix, cont_prefix) = self.event_prefixes(name, event, indent);
 
         let mut lines = Vec::new();
         let mut first = true;
@@ -469,7 +569,7 @@ impl OutputInner {
                 .enumerate()
             {
                 let p = if first && i == 0 { &head_prefix } else { &cont_prefix };
-                lines.push(format!("{} {chunk}", p.paint(color).dim_if(dim)));
+                lines.push(format!("{p} {chunk}"));
             }
             first = false;
         }
@@ -724,11 +824,21 @@ impl BlockWriter {
             .dispatch_stderr_details(&self.name, self.color, self.indent, details);
     }
 
-    /// Write all lines from a reader, prefixed with the block name.
+    /// Show a message printed by the block's command. A block that printed
+    /// any messages ends with them instead of a bare "ok".
+    pub fn message(&self, message: &Message) {
+        self.output.dispatch_message(&self.name, self.indent, message);
+    }
+
+    /// Write all lines from a reader, prefixed with the block name. Lines
+    /// that are [`Message`]s are shown as messages instead.
     pub fn pipe_stdout(&self, reader: impl BufRead) {
         for line in reader.lines() {
             match line {
-                Ok(l) => self.line(&l),
+                Ok(l) => match Message::parse(&l) {
+                    Some(message) => self.message(&message),
+                    None => self.line(&l),
+                },
                 Err(_) => break,
             }
         }
@@ -941,7 +1051,96 @@ mod tests {
             term_width,
             active: IndexMap::new(),
             live_rows: 0,
+            messaged: HashSet::new(),
         }
+    }
+
+    fn message(level: MessageLevel, text: &str) -> Message {
+        Message {
+            level,
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn message_parses_levels() {
+        assert_eq!(
+            Message::parse("::success::released v1"),
+            Some(message(MessageLevel::Success, "released v1"))
+        );
+        assert_eq!(
+            Message::parse("::info::note"),
+            Some(message(MessageLevel::Info, "note"))
+        );
+        assert_eq!(
+            Message::parse("::notice::note"),
+            Some(message(MessageLevel::Info, "note"))
+        );
+        assert_eq!(
+            Message::parse("::warning::careful"),
+            Some(message(MessageLevel::Warning, "careful"))
+        );
+        assert_eq!(
+            Message::parse("::error::broken"),
+            Some(message(MessageLevel::Error, "broken"))
+        );
+    }
+
+    #[test]
+    fn message_ignores_parameters() {
+        assert_eq!(
+            Message::parse("::warning file=src/main.rs,line=12::unused import"),
+            Some(message(MessageLevel::Warning, "unused import"))
+        );
+    }
+
+    #[test]
+    fn message_decodes_escapes() {
+        assert_eq!(
+            Message::parse("::error::first%0Asecond 100%25 %250A"),
+            Some(message(MessageLevel::Error, "first\nsecond 100% %0A"))
+        );
+    }
+
+    #[test]
+    fn message_rejects_other_lines() {
+        assert_eq!(Message::parse("::group::Build"), None);
+        assert_eq!(Message::parse("::endgroup::"), None);
+        assert_eq!(Message::parse("warning::text"), None);
+        assert_eq!(Message::parse("::warning text"), None);
+        assert_eq!(Message::parse("plain output"), None);
+    }
+
+    #[test]
+    fn event_sigil_takes_event_colour() {
+        let inner = inner_tty(4, 80);
+        let sigil = "▲".paint(Color::Yellow).to_string();
+        assert!(inner.fmt_event("a", Event::Warning, None, "careful")[0].contains(&sigil));
+        assert!(inner.fmt_event_raw("a", Event::Warning, None, "careful")[0].contains(&sigil));
+    }
+
+    #[test]
+    fn finish_messages_replaces_ok_after_messages() {
+        let mut inner = inner_tty(4, 80);
+        let ok = vec!["a ✔ ok".to_owned()];
+        inner.messaged.insert("a".into());
+        assert!(inner.finish_messages("a", Event::Ok, "", ok.clone()).is_empty());
+        // Tracking ends with the block, so its next run shows "ok" again.
+        assert_eq!(inner.finish_messages("a", Event::Ok, "", ok.clone()), ok);
+        inner.live = false;
+    }
+
+    #[test]
+    fn finish_messages_keeps_failure_after_messages() {
+        let mut inner = inner_tty(4, 80);
+        let failed = vec!["a ✘ command exited with 1".to_owned()];
+        inner.messaged.insert("a".into());
+        assert_eq!(
+            inner.finish_messages("a", Event::Failed, "command exited with 1", failed.clone()),
+            failed
+        );
+        assert!(!inner.messaged.contains("a"));
+        inner.live = false;
     }
 
     #[test]

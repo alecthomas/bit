@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ReportMode;
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::{BlockWriter, Message};
 use crate::provider::{
     ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, PlanAction, PlanResult, Provider, Resource,
     ResourceKind,
@@ -478,7 +478,9 @@ fn run_with_results(
             // Keep draining stdout after a mapping error so the command
             // can't block on a full pipe.
             for line in BufReader::new(out).lines().map_while(Result::ok) {
-                if mapped.is_ok() {
+                if let Some(message) = Message::parse(&line) {
+                    writer.message(&message);
+                } else if mapped.is_ok() {
                     mapped = report.line(&line);
                 }
             }
