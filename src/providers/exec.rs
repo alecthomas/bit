@@ -135,17 +135,24 @@ where
     deserializer.deserialize_any(StringOrVec)
 }
 
-/// Build an `sh -c` command with piped stdout and stderr.
+/// Build a `bash -eo pipefail -c` command with piped stdout and stderr. `-e`
+/// makes a multi-line script fail at its first failing line; without it, only
+/// the last line's exit status counts, so a trailing `echo` would hide
+/// failures. `pipefail` does the same for earlier commands in a pipeline,
+/// which is why this uses bash rather than POSIX `sh`.
 fn shell(command: &str, dir: Option<&str>) -> Command {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(command).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut cmd = Command::new("bash");
+    cmd.args(["-eo", "pipefail", "-c"])
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
     cmd
 }
 
-/// Run a shell command under `sh -c`, piping stdout/stderr through the block
+/// Run a shell command under `bash -eo pipefail`, piping stdout/stderr through the block
 /// writer. Returns `Err` if the command exits non-zero.
 fn run_command(command: &str, dir: Option<&str>, writer: &BlockWriter) -> Result<(), BoxError> {
     let mut child = shell(command, dir)
@@ -760,6 +767,20 @@ mod tests {
     }
 
     #[test]
+    fn apply_fails_when_an_earlier_line_fails() {
+        let inputs = ExecInputs {
+            command: "false\necho \"::success::done\"".into(),
+            ..exec_inputs(vec![])
+        };
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
+        let out = crate::output::Output::silent();
+        let writer = out.writer("test");
+        assert!(Resource::apply(&resource, &inputs, None, &writer).is_err());
+    }
+
+    #[test]
     fn destroy_removes_output_dir() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("build_output");
@@ -842,6 +863,22 @@ mod tests {
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
         assert!(!result.outputs.passed);
+    }
+
+    #[test]
+    fn test_resource_fails_when_an_earlier_line_fails() {
+        assert!(!apply_test(&test_inputs("false\ntrue", None)).unwrap());
+    }
+
+    #[test]
+    fn test_resource_fails_when_an_earlier_pipeline_command_fails() {
+        assert!(!apply_test(&test_inputs("false | true", None)).unwrap());
+    }
+
+    #[test]
+    fn test_results_fail_when_an_earlier_line_fails() {
+        let command = "false\necho '{\"n\":\"a\",\"ok\":true}'";
+        assert!(!apply_test(&test_inputs(command, Some(JSONL_RESULTS))).unwrap());
     }
 
     fn test_inputs(command: &str, results: Option<&str>) -> ExecTestInputs {

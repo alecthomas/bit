@@ -1016,6 +1016,11 @@ instead of "ok". Messages don't affect whether a block passes; only its exit
 status does. Skipped and cached blocks don't run their command, so they
 don't repeat its messages.
 
+`exec` and `exec.test` commands run under `bash -eo pipefail`, so a script
+stops and fails at its first failing line, including a failure anywhere in a
+pipeline. A trailing `echo "::success::..."` can't hide an earlier failure.
+Append `|| true` to a line whose failure should be ignored.
+
 ### Shared build cache
 
 Successful results of some resources are also recorded in a shared cache so
