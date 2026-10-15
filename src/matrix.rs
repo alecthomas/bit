@@ -13,6 +13,12 @@ pub(crate) fn matrix_key(name: &str, values: &[&Value]) -> String {
     format!("{name}[{}]", matrix_values_key(values))
 }
 
+/// Name one slice of a matrix block instance. A parameterized instance's
+/// arguments follow the keys, mirroring the call syntax `name[keys](args)`.
+pub(crate) fn slice_name(name: &str, values: &[&Value], instance_args: &str) -> String {
+    format!("{}{instance_args}", matrix_key(name, values))
+}
+
 fn matrix_values_key(values: &[&Value]) -> String {
     values
         .iter()
@@ -46,8 +52,12 @@ fn cartesian_product<'a>(lists: &[&'a [Value]]) -> Vec<Vec<&'a Value>> {
 /// - Matrix key variables are substituted with their concrete scalar values
 /// - References to other matrix blocks sharing the same keys are rewritten
 ///   to point to the matching slice
+///
+/// `instance_args` is the argument list of a parameterized instance, or empty.
+/// The group is named `name(args)` and each slice `name[keys](args)`.
 pub fn expand_matrix(
     block: &Block,
+    instance_args: &str,
     scope: &mut Scope,
     registry: &ProviderRegistry,
     store: &dyn StateStore,
@@ -83,11 +93,12 @@ pub fn expand_matrix(
             })
     };
 
+    let group = format!("{}{instance_args}", block.name);
     // Track all expanded node names for this block
     let mut expanded_names: Vec<String> = Vec::new();
 
     for combo in &combos {
-        let node_name = matrix_key(&block.name, combo);
+        let node_name = slice_name(&block.name, combo, instance_args);
 
         // Build substitution map: key_name -> scalar value
         let subs: HashMap<String, Expr> = block
@@ -101,7 +112,7 @@ pub fn expand_matrix(
         // for this combination. Only for blocks sharing the same key set.
         let mut block_subs: HashMap<String, String> = HashMap::new();
         for (other_name, other_keys) in matrix_blocks {
-            if other_name == &block.name {
+            if other_name == &group {
                 continue;
             }
             if other_keys == &block.matrix_keys {
@@ -131,7 +142,7 @@ pub fn expand_matrix(
             resource_name: block.resource.clone(),
             protected: block.protected,
             explicit: block.explicit,
-            concurrency_group: block.name.clone(),
+            concurrency_group: group.clone(),
             fields: rewritten_fields,
             resource,
             prior_state,
@@ -179,10 +190,10 @@ pub fn expand_matrix(
         matrix_map.insert(key, Value::strct(Map::new()));
     }
     scope
-        .define(&block.name, crate::expr::SymbolKind::Block, Value::strct(matrix_map))
+        .define(&group, crate::expr::SymbolKind::Block, Value::strct(matrix_map))
         .map_err(|existing| LoadError::DuplicateName {
             pos: block.pos.clone(),
-            name: block.name.clone(),
+            name: group.clone(),
             existing: existing.as_str(),
         })?;
 

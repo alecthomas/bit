@@ -115,7 +115,7 @@ pub(crate) fn materialize(
             if block.matrix_keys.is_empty() {
                 selected.push(name);
             } else {
-                selected.extend(context.matrix_slices(&name));
+                selected.extend(context.matrix_slices(&block.name, &name));
             }
         } else {
             if !invocation.args.is_empty() {
@@ -164,11 +164,16 @@ impl Instantiator<'_> {
         }
     }
 
-    fn matrix_slices(&self, name: &str) -> Vec<String> {
-        let Some(Value::Struct(_, slices)) = self.scope.get(name) else {
+    /// List the slices of `group`, an instance of the matrix block `block_name`.
+    fn matrix_slices(&self, block_name: &str, group: &str) -> Vec<String> {
+        let Some(Value::Struct(_, slices)) = self.scope.get(group) else {
             return Vec::new();
         };
-        let mut names: Vec<_> = slices.keys().map(|key| format!("{name}[{key}]")).collect();
+        let instance_args = &group[block_name.len()..];
+        let mut names: Vec<_> = slices
+            .keys()
+            .map(|key| format!("{block_name}[{key}]{instance_args}"))
+            .collect();
         names.sort();
         names
     }
@@ -224,7 +229,7 @@ impl Instantiator<'_> {
                     if block.matrix_keys.is_empty() {
                         blocks.push(name);
                     } else {
-                        blocks.extend(self.matrix_slices(&name));
+                        blocks.extend(self.matrix_slices(&block.name, &name));
                     }
                 }
             } else {
@@ -266,7 +271,7 @@ impl Instantiator<'_> {
             })
             .collect::<Result<_, _>>()?;
         let value_refs: Vec<_> = values.iter().collect();
-        let slice = matrix::matrix_key(&group, &value_refs);
+        let slice = matrix::slice_name(&block.name, &value_refs, &group[block.name.len()..]);
         if !self.dag.has_block(&slice) {
             return Err(invalid(
                 &block.pos,
@@ -291,7 +296,8 @@ impl Instantiator<'_> {
             return Ok(block.name.clone());
         }
         let bound = bind(&block.name, &block.pos, &block.params, args, caller)?;
-        let name = instance_name(&block.name, &block.params, &bound.values)?;
+        let instance_args = instance_args(&block.name, &block.params, &bound.values)?;
+        let name = format!("{}{instance_args}", block.name);
         if self.dag.has_block(&name) || self.matrix_blocks.contains_key(&name) {
             return Ok(name);
         }
@@ -318,6 +324,7 @@ impl Instantiator<'_> {
             })
             .collect();
         if !block.matrix_keys.is_empty() {
+            concrete.name = block.name.clone();
             concrete.fields = substituted;
             // Matrix keys may be bound block parameters. Expand in that scope,
             // then publish only the resulting nodes to the module scope.
@@ -325,6 +332,7 @@ impl Instantiator<'_> {
             let before: HashSet<_> = self.dag.block_names().into_iter().collect();
             matrix::expand_matrix(
                 &concrete,
+                &instance_args,
                 &mut expansion_scope,
                 self.registry,
                 self.store,
@@ -667,23 +675,31 @@ fn cli_args(
 }
 
 fn instance_name(name: &str, params: &[Param], values: &[Value]) -> Result<String, LoadError> {
+    Ok(format!("{name}{}", instance_args(name, params, values)?))
+}
+
+/// Format bound values as the named argument list of a call, such as
+/// `(tag="1.2.3")`, so instance names read like the calls that create them.
+/// Empty when there are no values.
+fn instance_args(name: &str, params: &[Param], values: &[Value]) -> Result<String, LoadError> {
     if values.is_empty() {
-        return Ok(name.to_owned());
+        return Ok(String::new());
     }
-    let literals: Result<Vec<_>, _> = params
+    let arguments: Result<Vec<_>, _> = params
         .iter()
         .zip(values)
         .map(|(param, value)| {
-            if param.typ == Type::Secret {
+            let literal = if param.typ == Type::Secret {
                 let encoded = serde_json::to_vec(value)?;
-                Ok(format!(r#""secret:{}""#, crate::sha256::SHA256::digest(&encoded)))
+                format!(r#""secret:{}""#, crate::sha256::SHA256::digest(&encoded))
             } else {
-                serde_json::to_string(value)
-            }
+                value.to_literal()
+            };
+            Ok::<_, serde_json::Error>(format!("{}={literal}", param.name))
         })
         .collect();
-    let literals = literals.map_err(|error| invalid(&crate::ast::Pos::default(), name, &error.to_string()))?;
-    Ok(format!("{name}[{}]", literals.join(", ")))
+    let arguments = arguments.map_err(|error| invalid(&crate::ast::Pos::default(), name, &error.to_string()))?;
+    Ok(format!("({})", arguments.join(", ")))
 }
 
 fn invalid(pos: &crate::ast::Pos, name: &str, message: &str) -> LoadError {

@@ -258,7 +258,7 @@ pub fn load_selected(
 
     // Expand matrix blocks now that all params/lets are in scope
     for block in &deferred_matrix {
-        matrix::expand_matrix(block, &mut scope, registry, store, &mut dag, &matrix_blocks)?;
+        matrix::expand_matrix(block, "", &mut scope, registry, store, &mut dag, &matrix_blocks)?;
     }
 
     let selected_names = crate::invocation::materialize(
@@ -838,9 +838,9 @@ target publish(tag : string) = [image(tag = tag)]
         let (dag, _scope, selected) =
             load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
 
-        assert_eq!(selected, vec![r#"publish["v1"]"#]);
-        assert_eq!(dag.target_order(&selected[0]).unwrap(), vec![r#"image["v1"]"#]);
-        let node = dag.get_node(r#"image["v1"]"#).unwrap();
+        assert_eq!(selected, vec![r#"publish(tag="v1")"#]);
+        assert_eq!(dag.target_order(&selected[0]).unwrap(), vec![r#"image(tag="v1")"#]);
+        let node = dag.get_node(r#"image(tag="v1")"#).unwrap();
         assert_eq!(
             node.fields.iter().find(|field| field.name == "command").unwrap().value,
             crate::ast::Expr::Str(vec![
@@ -878,8 +878,8 @@ target second(value : string) = [job(value = value)]
             load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
 
         assert_eq!(selected.len(), 3);
-        assert!(dag.has_block(r#"job["a"]"#));
-        assert!(dag.has_block(r#"job["b"]"#));
+        assert!(dag.has_block(r#"job(value="a")"#));
+        assert!(dag.has_block(r#"job(value="b")"#));
         assert_eq!(dag.block_names().len(), 2);
     }
 
@@ -910,9 +910,9 @@ target publish(package : string) = [release(package = package)]
         let (dag, _scope, _) =
             load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
 
-        let prepare = r#"prepare["api"]"#;
-        let compile = r#"compile["api"]"#;
-        let release = r#"release["api"]"#;
+        let prepare = r#"prepare(package="api")"#;
+        let compile = r#"compile(package="api")"#;
+        let release = r#"release(package="api")"#;
         assert!(dag.has_block(prepare));
         assert!(dag.has_block(compile));
         assert!(dag.has_block(release));
@@ -943,7 +943,7 @@ build[arch] = exec {
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
         for arch in ["amd64", "arm64"] {
-            let prepare = format!(r#"prepare["{arch}"]"#);
+            let prepare = format!(r#"prepare(arch="{arch}")"#);
             let build = format!(r#"build["{arch}"]"#);
             assert!(dag.has_block(&prepare));
             assert!(dag.content_deps(&build).contains(&prepare));
@@ -987,16 +987,22 @@ target arm(tag : string) = [build["arm64"](tag = tag)]
 
         for tag in ["1.2.3", "2.0.0"] {
             for arch in ["amd64", "arm64"] {
-                let build = format!(r#"build["{tag}"]["{arch}"]"#);
-                let prepare = format!(r#"prepare["{tag}"]["{arch}"]"#);
+                let build = format!(r#"build["{arch}"](tag="{tag}")"#);
+                let prepare = format!(r#"prepare["{arch}"](tag="{tag}")"#);
                 assert!(dag.has_block(&build));
                 assert!(dag.content_deps(&build).contains(&prepare));
             }
         }
         assert_eq!(dag.block_names().len(), 8);
         assert_eq!(dag.targets()[&selected[0]].blocks.len(), 2);
-        assert_eq!(dag.targets()[&selected[1]].blocks, vec![r#"build["1.2.3"]["arm64"]"#]);
-        assert_eq!(dag.targets()[&selected[2]].blocks, vec![r#"build["2.0.0"]["arm64"]"#]);
+        assert_eq!(
+            dag.targets()[&selected[1]].blocks,
+            vec![r#"build["arm64"](tag="1.2.3")"#]
+        );
+        assert_eq!(
+            dag.targets()[&selected[2]].blocks,
+            vec![r#"build["arm64"](tag="2.0.0")"#]
+        );
     }
 
     #[test]
@@ -1517,7 +1523,7 @@ inst = mymod {
         )
         .unwrap();
 
-        let prepare = r#"prepare["prod"]"#.to_owned();
+        let prepare = r#"prepare(env="prod")"#.to_owned();
         assert!(dag.has_block(&prepare));
         assert!(dag.content_deps("inst.a").contains(&prepare));
     }
@@ -1556,7 +1562,7 @@ output path = image.path
         )
         .unwrap();
 
-        let compile = r#"inst.compile["api"]"#.to_owned();
+        let compile = r#"inst.compile(package="api")"#.to_owned();
         assert!(dag.has_block(&compile));
         assert!(dag.content_deps("inst.image").contains(&compile));
     }
@@ -1593,8 +1599,11 @@ target run(value : string) = [job(value = value)]
         )
         .unwrap();
 
-        assert_eq!(selected, vec![r#"inst.run["hello"]"#]);
-        assert_eq!(dag.target_order(&selected[0]).unwrap(), vec![r#"inst.job["hello"]"#]);
+        assert_eq!(selected, vec![r#"inst.run(value="hello")"#]);
+        assert_eq!(
+            dag.target_order(&selected[0]).unwrap(),
+            vec![r#"inst.job(value="hello")"#]
+        );
     }
 
     #[test]
@@ -1625,7 +1634,7 @@ target run = [job["arm64"](arch = ["amd64", "arm64"], tag = "v1")]
 
         assert_eq!(
             dag.target_order("inst.run").unwrap(),
-            vec![r#"inst.job[["amd64","arm64"], "v1"]["arm64"]"#]
+            vec![r#"inst.job["arm64"](arch=["amd64", "arm64"], tag="v1")"#]
         );
     }
 

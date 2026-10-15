@@ -151,7 +151,7 @@ target show(value : string) = [job(value = value)]
 
     let output = run_bit(project.path(), &["--graph", "show", "value=hello"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(String::from_utf8_lossy(&output.stdout).contains(r#"job["hello"]"#));
+    assert!(String::from_utf8_lossy(&output.stdout).contains(r#"job(value="hello")"#));
 
     let output = run_bit(project.path(), &["--list"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
