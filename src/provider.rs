@@ -248,16 +248,25 @@ impl VersionCommand {
         Ambient::Version(self)
     }
 
-    /// Shell-like rendering, which identifies the fingerprint: commands that
-    /// render the same report the same version.
+    /// Shell-like rendering without the working directory, which identifies
+    /// the fingerprint among a block's sources. The directory is left out
+    /// because it is usually absolute: worktrees of one repository must
+    /// produce the same source key for the shared cache to match, and a
+    /// block always runs its command in the same directory anyway.
     pub fn display(&self) -> String {
         let mut parts: Vec<String> = self.env.iter().map(|(name, value)| format!("{name}={value}")).collect();
         parts.push(self.program.clone());
         parts.extend(self.args.iter().cloned());
-        let command = parts.join(" ");
+        parts.join(" ")
+    }
+
+    /// Identity of this command's output within one process. Unlike
+    /// [`VersionCommand::display`] it includes the directory, since two
+    /// blocks may run the same command where different toolchains apply.
+    pub fn probe_key(&self) -> String {
         match &self.dir {
-            Some(dir) => format!("{command} (in {dir})"),
-            None => command,
+            Some(dir) => format!("{} (in {dir})", self.display()),
+            None => self.display(),
         }
     }
 

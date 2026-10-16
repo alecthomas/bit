@@ -156,7 +156,7 @@ pub fn hash_ambient(ambient: &[Ambient], tracker: &mut FileTracker) -> Result<BT
         match item {
             Ambient::Version(command) => {
                 let key = format!("version:{}", command.display());
-                let output = probe_tool(&key, || command.command());
+                let output = probe_tool(&command.probe_key(), || command.command());
                 let hash = match output {
                     Ok(output) => SHA256::digest(output.as_bytes()),
                     Err(_) => SHA256::digest(b"unavailable"),
@@ -348,7 +348,7 @@ mod tests {
                 ("executable:bit-test-no-such-tool".into(), SHA256::digest(b"missing")),
                 ("version:A=b echo 1.2.3".into(), SHA256::digest(b"1.2.3")),
                 (
-                    "version:bit-test-no-such-tool --version (in sub)".into(),
+                    "version:bit-test-no-such-tool --version".into(),
                     SHA256::digest(b"unavailable")
                 ),
                 ("env:PATH".into(), SHA256::digest(path.as_encoded_bytes())),
