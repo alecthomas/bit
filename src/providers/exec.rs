@@ -13,8 +13,8 @@ use super::ReportMode;
 use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Message};
 use crate::provider::{
-    ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, PlanAction, PlanResult, Provider, Resource,
-    ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, PlanAction, PlanResult, Provider,
+    Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 use crate::value::Value;
@@ -258,6 +258,12 @@ impl Resource for ExecResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    /// The shell that runs the command. The programs the command itself
+    /// runs are unknown, so `inputs` must name any that matter.
+    fn ambient(&self, _inputs: &ExecInputs) -> Vec<Ambient> {
+        vec![crate::providers::version("bash", &["--version"], None)]
     }
 
     fn resolve(&self, inputs: &ExecInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -524,6 +530,12 @@ impl Resource for ExecTestResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
+    }
+
+    /// The shell that runs the command. The programs the command itself
+    /// runs are unknown, so `inputs` must name any that matter.
+    fn ambient(&self, _inputs: &ExecTestInputs) -> Vec<Ambient> {
+        vec![crate::providers::version("bash", &["--version"], None)]
     }
 
     fn resolve(&self, inputs: &ExecTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {

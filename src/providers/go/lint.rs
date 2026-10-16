@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 /// Run golangci-lint
@@ -94,6 +94,14 @@ impl Resource for GoLintResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
+    }
+
+    fn ambient(&self, inputs: &GoLintInputs) -> Vec<Ambient> {
+        let dir = inputs.dir.as_deref();
+        vec![
+            crate::providers::version("golangci-lint", &["version"], dir),
+            super::toolchain(&super::GoEnv::default(), dir),
+        ]
     }
 
     fn resolve(&self, inputs: &GoLintInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -190,18 +198,6 @@ impl Resource for GoLintResource {
 
     fn cache_policy(&self, _inputs: &GoLintInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
-    }
-
-    fn toolchain(&self, inputs: &GoLintInputs) -> Result<BTreeMap<String, String>, BoxError> {
-        let dir = inputs.dir.as_deref().map(Path::new);
-        let mut fingerprint = super::toolchain_fingerprint(&super::GoEnv::default(), dir)?;
-        let version = crate::providers::probe_tool("golangci-lint version", || {
-            let mut cmd = Command::new("golangci-lint");
-            cmd.arg("version");
-            cmd
-        })?;
-        fingerprint.insert("golangci-lint".to_owned(), version);
-        Ok(fingerprint)
     }
 }
 

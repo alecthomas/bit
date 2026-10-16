@@ -1,18 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 
+use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
-use crate::provider::BoxError;
+use crate::provider::{Ambient, BoxError, VersionCommand};
 use crate::sha256::{Hasher, SHA256};
 
 pub mod docker;
 pub mod exec;
 pub mod go;
 pub mod pnpm;
+pub mod protobuf;
 pub mod rust;
 
 /// How much of a test run to show. Shared by the test resources that report
@@ -69,29 +71,123 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// version. Targets are hashed as stored by readlink, not resolved, so the
 /// hash is the same across checkouts.
 pub fn hash_file(path: &Path) -> Result<SHA256, BoxError> {
-    let mut link = path.to_path_buf();
-    let mut targets = Vec::new();
-    while fs::symlink_metadata(&link)?.is_symlink() {
-        if targets.len() == MAX_SYMLINK_HOPS {
-            return Err(format!("too many levels of symlinks hashing {}", path.display()).into());
+    let chain = LinkChain::of(path)?;
+    chain.hash()
+}
+
+/// A path's symlink chain: each link target as stored, and the file the
+/// chain ends at. Reading it costs one `readlink` per hop, not the content.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LinkChain {
+    pub targets: Vec<PathBuf>,
+    pub file: PathBuf,
+}
+
+impl LinkChain {
+    pub fn of(path: &Path) -> Result<Self, BoxError> {
+        let mut file = path.to_path_buf();
+        let mut targets = Vec::new();
+        while fs::symlink_metadata(&file)?.is_symlink() {
+            if targets.len() == MAX_SYMLINK_HOPS {
+                return Err(format!("too many levels of symlinks hashing {}", path.display()).into());
+            }
+            let target = fs::read_link(&file)?;
+            // A relative target is relative to the link's directory; joining
+            // an absolute target replaces the path.
+            file = file.parent().unwrap_or(Path::new("")).join(&target);
+            targets.push(target);
         }
-        let target = fs::read_link(&link)?;
-        // A relative target is relative to the link's directory; joining an
-        // absolute target replaces the path.
-        link = link.parent().unwrap_or(Path::new("")).join(&target);
-        targets.push(target);
+        Ok(Self { targets, file })
     }
-    let contents = fs::read(&link)?;
-    if targets.is_empty() {
-        return Ok(SHA256::digest(&contents));
+
+    /// The [`hash_file`] digest: the link targets, then the file's content.
+    pub fn hash(&self) -> Result<SHA256, BoxError> {
+        let mut hasher = Hasher::new();
+        for target in &self.targets {
+            hasher.update(target.as_os_str().as_encoded_bytes());
+            hasher.update(b"\0");
+        }
+        // Streamed, so a large executable is never held in memory whole.
+        let mut file = fs::File::open(&self.file)?;
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let read = std::io::Read::read(&mut file, &mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(hasher.finalize())
     }
-    let mut hasher = Hasher::new();
-    for target in &targets {
-        hasher.update(target.as_os_str().as_encoded_bytes());
-        hasher.update(b"\0");
+}
+
+/// Locate `program` as a command run from bit's working directory would: a
+/// name containing `/` is a path, and any other name is searched for on
+/// `PATH`.
+pub fn find_executable(program: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if program.contains('/') {
+        let path = PathBuf::from(program);
+        return path.is_file().then_some(path);
     }
-    hasher.update(&contents);
-    Ok(hasher.finalize())
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|entry| entry.join(program))
+        .find(|path| {
+            fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        })
+}
+
+/// Fingerprint the ambient state a resource declares, as sources. See
+/// [`crate::provider::Resource::ambient`].
+///
+/// An executable found on disk is keyed by its path, so a Git change to it,
+/// such as a Hermit upgrade, maps to the blocks that run it. Every other
+/// fingerprint is keyed by an [`AMBIENT_KEY_PREFIXES`] prefix, which no path
+/// has.
+///
+/// A tool that cannot be found or run is recorded as such rather than
+/// failing the block: running it fails anyway, and recording it means
+/// installing it later reruns the block. An unset variable is omitted, so
+/// setting it later is a new source.
+pub fn hash_ambient(ambient: &[Ambient], tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let mut hashes = BTreeMap::new();
+    for item in ambient {
+        match item {
+            Ambient::Version(command) => {
+                let key = format!("version:{}", command.display());
+                let output = probe_tool(&key, || command.command());
+                let hash = match output {
+                    Ok(output) => SHA256::digest(output.as_bytes()),
+                    Err(_) => SHA256::digest(b"unavailable"),
+                };
+                hashes.insert(key, hash);
+            }
+            Ambient::Executable(name) => match find_executable(name) {
+                Some(path) => {
+                    hashes.insert(path.to_string_lossy().into_owned(), tracker.hash_executable(&path)?);
+                }
+                None => {
+                    hashes.insert(format!("executable:{name}"), SHA256::digest(b"missing"));
+                }
+            },
+            Ambient::Variable(name) => {
+                if let Some(value) = std::env::var_os(name) {
+                    hashes.insert(format!("env:{name}"), SHA256::digest(value.as_encoded_bytes()));
+                }
+            }
+        }
+    }
+    Ok(hashes)
+}
+
+/// Prefixes of [`hash_ambient`] keys that are not paths. Git cannot report a
+/// change to them, so change detection compares them directly.
+pub const AMBIENT_KEY_PREFIXES: [&str; 3] = ["version:", "executable:", "env:"];
+
+/// A tool's version command, as an [`Ambient::Version`].
+pub(crate) fn version(program: &str, args: &[&str], dir: Option<&str>) -> Ambient {
+    VersionCommand::new(program, args).dir(dir).ambient()
 }
 
 /// Per-process cache of tool probe output (versions, `go env`, ...) so a run
@@ -214,5 +310,49 @@ mod tests {
         symlink("a", dir.path().join("b")).unwrap();
         let error = hash_file(&dir.path().join("a")).unwrap_err();
         assert!(error.to_string().contains("too many levels of symlinks"));
+    }
+
+    #[test]
+    fn find_tool_searches_path_for_names_and_checks_paths() {
+        assert!(find_executable("sh").is_some_and(|path| path.ends_with("sh")));
+        assert_eq!(find_executable("bit-test-no-such-tool"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("tool");
+        fs::write(&tool, "#!/bin/sh\n").unwrap();
+        let tool = tool.to_string_lossy().into_owned();
+        assert_eq!(find_executable(&tool), Some(PathBuf::from(&tool)));
+        assert_eq!(find_executable(&format!("{tool}-missing")), None);
+    }
+
+    #[test]
+    fn hash_tools_fingerprints_each_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("tool");
+        fs::write(&tool, "v1").unwrap();
+        let tool = tool.to_string_lossy().into_owned();
+        let tools = [
+            Ambient::Executable(tool.clone()),
+            Ambient::Executable("bit-test-no-such-tool".into()),
+            VersionCommand::new("echo", &["1.2.3"]).env("A", "b").ambient(),
+            version("bit-test-no-such-tool", &["--version"], Some("sub")),
+            Ambient::Variable("PATH".into()),
+            Ambient::Variable("BIT_TEST_UNSET_VARIABLE".into()),
+        ];
+        let hashes = hash_ambient(&tools, &mut FileTracker::default()).unwrap();
+        let path = std::env::var_os("PATH").unwrap();
+        assert_eq!(
+            hashes,
+            BTreeMap::from([
+                (tool, SHA256::digest(b"v1")),
+                ("executable:bit-test-no-such-tool".into(), SHA256::digest(b"missing")),
+                ("version:A=b echo 1.2.3".into(), SHA256::digest(b"1.2.3")),
+                (
+                    "version:bit-test-no-such-tool --version (in sub)".into(),
+                    SHA256::digest(b"unavailable")
+                ),
+                ("env:PATH".into(), SHA256::digest(path.as_encoded_bytes())),
+            ])
+        );
     }
 }

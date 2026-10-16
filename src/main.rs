@@ -15,6 +15,8 @@ use bit::providers::docker::DockerProvider;
 use bit::providers::exec::ExecProvider;
 use bit::providers::go::GoProvider;
 use bit::providers::pnpm::PnpmProvider;
+use bit::providers::protobuf::buf::BufProvider;
+use bit::providers::protobuf::protoc::ProtocProvider;
 use bit::providers::rust::RustProvider;
 use bit::state;
 use bit::value::Map;
@@ -169,6 +171,8 @@ fn default_registry(tracker: &Arc<Mutex<FileTracker>>) -> ProviderRegistry {
     let mut reg = ProviderRegistry::new();
     reg.register(Box::new(ExecProvider::new(tracker.clone())));
     reg.register(Box::new(DockerProvider::new(tracker.clone())));
+    reg.register(Box::new(BufProvider::new(tracker.clone())));
+    reg.register(Box::new(ProtocProvider::new(tracker.clone())));
     reg.register(Box::new(GoProvider::new(tracker.clone())));
     reg.register(Box::new(PnpmProvider::new(tracker.clone())));
     reg.register(Box::new(RustProvider::new(tracker.clone())));
@@ -553,7 +557,13 @@ fn main() {
         process::exit(1);
     };
 
-    let tracker = Arc::new(Mutex::new(FileTracker::new()));
+    // Without a cache directory, executables are still fingerprinted, just
+    // read on every run.
+    let tracker = match bit::cache::cache_root() {
+        Ok(root) => FileTracker::with_executable_cache(root.join("executable-hashes-v1.json")),
+        Err(_) => FileTracker::new(),
+    };
+    let tracker = Arc::new(Mutex::new(tracker));
 
     if cli.force && !operation.allows_force() {
         eprintln!(

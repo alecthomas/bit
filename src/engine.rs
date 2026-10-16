@@ -375,7 +375,7 @@ pub fn affected_order(
                 if prior.provider_state.is_some() && hash_inputs(&inputs, cache) != prior.input_hash {
                     direct = true;
                 }
-                match node.resource.resolve(&inputs) {
+                match resolve_sources(node, &inputs, tracker) {
                     Ok(resolved) => current = cache.normalize_keys(&resolved),
                     Err(_) => direct = true,
                 }
@@ -389,9 +389,26 @@ pub fn affected_order(
             Err(_) => direct = true,
         }
 
+        // Git cannot report a changed tool version or environment variable,
+        // so those fingerprints are compared with the prior run instead. As
+        // with the inputs above, a block that never ran has nothing to
+        // compare against.
+        if prior.provider_state.is_some() {
+            let tool_keys = current
+                .keys()
+                .chain(prior.resolve_map.keys())
+                .filter(|key| is_ambient_key(key));
+            for key in tool_keys {
+                if current.get(key) != prior.resolve_map.get(key) {
+                    direct = true;
+                }
+            }
+        }
+
         let tracked: HashSet<&str> = current
             .keys()
             .chain(prior.resolve_map.keys())
+            .filter(|key| !is_ambient_key(key))
             .chain(outputs.iter())
             .map(String::as_str)
             .collect();
@@ -460,9 +477,9 @@ struct Prepared {
     /// excluded output and a cached one are kept out of the action key, since
     /// neither is a source; only this subset reaches the CAS.
     cached_outputs: Vec<OutputFile>,
-    /// Toolchain fingerprint; `Some` only for shared-cache resources whose
-    /// fingerprint could be computed.
-    toolchain: Option<BTreeMap<String, String>>,
+    /// Whether the shared cache was consulted, so a successful result may
+    /// be published to it.
+    shared: bool,
     hit: Option<CacheHit>,
 }
 
@@ -505,6 +522,31 @@ struct ResolvedHashes {
     tracked: BTreeMap<String, SHA256>,
 }
 
+/// Whether a source key is an ambient fingerprint rather than a path.
+fn is_ambient_key(key: &str) -> bool {
+    crate::providers::AMBIENT_KEY_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
+}
+
+/// The block's sources: the files its resource resolves and the ambient
+/// state it depends on, so a tool upgrade or changed variable is a source
+/// change like any other.
+fn resolve_sources(
+    node: &DagNode,
+    inputs: &Map,
+    tracker: &Mutex<FileTracker>,
+) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    // Resources lock the tracker themselves while resolving.
+    let mut sources = node.resource.resolve(inputs)?;
+    let ambient = node.resource.ambient(inputs)?;
+    sources.extend(crate::providers::hash_ambient(
+        &ambient,
+        &mut tracker.lock().expect("tracker lock"),
+    )?);
+    Ok(sources)
+}
+
 fn resolve_hashes(
     node: &DagNode,
     inputs: &Map,
@@ -512,7 +554,7 @@ fn resolve_hashes(
     cache: &BuildCache,
     tracker: &Mutex<FileTracker>,
 ) -> Result<ResolvedHashes, BoxError> {
-    let sources = cache.normalize_keys(&node.resource.resolve(inputs)?);
+    let sources = cache.normalize_keys(&resolve_sources(node, inputs, tracker)?);
     let mut tracked = sources.clone();
     let mut tracker = tracker.lock().expect("tracker lock");
     for output in outputs {
@@ -542,14 +584,14 @@ fn is_uncached(uncached: &HashSet<&str>, output: &OutputFile) -> bool {
     uncached.contains(output.path.trim_end_matches('/')) || uncached.contains(output.role.trim_end_matches('/'))
 }
 
-/// Compute the shared action key from provider-resolved source hashes.
-/// Sources are measured before apply for lookup and after apply for publication.
+/// Compute the shared action key from provider-resolved source hashes,
+/// which include the ambient fingerprints. Sources are measured before apply
+/// for lookup and after apply for publication.
 fn action_key(
     name: &str,
     node: &DagNode,
     prepared: &Prepared,
     sources: &BTreeMap<String, SHA256>,
-    toolchain: &BTreeMap<String, String>,
     cache: &BuildCache,
 ) -> Result<ActionKey, BoxError> {
     let CachePolicy::Shared { version } = node.resource.cache_policy(&prepared.inputs) else {
@@ -566,7 +608,6 @@ fn action_key(
         inputs: hash_inputs(&prepared.inputs, cache),
         sources,
         deps: &prepared.dep_hashes,
-        toolchain,
     }
     .key())
 }
@@ -664,7 +705,7 @@ fn prepare_block(
         plan,
         outputs,
         cached_outputs: Vec::new(),
-        toolchain: None,
+        shared: false,
         hit: None,
     };
 
@@ -682,16 +723,9 @@ fn prepare_block(
         .filter(|o| !is_uncached(&uncached, o))
         .cloned()
         .collect();
-    let toolchain = match node.resource.toolchain(&prepared.inputs) {
-        Ok(t) => t,
-        Err(e) => {
-            crate::debug!(writer, "toolchain fingerprint unavailable, cache disabled: {e}");
-            return Ok(prepared);
-        }
-    };
-    let key = action_key(name, node, &prepared, &prepared.sources, &toolchain, cache)
-        .map_err(provider_error(node, name, "resolve"))?;
-    prepared.toolchain = Some(toolchain);
+    let key =
+        action_key(name, node, &prepared, &prepared.sources, cache).map_err(provider_error(node, name, "resolve"))?;
+    prepared.shared = true;
 
     // Look up a receipt only when every dependency hash is settled. A
     // previously failed test always reruns locally so the failure is
@@ -1214,7 +1248,6 @@ fn publish_receipt(
     post_hash: SHA256,
     state: &serde_json::Value,
     outputs: &Map,
-    toolchain: &BTreeMap<String, String>,
     cache: &BuildCache,
     writer: &BlockWriter,
 ) {
@@ -1228,7 +1261,7 @@ fn publish_receipt(
         let artifacts = node
             .resource
             .capture_artifacts(&prepared.inputs, state, &prepared.cached_outputs, cas)?;
-        let key = action_key(name, node, prepared, post_sources, toolchain, cache)?;
+        let key = action_key(name, node, prepared, post_sources, cache)?;
         let receipt = Receipt {
             version: RECEIPT_VERSION,
             provider: node.provider.clone(),
@@ -1380,10 +1413,7 @@ fn execute_block(
 
         // Failed tests stay in local state so they rerun, but never enter
         // the shared cache.
-        if !from_cache
-            && !test_failed
-            && let Some(toolchain) = &prepared.toolchain
-        {
+        if !from_cache && !test_failed && prepared.shared {
             publish_receipt(
                 name,
                 node,
@@ -1392,7 +1422,6 @@ fn execute_block(
                 post_hash,
                 new_state,
                 &apply_result.outputs,
-                toolchain,
                 cache,
                 writer,
             );
@@ -2253,6 +2282,42 @@ lint[module] = go.lint {
     }
 
     #[test]
+    fn affected_order_selects_blocks_whose_tool_version_changed() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.txt");
+        std::fs::write(&source, "source").unwrap();
+        let input = format!(
+            "build = exec {{ command = \"true\" inputs = [\"{}\"] }}\n",
+            source.display()
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let cache = BuildCache::local_only(dir.path());
+        let affected = |store: &MemoryStore| {
+            let (dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), store, &[]).unwrap();
+            let order = resolve_order(&dag, &[]).unwrap();
+            affected_order(&dag, &base, &cache, &order, &crate::git::Changes::default(), &tracker).unwrap()
+        };
+
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        apply(&mut dag, &base, &store, &cache, &Output::new(&[]), &[], 1, &tracker).unwrap();
+        assert!(affected(&store).is_empty(), "nothing changed");
+
+        // Record a different bash version than the one installed, as if it
+        // was upgraded since the block ran.
+        let mut wrapped: WrappedState = serde_json::from_value(store.load("build").unwrap().unwrap()).unwrap();
+        let version = wrapped
+            .resolve_map
+            .iter_mut()
+            .find(|(key, _)| key.starts_with("version:bash"))
+            .expect("bash version is tracked");
+        *version.1 = SHA256::digest(b"another version");
+        store.save("build", &serde_json::to_value(&wrapped).unwrap()).unwrap();
+        assert_eq!(affected(&store), vec!["build".to_owned()]);
+    }
+
+    #[test]
     fn affected_order_keeps_unmapped_blocks_and_falls_back_for_unknown_deletions() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
@@ -2685,8 +2750,8 @@ lint[module] = go.lint {
         use crate::file_tracker::FileTracker;
         use crate::output::BlockWriter;
         use crate::provider::{
-            ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, MaterializeResult, OutputFile, PlanAction,
-            PlanResult, Provider, Resource, ResourceKind,
+            Ambient, ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, MaterializeResult, OutputFile,
+            PlanAction, PlanResult, Provider, Resource, ResourceKind,
         };
         use crate::sha256::SHA256;
         use crate::value::Value;
@@ -2698,6 +2763,8 @@ lint[module] = go.lint {
             pub content: Option<String>,
             #[serde(default)]
             pub passed: Option<bool>,
+            #[serde(default)]
+            pub tool: Option<String>,
         }
 
         #[derive(Debug, Serialize, bit_derive::Schema)]
@@ -2778,6 +2845,9 @@ lint[module] = go.lint {
                 }
                 Ok(map)
             }
+            fn ambient(&self, inputs: &Inputs) -> Vec<Ambient> {
+                inputs.tool.iter().cloned().map(Ambient::Executable).collect()
+            }
             fn plan(&self, _inputs: &Inputs, prior: Option<&State>) -> Result<PlanResult, BoxError> {
                 Ok(PlanResult {
                     action: if prior.is_some() {
@@ -2822,9 +2892,6 @@ lint[module] = go.lint {
             }
             fn output_keys(&self, inputs: &Inputs) -> Vec<String> {
                 vec![out_path(inputs).to_string_lossy().into_owned()]
-            }
-            fn toolchain(&self, _inputs: &Inputs) -> Result<BTreeMap<String, String>, BoxError> {
-                Ok(BTreeMap::from([("tool".to_owned(), "1".to_owned())]))
             }
             /// Capture and check come from the default implementations. Only
             /// the state and outputs are rebuilt here, because they hold this
@@ -3076,6 +3143,34 @@ lint[module] = go.lint {
         let plans = h.apply(&b, &b.block("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::None);
         assert_eq!(h.applies(), 1);
+    }
+
+    #[test]
+    fn changed_tool_reruns_block_and_changes_action_key() {
+        let h = Harness::new();
+        let a = h.worktree("a");
+        a.write_src("hello");
+        let tool = a.root.join("tool");
+        std::fs::write(&tool, "v1").unwrap();
+        let block = a.block("app", "file", &format!("  tool = \"{}\"\n", tool.display()));
+
+        assert_eq!(h.apply(&a, &block, 1).unwrap()[0].plan.action, PlanAction::Create);
+        assert_eq!(h.apply(&a, &block, 1).unwrap()[0].plan.action, PlanAction::None);
+
+        std::fs::write(&tool, "v2").unwrap();
+        let plans = h.apply(&a, &block, 1).unwrap();
+        assert_eq!(plans[0].plan.action, PlanAction::Update);
+        assert_eq!(plans[0].plan.reason.as_deref(), Some("'tool' changed"));
+        assert_eq!(h.applies(), 2);
+        assert_eq!(h.receipts().len(), 2, "the tool is part of the action key");
+
+        // The output is identical under both tools, so the v1 receipt is
+        // bound as already valid.
+        std::fs::write(&tool, "v1").unwrap();
+        let plans = h.apply(&a, &block, 1).unwrap();
+        assert_eq!(plans[0].plan.action, PlanAction::None);
+        assert_eq!(plans[0].plan.reason.as_deref(), Some("cached"));
+        assert_eq!(h.applies(), 2);
     }
 
     #[test]

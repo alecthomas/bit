@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv, RustFeatures};
@@ -69,6 +69,10 @@ impl Resource for RustClippyResource {
         ResourceKind::Test
     }
 
+    fn ambient(&self, inputs: &RustClippyInputs) -> Vec<Ambient> {
+        super::build_ambient(&inputs.env, &[&["cargo", "clippy", "--version"]])
+    }
+
     fn resolve(&self, inputs: &RustClippyInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
         super::resolve_rust_inputs(inputs.package.as_deref(), &mut tracker)
@@ -127,10 +131,6 @@ impl Resource for RustClippyResource {
 
     fn cache_policy(&self, _inputs: &RustClippyInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
-    }
-
-    fn toolchain(&self, inputs: &RustClippyInputs) -> Result<BTreeMap<String, String>, BoxError> {
-        super::toolchain_fingerprint(&inputs.env)
     }
 }
 

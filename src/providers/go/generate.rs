@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::GoEnv;
@@ -72,6 +72,11 @@ impl Resource for GoGenerateResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    /// Only the go command: the generators its directives run are unknown.
+    fn ambient(&self, inputs: &GoGenerateInputs) -> Vec<Ambient> {
+        vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
     }
 
     fn resolve(&self, inputs: &GoGenerateInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {

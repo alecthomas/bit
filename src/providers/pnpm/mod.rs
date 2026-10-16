@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
+use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider};
 use crate::value::Value;
 
 /// List workspace packages that define a script.
@@ -61,6 +61,15 @@ impl Provider for PnpmProvider {
             _ => Err(format!("pnpm provider has no function '{name}'").into()),
         }
     }
+}
+
+/// pnpm and node versions, run in the workspace: corepack and Node version
+/// managers select them per directory. Shared by all three pnpm resources.
+fn ambient(dir: &str) -> Vec<Ambient> {
+    vec![
+        crate::providers::version("pnpm", &["--version"], Some(dir)),
+        crate::providers::version("node", &["--version"], Some(dir)),
+    ]
 }
 
 /// Run `pnpm <args...>`, streaming stdout/stderr through the block writer.

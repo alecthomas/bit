@@ -75,6 +75,12 @@ impl Resource for NetworkResource {
         Ok(std::collections::BTreeMap::new())
     }
 
+    /// None: the network is daemon state that the docker CLI only requests,
+    /// so a CLI upgrade must not recreate it under its attached containers.
+    fn ambient(&self, _inputs: &NetworkInputs) -> Vec<crate::provider::Ambient> {
+        vec![]
+    }
+
     fn plan(&self, inputs: &NetworkInputs, prior_state: Option<&NetworkState>) -> Result<PlanResult, BoxError> {
         let desc = format!("docker network create {}", inputs.name);
 

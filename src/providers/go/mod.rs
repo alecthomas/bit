@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
+use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider, VersionCommand};
 use crate::sha256::SHA256;
 use crate::value::Value;
 
@@ -34,15 +34,22 @@ pub struct GoEnv {
 
 impl GoEnv {
     pub fn apply_to(&self, cmd: &mut Command) {
+        cmd.envs(self.vars());
+    }
+
+    /// The environment variables these overrides set.
+    fn vars(&self) -> Vec<(&'static str, String)> {
+        let mut vars = Vec::new();
         if let Some(v) = &self.goos {
-            cmd.env("GOOS", v);
+            vars.push(("GOOS", v.clone()));
         }
         if let Some(v) = &self.goarch {
-            cmd.env("GOARCH", v);
+            vars.push(("GOARCH", v.clone()));
         }
         if let Some(cgo) = self.cgo {
-            cmd.env("CGO_ENABLED", if cgo { "1" } else { "0" });
+            vars.push(("CGO_ENABLED", if cgo { "1" } else { "0" }.to_owned()));
         }
+        vars
     }
 }
 
@@ -61,39 +68,30 @@ pub fn resolve_go_inputs(
     tracker.hash_files(&files)
 }
 
-/// Fingerprint of the effective Go toolchain and target, for the shared
-/// action key. `go env` reports values after the block's `GoEnv` overrides
-/// and the ambient environment are applied, so both are captured.
-pub fn toolchain_fingerprint(env: &GoEnv, dir: Option<&Path>) -> Result<BTreeMap<String, String>, BoxError> {
-    const KEYS: [&str; 8] = [
-        "GOVERSION",
-        "GOOS",
-        "GOARCH",
-        "CGO_ENABLED",
-        "GOFLAGS",
-        "GOEXPERIMENT",
-        "GOARM",
-        "GOAMD64",
-    ];
-    let probe_key = format!(
-        "go env|{}|{:?}",
-        dir.map(|d| d.display().to_string()).unwrap_or_default(),
-        env
-    );
-    let text = super::probe_tool(&probe_key, || {
-        let mut cmd = Command::new("go");
-        cmd.arg("env").args(KEYS);
-        env.apply_to(&mut cmd);
-        if let Some(dir) = dir {
-            cmd.current_dir(dir);
-        }
-        cmd
-    })?;
-    Ok(KEYS
-        .iter()
-        .zip(text.lines().chain(std::iter::repeat("")))
-        .map(|(k, v)| (format!("go.{k}"), v.trim().to_owned()))
-        .collect())
+/// The effective Go toolchain and target, as `go env` reports them once the
+/// block's `GoEnv` overrides and the ambient environment apply. Run in
+/// `dir`, the go command honours the module's `toolchain` line, so a
+/// toolchain switch behind it is seen.
+pub fn toolchain(env: &GoEnv, dir: Option<&str>) -> Ambient {
+    let mut command = VersionCommand::new(
+        "go",
+        &[
+            "env",
+            "GOVERSION",
+            "GOOS",
+            "GOARCH",
+            "CGO_ENABLED",
+            "GOFLAGS",
+            "GOEXPERIMENT",
+            "GOARM",
+            "GOAMD64",
+        ],
+    )
+    .dir(dir);
+    for (name, value) in env.vars() {
+        command = command.env(name, &value);
+    }
+    command.ambient()
 }
 
 /// List Go packages matching a package pattern.

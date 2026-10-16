@@ -549,6 +549,84 @@ output version = app.version
 
 ## Providers
 
+### buf
+
+**`buf.generate`** (build) — Generate code from Protobuf files with buf generate
+
+```bit
+block = buf.generate {
+  input = string?     # Buf input, relative to `dir` (defaults to the workspace in `dir`)
+  dir = string?       # Working directory for the command
+  template = string?  # Generation template path, relative to `dir` (defaults to "buf.gen.yaml")
+  flags = [string]?   # Extra flags passed to buf generate
+}
+```
+
+**Outputs:**
+
+| Field   | Type       | Description                                             |
+| ------- | ---------- | ------------------------------------------------------- |
+| `paths` | `[string]` | Output paths named by the generation template's plugins |
+
+**`buf.lint`** (test) — Lint Protobuf files with buf lint
+
+```bit
+block = buf.lint {
+  input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
+  dir = string?      # Working directory for the command
+  flags = [string]?  # Extra flags passed to buf lint
+}
+```
+
+**Outputs:**
+
+| Field    | Type   | Description            |
+| -------- | ------ | ---------------------- |
+| `passed` | `bool` | Whether linting passed |
+
+**`buf.format`** (build) — Format Protobuf files with buf format
+
+```bit
+block = buf.format {
+  input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
+  dir = string?      # Working directory for the command
+  flags = [string]?  # Extra flags passed to buf format
+}
+```
+
+**`buf.format-check`** (test) — Format Protobuf files with buf format
+
+```bit
+block = buf.format-check {
+  input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
+  dir = string?      # Working directory for the command
+  flags = [string]?  # Extra flags passed to buf format
+}
+```
+
+**Outputs:**
+
+| Field    | Type   | Description                     |
+| -------- | ------ | ------------------------------- |
+| `passed` | `bool` | Whether all files are formatted |
+
+**`buf.breaking`** (test) — Check Protobuf files for breaking changes with buf breaking
+
+```bit
+block = buf.breaking {
+  input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
+  dir = string?      # Working directory for the command
+  against = string   # Baseline input to compare against (e.g. ".git#branch=main")
+  flags = [string]?  # Extra flags passed to buf breaking
+}
+```
+
+**Outputs:**
+
+| Field    | Type   | Description                            |
+| -------- | ------ | -------------------------------------- |
+| `passed` | `bool` | Whether no breaking changes were found |
+
 ### docker
 
 **`docker.image`** (build) — Build a Docker image (auto-detects inputs from Dockerfile)
@@ -862,6 +940,28 @@ block = pnpm.test {
 
 **`pnpm.packages_with_script(script: string, dir: string?) -> [string]`** — List workspace packages that define a script.
 
+### protoc
+
+**`protoc.generate`** (build) — Generate code from Protobuf files with protoc
+
+```bit
+block = protoc.generate {
+  sources = [string]        # Protobuf files or glob patterns to compile, relative to `dir`
+  include = [string]?       # Import paths passed as `-I` (defaults to `dir`)
+  out = {string = string}   # Output directory for each generator (e.g. `{ go = "gen/go" }` passes `--go_out=gen/go`)
+  opt = {string = string}?  # Options for each generator (e.g. `{ go = "paths=source_relative" }` passes `--go_opt=paths=source_relative`)
+  flags = [string]?         # Extra flags passed to protoc
+  incremental = bool?       # Compile only the sources that changed or import a changed file. Every generator must write each output from a single source; descriptor sets, documentation, and merged API specs need full runs.
+  dir = string?             # Working directory for the command
+}
+```
+
+**Outputs:**
+
+| Field   | Type       | Description                  |
+| ------- | ---------- | ---------------------------- |
+| `paths` | `[string]` | Generator output directories |
+
 ### rust
 
 **`rust.build`** (build) — Compile Rust packages
@@ -982,6 +1082,7 @@ block = rust.fmt-check {
 2. For each block in topological order:
    - Evaluate field expressions (with upstream outputs in scope)
    - Resolve input files via the provider
+   - Fingerprint the tools the resource runs alongside its input files, so a tool upgrade or toolchain switch reruns the blocks that use it and changes their shared cache key (see below)
    - Compute a content hash (file contents + dependency hashes). A symlinked input also hashes each link target in its chain, so a stable Hermit stub such as `bin/tsk` reruns blocks when the tool is upgraded
    - Skip if nothing changed; apply if inputs differ
 3. Persist state to the user's cache directory (e.g. `~/Library/Caches/bit/<hash>/state.json` on macOS, `~/.cache/bit/<hash>/state.json` on Linux), partitioned by a hash of the project's absolute path
@@ -992,6 +1093,42 @@ Rust resources with a `package` select that package and its transitive local
 workspace dependencies for change detection. Without `package`, they track the
 whole workspace. All Rust resources also track `rustfmt.toml` and
 `.cargo/config.toml` at the workspace root.
+
+Each resource also fingerprints the ambient state its result depends on:
+the tools it runs and the environment variables it reads. bit records it
+in one of three ways:
+
+- A tool's version command, run where and how the resource runs the tool.
+  Through a proxy such as rustup or the go command, this reports the
+  toolchain the proxy selects, for example from `rust-toolchain.toml` or a
+  `go.mod` `toolchain` line.
+- A tool's executable content, for plugins without reliable version output.
+  bit reuses a hash while the file's symlink chain, size, timestamps, and
+  inode are unchanged, so large executables are not read on every run.
+- An environment variable that no version command reports, such as
+  `RUSTFLAGS`.
+
+| Provider | Fingerprints                                                                                                     |
+| -------- | ---------------------------------------------------------------------------------------------------------------- |
+| `exec`   | `bash --version`; name any program a command depends on in `inputs`                                              |
+| `docker` | `docker --version` for `docker.image` and `docker.push`. Containers and networks track none, so a CLI upgrade never recreates them |
+| `go`     | `go env GOVERSION GOOS GOARCH …` with the block's target; `golangci-lint version` for `go.lint`                  |
+| `rust`   | `rustc -vV`; `RUSTFLAGS`-style variables for building, testing, and linting; `cargo clippy --version` for `rust.clippy`; `rustfmt --version` for formatting |
+| `pnpm`   | `pnpm --version` and `node --version` in the workspace                                                           |
+| `buf`    | `buf --version`; the content of local plugins in `buf.gen.yaml` and check plugins in `buf.yaml`                  |
+| `protoc` | `protoc --version`; the content of each `protoc-gen-*` plugin and `--plugin` path                                |
+
+A tool that cannot be found or run is recorded as missing, so installing it
+later reruns the blocks that use it.
+
+`protoc.generate` tracks its sources and the files they transitively import.
+It removes generated files the latest run no longer writes. `--clean` removes
+only generated files, so anything else kept in an output directory survives.
+With `incremental = true`, it compiles only the changed sources and the
+sources that import them. It runs a full compile after a configuration or
+tool change, a removed source, or an output that moved. When a recompiled
+source stops writing an output without writing a new one, the old output
+remains until the next full compile.
 
 ### Messages
 
@@ -1028,7 +1165,8 @@ that linked Git worktrees of the same repository can reuse them, even after
 the worktree that produced them has been deleted:
 
 - `rust.build`, `rust.test`, `rust.clippy`, `rust.fmt`, `rust.fmt-check`,
-  `go.build`, `go.test`, `go.lint`, `go.fmt`, and `go.fmt-l` record that the
+  `go.build`, `go.test`, `go.lint`, `go.fmt`, `go.fmt-l`, `buf.lint`,
+  `buf.format`, and `buf.format-check` record that the
   action succeeded for a given set of sources, inputs, dependencies, and
   toolchain. A worktree with identical sources skips the action.
 - `go.exe` and `rust.exe` additionally store the built binary. A worktree

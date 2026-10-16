@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv};
@@ -117,6 +117,10 @@ impl Resource for RustFmtResource {
         ResourceKind::Build
     }
 
+    fn ambient(&self, inputs: &RustFmtInputs) -> Vec<Ambient> {
+        super::toolchain(&inputs.env, &[&["rustfmt", "--version"]])
+    }
+
     fn resolve(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
         resolve(inputs, &mut tracker)
@@ -150,10 +154,6 @@ impl Resource for RustFmtResource {
     fn cache_policy(&self, _inputs: &RustFmtInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
-
-    fn toolchain(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, String>, BoxError> {
-        super::toolchain_fingerprint(&inputs.env)
-    }
 }
 
 // -- rust.fmt-check (test) ----------------------------------------------------
@@ -173,6 +173,10 @@ impl Resource for RustFmtCheckResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
+    }
+
+    fn ambient(&self, inputs: &RustFmtInputs) -> Vec<Ambient> {
+        super::toolchain(&inputs.env, &[&["rustfmt", "--version"]])
     }
 
     fn resolve(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -207,10 +211,6 @@ impl Resource for RustFmtCheckResource {
 
     fn cache_policy(&self, _inputs: &RustFmtInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
-    }
-
-    fn toolchain(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, String>, BoxError> {
-        super::toolchain_fingerprint(&inputs.env)
     }
 }
 

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::GoEnv;
@@ -241,6 +241,10 @@ impl Resource for GoTestResource {
         ResourceKind::Test
     }
 
+    fn ambient(&self, inputs: &GoTestInputs) -> Vec<Ambient> {
+        vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
+    }
+
     fn resolve(&self, inputs: &GoTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
@@ -357,10 +361,6 @@ impl Resource for GoTestResource {
 
     fn cache_policy(&self, _inputs: &GoTestInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
-    }
-
-    fn toolchain(&self, inputs: &GoTestInputs) -> Result<BTreeMap<String, String>, BoxError> {
-        super::toolchain_fingerprint(&inputs.env, inputs.dir.as_deref().map(std::path::Path::new))
     }
 }
 

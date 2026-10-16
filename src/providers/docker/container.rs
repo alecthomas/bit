@@ -249,6 +249,12 @@ impl Resource for ContainerResource {
         Ok(std::collections::BTreeMap::new())
     }
 
+    /// None: the container is daemon state that the docker CLI only
+    /// requests, so a CLI upgrade must not recreate a running container.
+    fn ambient(&self, _inputs: &ContainerInputs) -> Vec<crate::provider::Ambient> {
+        vec![]
+    }
+
     fn plan(&self, inputs: &ContainerInputs, prior_state: Option<&ContainerState>) -> Result<PlanResult, BoxError> {
         let desc = format!("docker run {}", inputs.image);
 

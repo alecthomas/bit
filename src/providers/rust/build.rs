@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv, RustFeatures};
@@ -63,6 +63,10 @@ impl Resource for RustBuildResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn ambient(&self, inputs: &RustBuildInputs) -> Vec<Ambient> {
+        super::build_ambient(&inputs.env, &[])
     }
 
     fn resolve(&self, inputs: &RustBuildInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -123,10 +127,6 @@ impl Resource for RustBuildResource {
 
     fn cache_policy(&self, _inputs: &RustBuildInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
-    }
-
-    fn toolchain(&self, inputs: &RustBuildInputs) -> Result<BTreeMap<String, String>, BoxError> {
-        super::toolchain_fingerprint(&inputs.env)
     }
 }
 

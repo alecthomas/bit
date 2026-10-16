@@ -189,6 +189,89 @@ pub fn restore_output_files(
     Ok(())
 }
 
+/// Ambient state a resource's result depends on: what the machine and
+/// process provide rather than what the block declares. Files the provider
+/// discovers, wherever they live, belong in [`Resource::resolve`] instead.
+/// See [`Resource::ambient`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ambient {
+    /// A tool's version, as a version command such as `go env GOVERSION` or
+    /// `rustc -vV` reports it. Use this for any tool that reports its
+    /// version: run where and how the resource runs the tool, a proxy such
+    /// as rustup or the go command reports the toolchain it selects, which
+    /// hashing the proxy's own executable cannot see.
+    Version(VersionCommand),
+    /// A tool's executable content, found as a command would find it: a
+    /// name containing `/` is a path relative to bit's working directory,
+    /// and any other name is searched for on `PATH`. Use this for tools with
+    /// no reliable version output, such as protoc plugins.
+    Executable(String),
+    /// An environment variable the action reads, such as `RUSTFLAGS`. Only
+    /// for variables no [`Ambient::Version`] output already reports: `go
+    /// env`, for example, prints `GOFLAGS` itself.
+    Variable(String),
+}
+
+/// A version command for [`Ambient::Version`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Working directory, when the tool's selection depends on it, as with
+    /// rustup's `rust-toolchain.toml` or a `go.mod` toolchain line.
+    pub dir: Option<String>,
+    /// Environment variables set for the command.
+    pub env: Vec<(String, String)>,
+}
+
+impl VersionCommand {
+    pub fn new(program: &str, args: &[&str]) -> Self {
+        Self {
+            program: program.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            dir: None,
+            env: Vec::new(),
+        }
+    }
+
+    pub fn dir(mut self, dir: Option<&str>) -> Self {
+        self.dir = dir.map(str::to_owned);
+        self
+    }
+
+    pub fn env(mut self, name: &str, value: &str) -> Self {
+        self.env.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    pub fn ambient(self) -> Ambient {
+        Ambient::Version(self)
+    }
+
+    /// Shell-like rendering, which identifies the fingerprint: commands that
+    /// render the same report the same version.
+    pub fn display(&self) -> String {
+        let mut parts: Vec<String> = self.env.iter().map(|(name, value)| format!("{name}={value}")).collect();
+        parts.push(self.program.clone());
+        parts.extend(self.args.iter().cloned());
+        let command = parts.join(" ");
+        match &self.dir {
+            Some(dir) => format!("{command} (in {dir})"),
+            None => command,
+        }
+    }
+
+    pub fn command(&self) -> std::process::Command {
+        let mut cmd = std::process::Command::new(&self.program);
+        cmd.args(&self.args);
+        cmd.envs(self.env.iter().map(|(name, value)| (name, value)));
+        if let Some(dir) = &self.dir {
+            cmd.current_dir(dir);
+        }
+        cmd
+    }
+}
+
 /// Signature of a provider-exported function.
 #[derive(Debug, Clone)]
 pub struct FuncSignature {
@@ -244,6 +327,16 @@ pub trait Resource {
     /// path -> SHA256 hashes. An output that is also an input belongs here;
     /// the engine hashes declared outputs separately for local change detection.
     fn resolve(&self, inputs: &Self::Inputs) -> Result<BTreeMap<String, SHA256>, BoxError>;
+
+    /// The ambient state the result depends on: the tools the resource runs
+    /// and the environment variables it reads. Each is fingerprinted as a
+    /// source alongside [`Resource::resolve`], so a tool upgrade or changed
+    /// variable reruns the block and changes its shared action key. See
+    /// [`Ambient`].
+    fn ambient(&self, _inputs: &Self::Inputs) -> Vec<Ambient> {
+        vec![]
+    }
+
     fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -291,11 +384,6 @@ pub trait Resource {
     /// block reports success over it.
     fn output_keys(&self, _inputs: &Self::Inputs) -> Vec<String> {
         vec![]
-    }
-
-    /// Toolchain and environment fingerprint mixed into the action key.
-    fn toolchain(&self, _inputs: &Self::Inputs) -> Result<BTreeMap<String, String>, BoxError> {
-        Ok(BTreeMap::new())
     }
 
     /// Capture durable artifacts produced by a successful apply into the CAS,
@@ -359,6 +447,9 @@ pub trait DynResource: Send + Sync {
     fn kind(&self) -> ResourceKind;
     fn schema(&self) -> ResourceSchema;
     fn resolve(&self, inputs: &Map) -> Result<BTreeMap<String, SHA256>, BoxError>;
+    fn ambient(&self, _inputs: &Map) -> Result<Vec<Ambient>, BoxError> {
+        Ok(vec![])
+    }
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
@@ -380,9 +471,6 @@ pub trait DynResource: Send + Sync {
     // through the blanket impl below instead.
     fn output_keys(&self, _inputs: &Map) -> Result<Vec<String>, BoxError> {
         Ok(vec![])
-    }
-    fn toolchain(&self, _inputs: &Map) -> Result<BTreeMap<String, String>, BoxError> {
-        Ok(BTreeMap::new())
     }
     fn capture_artifacts(
         &self,
@@ -450,6 +538,11 @@ impl<R: Resource + Send + Sync> DynResource for R {
         Resource::resolve(self, &typed)
     }
 
+    fn ambient(&self, inputs: &Map) -> Result<Vec<Ambient>, BoxError> {
+        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        Ok(Resource::ambient(self, &typed))
+    }
+
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         // Discard prior state if it can't be deserialized (e.g. resource type changed).
@@ -492,11 +585,6 @@ impl<R: Resource + Send + Sync> DynResource for R {
     fn output_keys(&self, inputs: &Map) -> Result<Vec<String>, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         Ok(Resource::output_keys(self, &typed))
-    }
-
-    fn toolchain(&self, inputs: &Map) -> Result<BTreeMap<String, String>, BoxError> {
-        let typed: R::Inputs = deserialize_inputs(inputs)?;
-        Resource::toolchain(self, &typed)
     }
 
     fn capture_artifacts(

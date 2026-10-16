@@ -10,8 +10,8 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, ReceiptCheck, Resource,
-    ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, ReceiptCheck,
+    Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -144,6 +144,10 @@ impl Resource for RustExeResource {
         ResourceKind::Build
     }
 
+    fn ambient(&self, inputs: &RustExeInputs) -> Vec<Ambient> {
+        super::build_ambient(&inputs.env, &[])
+    }
+
     fn resolve(&self, inputs: &RustExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
         super::resolve_rust_inputs(inputs.package.as_deref(), &mut tracker)
@@ -232,10 +236,6 @@ impl Resource for RustExeResource {
 
     fn cache_policy(&self, _inputs: &RustExeInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
-    }
-
-    fn toolchain(&self, inputs: &RustExeInputs) -> Result<BTreeMap<String, String>, BoxError> {
-        super::toolchain_fingerprint(&inputs.env)
     }
 
     fn capture_artifacts(

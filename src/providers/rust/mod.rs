@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::ProjectIdentity;
 use crate::file_tracker::FileTracker;
-use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
+use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider, VersionCommand};
 use crate::sha256::SHA256;
 use crate::value::{BlockRef, Value};
 
@@ -212,40 +212,36 @@ fn remap_wrapper() -> Option<&'static Path> {
     WRAPPER.as_deref()
 }
 
-/// Fingerprint of the Rust toolchain and build environment, for the shared
-/// action key: `rustc -vV` for the selected toolchain, the toolchain pin
-/// file if present, and the cargo/rustc environment variables that change
-/// compiler output.
-pub fn toolchain_fingerprint(env: &RustEnv) -> Result<BTreeMap<String, String>, BoxError> {
-    const ENV_VARS: [&str; 4] = [
+/// `rustc -vV` and `extra` version commands for the selected toolchain.
+/// Through rustup, they report the toolchain that `toolchain` or
+/// `rust-toolchain.toml` selects.
+pub fn toolchain(env: &RustEnv, extra: &[&[&str]]) -> Vec<Ambient> {
+    let version = |command: &[&str]| {
+        let mut command = VersionCommand::new(command[0], &command[1..]);
+        if let Some(tc) = &env.toolchain {
+            command = command.env("RUSTUP_TOOLCHAIN", tc);
+        }
+        command.ambient()
+    };
+    let mut ambient = vec![version(&["rustc", "-vV"])];
+    ambient.extend(extra.iter().map(|command| version(command)));
+    ambient
+}
+
+/// [`toolchain`] plus the variables cargo reads that change compiler
+/// output, for the resources that compile. No version command reports
+/// them, and without them a binary built with different flags in another
+/// worktree could be restored from the shared cache.
+pub fn build_ambient(env: &RustEnv, extra: &[&[&str]]) -> Vec<Ambient> {
+    const BUILD_VARIABLES: [&str; 4] = [
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
         "CARGO_BUILD_RUSTFLAGS",
         "CARGO_BUILD_TARGET",
     ];
-    let probe_key = format!("rustc -vV|{:?}", env.toolchain);
-    let rustc = super::probe_tool(&probe_key, || {
-        let mut cmd = Command::new("rustc");
-        cmd.arg("-vV");
-        if let Some(tc) = &env.toolchain {
-            cmd.env("RUSTUP_TOOLCHAIN", tc);
-        }
-        cmd
-    })?;
-    let mut fingerprint = BTreeMap::new();
-    fingerprint.insert("rustc".to_owned(), rustc);
-    for name in ["rust-toolchain.toml", "rust-toolchain"] {
-        let path = Path::new(name);
-        if path.is_file() {
-            fingerprint.insert(format!("file.{name}"), super::hash_file(path)?.to_string());
-        }
-    }
-    for var in ENV_VARS {
-        if let Ok(value) = std::env::var(var) {
-            fingerprint.insert(format!("env.{var}"), value);
-        }
-    }
-    Ok(fingerprint)
+    let mut ambient = toolchain(env, extra);
+    ambient.extend(BUILD_VARIABLES.iter().map(|var| Ambient::Variable((*var).to_owned())));
+    ambient
 }
 
 /// Cached source directories, individual files, and target directory

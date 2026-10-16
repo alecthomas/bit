@@ -54,8 +54,6 @@ pub struct ActionKeyInput<'a> {
     pub sources: &'a BTreeMap<String, SHA256>,
     /// Result hashes of dependencies selected during the current run.
     pub deps: &'a BTreeMap<String, SHA256>,
-    /// Toolchain and environment fingerprint from the provider.
-    pub toolchain: &'a BTreeMap<String, String>,
 }
 
 impl ActionKeyInput<'_> {
@@ -308,7 +306,6 @@ mod tests {
     fn action_key_is_deterministic_and_sensitive() {
         let sources: BTreeMap<String, SHA256> = [("a".to_owned(), SHA256::digest(b"a"))].into();
         let deps = BTreeMap::new();
-        let toolchain: BTreeMap<String, String> = [("go".to_owned(), "1.0".to_owned())].into();
         let base = ActionKeyInput {
             receipt_version: RECEIPT_VERSION,
             provider: "go",
@@ -320,13 +317,12 @@ mod tests {
             inputs: SHA256::digest(b"inputs"),
             sources: &sources,
             deps: &deps,
-            toolchain: &toolchain,
         };
         let same = ActionKeyInput { ..base };
         assert_eq!(base.key(), same.key());
-        let other_toolchain: BTreeMap<String, String> = [("go".to_owned(), "1.1".to_owned())].into();
+        let other_sources: BTreeMap<String, SHA256> = [("a".to_owned(), SHA256::digest(b"b"))].into();
         let different = ActionKeyInput {
-            toolchain: &other_toolchain,
+            sources: &other_sources,
             ..base
         };
         assert_ne!(base.key(), different.key());

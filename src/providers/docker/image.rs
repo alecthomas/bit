@@ -12,8 +12,8 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, ReceiptCheck, Resource,
-    ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, ReceiptCheck,
+    Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -365,6 +365,14 @@ impl Resource for ImageResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn ambient(&self, _inputs: &ImageInputs) -> Vec<Ambient> {
+        vec![crate::providers::version(
+            &self.docker.to_string_lossy(),
+            &["--version"],
+            None,
+        )]
     }
 
     fn resolve(&self, inputs: &ImageInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {

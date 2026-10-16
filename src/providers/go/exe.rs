@@ -11,8 +11,8 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, Resource, ResourceKind,
-    restore_output_files,
+    Ambient, ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, Resource,
+    ResourceKind, restore_output_files,
 };
 use crate::sha256::SHA256;
 
@@ -106,6 +106,10 @@ impl Resource for GoExeResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn ambient(&self, inputs: &GoExeInputs) -> Vec<Ambient> {
+        vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
     }
 
     fn resolve(&self, inputs: &GoExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -209,10 +213,6 @@ impl Resource for GoExeResource {
 
     fn output_keys(&self, inputs: &GoExeInputs) -> Vec<String> {
         vec![GoExeResource::output_path(inputs)]
-    }
-
-    fn toolchain(&self, inputs: &GoExeInputs) -> Result<BTreeMap<String, String>, BoxError> {
-        super::toolchain_fingerprint(&inputs.env, inputs.dir.as_deref().map(Path::new))
     }
 
     /// The default capture and check handle the binary itself. Only the state

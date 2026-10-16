@@ -260,6 +260,12 @@ impl Resource for NetworkAttachResource {
         Ok(BTreeMap::new())
     }
 
+    /// None: the attachment is daemon state that the docker CLI only
+    /// requests, so a CLI upgrade must not detach and reattach a container.
+    fn ambient(&self, _inputs: &NetworkAttachInputs) -> Vec<crate::provider::Ambient> {
+        vec![]
+    }
+
     fn plan(
         &self,
         inputs: &NetworkAttachInputs,

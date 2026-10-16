@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::{run_pnpm, workspace};
@@ -62,6 +62,10 @@ impl Resource for PnpmInstallResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn ambient(&self, inputs: &PnpmInstallInputs) -> Vec<Ambient> {
+        super::ambient(&inputs.dir)
     }
 
     fn resolve(&self, inputs: &PnpmInstallInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {

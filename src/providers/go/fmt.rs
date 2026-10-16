@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 fn default_package() -> String {
@@ -83,6 +83,11 @@ impl Resource for GoFmtResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    /// gofmt ships with the Go toolchain, which the go command reports.
+    fn ambient(&self, inputs: &GoFmtInputs) -> Vec<Ambient> {
+        vec![super::toolchain(&super::GoEnv::default(), inputs.dir.as_deref())]
     }
 
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -171,13 +176,6 @@ impl Resource for GoFmtResource {
     fn cache_policy(&self, _inputs: &GoFmtInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
-
-    fn toolchain(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, String>, BoxError> {
-        super::toolchain_fingerprint(
-            &super::GoEnv::default(),
-            inputs.dir.as_deref().map(std::path::Path::new),
-        )
-    }
 }
 
 // ── go.fmt-l (test) ─────────────────────────────────────────────────────
@@ -203,6 +201,11 @@ impl Resource for GoFmtCheckResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Test
+    }
+
+    /// gofmt ships with the Go toolchain, which the go command reports.
+    fn ambient(&self, inputs: &GoFmtInputs) -> Vec<Ambient> {
+        vec![super::toolchain(&super::GoEnv::default(), inputs.dir.as_deref())]
     }
 
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -284,13 +287,6 @@ impl Resource for GoFmtCheckResource {
 
     fn cache_policy(&self, _inputs: &GoFmtInputs) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
-    }
-
-    fn toolchain(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, String>, BoxError> {
-        super::toolchain_fingerprint(
-            &super::GoEnv::default(),
-            inputs.dir.as_deref().map(std::path::Path::new),
-        )
     }
 }
 

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 /// Push a Docker image to a registry
@@ -66,6 +66,10 @@ impl Resource for PushResource {
 
     fn kind(&self) -> ResourceKind {
         ResourceKind::Build
+    }
+
+    fn ambient(&self, _inputs: &PushInputs) -> Vec<Ambient> {
+        vec![crate::providers::version("docker", &["--version"], None)]
     }
 
     fn resolve(&self, _inputs: &PushInputs) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
