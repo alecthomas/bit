@@ -982,7 +982,7 @@ block = rust.fmt-check {
 2. For each block in topological order:
    - Evaluate field expressions (with upstream outputs in scope)
    - Resolve input files via the provider
-   - Compute a content hash (file contents + dependency hashes)
+   - Compute a content hash (file contents + dependency hashes). A symlinked input also hashes each link target in its chain, so a stable Hermit stub such as `bin/tsk` reruns blocks when the tool is upgraded
    - Skip if nothing changed; apply if inputs differ
 3. Persist state to the user's cache directory (e.g. `~/Library/Caches/bit/<hash>/state.json` on macOS, `~/.cache/bit/<hash>/state.json` on Linux), partitioned by a hash of the project's absolute path
 
