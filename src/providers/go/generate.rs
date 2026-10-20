@@ -12,6 +12,7 @@ use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, P
 use crate::sha256::SHA256;
 
 use super::GoEnv;
+use super::scanner::Tests;
 
 /// Run go generate
 #[derive(Debug, Deserialize, bit_derive::Schema)]
@@ -83,11 +84,7 @@ impl Resource for GoGenerateResource {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(Path::new);
         // `go generate` also runs directives in `_test.go` files.
-        let mut files = super::resolve_go_inputs(&inputs.package, dir, true, &mut tracker)?;
-        for pattern in &inputs.inputs {
-            files.extend(tracker.hash_glob(pattern)?);
-        }
-        Ok(files)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &inputs.inputs, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoGenerateInputs, prior_state: Option<&GoGenerateState>) -> Result<PlanResult, BoxError> {

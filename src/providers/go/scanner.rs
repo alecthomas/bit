@@ -27,6 +27,18 @@ struct ModuleCache {
 
 static CACHE: Mutex<Option<ModuleCache>> = Mutex::new(None);
 
+/// Which test inputs a scan tracks for the packages a pattern names. Test
+/// inputs are never tracked for the packages those import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tests {
+    Excluded,
+    /// `_test.go` files.
+    Sources,
+    /// `_test.go` files and each package's `testdata/` tree, which tests read
+    /// at run time.
+    SourcesAndTestdata,
+}
+
 /// Get or initialize the module cache, starting the search from `start_dir`.
 fn with_cache<F, R>(start_dir: &Path, f: F) -> Result<R, BoxError>
 where
@@ -130,7 +142,7 @@ fn scan_package_dir(cache: &mut ModuleCache, pkg_dir: &Path) -> Result<(), BoxEr
 fn collect_transitive(
     cache: &mut ModuleCache,
     pkg_dir: &Path,
-    include_tests: bool,
+    tests: Tests,
     files: &mut HashSet<PathBuf>,
     visited: &mut HashSet<PathBuf>,
 ) -> Result<(), BoxError> {
@@ -146,17 +158,19 @@ fn collect_transitive(
         let scan = cache.packages.get(&canonical).expect("just scanned");
         let mut f = scan.go_files.clone();
         f.extend(scan.embed_files.iter().cloned());
-        if include_tests {
+        if tests != Tests::Excluded {
             f.extend(scan.test_files.iter().cloned());
         }
         (f, scan.local_import_dirs.iter().cloned().collect())
     };
 
     files.extend(local_files);
+    if tests == Tests::SourcesAndTestdata {
+        files.extend(files_under(&pkg_dir.join("testdata")));
+    }
 
-    // Recurse into deps (never with tests).
     for dep_dir in dep_dirs {
-        collect_transitive(cache, &dep_dir, false, files, visited)?;
+        collect_transitive(cache, &dep_dir, Tests::Excluded, files, visited)?;
     }
 
     Ok(())
@@ -171,7 +185,7 @@ fn collect_transitive(
 /// upward looking for `go.mod`). Pass `Some(dir)` when the calling block runs
 /// `go` from a non-project-root directory — e.g. a `go.exe` block with a `dir`
 /// pointing at a separate-module subdirectory. `None` starts from bit's CWD.
-pub fn scan(pattern: &str, include_tests: bool, base_dir: Option<&Path>) -> Result<HashSet<PathBuf>, BoxError> {
+pub fn scan(pattern: &str, tests: Tests, base_dir: Option<&Path>) -> Result<HashSet<PathBuf>, BoxError> {
     let cwd;
     let start = match base_dir {
         Some(dir) => dir,
@@ -187,7 +201,7 @@ pub fn scan(pattern: &str, include_tests: bool, base_dir: Option<&Path>) -> Resu
         let mut visited = HashSet::new();
 
         for dir in &pkg_dirs {
-            collect_transitive(cache, dir, include_tests, &mut all_files, &mut visited)?;
+            collect_transitive(cache, dir, tests, &mut all_files, &mut visited)?;
         }
 
         let go_mod = cache.module_root.join("go.mod");
@@ -310,13 +324,7 @@ fn expand_embeds(pkg_dir: &Path, patterns: &[String]) -> Vec<PathBuf> {
     for pat in patterns {
         let full = pkg_dir.join(pat);
         if full.is_dir() {
-            if let Ok(entries) = glob::glob(&format!("{}/**/*", full.display())) {
-                for entry in entries.flatten() {
-                    if entry.is_file() {
-                        files.push(entry);
-                    }
-                }
-            }
+            files.extend(files_under(&full));
         } else if let Ok(entries) = glob::glob(&full.to_string_lossy()) {
             for entry in entries.flatten() {
                 if entry.is_file() {
@@ -326,6 +334,14 @@ fn expand_embeds(pkg_dir: &Path, patterns: &[String]) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+/// All files beneath `dir`, recursively; empty if `dir` does not exist.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = glob::glob(&format!("{}/**/*", dir.display())) else {
+        return Vec::new();
+    };
+    entries.flatten().filter(|entry| entry.is_file()).collect()
 }
 
 /// Resolve a package pattern to a list of package directories.
@@ -597,13 +613,13 @@ var content embed.FS
         *CACHE.lock().unwrap() = None;
     }
 
-    fn scan_from(root: &Path, pattern: &str, include_tests: bool) -> Result<HashSet<PathBuf>, BoxError> {
+    fn scan_from(root: &Path, pattern: &str, tests: Tests) -> Result<HashSet<PathBuf>, BoxError> {
         with_cache(root, |cache| {
             let pkg_dirs = resolve_package_dirs(&cache.module_root, &cache.module_path, pattern)?;
             let mut all_files = HashSet::new();
             let mut visited = HashSet::new();
             for dir in &pkg_dirs {
-                collect_transitive(cache, dir, include_tests, &mut all_files, &mut visited)?;
+                collect_transitive(cache, dir, tests, &mut all_files, &mut visited)?;
             }
             let go_mod = cache.module_root.join("go.mod");
             let go_sum = cache.module_root.join("go.sum");
@@ -617,17 +633,13 @@ var content embed.FS
         })
     }
 
-    fn scan_from_cached_count(
-        root: &Path,
-        pattern: &str,
-        include_tests: bool,
-    ) -> Result<(HashSet<PathBuf>, usize), BoxError> {
+    fn scan_from_cached_count(root: &Path, pattern: &str, tests: Tests) -> Result<(HashSet<PathBuf>, usize), BoxError> {
         with_cache(root, |cache| {
             let pkg_dirs = resolve_package_dirs(&cache.module_root, &cache.module_path, pattern)?;
             let mut all_files = HashSet::new();
             let mut visited = HashSet::new();
             for dir in &pkg_dirs {
-                collect_transitive(cache, dir, include_tests, &mut all_files, &mut visited)?;
+                collect_transitive(cache, dir, tests, &mut all_files, &mut visited)?;
             }
             let go_mod = cache.module_root.join("go.mod");
             let go_sum = cache.module_root.join("go.sum");
@@ -675,7 +687,7 @@ func Hello() { fmt.Println("hello") }
         )
         .unwrap();
 
-        let files = scan_from(root, "./cmd/app", false).unwrap();
+        let files = scan_from(root, "./cmd/app", Tests::Excluded).unwrap();
         let canon_root = root.canonicalize().unwrap();
         let rel: HashSet<_> = files
             .iter()
@@ -700,9 +712,9 @@ func Hello() { fmt.Println("hello") }
         fs::write(root.join("pkg/lib.go"), "package pkg\n").unwrap();
         fs::write(root.join("pkg/lib_test.go"), "package pkg\n").unwrap();
 
-        let without_tests = scan_from(root, "./pkg", false).unwrap();
+        let without_tests = scan_from(root, "./pkg", Tests::Excluded).unwrap();
         clear_cache();
-        let with_tests = scan_from(root, "./pkg", true).unwrap();
+        let with_tests = scan_from(root, "./pkg", Tests::Sources).unwrap();
 
         let canon_root = root.canonicalize().unwrap();
         let rel_without: HashSet<_> = without_tests
@@ -716,6 +728,41 @@ func Hello() { fmt.Println("hello") }
 
         assert!(!rel_without.contains(Path::new("pkg/lib_test.go")));
         assert!(rel_with.contains(Path::new("pkg/lib_test.go")));
+    }
+
+    #[test]
+    fn scan_includes_testdata_of_tested_packages_only() {
+        clear_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        fs::create_dir_all(root.join("pkg/testdata/nested")).unwrap();
+        fs::write(
+            root.join("pkg/lib.go"),
+            "package pkg\nimport \"example.com/test/dep\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("pkg/testdata/nested/golden.txt"), "golden\n").unwrap();
+        fs::create_dir_all(root.join("dep/testdata")).unwrap();
+        fs::write(root.join("dep/dep.go"), "package dep\n").unwrap();
+        fs::write(root.join("dep/testdata/fixture.txt"), "fixture\n").unwrap();
+
+        let canon_root = root.canonicalize().unwrap();
+        let relative = |files: HashSet<PathBuf>| -> HashSet<PathBuf> {
+            files
+                .iter()
+                .map(|p| p.strip_prefix(&canon_root).unwrap().to_path_buf())
+                .collect()
+        };
+        let sources = relative(scan_from(root, "./pkg", Tests::Sources).unwrap());
+        clear_cache();
+        let testdata = relative(scan_from(root, "./pkg", Tests::SourcesAndTestdata).unwrap());
+
+        assert!(!sources.contains(Path::new("pkg/testdata/nested/golden.txt")));
+        assert!(testdata.contains(Path::new("pkg/testdata/nested/golden.txt")));
+        assert!(testdata.contains(Path::new("dep/dep.go")));
+        assert!(!testdata.contains(Path::new("dep/testdata/fixture.txt")));
     }
 
     #[test]
@@ -767,8 +814,8 @@ func Hello() { fmt.Println("hello") }
         fs::create_dir_all(root.join("internal/shared")).unwrap();
         fs::write(root.join("internal/shared/lib.go"), "package shared\n").unwrap();
 
-        let files_a = scan_from(root, "./cmd/a", false).unwrap();
-        let (files_b, cached_count) = scan_from_cached_count(root, "./cmd/b", false).unwrap();
+        let files_a = scan_from(root, "./cmd/a", Tests::Excluded).unwrap();
+        let (files_b, cached_count) = scan_from_cached_count(root, "./cmd/b", Tests::Excluded).unwrap();
 
         let canon_root = root.canonicalize().unwrap();
         let rel_a: HashSet<_> = files_a
@@ -807,7 +854,7 @@ func Hello() { fmt.Println("hello") }
 
         // base_dir = inner_root → scanner finds the inner module's go.mod
         // and returns only inner.go (plus go.mod).
-        let inner_files = scan(".", false, Some(&inner_root)).unwrap();
+        let inner_files = scan(".", Tests::Excluded, Some(&inner_root)).unwrap();
         assert!(
             inner_files.iter().any(|p| p.ends_with("inner.go")),
             "expected inner.go in {inner_files:?}"
@@ -820,7 +867,7 @@ func Hello() { fmt.Println("hello") }
         // base_dir = outer_root → scanner finds the outer module and skips
         // inner.go (different module).
         clear_cache();
-        let outer_files = scan(".", false, Some(outer_root)).unwrap();
+        let outer_files = scan(".", Tests::Excluded, Some(outer_root)).unwrap();
         assert!(
             outer_files.iter().any(|p| p.ends_with("outer.go")),
             "expected outer.go in {outer_files:?}"

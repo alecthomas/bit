@@ -777,13 +777,14 @@ block = exec.test {
 
 ```bit
 block = go.exe {
-  package = string   # Go package to build (e.g. "./cmd/myapp")
-  output = string?   # Output binary path (defaults to package base name)
-  flags = [string]?  # Extra flags passed to go build
-  dir = string?      # Working directory for the command
-  goos = string?     # Target OS
-  goarch = string?   # Target architecture
-  cgo = bool?        # Enable cgo
+  package = string    # Go package to build (e.g. "./cmd/myapp")
+  output = string?    # Output binary path (defaults to package base name)
+  flags = [string]?   # Extra flags passed to go build
+  inputs = [string]?  # Input file glob patterns (in addition to Go sources)
+  dir = string?       # Working directory for the command
+  goos = string?      # Target OS
+  goarch = string?    # Target architecture
+  cgo = bool?         # Enable cgo
 }
 ```
 
@@ -797,12 +798,13 @@ block = go.exe {
 
 ```bit
 block = go.build {
-  package = string   # Go package pattern (e.g. "./...")
-  flags = [string]?  # Extra flags passed to go build
-  dir = string?      # Working directory for the command
-  goos = string?     # Target OS
-  goarch = string?   # Target architecture
-  cgo = bool?        # Enable cgo
+  package = string    # Go package pattern (e.g. "./...")
+  flags = [string]?   # Extra flags passed to go build
+  inputs = [string]?  # Input file glob patterns (in addition to Go sources)
+  dir = string?       # Working directory for the command
+  goos = string?      # Target OS
+  goarch = string?    # Target architecture
+  cgo = bool?         # Enable cgo
 }
 ```
 
@@ -827,6 +829,7 @@ block = go.generate {
 block = go.test {
   package = string                      # Go package pattern (e.g. "./...")
   flags = [string]?                     # Extra flags passed to go test
+  inputs = [string]?                    # Input file glob patterns (in addition to Go sources and `testdata/`)
   report = ("suites" | "tests" | "verbose")?  # What to show: a line per package (`suites`), a line per test (`tests`), or a line per test plus go's output as it arrives (`verbose`). Outside `verbose`, go's output is shown only on failure.
   dir = string?                         # Working directory for the command
   goos = string?                        # Target OS
@@ -845,9 +848,10 @@ block = go.test {
 
 ```bit
 block = go.lint {
-  package = string   # Go package pattern
-  flags = [string]?  # Extra flags passed to golangci-lint run
-  dir = string?      # Working directory for the command
+  package = string    # Go package pattern
+  flags = [string]?   # Extra flags passed to golangci-lint run
+  inputs = [string]?  # Input file glob patterns (in addition to Go sources)
+  dir = string?       # Working directory for the command
 }
 ```
 

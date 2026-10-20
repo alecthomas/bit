@@ -10,6 +10,8 @@ use crate::output::BlockWriter;
 use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
+use super::scanner::Tests;
+
 fn default_package() -> String {
     "./...".to_owned()
 }
@@ -50,7 +52,7 @@ pub struct GoFmtState {
 /// discovery starts from that directory so a block targeting a separate-module
 /// subdirectory scans the right module.
 fn go_source_files(package: &str, dir: Option<&std::path::Path>) -> Result<Vec<String>, BoxError> {
-    let files = super::scanner::scan(package, true, dir)?;
+    let files = super::scanner::scan(package, Tests::Sources, dir)?;
     let mut paths: Vec<String> = files
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e == "go"))
@@ -93,7 +95,7 @@ impl Resource for GoFmtResource {
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, true, &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &[], &mut tracker)
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -211,7 +213,7 @@ impl Resource for GoFmtCheckResource {
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, true, &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &[], &mut tracker)
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {

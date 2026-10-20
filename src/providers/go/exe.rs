@@ -17,6 +17,7 @@ use crate::provider::{
 use crate::sha256::SHA256;
 
 use super::GoEnv;
+use super::scanner::Tests;
 
 /// Build a Go binary
 #[derive(Debug, Deserialize, bit_derive::Schema)]
@@ -29,6 +30,9 @@ pub struct GoExeInputs {
     /// Extra flags passed to go build
     #[serde(default)]
     pub flags: Vec<String>,
+    /// Input file glob patterns (in addition to Go sources)
+    #[serde(default)]
+    pub inputs: Vec<String>,
     /// Working directory for the command
     #[serde(default)]
     pub dir: Option<String>,
@@ -115,7 +119,7 @@ impl Resource for GoExeResource {
     fn resolve(&self, inputs: &GoExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::Excluded, &inputs.inputs, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoExeInputs, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {
@@ -250,6 +254,25 @@ mod tests {
         assert_eq!(Resource::kind(&resource), ResourceKind::Build);
     }
 
+    #[test]
+    fn resolve_tracks_extra_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        std::fs::write(root.join("main.go"), "package main\n").unwrap();
+        std::fs::write(root.join("main.c"), "int f(void) { return 0; }\n").unwrap();
+        let inputs = GoExeInputs {
+            package: ".".into(),
+            output: None,
+            flags: vec![],
+            inputs: vec![root.join("*.c").to_string_lossy().into_owned()],
+            dir: Some(root.to_string_lossy().into_owned()),
+            env: GoEnv::default(),
+        };
+        let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
+        assert!(resolved.keys().any(|p| p.ends_with("main.c")), "{resolved:?}");
+    }
+
     /// Pinned so that a change to how the binary is captured or restored is
     /// forced to bump the version rather than collide with older receipts.
     #[test]
@@ -258,6 +281,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: Some("bin/app".into()),
             flags: vec![],
+            inputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
@@ -273,6 +297,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: Some("bin/app".into()),
             flags: vec![],
+            inputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
@@ -287,6 +312,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: Some("bin/app".into()),
             flags: vec![],
+            inputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
@@ -308,6 +334,7 @@ mod tests {
             package: "./cmd/other".into(),
             output: Some("bin/app".into()),
             flags: vec![],
+            inputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
@@ -329,6 +356,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: Some("bin/app".into()),
             flags: vec!["-ldflags=-s".into()],
+            inputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
@@ -350,6 +378,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: Some("bin/app".into()),
             flags: vec![],
+            inputs: vec![],
             dir: None,
             env: GoEnv {
                 goos: Some("linux".into()),
@@ -375,6 +404,7 @@ mod tests {
             package: "./cmd/foo".into(),
             output: None,
             flags: vec![],
+            inputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
@@ -387,6 +417,7 @@ mod tests {
             package: "./cmd/foo".into(),
             output: Some("bin/foo".into()),
             flags: vec![],
+            inputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };

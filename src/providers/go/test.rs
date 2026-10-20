@@ -12,6 +12,7 @@ use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, P
 use crate::sha256::SHA256;
 
 use super::GoEnv;
+use super::scanner::Tests;
 use crate::providers::ReportMode;
 
 /// Run Go tests
@@ -22,6 +23,9 @@ pub struct GoTestInputs {
     /// Extra flags passed to go test
     #[serde(default)]
     pub flags: Vec<String>,
+    /// Input file glob patterns (in addition to Go sources and `testdata/`)
+    #[serde(default)]
+    pub inputs: Vec<String>,
     /// What to show: a line per package (`suites`), a line per test
     /// (`tests`), or a line per test plus go's output as it arrives
     /// (`verbose`). Outside `verbose`, go's output is shown only on failure.
@@ -248,7 +252,13 @@ impl Resource for GoTestResource {
     fn resolve(&self, inputs: &GoTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, true, &mut tracker)
+        super::resolve_go_inputs(
+            &inputs.package,
+            dir,
+            Tests::SourcesAndTestdata,
+            &inputs.inputs,
+            &mut tracker,
+        )
     }
 
     fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
@@ -380,10 +390,36 @@ mod tests {
     }
 
     #[test]
+    fn resolve_tracks_testdata_and_extra_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        std::fs::write(root.join("lib.go"), "package lib\n").unwrap();
+        std::fs::create_dir_all(root.join("testdata")).unwrap();
+        std::fs::write(root.join("testdata/golden.txt"), "golden\n").unwrap();
+        std::fs::write(root.join("schema.json"), "{}\n").unwrap();
+        let inputs = GoTestInputs {
+            package: "./...".into(),
+            flags: vec![],
+            inputs: vec![root.join("*.json").to_string_lossy().into_owned()],
+            report: ReportMode::default(),
+            dir: Some(root.to_string_lossy().into_owned()),
+            env: GoEnv::default(),
+        };
+        let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
+        assert!(
+            resolved.keys().any(|p| p.ends_with("testdata/golden.txt")),
+            "{resolved:?}"
+        );
+        assert!(resolved.keys().any(|p| p.ends_with("schema.json")), "{resolved:?}");
+    }
+
+    #[test]
     fn plan_create_when_no_prior_state() {
         let inputs = GoTestInputs {
             package: "./...".into(),
             flags: vec![],
+            inputs: vec![],
             report: ReportMode::default(),
             dir: None,
             env: GoEnv::default(),
@@ -419,6 +455,7 @@ mod tests {
         let inputs = GoTestInputs {
             package: "./...".into(),
             flags: vec!["-v".into()],
+            inputs: vec![],
             report: ReportMode::default(),
             dir: None,
             env: GoEnv::default(),

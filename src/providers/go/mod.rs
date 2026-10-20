@@ -17,6 +17,7 @@ use crate::file_tracker::FileTracker;
 use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider, VersionCommand};
 use crate::sha256::SHA256;
 use crate::value::Value;
+use scanner::Tests;
 
 /// First-class Go environment variables shared across all go resources.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
@@ -53,19 +54,26 @@ impl GoEnv {
     }
 }
 
-/// Scan Go source files for a package pattern and return hashed inputs.
+/// Scan Go source files for a package pattern and return hashed inputs,
+/// together with the files matching the block's extra `inputs` globs.
 ///
 /// `dir`, when set, is the working directory where `go` would be invoked — the
 /// scanner walks up from there to locate `go.mod`. Required for blocks that
 /// build a separate Go module via the `dir` field; `None` starts from bit's CWD.
+/// The `inputs` globs are relative to bit's CWD, as in every other block.
 pub fn resolve_go_inputs(
     pkg: &str,
     dir: Option<&Path>,
-    include_tests: bool,
+    tests: Tests,
+    inputs: &[String],
     tracker: &mut FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let files: Vec<_> = scanner::scan(pkg, include_tests, dir)?.into_iter().collect();
-    tracker.hash_files(&files)
+    let files: Vec<_> = scanner::scan(pkg, tests, dir)?.into_iter().collect();
+    let mut hashes = tracker.hash_files(&files)?;
+    for pattern in inputs {
+        hashes.extend(tracker.hash_glob(pattern)?);
+    }
+    Ok(hashes)
 }
 
 /// The effective Go toolchain and target, as `go env` reports them once the

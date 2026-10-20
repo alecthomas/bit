@@ -11,6 +11,8 @@ use crate::output::BlockWriter;
 use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
+use super::scanner::Tests;
+
 /// Run golangci-lint
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoLintInputs {
@@ -20,6 +22,9 @@ pub struct GoLintInputs {
     /// Extra flags passed to golangci-lint run
     #[serde(default)]
     pub flags: Vec<String>,
+    /// Input file glob patterns (in addition to Go sources)
+    #[serde(default)]
+    pub inputs: Vec<String>,
     /// Working directory for the command
     #[serde(default)]
     pub dir: Option<String>,
@@ -108,7 +113,7 @@ impl Resource for GoLintResource {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(Path::new);
         // golangci-lint lints tests by default; tracking them when disabled only costs a rerun.
-        let mut files = super::resolve_go_inputs(&inputs.package, dir, true, &mut tracker)?;
+        let mut files = super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &inputs.inputs, &mut tracker)?;
         let lint_dir = std::env::current_dir()?.join(dir.unwrap_or(Path::new("")));
         let home = dirs::home_dir();
         for path in golangci_config_files(&lint_dir, &inputs.package, home.as_deref()) {
@@ -260,6 +265,7 @@ mod tests {
         let inputs = GoLintInputs {
             package: "./...".into(),
             flags: vec![],
+            inputs: vec![],
             dir: Some(root.to_string_lossy().into_owned()),
         };
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
@@ -276,6 +282,7 @@ mod tests {
         let inputs = GoLintInputs {
             package: "./...".into(),
             flags: vec![],
+            inputs: vec![],
             dir: Some(root.to_string_lossy().into_owned()),
         };
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
@@ -295,6 +302,7 @@ mod tests {
         let inputs = GoLintInputs {
             package: "./...".into(),
             flags: vec![],
+            inputs: vec![],
             dir: None,
         };
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
@@ -306,6 +314,7 @@ mod tests {
         let inputs = GoLintInputs {
             package: "./...".into(),
             flags: vec![],
+            inputs: vec![],
             dir: None,
         };
         let prior = GoLintState {
@@ -322,6 +331,7 @@ mod tests {
         let inputs = GoLintInputs {
             package: "./...".into(),
             flags: vec!["--fast".into()],
+            inputs: vec![],
             dir: None,
         };
         let prior = GoLintState {

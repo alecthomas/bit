@@ -11,6 +11,7 @@ use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, P
 use crate::sha256::SHA256;
 
 use super::GoEnv;
+use super::scanner::Tests;
 
 /// Compile Go packages without producing a binary
 #[derive(Debug, Deserialize, bit_derive::Schema)]
@@ -20,6 +21,9 @@ pub struct GoBuildInputs {
     /// Extra flags passed to go build
     #[serde(default)]
     pub flags: Vec<String>,
+    /// Input file glob patterns (in addition to Go sources)
+    #[serde(default)]
+    pub inputs: Vec<String>,
     /// Working directory for the command
     #[serde(default)]
     pub dir: Option<String>,
@@ -72,7 +76,7 @@ impl Resource for GoBuildResource {
     fn resolve(&self, inputs: &GoBuildInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, false, &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::Excluded, &inputs.inputs, &mut tracker)
     }
 
     fn plan(&self, inputs: &GoBuildInputs, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
@@ -175,6 +179,7 @@ mod tests {
         let inputs = GoBuildInputs {
             package: "./...".into(),
             flags: vec![],
+            inputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
@@ -188,6 +193,7 @@ mod tests {
         let inputs = GoBuildInputs {
             package: "./...".into(),
             flags: vec![],
+            inputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
