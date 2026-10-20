@@ -1112,7 +1112,7 @@ block = rust.fmt-check {
    - Fingerprint the tools the resource runs alongside its input files, so a tool upgrade or toolchain switch reruns the blocks that use it and changes their shared cache key (see below)
    - Compute a content hash (file contents + dependency hashes). A symlinked input also hashes each link target in its chain, so a stable Hermit stub such as `bin/tsk` reruns blocks when the tool is upgraded
    - Skip if nothing changed; apply if inputs differ
-3. Persist state to the user's cache directory (e.g. `~/Library/Caches/bit/<hash>/state.json` on macOS, `~/.cache/bit/<hash>/state.json` on Linux), partitioned by a hash of the project's absolute path
+3. Persist state to the user's cache directory (e.g. `~/Library/Caches/bit/<hash>/state/` on macOS, `~/.cache/bit/<hash>/state/` on Linux, one file per block), partitioned by a hash of the project's absolute path
 
 Parallel execution with `-j N` (defaults to CPU count).
 
