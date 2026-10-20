@@ -28,6 +28,8 @@ pub enum EvalError {
     Exec(String),
     #[error("glob error: {0}")]
     Glob(String),
+    #[error("regex error: {0}")]
+    Regex(String),
     #[error("shell quoting error: {0}")]
     Shell(String),
     #[error("cannot determine project directory: {0}")]
@@ -400,6 +402,12 @@ fn builtins() -> &'static HashMap<String, BuiltinDef> {
             BuiltinDef::new(__bit_call_trim_prefix, Type::String, __bit_signature_trim_prefix()),
             BuiltinDef::new(__bit_call_trim_suffix, Type::String, __bit_signature_trim_suffix()),
             BuiltinDef::new(__bit_call_sha256, Type::String, __bit_signature_sha256()),
+            BuiltinDef::new(
+                __bit_call_filter,
+                Type::List(Box::new(Type::String)),
+                __bit_signature_filter(),
+            ),
+            BuiltinDef::new(__bit_call_replace, Type::String, __bit_signature_replace()),
         ]
         .into_iter()
         .map(|def| (def.signature.name.clone(), def))
@@ -643,6 +651,28 @@ fn sha256(value: String) -> Result<String, EvalError> {
     let digest = Sha256::digest(value.as_bytes());
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     Ok(hex)
+}
+
+fn compile_regex(pattern: &str) -> Result<regex::Regex, EvalError> {
+    regex::Regex::new(pattern).map_err(|e| EvalError::Regex(format!("invalid pattern '{pattern}': {e}")))
+}
+
+/// Keep the strings in a list that match a regular expression.
+#[bit_derive::provider_function]
+fn filter(list: Vec<String>, pattern: String) -> Result<Vec<String>, EvalError> {
+    let re = compile_regex(&pattern)?;
+    Ok(list.into_iter().filter(|value| re.is_match(value)).collect())
+}
+
+/// Replace every regular expression match in a string or each string in a list. The replacement may reference capture groups as `$1` or `${name}`.
+#[bit_derive::provider_function]
+fn replace(value: StringOrList, pattern: String, replacement: String) -> Result<StringOrList, EvalError> {
+    let re = compile_regex(&pattern)?;
+    let replace = |value: String| re.replace_all(&value, replacement.as_str()).into_owned();
+    Ok(match value {
+        StringOrList::String(value) => StringOrList::String(replace(value)),
+        StringOrList::List(values) => StringOrList::List(values.into_iter().map(replace).collect()),
+    })
 }
 
 #[cfg(test)]
@@ -1437,6 +1467,69 @@ mod tests {
         assert_eq!(
             eval(&expr, &scope).unwrap(),
             Value::Str("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into())
+        );
+    }
+
+    #[test]
+    fn eval_filter() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::List(vec![
+                Expr::Str(vec![StringPart::Literal("main.go".into())]),
+                Expr::Str(vec![StringPart::Literal("main_test.go".into())]),
+                Expr::Str(vec![StringPart::Literal("util.go".into())]),
+            ])),
+            "filter".into(),
+            vec![Expr::Str(vec![StringPart::Literal("_test\\.go$".into())])],
+        );
+        assert_eq!(
+            eval(&expr, &scope).unwrap(),
+            Value::list(vec![Value::Str("main_test.go".into())])
+        );
+    }
+
+    #[test]
+    fn eval_filter_invalid_pattern() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::List(vec![Expr::Str(vec![StringPart::Literal("a".into())])])),
+            "filter".into(),
+            vec![Expr::Str(vec![StringPart::Literal("(".into())])],
+        );
+        assert!(matches!(eval(&expr, &scope), Err(EvalError::Regex(_))));
+    }
+
+    #[test]
+    fn eval_replace_string_with_captures() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::Str(vec![StringPart::Literal("v1.2.3-v4.5.6".into())])),
+            "replace".into(),
+            vec![
+                Expr::Str(vec![StringPart::Literal("v(\\d+)\\.(\\d+)\\.\\d+".into())]),
+                Expr::Str(vec![StringPart::Literal("$1.$2".into())]),
+            ],
+        );
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("1.2-4.5".into()));
+    }
+
+    #[test]
+    fn eval_replace_list() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::List(vec![
+                Expr::Str(vec![StringPart::Literal("cmd/api/main.go".into())]),
+                Expr::Str(vec![StringPart::Literal("README.md".into())]),
+            ])),
+            "replace".into(),
+            vec![
+                Expr::Str(vec![StringPart::Literal("^cmd/([^/]+)/.*$".into())]),
+                Expr::Str(vec![StringPart::Literal("${1}".into())]),
+            ],
+        );
+        assert_eq!(
+            eval(&expr, &scope).unwrap(),
+            Value::list(vec![Value::Str("api".into()), Value::Str("README.md".into())])
         );
     }
 }

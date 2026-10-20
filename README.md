@@ -414,6 +414,8 @@ its unqualified name, for example `bit --schema env`.
 
 **`exec(command: string) -> string`** — Run a shell command and return stdout.
 
+**`filter(list: [string], pattern: string) -> [string]`** — Keep the strings in a list that match a regular expression.
+
 **`glob(pattern: string) -> [string]`** — Expand a filesystem glob.
 
 **`lines(value: string) -> [string]`** — Split a string into nonempty lines.
@@ -421,6 +423,8 @@ its unqualified name, for example `bit --schema env`.
 **`prefix(value: string | [string], text: string) -> string | [string]`** — Prepend text to a string or each string in a list.
 
 **`project_dir() -> string`** — Return the absolute directory containing BUILD.bit.
+
+**`replace(value: string | [string], pattern: string, replacement: string) -> string | [string]`** — Replace every regular expression match in a string or each string in a list. The replacement may reference capture groups as `$1` or `${name}`.
 
 **`secret(name: string) -> string`** — Read a secret by name.
 
