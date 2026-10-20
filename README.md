@@ -419,6 +419,10 @@ its unqualified name, for example `bit --schema env`.
 
 **`trim(value: string | [string]) -> string | [string]`** — Trim whitespace from a string or each string in a list.
 
+**`trim_prefix(value: string | [string], text: string) -> string | [string]`** — Remove a leading prefix from a string or each string in a list, if present.
+
+**`trim_suffix(value: string | [string], text: string) -> string | [string]`** — Remove a trailing suffix from a string or each string in a list, if present.
+
 **`uniq(list: [any]) -> [any]`** — Deduplicate a list while preserving order.
 
 ### Provider Functions
@@ -1112,15 +1116,15 @@ in one of three ways:
 - An environment variable that no version command reports, such as
   `RUSTFLAGS`.
 
-| Provider | Fingerprints                                                                                                     |
-| -------- | ---------------------------------------------------------------------------------------------------------------- |
-| `exec`   | `bash --version`; name any program a command depends on in `inputs`                                              |
-| `docker` | `docker --version` for `docker.image` and `docker.push`. Containers and networks track none, so a CLI upgrade never recreates them |
-| `go`     | `go env GOVERSION GOOS GOARCH …` with the block's target; `golangci-lint version` for `go.lint`                  |
+| Provider | Fingerprints                                                                                                                                                |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `exec`   | `bash --version`; name any program a command depends on in `inputs`                                                                                         |
+| `docker` | `docker --version` for `docker.image` and `docker.push`. Containers and networks track none, so a CLI upgrade never recreates them                          |
+| `go`     | `go env GOVERSION GOOS GOARCH …` with the block's target; `golangci-lint version` for `go.lint`                                                             |
 | `rust`   | `rustc -vV`; `RUSTFLAGS`-style variables for building, testing, and linting; `cargo clippy --version` for `rust.clippy`; `rustfmt --version` for formatting |
-| `pnpm`   | `pnpm --version` and `node --version` in the workspace                                                           |
-| `buf`    | `buf --version`; the content of local plugins in `buf.gen.yaml` and check plugins in `buf.yaml`                  |
-| `protoc` | `protoc --version`; the content of each `protoc-gen-*` plugin and `--plugin` path                                |
+| `pnpm`   | `pnpm --version` and `node --version` in the workspace                                                                                                      |
+| `buf`    | `buf --version`; the content of local plugins in `buf.gen.yaml` and check plugins in `buf.yaml`                                                             |
+| `protoc` | `protoc --version`; the content of each `protoc-gen-*` plugin and `--plugin` path                                                                           |
 
 A tool that cannot be found or run is recorded as missing, so installing it
 later reruns the blocks that use it.

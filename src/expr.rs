@@ -397,6 +397,8 @@ fn builtins() -> &'static HashMap<String, BuiltinDef> {
             BuiltinDef::new(__bit_call_prefix, Type::String, __bit_signature_prefix()),
             BuiltinDef::new(__bit_call_project_dir, Type::String, __bit_signature_project_dir()),
             BuiltinDef::new(__bit_call_suffix, Type::String, __bit_signature_suffix()),
+            BuiltinDef::new(__bit_call_trim_prefix, Type::String, __bit_signature_trim_prefix()),
+            BuiltinDef::new(__bit_call_trim_suffix, Type::String, __bit_signature_trim_suffix()),
             BuiltinDef::new(__bit_call_sha256, Type::String, __bit_signature_sha256()),
         ]
         .into_iter()
@@ -611,6 +613,26 @@ fn suffix(value: StringOrList, text: String) -> Result<StringOrList, EvalError> 
         StringOrList::List(values) => {
             StringOrList::List(values.into_iter().map(|value| format!("{value}{text}")).collect())
         }
+    })
+}
+
+/// Remove a leading prefix from a string or each string in a list, if present.
+#[bit_derive::provider_function]
+fn trim_prefix(value: StringOrList, text: String) -> Result<StringOrList, EvalError> {
+    let trim = |value: String| value.strip_prefix(text.as_str()).map(str::to_owned).unwrap_or(value);
+    Ok(match value {
+        StringOrList::String(value) => StringOrList::String(trim(value)),
+        StringOrList::List(values) => StringOrList::List(values.into_iter().map(trim).collect()),
+    })
+}
+
+/// Remove a trailing suffix from a string or each string in a list, if present.
+#[bit_derive::provider_function]
+fn trim_suffix(value: StringOrList, text: String) -> Result<StringOrList, EvalError> {
+    let trim = |value: String| value.strip_suffix(text.as_str()).map(str::to_owned).unwrap_or(value);
+    Ok(match value {
+        StringOrList::String(value) => StringOrList::String(trim(value)),
+        StringOrList::List(values) => StringOrList::List(values.into_iter().map(trim).collect()),
     })
 }
 
@@ -1345,6 +1367,62 @@ mod tests {
         assert_eq!(
             eval(&expr, &scope).unwrap(),
             Value::list(vec![Value::Str("app.so".into()), Value::Str("lib.so".into()),])
+        );
+    }
+
+    #[test]
+    fn eval_trim_prefix_string() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::Str(vec![StringPart::Literal("linux/amd64".into())])),
+            "trim_prefix".into(),
+            vec![Expr::Str(vec![StringPart::Literal("linux/".into())])],
+        );
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("amd64".into()));
+    }
+
+    #[test]
+    fn eval_trim_prefix_list_leaves_unmatched() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::List(vec![
+                Expr::Str(vec![StringPart::Literal("linux/amd64".into())]),
+                Expr::Str(vec![StringPart::Literal("darwin/arm64".into())]),
+            ])),
+            "trim_prefix".into(),
+            vec![Expr::Str(vec![StringPart::Literal("linux/".into())])],
+        );
+        assert_eq!(
+            eval(&expr, &scope).unwrap(),
+            Value::list(vec![Value::Str("amd64".into()), Value::Str("darwin/arm64".into()),])
+        );
+    }
+
+    #[test]
+    fn eval_trim_suffix_string() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::Str(vec![StringPart::Literal("app.exe".into())])),
+            "trim_suffix".into(),
+            vec![Expr::Str(vec![StringPart::Literal(".exe".into())])],
+        );
+        assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("app".into()));
+    }
+
+    #[test]
+    fn eval_trim_suffix_list_leaves_unmatched() {
+        let scope = Scope::new();
+        let expr = Expr::Pipe(
+            Box::new(Expr::List(vec![
+                Expr::Str(vec![StringPart::Literal("app.so".into())]),
+                Expr::Str(vec![StringPart::Literal("lib.a".into())]),
+            ])),
+            "trim_suffix".into(),
+            vec![Expr::Str(vec![StringPart::Literal(".so".into())])],
+        );
+        assert_eq!(
+            eval(&expr, &scope).unwrap(),
+            Value::list(vec![Value::Str("app".into()), Value::Str("lib.a".into()),])
         );
     }
 
