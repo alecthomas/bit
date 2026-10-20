@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -53,11 +53,11 @@ pub struct GoGenerateState {
 }
 
 pub struct GoGenerateResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl GoGenerateResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -81,10 +81,10 @@ impl Resource for GoGenerateResource {
     }
 
     fn resolve(&self, inputs: &GoGenerateInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(Path::new);
         // `go generate` also runs directives in `_test.go` files.
-        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &inputs.inputs, &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &inputs.inputs, tracker)
     }
 
     fn plan(&self, inputs: &GoGenerateInputs, prior_state: Option<&GoGenerateState>) -> Result<PlanResult, BoxError> {
@@ -187,7 +187,7 @@ mod tests {
     use super::*;
 
     fn test_resource() -> GoGenerateResource {
-        GoGenerateResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        GoGenerateResource::new(Arc::new(FileTracker::default()))
     }
 
     #[test]

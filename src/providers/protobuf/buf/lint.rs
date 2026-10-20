@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -28,11 +28,11 @@ pub struct BufLintOutputs {
 }
 
 pub struct BufLintResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl BufLintResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -57,8 +57,8 @@ impl Resource for BufLintResource {
     }
 
     fn resolve(&self, inputs: &BufLintInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        inputs.target.resolve(&[], &mut tracker)
+        let tracker = &*self.tracker;
+        inputs.target.resolve(&[], tracker)
     }
 
     fn ambient(&self, inputs: &BufLintInputs) -> Vec<Ambient> {
@@ -105,7 +105,7 @@ mod tests {
     use crate::provider::PlanAction;
 
     fn test_resource() -> BufLintResource {
-        BufLintResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        BufLintResource::new(Arc::new(FileTracker::default()))
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::fs;
 use std::io::BufReader;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -60,11 +60,11 @@ pub struct GoExeState {
 }
 
 pub struct GoExeResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl GoExeResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 
@@ -117,9 +117,9 @@ impl Resource for GoExeResource {
     }
 
     fn resolve(&self, inputs: &GoExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, Tests::Excluded, &inputs.inputs, &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::Excluded, &inputs.inputs, tracker)
     }
 
     fn plan(&self, inputs: &GoExeInputs, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {
@@ -245,7 +245,7 @@ mod tests {
     use super::*;
 
     fn test_resource() -> GoExeResource {
-        GoExeResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        GoExeResource::new(Arc::new(FileTracker::default()))
     }
 
     #[test]

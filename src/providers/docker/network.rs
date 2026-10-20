@@ -1,5 +1,5 @@
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -49,11 +49,11 @@ fn network_id(name: &str) -> Option<String> {
 
 pub struct NetworkResource {
     #[allow(dead_code)]
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl NetworkResource {
-    pub(super) fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub(super) fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -208,12 +208,7 @@ mod tests {
             name: "test-net".into(),
             driver: None,
         };
-        let result = Resource::plan(
-            &NetworkResource::new(Arc::new(Mutex::new(FileTracker::default()))),
-            &inputs,
-            None,
-        )
-        .unwrap();
+        let result = Resource::plan(&NetworkResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
@@ -229,7 +224,7 @@ mod tests {
             driver: None,
         };
         let result = Resource::plan(
-            &NetworkResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &NetworkResource::new(Arc::new(FileTracker::default())),
             &inputs,
             Some(&prior),
         )

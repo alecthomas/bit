@@ -4,7 +4,7 @@ use std::io::{self, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -284,12 +284,12 @@ fn build_args(inputs: &ImageInputs, metadata_path: Option<&Path>) -> Vec<String>
 }
 
 pub struct ImageResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
     docker: PathBuf,
 }
 
 impl ImageResource {
-    pub(super) fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub(super) fn new(tracker: Arc<FileTracker>) -> Self {
         Self {
             tracker,
             docker: "docker".into(),
@@ -380,7 +380,7 @@ impl Resource for ImageResource {
         let dockerfile = context.join(&inputs.dockerfile);
         let dockerignore = parse::DockerIgnore::load(context);
 
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        let tracker = &*self.tracker;
         let mut files = BTreeMap::new();
 
         if dockerfile.is_file() {
@@ -726,12 +726,7 @@ mod tests {
     #[test]
     fn plan_create_when_no_state() {
         let inputs = test_inputs();
-        let result = Resource::plan(
-            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
-            &inputs,
-            None,
-        )
-        .unwrap();
+        let result = Resource::plan(&ImageResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert!(result.description.contains("myapp:latest"));
     }
@@ -750,7 +745,7 @@ exit 0
         .unwrap();
         std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
         let resource = ImageResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
             docker,
         };
         let output = crate::output::Output::new(&[]);
@@ -773,7 +768,7 @@ exit 0
             pinned_tag: None,
         };
         let result = Resource::plan(
-            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &ImageResource::new(Arc::new(FileTracker::default())),
             &inputs,
             Some(&prior),
         )
@@ -797,7 +792,7 @@ exit 0
             pinned_tag: None,
         };
         let result = Resource::plan(
-            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &ImageResource::new(Arc::new(FileTracker::default())),
             &inputs,
             Some(&prior),
         )
@@ -821,7 +816,7 @@ exit 0
             pinned_tag: None,
         };
         let result = Resource::plan(
-            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &ImageResource::new(Arc::new(FileTracker::default())),
             &inputs,
             Some(&prior),
         )
@@ -844,11 +839,7 @@ exit 0
             build_args: HashMap::new(),
             platform: vec![],
         };
-        let resolved = Resource::resolve(
-            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
-            &inputs,
-        )
-        .unwrap();
+        let resolved = Resource::resolve(&ImageResource::new(Arc::new(FileTracker::default())), &inputs).unwrap();
         assert_eq!(resolved.len(), 2);
         assert!(resolved.contains_key(&dockerfile.to_string_lossy().into_owned()));
         assert!(resolved.contains_key(&src_file.to_string_lossy().into_owned()));
@@ -871,19 +862,11 @@ exit 0
             build_args: HashMap::new(),
             platform: vec![],
         };
-        let resolved = Resource::resolve(
-            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
-            &inputs,
-        )
-        .unwrap();
+        let resolved = Resource::resolve(&ImageResource::new(Arc::new(FileTracker::default())), &inputs).unwrap();
         assert_eq!(resolved.len(), 3); // Dockerfile + main.rs + test.log
 
         std::fs::write(dir.path().join(".dockerignore"), "*.log\n").unwrap();
-        let resolved = Resource::resolve(
-            &ImageResource::new(Arc::new(Mutex::new(FileTracker::default()))),
-            &inputs,
-        )
-        .unwrap();
+        let resolved = Resource::resolve(&ImageResource::new(Arc::new(FileTracker::default())), &inputs).unwrap();
         assert_eq!(resolved.len(), 2); // Dockerfile + main.rs
         assert!(resolved.contains_key(&dockerfile.to_string_lossy().into_owned()));
         assert!(resolved.contains_key(&src_dir.join("main.rs").to_string_lossy().into_owned()));
@@ -947,7 +930,7 @@ exit 0
 
     #[test]
     fn image_uses_shared_cache() {
-        let resource = ImageResource::new(Arc::new(Mutex::new(FileTracker::default())));
+        let resource = ImageResource::new(Arc::new(FileTracker::default()));
         assert_eq!(
             Resource::cache_policy(&resource, &test_inputs()),
             CachePolicy::Shared { version: 2 }
@@ -956,7 +939,7 @@ exit 0
 
     #[test]
     fn multi_platform_image_uses_local_state_only() {
-        let resource = ImageResource::new(Arc::new(Mutex::new(FileTracker::default())));
+        let resource = ImageResource::new(Arc::new(FileTracker::default()));
         assert_eq!(
             Resource::cache_policy(&resource, &multi_platform_inputs()),
             CachePolicy::Local
@@ -986,7 +969,7 @@ exit 91
         .unwrap();
         std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
         let resource = ImageResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
             docker,
         };
         let output = crate::output::Output::new(&[]);
@@ -1019,7 +1002,7 @@ printf '%s\n' "$*" > "$(dirname "$0")/docker.log"
         .unwrap();
         std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
         let resource = ImageResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
             docker,
         };
         let digest = "b".repeat(64);
@@ -1042,7 +1025,7 @@ printf '%s\n' "$*" > "$(dirname "$0")/docker.log"
     #[test]
     fn multi_platform_destroy_does_not_remove_a_local_image() {
         let resource = ImageResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
             docker: "/does/not/exist/docker".into(),
         };
         let state = ImageState {
@@ -1080,7 +1063,7 @@ exit 91
         .unwrap();
         std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
         let resource = ImageResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
             docker,
         };
         let output = crate::output::Output::new(&[]);
@@ -1096,7 +1079,7 @@ exit 91
 
     #[test]
     fn receipt_without_image_archive_is_unusable() {
-        let resource = ImageResource::new(Arc::new(Mutex::new(FileTracker::default())));
+        let resource = ImageResource::new(Arc::new(FileTracker::default()));
         assert_eq!(
             Resource::check_receipt(
                 &resource,
@@ -1157,7 +1140,7 @@ exit 1
         std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let resource = ImageResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
             docker,
         };
         let cas = Cas::new(dir.path().join("cas"));

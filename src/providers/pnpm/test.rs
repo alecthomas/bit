@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +55,7 @@ pub struct PnpmTestState {
 }
 
 pub struct PnpmTestResource {
-    pub(super) tracker: Arc<Mutex<FileTracker>>,
+    pub(super) tracker: Arc<FileTracker>,
 }
 
 impl Resource for PnpmTestResource {
@@ -76,14 +76,8 @@ impl Resource for PnpmTestResource {
     }
 
     fn resolve(&self, inputs: &PnpmTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("FileTracker mutex poisoned");
-        resolve_inputs(
-            &inputs.dir,
-            inputs.package.as_deref(),
-            &[],
-            &inputs.inputs,
-            &mut tracker,
-        )
+        let tracker = &*self.tracker;
+        resolve_inputs(&inputs.dir, inputs.package.as_deref(), &[], &inputs.inputs, tracker)
     }
 
     fn plan(&self, inputs: &PnpmTestInputs, prior_state: Option<&PnpmTestState>) -> Result<PlanResult, BoxError> {
@@ -174,7 +168,7 @@ mod tests {
 
     fn test_resource() -> PnpmTestResource {
         PnpmTestResource {
-            tracker: Arc::new(Mutex::new(FileTracker::new())),
+            tracker: Arc::new(FileTracker::new()),
         }
     }
 

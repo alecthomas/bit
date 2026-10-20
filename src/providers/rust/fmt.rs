@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -69,7 +69,7 @@ fn fmt_check_command(inputs: &RustFmtInputs) -> CargoCommand {
     cargo
 }
 
-fn resolve(inputs: &RustFmtInputs, tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+fn resolve(inputs: &RustFmtInputs, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let mut files = super::resolve_rust_inputs(inputs.package.as_deref(), tracker)?;
     let name = ".rustfmt.toml";
     let path = std::path::Path::new(name);
@@ -101,7 +101,7 @@ fn save_state(inputs: &RustFmtInputs) -> RustFmtState {
 // -- rust.fmt (build) ---------------------------------------------------------
 
 pub struct RustFmtResource {
-    pub tracker: Arc<Mutex<FileTracker>>,
+    pub tracker: Arc<FileTracker>,
 }
 
 impl Resource for RustFmtResource {
@@ -122,8 +122,8 @@ impl Resource for RustFmtResource {
     }
 
     fn resolve(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
-        resolve(inputs, &mut tracker)
+        let tracker = &*self.tracker;
+        resolve(inputs, tracker)
     }
 
     fn plan(&self, inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
@@ -159,7 +159,7 @@ impl Resource for RustFmtResource {
 // -- rust.fmt-check (test) ----------------------------------------------------
 
 pub struct RustFmtCheckResource {
-    pub tracker: Arc<Mutex<FileTracker>>,
+    pub tracker: Arc<FileTracker>,
 }
 
 impl Resource for RustFmtCheckResource {
@@ -180,8 +180,8 @@ impl Resource for RustFmtCheckResource {
     }
 
     fn resolve(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
-        resolve(inputs, &mut tracker)
+        let tracker = &*self.tracker;
+        resolve(inputs, tracker)
     }
 
     fn plan(&self, inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
@@ -220,13 +220,13 @@ mod tests {
 
     fn make_fmt_resource() -> RustFmtResource {
         RustFmtResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
         }
     }
 
     fn make_fmt_check_resource() -> RustFmtCheckResource {
         RustFmtCheckResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
         }
     }
 

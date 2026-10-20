@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -47,11 +47,11 @@ pub struct GoBuildState {
 }
 
 pub struct GoBuildResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl GoBuildResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -74,9 +74,9 @@ impl Resource for GoBuildResource {
     }
 
     fn resolve(&self, inputs: &GoBuildInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, Tests::Excluded, &inputs.inputs, &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::Excluded, &inputs.inputs, tracker)
     }
 
     fn plan(&self, inputs: &GoBuildInputs, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
@@ -165,7 +165,7 @@ mod tests {
     use super::*;
 
     fn test_resource() -> GoBuildResource {
-        GoBuildResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        GoBuildResource::new(Arc::new(FileTracker::default()))
     }
 
     #[test]

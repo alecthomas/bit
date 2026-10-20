@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -148,11 +148,11 @@ pub struct BufGenerateState {
 }
 
 pub struct BufGenerateResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl BufGenerateResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -171,8 +171,8 @@ impl Resource for BufGenerateResource {
     }
 
     fn resolve(&self, inputs: &BufGenerateInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        inputs.target.resolve(&[inputs.template()], &mut tracker)
+        let tracker = &*self.tracker;
+        inputs.target.resolve(&[inputs.template()], tracker)
     }
 
     fn ambient(&self, inputs: &BufGenerateInputs) -> Vec<Ambient> {
@@ -237,7 +237,7 @@ mod tests {
     use crate::provider::PlanAction;
 
     fn test_resource() -> BufGenerateResource {
-        BufGenerateResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        BufGenerateResource::new(Arc::new(FileTracker::default()))
     }
 
     /// Inputs reading `template` from a fresh directory.

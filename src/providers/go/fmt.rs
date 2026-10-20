@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -65,11 +65,11 @@ fn go_source_files(package: &str, dir: Option<&std::path::Path>) -> Result<Vec<S
 // ── go.fmt (build) ──────────────────────────────────────────────────────
 
 pub struct GoFmtResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl GoFmtResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -93,9 +93,9 @@ impl Resource for GoFmtResource {
     }
 
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &[], &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &[], tracker)
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -183,11 +183,11 @@ impl Resource for GoFmtResource {
 // ── go.fmt-l (test) ─────────────────────────────────────────────────────
 
 pub struct GoFmtCheckResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl GoFmtCheckResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -211,9 +211,9 @@ impl Resource for GoFmtCheckResource {
     }
 
     fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &[], &mut tracker)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &[], tracker)
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -297,11 +297,11 @@ mod tests {
     use super::*;
 
     fn test_fmt_resource() -> GoFmtResource {
-        GoFmtResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        GoFmtResource::new(Arc::new(FileTracker::default()))
     }
 
     fn test_fmt_check_resource() -> GoFmtCheckResource {
-        GoFmtCheckResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        GoFmtCheckResource::new(Arc::new(FileTracker::default()))
     }
 
     const UNFORMATTED_TEST: &str = "package pkg\nfunc helper( ) {}\n";

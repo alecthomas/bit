@@ -285,10 +285,7 @@ pub fn target_directory() -> Result<PathBuf, BoxError> {
 /// hashes `.rs` files within them via the tracker. When `package` is set, only
 /// that package and its transitive local workspace dependencies are included.
 /// The metadata discovery is cached so the call only happens once per run.
-pub fn resolve_rust_inputs(
-    package: Option<&str>,
-    tracker: &mut FileTracker,
-) -> Result<BTreeMap<String, SHA256>, BoxError> {
+pub fn resolve_rust_inputs(package: Option<&str>, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let discovered = discovered()?;
     let paths = match package {
         Some(package) => discovered
@@ -596,11 +593,11 @@ fn discover_source_dirs(packages: &[&serde_json::Value], cwd: &Path) -> HashSet<
 
 /// Rust provider with `build`, `exe`, `test`, `clippy`, and `fmt` resources.
 pub struct RustProvider {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl RustProvider {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -652,7 +649,7 @@ mod tests {
 
     #[test]
     fn provider_registration() {
-        let tracker = Arc::new(Mutex::new(FileTracker::default()));
+        let tracker = Arc::new(FileTracker::default());
         let provider = RustProvider::new(tracker);
         assert_eq!(provider.name(), "rust");
         let resources = provider.resources();

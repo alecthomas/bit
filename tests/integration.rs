@@ -3,7 +3,7 @@ use std::fs;
 use bit::cache::BuildCache;
 use bit::engine;
 use bit::loader;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bit::file_tracker::FileTracker;
 use bit::output::Output;
@@ -13,15 +13,15 @@ use bit::providers::exec::ExecProvider;
 use bit::state::{StateError, StateStore};
 use bit::value::Map;
 
-fn test_tracker() -> Arc<Mutex<FileTracker>> {
-    Arc::new(Mutex::new(FileTracker::new()))
+fn test_tracker() -> Arc<FileTracker> {
+    Arc::new(FileTracker::new())
 }
 
 fn local_cache() -> BuildCache {
     BuildCache::local_only(std::path::Path::new("."))
 }
 
-fn registry(tracker: &Arc<Mutex<FileTracker>>) -> ProviderRegistry {
+fn registry(tracker: &Arc<FileTracker>) -> ProviderRegistry {
     let mut reg = ProviderRegistry::new();
     reg.register(Box::new(ExecProvider::new(tracker.clone())));
     reg

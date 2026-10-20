@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +48,7 @@ pub struct PnpmInstallState {
 }
 
 pub struct PnpmInstallResource {
-    pub(super) tracker: Arc<Mutex<FileTracker>>,
+    pub(super) tracker: Arc<FileTracker>,
 }
 
 impl Resource for PnpmInstallResource {
@@ -69,7 +69,7 @@ impl Resource for PnpmInstallResource {
     }
 
     fn resolve(&self, inputs: &PnpmInstallInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("FileTracker mutex poisoned");
+        let tracker = &*self.tracker;
         workspace::with_workspace(Path::new(&inputs.dir), |ws| {
             let mut files = BTreeMap::new();
             files.insert(
@@ -183,7 +183,7 @@ mod tests {
 
     fn test_resource() -> PnpmInstallResource {
         PnpmInstallResource {
-            tracker: Arc::new(Mutex::new(FileTracker::new())),
+            tracker: Arc::new(FileTracker::new()),
         }
     }
 

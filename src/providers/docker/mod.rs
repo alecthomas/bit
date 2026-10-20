@@ -6,7 +6,7 @@ pub mod parse;
 pub mod push;
 
 use std::process::Output;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::file_tracker::FileTracker;
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
@@ -27,11 +27,11 @@ pub(super) fn check_remove_output(action: &str, output: Output) -> Result<(), Bo
 }
 
 pub struct DockerProvider {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl DockerProvider {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }

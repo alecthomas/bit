@@ -9,7 +9,7 @@ pub mod test;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -66,7 +66,7 @@ pub fn resolve_go_inputs(
     dir: Option<&Path>,
     tests: Tests,
     inputs: &[String],
-    tracker: &mut FileTracker,
+    tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let files: Vec<_> = scanner::scan(pkg, tests, dir)?.into_iter().collect();
     let mut hashes = tracker.hash_files(&files)?;
@@ -186,11 +186,11 @@ fn package_list(output: &[u8]) -> Vec<String> {
 
 /// Go provider with `exe`, `build`, and `test` resources.
 pub struct GoProvider {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl GoProvider {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn provider_registration() {
-        let provider = GoProvider::new(Arc::new(Mutex::new(FileTracker::default())));
+        let provider = GoProvider::new(Arc::new(FileTracker::default()));
         assert_eq!(provider.name(), "go");
         let resources = provider.resources();
         assert_eq!(resources.len(), 7);

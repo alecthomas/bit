@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -234,11 +234,11 @@ fn run_disconnect(network: &str, container: &str) -> Result<(), BoxError> {
 
 pub struct NetworkAttachResource {
     #[allow(dead_code)]
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl NetworkAttachResource {
-    pub(super) fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub(super) fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -429,7 +429,7 @@ mod tests {
     }
 
     fn fresh_resource() -> NetworkAttachResource {
-        NetworkAttachResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        NetworkAttachResource::new(Arc::new(FileTracker::default()))
     }
 
     #[test]

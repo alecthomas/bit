@@ -110,7 +110,7 @@ fn proto_files(root: &Path) -> Result<Vec<PathBuf>, BoxError> {
 }
 
 /// Hash the `.proto` files under each of `roots`.
-fn hash_protos(roots: &[PathBuf], tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+fn hash_protos(roots: &[PathBuf], tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let mut hashes = BTreeMap::new();
     for root in roots {
         hashes.extend(tracker.hash_files(&proto_files(root)?)?);

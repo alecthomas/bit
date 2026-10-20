@@ -6,7 +6,7 @@ pub mod lint;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitStatus;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +53,7 @@ impl BufTarget {
     ///
     /// An input that is not a local directory, such as a Git or BSR
     /// reference, contributes only the configuration in `dir`.
-    fn resolve(&self, extra: &[&str], tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, extra: &[&str], tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let dir = self.dir.as_deref();
         let config_dirs = self.config_dirs();
         let source_root = config_dirs.last().expect("dir is always a config dir");
@@ -137,11 +137,11 @@ impl PluginCommand {
 /// Buf provider with `generate`, `lint`, `format`, `format-check`, and
 /// `breaking` resources.
 pub struct BufProvider {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl BufProvider {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn provider_registration() {
-        let provider = BufProvider::new(Arc::new(Mutex::new(FileTracker::default())));
+        let provider = BufProvider::new(Arc::new(FileTracker::default()));
         assert_eq!(provider.name(), "buf");
         let names: Vec<String> = provider.resources().iter().map(|r| r.name().to_owned()).collect();
         assert_eq!(names, ["generate", "lint", "format", "format-check", "breaking"]);
@@ -206,7 +206,7 @@ mod tests {
             input: Some("proto".into()),
             dir: Some(root.to_string_lossy().into_owned()),
         };
-        let resolved = target.resolve(&["buf.gen.yaml"], &mut FileTracker::default()).unwrap();
+        let resolved = target.resolve(&["buf.gen.yaml"], &FileTracker::default()).unwrap();
         let mut names: Vec<_> = resolved
             .keys()
             .map(|path| path.strip_prefix(&*root.to_string_lossy()).unwrap().to_owned())
@@ -249,7 +249,7 @@ mod tests {
             input: None,
             dir: Some(root.to_string_lossy().into_owned()),
         };
-        let resolved = target.resolve(&[], &mut FileTracker::default()).unwrap();
+        let resolved = target.resolve(&[], &FileTracker::default()).unwrap();
         assert!(
             resolved.keys().any(|path| path.ends_with("other/b.proto")),
             "{resolved:?}"

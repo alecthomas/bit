@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::cache::{ActionKey, ActionKeyInput, BuildCache, PublishOutcome, RECEIPT_VERSION, Receipt};
 use crate::dag::{self, Dag, DagError, DagNode};
@@ -336,7 +336,7 @@ pub fn affected_order(
     cache: &BuildCache,
     order: &[String],
     changes: &crate::git::Changes,
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
 ) -> Result<Vec<String>, EngineError> {
     if order.is_empty() {
         return Ok(Vec::new());
@@ -355,7 +355,7 @@ pub fn affected_order(
         return Ok(order.to_vec());
     }
 
-    tracker.lock().expect("tracker lock").reset();
+    tracker.reset();
     let mut scope = base.scope.clone();
     let mut affected = HashSet::new();
 
@@ -532,18 +532,11 @@ fn is_ambient_key(key: &str) -> bool {
 /// The block's sources: the files its resource resolves and the ambient
 /// state it depends on, so a tool upgrade or changed variable is a source
 /// change like any other.
-fn resolve_sources(
-    node: &DagNode,
-    inputs: &Map,
-    tracker: &Mutex<FileTracker>,
-) -> Result<BTreeMap<String, SHA256>, BoxError> {
+fn resolve_sources(node: &DagNode, inputs: &Map, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
     // Resources lock the tracker themselves while resolving.
     let mut sources = node.resource.resolve(inputs)?;
     let ambient = node.resource.ambient(inputs)?;
-    sources.extend(crate::providers::hash_ambient(
-        &ambient,
-        &mut tracker.lock().expect("tracker lock"),
-    )?);
+    sources.extend(crate::providers::hash_ambient(&ambient, tracker)?);
     Ok(sources)
 }
 
@@ -552,11 +545,10 @@ fn resolve_hashes(
     inputs: &Map,
     outputs: &[OutputFile],
     cache: &BuildCache,
-    tracker: &Mutex<FileTracker>,
+    tracker: &FileTracker,
 ) -> Result<ResolvedHashes, BoxError> {
     let sources = cache.normalize_keys(&resolve_sources(node, inputs, tracker)?);
     let mut tracked = sources.clone();
-    let mut tracker = tracker.lock().expect("tracker lock");
     for output in outputs {
         let path = Path::new(&output.path);
         if path.is_file() {
@@ -633,7 +625,7 @@ fn prepare_block(
     dep_hashes: BTreeMap<String, SHA256>,
     dirty: &HashSet<String>,
     cache: &BuildCache,
-    tracker: &Mutex<FileTracker>,
+    tracker: &FileTracker,
     writer: &BlockWriter,
     mode: ApplyMode,
 ) -> Result<Prepared, EngineError> {
@@ -773,7 +765,7 @@ pub fn plan(
     cache: &BuildCache,
     output: &Output,
     targets: &[String],
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = resolve_order(dag, targets)?;
     plan_selected(dag, base, cache, output, &order, tracker)
@@ -786,9 +778,9 @@ pub fn plan_selected(
     cache: &BuildCache,
     output: &Output,
     order: &[String],
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
-    tracker.lock().expect("tracker lock").reset();
+    tracker.reset();
     validate_active_params(dag, order, base)?;
     crate::debug!(output, "plan: {} block(s) in order: {}", order.len(), order.join(", "));
 
@@ -866,7 +858,7 @@ pub fn apply(
     output: &Output,
     targets: &[String],
     jobs: usize,
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = resolve_order(dag, targets)?;
     apply_selected(dag, base, store, cache, output, &order, jobs, tracker)
@@ -882,7 +874,7 @@ pub fn apply_selected(
     output: &Output,
     order: &[String],
     jobs: usize,
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     apply_selected_with_mode(dag, base, store, cache, output, order, jobs, tracker, ApplyMode::Normal)
 }
@@ -898,7 +890,7 @@ pub fn apply_selected_forced(
     output: &Output,
     order: &[String],
     jobs: usize,
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     apply_selected_with_mode(dag, base, store, cache, output, order, jobs, tracker, ApplyMode::Force)
 }
@@ -912,10 +904,10 @@ fn apply_selected_with_mode(
     output: &Output,
     order: &[String],
     jobs: usize,
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
     mode: ApplyMode,
 ) -> Result<Vec<BlockPlan>, EngineError> {
-    tracker.lock().expect("tracker lock").reset();
+    tracker.reset();
     validate_active_params(dag, order, base)?;
     crate::debug!(
         output,
@@ -952,7 +944,7 @@ pub fn test(
     cache: &BuildCache,
     output: &Output,
     jobs: usize,
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let order = dag.test_order()?;
     crate::debug!(
@@ -974,7 +966,7 @@ fn apply_order(
     cache: &BuildCache,
     output: &Output,
     order: &[String],
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
     mode: ApplyMode,
 ) -> Result<Vec<BlockPlan>, EngineError> {
     let mut scope = base.scope.clone();
@@ -1049,7 +1041,7 @@ fn apply_order_parallel(
     output: &Output,
     order: &[String],
     jobs: usize,
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
     concurrency: &HashMap<String, Option<ConcurrencyLimit>>,
     mode: ApplyMode,
 ) -> Result<Vec<BlockPlan>, EngineError> {
@@ -1199,28 +1191,17 @@ fn bind_receipt(
     hit: &CacheHit,
     cache: &BuildCache,
     writer: &BlockWriter,
-    tracker: &Mutex<FileTracker>,
 ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
     let cas = cache.cas().ok_or("shared cache unavailable")?;
     let materialize = || {
         node.resource
             .materialize(inputs, &hit.receipt.state, outputs, &hit.receipt.artifacts, cas, writer)
     };
-    // Restoring declared outputs mutates provider-visible paths. Serialize it
-    // with input resolution so another block cannot hash bit's temporary
-    // files while they are being atomically moved into place. With no declared
-    // outputs there are no engine-managed paths to protect; provider-specific
-    // restoration such as `docker image load` must not block unrelated input
-    // resolution.
-    let materialized = if hit.check == ReceiptCheck::Restore && !outputs.is_empty() {
-        let mut tracker = tracker.lock().expect("tracker lock");
-        let result = materialize();
-        tracker.clear_hash_cache();
-        result?
-    } else {
-        materialize()?
-    };
-    match materialized {
+    // Restoring declared outputs moves temporary files into place while other
+    // blocks may be resolving inputs. The tracker skips discovered files that
+    // vanish before they are hashed, and rehashes restored files whose
+    // metadata changed, so this needs no coordination with resolution.
+    match materialize()? {
         Some(result) => Ok(result),
         // The default `materialize` recreates the declared outputs and leaves
         // the receipt's own state and outputs to be bound as they are. A
@@ -1299,7 +1280,7 @@ fn execute_block(
     dep_hashes: BTreeMap<String, SHA256>,
     cache: &BuildCache,
     writer: &BlockWriter,
-    tracker: &Mutex<FileTracker>,
+    tracker: &FileTracker,
     mode: ApplyMode,
 ) -> Result<BlockResult, EngineError> {
     let inputs = eval_fields(&node.fields, scope).map_err(|e| EngineError::Eval {
@@ -1334,15 +1315,7 @@ fn execute_block(
                 prepared.plan.reason.as_deref(),
             );
         }
-        match bind_receipt(
-            node,
-            &prepared.inputs,
-            &prepared.cached_outputs,
-            hit,
-            cache,
-            writer,
-            tracker,
-        ) {
+        match bind_receipt(node, &prepared.inputs, &prepared.cached_outputs, hit, cache, writer) {
             Ok(result) => bound = Some(result),
             Err(e) => {
                 writer.stderr_line(&format!("warning: cannot use cached result, running instead: {e}"));
@@ -1401,8 +1374,8 @@ fn execute_block(
     let mut result_hash = None;
     let wrapped_state = if let Some(new_state) = &apply_result.state {
         // Re-resolve after apply: outputs now exist and mutating actions
-        // such as formatters change their own inputs.
-        tracker.lock().expect("tracker lock").clear_hash_cache();
+        // such as formatters change their own inputs. The tracker rehashes
+        // any file whose metadata changed.
         let ResolvedHashes {
             sources: post_sources,
             tracked: post_resolve,
@@ -1764,7 +1737,7 @@ fn concurrency_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use crate::file_tracker::FileTracker;
     use crate::loader;
@@ -1773,15 +1746,15 @@ mod tests {
     use crate::providers::exec::ExecProvider;
     use crate::state::StateStore;
 
-    fn test_tracker() -> Arc<Mutex<FileTracker>> {
-        Arc::new(Mutex::new(FileTracker::new()))
+    fn test_tracker() -> Arc<FileTracker> {
+        Arc::new(FileTracker::new())
     }
 
     fn test_cache() -> BuildCache {
         BuildCache::local_only(std::path::Path::new("."))
     }
 
-    fn test_registry(tracker: &Arc<Mutex<FileTracker>>) -> ProviderRegistry {
+    fn test_registry(tracker: &Arc<FileTracker>) -> ProviderRegistry {
         let mut reg = ProviderRegistry::new();
         reg.register(Box::new(ExecProvider::new(tracker.clone())));
         reg
@@ -2741,13 +2714,12 @@ lint[module] = go.lint {
         //! `passed` output is controlled by an input.
         use std::collections::BTreeMap;
         use std::path::{Path, PathBuf};
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         use serde::{Deserialize, Serialize};
 
         use crate::cache::{ArtifactRef, Cas};
-        use crate::file_tracker::FileTracker;
         use crate::output::BlockWriter;
         use crate::provider::{
             Ambient, ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, MaterializeResult, OutputFile,
@@ -2780,8 +2752,6 @@ lint[module] = go.lint {
 
         pub struct CachedProvider {
             pub applies: Arc<AtomicUsize>,
-            pub tracker: Arc<Mutex<FileTracker>>,
-            pub materialize_saw_tracker_lock: Arc<AtomicBool>,
         }
 
         impl Provider for CachedProvider {
@@ -2792,15 +2762,11 @@ lint[module] = go.lint {
                 vec![
                     Box::new(FileResource {
                         applies: self.applies.clone(),
-                        tracker: self.tracker.clone(),
-                        materialize_saw_tracker_lock: self.materialize_saw_tracker_lock.clone(),
                         kind: ResourceKind::Build,
                         name: "file",
                     }),
                     Box::new(FileResource {
                         applies: self.applies.clone(),
-                        tracker: self.tracker.clone(),
-                        materialize_saw_tracker_lock: self.materialize_saw_tracker_lock.clone(),
                         kind: ResourceKind::Test,
                         name: "check",
                     }),
@@ -2816,8 +2782,6 @@ lint[module] = go.lint {
 
         pub struct FileResource {
             applies: Arc<AtomicUsize>,
-            tracker: Arc<Mutex<FileTracker>>,
-            materialize_saw_tracker_lock: Arc<AtomicBool>,
             kind: ResourceKind,
             name: &'static str,
         }
@@ -2905,10 +2869,6 @@ lint[module] = go.lint {
                 cas: &Cas,
                 writer: &BlockWriter,
             ) -> MaterializeResult<State, Outputs> {
-                self.materialize_saw_tracker_lock.store(
-                    matches!(self.tracker.try_lock(), Err(std::sync::TryLockError::WouldBlock)),
-                    Ordering::SeqCst,
-                );
                 crate::provider::restore_output_files(outputs, artifacts, cas, writer)?;
                 let path = out_path(inputs).to_string_lossy().into_owned();
                 Ok(Some(ApplyResult {
@@ -2923,7 +2883,7 @@ lint[module] = go.lint {
     }
 
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// One linked git worktree: a project root with its own local state store.
     struct Worktree {
@@ -2978,7 +2938,6 @@ lint[module] = go.lint {
         repo: PathBuf,
         cache_dir: PathBuf,
         applies: Arc<AtomicUsize>,
-        materialize_saw_tracker_lock: Arc<AtomicBool>,
     }
 
     impl Harness {
@@ -3008,7 +2967,6 @@ lint[module] = go.lint {
                 repo,
                 _tmp: tmp,
                 applies: Arc::new(AtomicUsize::new(0)),
-                materialize_saw_tracker_lock: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -3016,12 +2974,10 @@ lint[module] = go.lint {
             Worktree::new(&self.repo, &self.base, name)
         }
 
-        fn registry(&self, tracker: &Arc<Mutex<FileTracker>>) -> ProviderRegistry {
+        fn registry(&self) -> ProviderRegistry {
             let mut reg = ProviderRegistry::new();
             reg.register(Box::new(cached::CachedProvider {
                 applies: self.applies.clone(),
-                tracker: tracker.clone(),
-                materialize_saw_tracker_lock: self.materialize_saw_tracker_lock.clone(),
             }));
             reg
         }
@@ -3030,11 +2986,11 @@ lint[module] = go.lint {
             BuildCache::open_at(&wt.root, &self.cache_dir)
         }
 
-        fn load(&self, wt: &Worktree, input: &str) -> (Dag, BaseScope, Arc<Mutex<FileTracker>>) {
+        fn load(&self, wt: &Worktree, input: &str) -> (Dag, BaseScope, Arc<FileTracker>) {
             let tracker = test_tracker();
             let module = parser::parse(input, "<test>").expect("parse failed");
             let (dag, base) =
-                loader::load(&module, &Map::new(), &self.registry(&tracker), &wt.store, &[]).expect("load failed");
+                loader::load(&module, &Map::new(), &self.registry(), &wt.store, &[]).expect("load failed");
             (dag, base, tracker)
         }
 
@@ -3093,10 +3049,6 @@ lint[module] = go.lint {
             self.applies.load(Ordering::SeqCst)
         }
 
-        fn materialize_saw_tracker_lock(&self) -> bool {
-            self.materialize_saw_tracker_lock.load(Ordering::SeqCst)
-        }
-
         /// The single published receipt, parsed.
         fn only_receipt(&self) -> Receipt {
             let paths = self.receipts();
@@ -3127,10 +3079,6 @@ lint[module] = go.lint {
         assert_eq!(plans[0].plan.action, PlanAction::Restore);
         assert_eq!(plans[0].plan.reason.as_deref(), Some("cached"));
         assert_eq!(h.applies(), 1, "provider must not run on a cache hit");
-        assert!(
-            h.materialize_saw_tracker_lock(),
-            "receipt materialization must be serialized with input resolution"
-        );
         assert_eq!(std::fs::read_to_string(b.out()).unwrap(), "hello");
         let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(b.out()).unwrap().permissions());
         assert_eq!(mode & 0o111, 0o111);
@@ -3267,10 +3215,6 @@ lint[module] = go.lint {
         assert_eq!(plans[0].plan.action, PlanAction::None);
         assert_eq!(plans[0].plan.reason.as_deref(), Some("cached"));
         assert_eq!(h.applies(), 1);
-        assert!(
-            !h.materialize_saw_tracker_lock(),
-            "binding a valid receipt must not block input resolution"
-        );
         assert!(b.store.load("app").unwrap().is_some());
     }
 

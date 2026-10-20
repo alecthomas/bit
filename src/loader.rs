@@ -449,7 +449,7 @@ fn resolve_dep(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use super::*;
     use crate::file_tracker::FileTracker;
@@ -459,7 +459,7 @@ mod tests {
 
     fn test_registry() -> ProviderRegistry {
         let mut reg = ProviderRegistry::new();
-        let tracker = Arc::new(Mutex::new(FileTracker::new()));
+        let tracker = Arc::new(FileTracker::new());
         reg.register(Box::new(ExecProvider::new(tracker)));
         reg.register(Box::new(DependencyProvider));
         reg

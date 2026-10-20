@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +44,7 @@ pub struct RustClippyState {
 }
 
 pub struct RustClippyResource {
-    pub tracker: Arc<Mutex<FileTracker>>,
+    pub tracker: Arc<FileTracker>,
 }
 
 fn clippy_command(inputs: &RustClippyInputs) -> CargoCommand {
@@ -74,8 +74,8 @@ impl Resource for RustClippyResource {
     }
 
     fn resolve(&self, inputs: &RustClippyInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
-        super::resolve_rust_inputs(inputs.package.as_deref(), &mut tracker)
+        let tracker = &*self.tracker;
+        super::resolve_rust_inputs(inputs.package.as_deref(), tracker)
     }
 
     fn plan(&self, inputs: &RustClippyInputs, prior_state: Option<&RustClippyState>) -> Result<PlanResult, BoxError> {
@@ -140,7 +140,7 @@ mod tests {
 
     fn make_resource() -> RustClippyResource {
         RustClippyResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
         }
     }
 

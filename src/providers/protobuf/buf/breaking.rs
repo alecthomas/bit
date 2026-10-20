@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -85,11 +85,11 @@ fn git_baseline_commit(against: &str, dir: Option<&str>) -> Result<Option<String
 }
 
 pub struct BufBreakingResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl BufBreakingResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -109,11 +109,11 @@ impl Resource for BufBreakingResource {
 
     /// A baseline that is a local directory is tracked like the input.
     fn resolve(&self, inputs: &BufBreakingInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        let mut hashes = inputs.target.resolve(&[], &mut tracker)?;
+        let tracker = &*self.tracker;
+        let mut hashes = inputs.target.resolve(&[], tracker)?;
         let baseline = super::super::in_dir(inputs.target.dir.as_deref(), &inputs.against);
         if baseline.is_dir() {
-            hashes.extend(super::super::hash_protos(&[baseline], &mut tracker)?);
+            hashes.extend(super::super::hash_protos(&[baseline], tracker)?);
         }
         Ok(hashes)
     }
@@ -173,7 +173,7 @@ mod tests {
     use super::*;
 
     fn test_resource() -> BufBreakingResource {
-        BufBreakingResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        BufBreakingResource::new(Arc::new(FileTracker::default()))
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) -> String {

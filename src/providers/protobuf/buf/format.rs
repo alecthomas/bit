@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -48,11 +48,11 @@ const CHECK: [&str; 2] = ["--diff", "--exit-code"];
 // ── buf.format (build) ──────────────────────────────────────────────────
 
 pub struct BufFormatResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl BufFormatResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -71,8 +71,8 @@ impl Resource for BufFormatResource {
     }
 
     fn resolve(&self, inputs: &BufFormatInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        inputs.target.resolve(&[], &mut tracker)
+        let tracker = &*self.tracker;
+        inputs.target.resolve(&[], tracker)
     }
 
     fn ambient(&self, inputs: &BufFormatInputs) -> Vec<Ambient> {
@@ -117,11 +117,11 @@ impl Resource for BufFormatResource {
 // ── buf.format-check (test) ─────────────────────────────────────────────
 
 pub struct BufFormatCheckResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl BufFormatCheckResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -140,8 +140,8 @@ impl Resource for BufFormatCheckResource {
     }
 
     fn resolve(&self, inputs: &BufFormatInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-        inputs.target.resolve(&[], &mut tracker)
+        let tracker = &*self.tracker;
+        inputs.target.resolve(&[], tracker)
     }
 
     fn ambient(&self, inputs: &BufFormatInputs) -> Vec<Ambient> {
@@ -184,8 +184,8 @@ impl Resource for BufFormatCheckResource {
 mod tests {
     use super::*;
 
-    fn tracker() -> Arc<Mutex<FileTracker>> {
-        Arc::new(Mutex::new(FileTracker::default()))
+    fn tracker() -> Arc<FileTracker> {
+        Arc::new(FileTracker::default())
     }
 
     #[test]

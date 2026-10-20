@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -208,12 +208,12 @@ fn run_outputs(command: &str, dir: Option<&str>) -> Result<crate::value::Map, Bo
 
 /// Provider for running arbitrary shell commands.
 pub struct ExecProvider {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl ExecProvider {
     /// Create a new exec provider with a shared file tracker.
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -244,7 +244,7 @@ impl Provider for ExecProvider {
 }
 
 struct ExecResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl Resource for ExecResource {
@@ -267,7 +267,7 @@ impl Resource for ExecResource {
     }
 
     fn resolve(&self, inputs: &ExecInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock");
+        let tracker = &*self.tracker;
         let mut files = BTreeMap::new();
         for pattern in &inputs.inputs {
             files.extend(tracker.hash_glob(pattern)?);
@@ -516,7 +516,7 @@ fn run_with_results(
 }
 
 struct ExecTestResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl Resource for ExecTestResource {
@@ -539,7 +539,7 @@ impl Resource for ExecTestResource {
     }
 
     fn resolve(&self, inputs: &ExecTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock");
+        let tracker = &*self.tracker;
         let mut files = BTreeMap::new();
         for pattern in &inputs.inputs {
             files.extend(tracker.hash_glob(pattern)?);
@@ -628,8 +628,8 @@ mod tests {
     use crate::value::Map;
     use std::fs;
 
-    fn test_tracker() -> Arc<Mutex<FileTracker>> {
-        Arc::new(Mutex::new(FileTracker::new()))
+    fn test_tracker() -> Arc<FileTracker> {
+        Arc::new(FileTracker::new())
     }
 
     #[test]

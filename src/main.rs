@@ -1,6 +1,6 @@
 use std::fs;
 use std::process;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use clap::Parser;
 use yansi::Paint;
@@ -167,7 +167,7 @@ struct Cli {
     targets: Vec<String>,
 }
 
-fn default_registry(tracker: &Arc<Mutex<FileTracker>>) -> ProviderRegistry {
+fn default_registry(tracker: &Arc<FileTracker>) -> ProviderRegistry {
     let mut reg = ProviderRegistry::new();
     reg.register(Box::new(ExecProvider::new(tracker.clone())));
     reg.register(Box::new(DockerProvider::new(tracker.clone())));
@@ -395,7 +395,7 @@ fn plan_styles(
     base: &bit::loader::BaseScope,
     cache: &BuildCache,
     order: &[String],
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
 ) -> Result<std::collections::HashMap<String, bit::graph::NodeStyle>, engine::EngineError> {
     use yansi::Paint;
     let silent = Output::silent();
@@ -504,7 +504,7 @@ fn selected_order(
     targets: &[String],
     since: Option<&str>,
     mode: SelectionMode,
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
 ) -> Result<Vec<String>, SelectionError> {
     let order = match mode {
         SelectionMode::Targets => engine::resolve_order(dag, targets)?,
@@ -527,7 +527,7 @@ fn selected_order_or_exit(
     targets: &[String],
     since: Option<&str>,
     mode: SelectionMode,
-    tracker: &Arc<Mutex<FileTracker>>,
+    tracker: &Arc<FileTracker>,
     quiet: bool,
 ) -> Option<Vec<String>> {
     let order = match selected_order(dag, base, cache, targets, since, mode, tracker) {
@@ -563,7 +563,7 @@ fn main() {
         Ok(root) => FileTracker::with_executable_cache(root.join("executable-hashes-v1.json")),
         Err(_) => FileTracker::new(),
     };
-    let tracker = Arc::new(Mutex::new(tracker));
+    let tracker = Arc::new(tracker);
 
     if cli.force && !operation.allows_force() {
         eprintln!(
@@ -1440,7 +1440,7 @@ mod tests {
     use super::*;
 
     fn registry() -> ProviderRegistry {
-        default_registry(&Arc::new(Mutex::new(FileTracker::new())))
+        default_registry(&Arc::new(FileTracker::new()))
     }
 
     #[test]

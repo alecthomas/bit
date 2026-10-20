@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -223,11 +223,11 @@ fn wait_healthy(name: &str, hc: &Healthcheck, writer: &BlockWriter) -> Result<()
 
 pub struct ContainerResource {
     #[allow(dead_code)]
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl ContainerResource {
-    pub(super) fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub(super) fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -427,12 +427,7 @@ mod tests {
     #[test]
     fn plan_create_when_no_state() {
         let inputs = test_inputs();
-        let result = Resource::plan(
-            &ContainerResource::new(Arc::new(Mutex::new(FileTracker::default()))),
-            &inputs,
-            None,
-        )
-        .unwrap();
+        let result = Resource::plan(&ContainerResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert!(result.description.contains("nginx:latest"));
     }
@@ -445,7 +440,7 @@ mod tests {
             container_id: "abc123".into(),
         };
         let result = Resource::plan(
-            &ContainerResource::new(Arc::new(Mutex::new(FileTracker::default()))),
+            &ContainerResource::new(Arc::new(FileTracker::default())),
             &inputs,
             Some(&prior),
         )

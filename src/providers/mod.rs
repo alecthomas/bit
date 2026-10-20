@@ -150,7 +150,7 @@ pub fn find_executable(program: &str) -> Option<PathBuf> {
 /// failing the block: running it fails anyway, and recording it means
 /// installing it later reruns the block. An unset variable is omitted, so
 /// setting it later is a new source.
-pub fn hash_ambient(ambient: &[Ambient], tracker: &mut FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+pub fn hash_ambient(ambient: &[Ambient], tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let mut hashes = BTreeMap::new();
     for item in ambient {
         match item {
@@ -339,7 +339,7 @@ mod tests {
             Ambient::Variable("PATH".into()),
             Ambient::Variable("BIT_TEST_UNSET_VARIABLE".into()),
         ];
-        let hashes = hash_ambient(&tools, &mut FileTracker::default()).unwrap();
+        let hashes = hash_ambient(&tools, &FileTracker::default()).unwrap();
         let path = std::env::var_os("PATH").unwrap();
         assert_eq!(
             hashes,

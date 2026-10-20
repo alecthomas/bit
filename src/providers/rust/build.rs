@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +40,7 @@ pub struct RustBuildState {
 }
 
 pub struct RustBuildResource {
-    pub tracker: Arc<Mutex<FileTracker>>,
+    pub tracker: Arc<FileTracker>,
 }
 
 fn build_command(inputs: &RustBuildInputs) -> CargoCommand {
@@ -70,8 +70,8 @@ impl Resource for RustBuildResource {
     }
 
     fn resolve(&self, inputs: &RustBuildInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
-        super::resolve_rust_inputs(inputs.package.as_deref(), &mut tracker)
+        let tracker = &*self.tracker;
+        super::resolve_rust_inputs(inputs.package.as_deref(), tracker)
     }
 
     fn plan(&self, inputs: &RustBuildInputs, prior_state: Option<&RustBuildState>) -> Result<PlanResult, BoxError> {
@@ -137,7 +137,7 @@ mod tests {
 
     fn make_resource() -> RustBuildResource {
         RustBuildResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
         }
     }
 

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -91,7 +91,7 @@ pub(super) fn resolve_inputs(
     package: Option<&str>,
     output: &[String],
     extra_globs: &[String],
-    tracker: &mut FileTracker,
+    tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
     workspace::with_workspace(Path::new(dir), |ws| {
         let mut files = BTreeMap::new();
@@ -189,7 +189,7 @@ pub struct PnpmRunState {
 }
 
 pub struct PnpmRunResource {
-    pub(super) tracker: Arc<Mutex<FileTracker>>,
+    pub(super) tracker: Arc<FileTracker>,
 }
 
 impl Resource for PnpmRunResource {
@@ -210,13 +210,13 @@ impl Resource for PnpmRunResource {
     }
 
     fn resolve(&self, inputs: &PnpmRunInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("FileTracker mutex poisoned");
+        let tracker = &*self.tracker;
         resolve_inputs(
             &inputs.dir,
             inputs.package.as_deref(),
             &inputs.output,
             &inputs.inputs,
-            &mut tracker,
+            tracker,
         )
     }
 
@@ -307,7 +307,7 @@ mod tests {
 
     fn test_resource() -> PnpmRunResource {
         PnpmRunResource {
-            tracker: Arc::new(Mutex::new(FileTracker::new())),
+            tracker: Arc::new(FileTracker::new()),
         }
     }
 

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -159,7 +159,7 @@ impl ProtocGenerateInputs {
     /// Hashes of the compiled files with their imports, and of the tools
     /// that compile them. The tool hashes are the ones the engine records,
     /// so an incremental run sees the same toolchain change.
-    fn hashes(&self, compilation: &Compilation, tracker: &mut FileTracker) -> Result<Hashes, BoxError> {
+    fn hashes(&self, compilation: &Compilation, tracker: &FileTracker) -> Result<Hashes, BoxError> {
         Ok(Hashes {
             protos: tracker.hash_files(&compilation.graph.files())?,
             tools: crate::providers::hash_ambient(&self.ambient(), tracker)?,
@@ -416,11 +416,11 @@ pub struct ProtocGenerateState {
 }
 
 pub struct ProtocGenerateResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl ProtocGenerateResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -494,7 +494,7 @@ impl Resource for ProtocGenerateResource {
     /// Tracks the sources and the files they transitively import.
     fn resolve(&self, inputs: &ProtocGenerateInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let files = inputs.compilation()?.graph.files();
-        self.tracker.lock().expect("tracker lock poisoned").hash_files(&files)
+        self.tracker.hash_files(&files)
     }
 
     fn ambient(&self, inputs: &ProtocGenerateInputs) -> Vec<Ambient> {
@@ -526,8 +526,8 @@ impl Resource for ProtocGenerateResource {
         }
         let compilation = inputs.compilation()?;
         let hashes = {
-            let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
-            inputs.hashes(&compilation, &mut tracker)?
+            let tracker = &*self.tracker;
+            inputs.hashes(&compilation, tracker)?
         };
 
         let incremental = match prior_state {
@@ -581,11 +581,11 @@ impl Resource for ProtocGenerateResource {
 
 /// protoc provider with a `generate` resource.
 pub struct ProtocProvider {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl ProtocProvider {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -614,7 +614,7 @@ mod tests {
     use crate::provider::PlanAction;
 
     fn test_resource() -> ProtocGenerateResource {
-        ProtocGenerateResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        ProtocGenerateResource::new(Arc::new(FileTracker::default()))
     }
 
     /// A project where `proto/acme/v1/a.proto` imports `b.proto`, which
@@ -646,7 +646,7 @@ mod tests {
         inputs.sources = vec!["proto/**/*.proto".into()];
         inputs.incremental = true;
         let compilation = inputs.compilation().unwrap();
-        let hashes = inputs.hashes(&compilation, &mut FileTracker::default()).unwrap();
+        let hashes = inputs.hashes(&compilation, &FileTracker::default()).unwrap();
         let prior = ProtocGenerateState {
             inputs: inputs.clone(),
             compiled: compilation.files,
@@ -659,13 +659,13 @@ mod tests {
 
     fn batches(inputs: &ProtocGenerateInputs, prior: &ProtocGenerateState) -> Option<Batches> {
         let compilation = inputs.compilation().unwrap();
-        let hashes = inputs.hashes(&compilation, &mut FileTracker::default()).unwrap();
+        let hashes = inputs.hashes(&compilation, &FileTracker::default()).unwrap();
         incremental_batches(inputs, prior, &compilation, &hashes)
     }
 
     #[test]
     fn provider_registration() {
-        let provider = ProtocProvider::new(Arc::new(Mutex::new(FileTracker::default())));
+        let provider = ProtocProvider::new(Arc::new(FileTracker::default()));
         assert_eq!(provider.name(), "protoc");
         let resources = provider.resources();
         assert_eq!(resources.len(), 1);

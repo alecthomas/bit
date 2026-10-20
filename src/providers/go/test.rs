@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -223,11 +223,11 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, mode: Report
 }
 
 pub struct GoTestResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl GoTestResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -250,15 +250,9 @@ impl Resource for GoTestResource {
     }
 
     fn resolve(&self, inputs: &GoTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(
-            &inputs.package,
-            dir,
-            Tests::SourcesAndTestdata,
-            &inputs.inputs,
-            &mut tracker,
-        )
+        super::resolve_go_inputs(&inputs.package, dir, Tests::SourcesAndTestdata, &inputs.inputs, tracker)
     }
 
     fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
@@ -380,7 +374,7 @@ mod tests {
     use crate::output::Output;
 
     fn test_resource() -> GoTestResource {
-        GoTestResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        GoTestResource::new(Arc::new(FileTracker::default()))
     }
 
     #[test]

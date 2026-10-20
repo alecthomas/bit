@@ -5,7 +5,7 @@ pub mod workspace;
 
 use std::io::BufReader;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
@@ -23,11 +23,11 @@ fn packages_with_script(script: String, dir: Option<String>) -> Result<Vec<Strin
 
 /// pnpm-aware provider with `install`, `run`, and `test` resources.
 pub struct PnpmProvider {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl PnpmProvider {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn provider_registration() {
-        let provider = PnpmProvider::new(Arc::new(Mutex::new(FileTracker::new())));
+        let provider = PnpmProvider::new(Arc::new(FileTracker::new()));
         assert_eq!(provider.name(), "pnpm");
         let resources = provider.resources();
         assert_eq!(resources.len(), 3);

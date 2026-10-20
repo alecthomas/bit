@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +61,7 @@ pub struct RustExeState {
 }
 
 pub struct RustExeResource {
-    pub tracker: Arc<Mutex<FileTracker>>,
+    pub tracker: Arc<FileTracker>,
 }
 
 /// Role under which the built binary is recorded in a receipt.
@@ -149,8 +149,8 @@ impl Resource for RustExeResource {
     }
 
     fn resolve(&self, inputs: &RustExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().unwrap_or_else(|e| e.into_inner());
-        super::resolve_rust_inputs(inputs.package.as_deref(), &mut tracker)
+        let tracker = &*self.tracker;
+        super::resolve_rust_inputs(inputs.package.as_deref(), tracker)
     }
 
     fn plan(&self, inputs: &RustExeInputs, prior_state: Option<&RustExeState>) -> Result<PlanResult, BoxError> {
@@ -307,7 +307,7 @@ mod tests {
 
     fn make_resource() -> RustExeResource {
         RustExeResource {
-            tracker: Arc::new(Mutex::new(FileTracker::default())),
+            tracker: Arc::new(FileTracker::default()),
         }
     }
 

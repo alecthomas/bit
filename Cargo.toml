@@ -33,3 +33,7 @@ jaq-std = "3.0.3"
 jaq-json = "2.0.3"
 shlex = "2.0.1"
 regex = "1.13.1"
+dashmap = "6.2.1"
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+sha2 = { version = "0.10.9", features = ["asm"] }

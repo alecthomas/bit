@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -79,11 +79,11 @@ fn golangci_config_files(lint_dir: &Path, package: &str, home: Option<&Path>) ->
 }
 
 pub struct GoLintResource {
-    tracker: Arc<Mutex<FileTracker>>,
+    tracker: Arc<FileTracker>,
 }
 
 impl GoLintResource {
-    pub fn new(tracker: Arc<Mutex<FileTracker>>) -> Self {
+    pub fn new(tracker: Arc<FileTracker>) -> Self {
         Self { tracker }
     }
 }
@@ -110,10 +110,10 @@ impl Resource for GoLintResource {
     }
 
     fn resolve(&self, inputs: &GoLintInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut tracker = self.tracker.lock().expect("tracker lock poisoned");
+        let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(Path::new);
         // golangci-lint lints tests by default; tracking them when disabled only costs a rerun.
-        let mut files = super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &inputs.inputs, &mut tracker)?;
+        let mut files = super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &inputs.inputs, tracker)?;
         let lint_dir = std::env::current_dir()?.join(dir.unwrap_or(Path::new("")));
         let home = dirs::home_dir();
         for path in golangci_config_files(&lint_dir, &inputs.package, home.as_deref()) {
@@ -211,7 +211,7 @@ mod tests {
     use super::*;
 
     fn test_resource() -> GoLintResource {
-        GoLintResource::new(Arc::new(Mutex::new(FileTracker::default())))
+        GoLintResource::new(Arc::new(FileTracker::default()))
     }
 
     #[test]
