@@ -230,8 +230,17 @@ fn render_block(result: &mut String, block: &Block, syntax: &StatementSource, co
     }
     result.push_str(&block.name);
     if !block.matrix_keys.is_empty() {
+        let keys: Vec<_> = block
+            .matrix_keys
+            .iter()
+            .zip(&syntax.matrix_keys)
+            .map(|(key, values)| match values {
+                Some(values) => format!("{} = {}", key.name, values.trim_end()),
+                None => key.name.clone(),
+            })
+            .collect();
         result.push('[');
-        result.push_str(&block.matrix_keys.join(", "));
+        result.push_str(&keys.join(", "));
         result.push(']');
     }
     result.push_str(" = ");
@@ -366,6 +375,13 @@ mod tests {
         let source = "import 'example.com/mod' as mod\nparam names:[string]=['one','two']\nlet selected=if true then [1]+[2] else [3]\noutput chosen=selected[0].name\npre protected explicit job[names]=exec{config={answer=42}, command=\"#{mod.value | trim}\"}\ntarget default=[job]\n";
         let formatted = format(source, "BUILD.bit").unwrap();
         assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
+    }
+
+    #[test]
+    fn formats_matrix_key_values_expressions() {
+        let source = "tests[module,package=go.packages('./...',module)]=go.test{package=package}\n";
+        let expected = "tests[module, package = go.packages('./...',module)] = go.test {\n  package = package\n}\n";
+        assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
     }
 
     #[test]

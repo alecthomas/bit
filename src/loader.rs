@@ -192,7 +192,7 @@ pub fn load_selected(
                             existing: existing.as_str(),
                         });
                     }
-                    matrix_blocks.insert(b.name.clone(), b.matrix_keys.clone());
+                    matrix_blocks.insert(b.name.clone(), b.matrix_key_names());
                     deferred_matrix.push(b.clone());
                 } else if let Some(module_path) = module::resolve_module_path(import_roots, &b.provider, &b.resource) {
                     // Full define happens in expand_module.
@@ -1021,6 +1021,39 @@ target release = [work(arch = ["arm64"], tag = "1.2.3")]
         let node = dag.get_node(&order[0]).unwrap();
         let command = node.fields.iter().find(|field| field.name == "command").unwrap();
         assert_eq!(command.value.to_string(), r#""build #{"arm64"} #{"1.2.3"}""#);
+    }
+
+    #[test]
+    fn matrix_key_values_depend_on_earlier_keys_and_params() {
+        let input = r##"
+let module = ["a", "b"]
+
+test[module, package = split("#{module}/x,#{module}/#{suffix}", ",")](suffix : string) = exec {
+  command = "test #{module} #{package}"
+  output = "tested"
+}
+target all = [test(suffix = "y")]
+"##;
+        let module = parser::parse(input, "<test>").unwrap();
+        let invocations = [crate::invocation::Invocation {
+            name: "all".into(),
+            args: vec![],
+        }];
+        let (dag, _scope, selected) =
+            load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
+
+        assert_eq!(
+            dag.targets()[&selected[0]].blocks,
+            vec![
+                r#"test["a", "a/x"](suffix="y")"#,
+                r#"test["a", "a/y"](suffix="y")"#,
+                r#"test["b", "b/x"](suffix="y")"#,
+                r#"test["b", "b/y"](suffix="y")"#,
+            ]
+        );
+        let node = dag.get_node(r#"test["b", "b/y"](suffix="y")"#).unwrap();
+        let command = node.fields.iter().find(|field| field.name == "command").unwrap();
+        assert_eq!(command.value.to_string(), r#""test #{"b"} #{"b/y"}""#);
     }
 
     #[test]

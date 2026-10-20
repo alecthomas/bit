@@ -100,6 +100,9 @@
 (matrix_slice_ref
   name: (identifier) @variable)
 
+(matrix_key_binding
+  name: (identifier) @variable)
+
 (dotted_identifier
   (identifier) @variable)
 

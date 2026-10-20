@@ -808,7 +808,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "identifier"
+          "name": "_block_matrix_key"
         },
         {
           "type": "REPEAT",
@@ -821,7 +821,7 @@
               },
               {
                 "type": "SYMBOL",
-                "name": "identifier"
+                "name": "_block_matrix_key"
               }
             ]
           }
@@ -829,6 +829,44 @@
         {
           "type": "STRING",
           "value": "]"
+        }
+      ]
+    },
+    "_block_matrix_key": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "identifier"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "matrix_key_binding"
+        }
+      ]
+    },
+    "matrix_key_binding": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "="
+        },
+        {
+          "type": "FIELD",
+          "name": "values",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_expression"
+          }
         }
       ]
     },

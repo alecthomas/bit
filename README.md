@@ -296,6 +296,23 @@ Multiple keys produce a cartesian product. Non-matrix blocks depending on a
 matrix block wait for all slices. Targets can name a matrix block to include
 all of its slices.
 
+A key can compute its own list with `key = expr`. The expression runs once for
+each combination of the keys before it, with those keys bound to their slice
+values, so a later list can depend on an earlier key:
+
+```hcl
+let module = go.modules()
+
+tests[module, package = go.packages("./...", module)] = go.test {
+  dir     = module
+  package = package
+}
+```
+
+This creates one slice per package in each module, such as
+`tests["svc", "example.com/svc/api"]`. A combination whose list is empty
+produces no slices.
+
 Matrix slice selectors are expressions. For example, `binary[selected_arch].path`
 evaluates `selected_arch` and selects the slice with that typed key.
 
@@ -890,6 +907,8 @@ block = go.fmt-l {
 | `passed` | `bool` | Whether all files are formatted |
 
 **`go.packages(pattern: string, dir: string?) -> [string]`** — List Go packages matching a package pattern.
+
+**`go.modules(dir: string?) -> [string]`** — List Go modules at or below a directory. Returns each `go.mod` directory relative to bit's working directory, skipping `vendor`, `testdata`, and directories starting with `.` or `_`, as `./...` does.
 
 ### pnpm
 

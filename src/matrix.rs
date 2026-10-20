@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use crate::ast::{Block, Expr, Field, StringPart};
+use crate::ast::{Block, Expr, Field, MatrixKey, StringPart};
 use crate::dag::{Dag, DagNode, collect_block_refs, collect_dependency_refs};
-use crate::expr::Scope;
+use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::provider::ProviderRegistry;
 use crate::state::StateStore;
@@ -27,26 +27,61 @@ fn matrix_values_key(values: &[&Value]) -> String {
         .join(", ")
 }
 
-/// Compute the cartesian product of multiple lists.
-/// Returns a vec of vecs, where each inner vec has one element per input list.
-fn cartesian_product<'a>(lists: &[&'a [Value]]) -> Vec<Vec<&'a Value>> {
-    let mut result: Vec<Vec<&'a Value>> = vec![vec![]];
-    for list in lists {
-        let mut new_result = Vec::new();
-        for combo in &result {
-            for item in *list {
-                let mut new_combo = combo.clone();
-                new_combo.push(item);
-                new_result.push(new_combo);
+/// Compute every combination of matrix key values, in key declaration order.
+///
+/// Bare keys form a cartesian product; a values expression is re-evaluated per earlier combination.
+fn matrix_combinations(block: &Block, scope: &Scope) -> Result<Vec<Vec<Value>>, LoadError> {
+    let mut combos: Vec<Vec<Value>> = vec![vec![]];
+    for (index, key) in block.matrix_keys.iter().enumerate() {
+        let mut next = Vec::new();
+        match &key.values {
+            None => {
+                let list = scope_key_list(block, key, scope)?;
+                for combo in &combos {
+                    for value in &list {
+                        next.push([combo.as_slice(), std::slice::from_ref(value)].concat());
+                    }
+                }
+            }
+            Some(values) => {
+                for combo in &combos {
+                    let mut key_scope = scope.clone();
+                    for (earlier, value) in block.matrix_keys[..index].iter().zip(combo) {
+                        key_scope.set(earlier.name.clone(), value.clone());
+                    }
+                    let list = expr::eval(values, &key_scope).map_err(|source| LoadError::Eval {
+                        pos: block.pos.clone(),
+                        source,
+                    })?;
+                    let list = list.as_list().ok_or_else(|| LoadError::MatrixKeyNotList {
+                        pos: block.pos.clone(),
+                        name: key.name.clone(),
+                    })?;
+                    for value in list {
+                        next.push([combo.as_slice(), std::slice::from_ref(value)].concat());
+                    }
+                }
             }
         }
-        result = new_result;
+        combos = next;
     }
-    result
+    Ok(combos)
 }
 
-/// Expand a matrix block into individual DagNodes — one per cartesian
-/// product combination of its key values.
+fn scope_key_list(block: &Block, key: &MatrixKey, scope: &Scope) -> Result<Vec<Value>, LoadError> {
+    let value = scope.get(&key.name).ok_or_else(|| LoadError::MatrixKeyNotFound {
+        pos: block.pos.clone(),
+        name: key.name.clone(),
+    })?;
+    let list = value.as_list().ok_or_else(|| LoadError::MatrixKeyNotList {
+        pos: block.pos.clone(),
+        name: key.name.clone(),
+    })?;
+    Ok(list.to_vec())
+}
+
+/// Expand a matrix block into individual DagNodes — one per combination of
+/// its key values.
 ///
 /// Within each expanded block:
 /// - Matrix key variables are substituted with their concrete scalar values
@@ -64,23 +99,9 @@ pub fn expand_matrix(
     dag: &mut Dag,
     matrix_blocks: &HashMap<String, Vec<String>>,
 ) -> Result<(), LoadError> {
-    // Look up each key — must be a list in scope
-    let mut key_lists: Vec<Vec<Value>> = Vec::new();
-    for key in &block.matrix_keys {
-        let val = scope.get(key).ok_or_else(|| LoadError::MatrixKeyNotFound {
-            pos: block.pos.clone(),
-            name: key.clone(),
-        })?;
-        let list = val.as_list().ok_or_else(|| LoadError::MatrixKeyNotList {
-            pos: block.pos.clone(),
-            name: key.clone(),
-        })?;
-        key_lists.push(list.to_vec());
-    }
-
-    // Compute cartesian product
-    let list_refs: Vec<&[Value]> = key_lists.iter().map(|l| l.as_slice()).collect();
-    let combos = cartesian_product(&list_refs);
+    let key_names = block.matrix_key_names();
+    let combos: Vec<Vec<Value>> = matrix_combinations(block, scope)?;
+    let combos: Vec<Vec<&Value>> = combos.iter().map(|combo| combo.iter().collect()).collect();
 
     // Look up the resource once
     let resource_factory = || {
@@ -101,8 +122,7 @@ pub fn expand_matrix(
         let node_name = slice_name(&block.name, combo, instance_args);
 
         // Build substitution map: key_name -> scalar value
-        let subs: HashMap<String, Expr> = block
-            .matrix_keys
+        let subs: HashMap<String, Expr> = key_names
             .iter()
             .zip(combo.iter())
             .map(|(k, v)| (k.clone(), (*v).to_expr()))
@@ -115,7 +135,7 @@ pub fn expand_matrix(
             if other_name == &group {
                 continue;
             }
-            if other_keys == &block.matrix_keys {
+            if other_keys == &key_names {
                 block_subs.insert(other_name.clone(), matrix_key(other_name, combo));
             }
         }
@@ -325,19 +345,74 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs
 mod tests {
     use super::*;
 
-    #[test]
-    fn cartesian_single_list() {
-        let a = vec![Value::Str("x".into()), Value::Str("y".into())];
-        let result = cartesian_product(&[&a]);
-        assert_eq!(result.len(), 2);
+    fn combinations(source: &str, scope: &Scope) -> Vec<String> {
+        let module = crate::parser::parse(source, "<test>").unwrap();
+        let crate::ast::Statement::Block(block) = &module.statements[0] else {
+            panic!("expected block");
+        };
+        matrix_combinations(block, scope)
+            .unwrap()
+            .iter()
+            .map(|combo| matrix_values_key(&combo.iter().collect::<Vec<_>>()))
+            .collect()
+    }
+
+    fn strings(values: &[&str]) -> Value {
+        Value::list(values.iter().map(|value| Value::Str((*value).into())).collect())
     }
 
     #[test]
-    fn cartesian_two_lists() {
-        let a = vec![Value::Str("a".into()), Value::Str("b".into())];
-        let b = vec![Value::Str("1".into()), Value::Str("2".into())];
-        let result = cartesian_product(&[&a, &b]);
-        assert_eq!(result.len(), 4);
+    fn bare_keys_form_cartesian_product() {
+        let mut scope = Scope::new();
+        scope.set("arch", strings(&["amd64", "arm64"]));
+        scope.set("os", strings(&["linux", "darwin"]));
+        assert_eq!(
+            combinations("job[arch, os] = exec {}", &scope),
+            [
+                r#""amd64", "linux""#,
+                r#""amd64", "darwin""#,
+                r#""arm64", "linux""#,
+                r#""arm64", "darwin""#
+            ]
+        );
+    }
+
+    #[test]
+    fn values_expression_sees_earlier_key_values() {
+        let mut scope = Scope::new();
+        scope.set("module", strings(&["a", "b"]));
+        assert_eq!(
+            combinations(
+                r##"job[module, package = ["#{module}/x", "#{module}/y"]] = exec {}"##,
+                &scope
+            ),
+            [r#""a", "a/x""#, r#""a", "a/y""#, r#""b", "b/x""#, r#""b", "b/y""#]
+        );
+    }
+
+    #[test]
+    fn values_expression_can_vary_list_length() {
+        let mut scope = Scope::new();
+        scope.set("group", strings(&["one", "none"]));
+        assert_eq!(
+            combinations(
+                r#"job[group, item = if group == "one" then ["x"] else []] = exec {}"#,
+                &scope
+            ),
+            [r#""one", "x""#]
+        );
+    }
+
+    #[test]
+    fn values_expression_must_be_a_list() {
+        let module = crate::parser::parse(r#"job[item = "x"] = exec {}"#, "<test>").unwrap();
+        let crate::ast::Statement::Block(block) = &module.statements[0] else {
+            panic!("expected block");
+        };
+        assert!(matches!(
+            matrix_combinations(block, &Scope::new()),
+            Err(LoadError::MatrixKeyNotList { name, .. }) if name == "item"
+        ));
     }
 
     #[test]

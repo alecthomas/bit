@@ -35,6 +35,8 @@ pub(crate) struct StatementSource<'a> {
     pub(crate) expression: &'a str,
     pub(crate) param_type_explicit: bool,
     pub(crate) fields: Vec<FieldSource<'a>>,
+    /// Source of each block matrix key's values expression, `None` for bare keys.
+    pub(crate) matrix_keys: Vec<Option<&'a str>>,
 }
 
 pub(crate) struct FieldSource<'a> {
@@ -46,6 +48,7 @@ struct ParsedBlock<'a> {
     block: Block,
     comments: Vec<Comment<'a>>,
     fields: Vec<FieldSource<'a>>,
+    matrix_keys: Vec<Option<&'a str>>,
 }
 
 pub fn parse(input: &str, filename: &str) -> Result<Module, ParseError> {
@@ -902,9 +905,18 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
         // Byte offset of the statement start (stored temporarily in pos.line,
         // converted to real line:col by parse() after parsing completes).
         let offset = full_len - input.len();
-        let (mut stmt, mut inner_comments, fields, expression, param_type_explicit) = alt((
-            import_stmt.map(|(value, source)| (Statement::Import(value), Vec::new(), Vec::new(), source, false)),
-            let_stmt.map(|(value, source)| (Statement::Let(value), Vec::new(), Vec::new(), source, false)),
+        let (mut stmt, mut inner_comments, fields, expression, param_type_explicit, matrix_keys) = alt((
+            import_stmt.map(|(value, source)| {
+                (
+                    Statement::Import(value),
+                    Vec::new(),
+                    Vec::new(),
+                    source,
+                    false,
+                    Vec::new(),
+                )
+            }),
+            let_stmt.map(|(value, source)| (Statement::Let(value), Vec::new(), Vec::new(), source, false, Vec::new())),
             |input: &mut &'i str| {
                 param_stmt(doc.clone(), &known_types, input).map(|(value, explicit, source)| {
                     (
@@ -913,16 +925,25 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
                         Vec::new(),
                         source.unwrap_or(""),
                         explicit,
+                        Vec::new(),
                     )
                 })
             },
             |input: &mut &'i str| {
                 target_stmt(doc.clone(), &known_types, input)
-                    .map(|value| (Statement::Target(value), Vec::new(), Vec::new(), "", false))
+                    .map(|value| (Statement::Target(value), Vec::new(), Vec::new(), "", false, Vec::new()))
             },
             |input: &mut &'i str| {
-                output_stmt(doc.clone(), input)
-                    .map(|(value, source)| (Statement::Output(value), Vec::new(), Vec::new(), source, false))
+                output_stmt(doc.clone(), input).map(|(value, source)| {
+                    (
+                        Statement::Output(value),
+                        Vec::new(),
+                        Vec::new(),
+                        source,
+                        false,
+                        Vec::new(),
+                    )
+                })
             },
             |input: &mut &'i str| {
                 block_stmt(doc.clone(), &known_types, input).map(|parsed| {
@@ -932,6 +953,7 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
                         parsed.fields,
                         "",
                         false,
+                        parsed.matrix_keys,
                     )
                 })
             },
@@ -974,6 +996,7 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
                     field
                 })
                 .collect(),
+            matrix_keys,
         });
         statements.push(stmt);
     }
@@ -1379,15 +1402,15 @@ fn block_stmt<'i>(
         }
     }
     let name = ident_string.parse_next(input)?;
-    // Optional matrix keys: name[key1, key2]
-    let matrix_keys = if opt(lex('[')).parse_next(input)?.is_some() {
-        let keys: Vec<String> = separated(1.., ident_string, lex(',')).parse_next(input)?;
+    // Optional matrix keys: name[key1, key2 = expr]
+    let (matrix_keys, matrix_key_sources) = if opt(lex('[')).parse_next(input)?.is_some() {
+        let keys: Vec<(MatrixKey, Option<&str>)> = separated(1.., matrix_key, lex(',')).parse_next(input)?;
         cut_err(lex(']'))
             .context(StrContext::Label("closing ']' in matrix keys"))
             .parse_next(input)?;
-        keys
+        keys.into_iter().unzip()
     } else {
-        vec![]
+        (vec![], vec![])
     };
     let params = opt(|input: &mut &str| formal_params(input, known_types))
         .parse_next(input)?
@@ -1464,7 +1487,28 @@ fn block_stmt<'i>(
         },
         comments,
         fields: field_starts,
+        matrix_keys: matrix_key_sources,
     })
+}
+
+/// `key` or `key = expr`, returning the source of `expr` for the formatter.
+fn matrix_key<'i>(input: &mut &'i str) -> ModalResult<(MatrixKey, Option<&'i str>)> {
+    let name = ident_string.parse_next(input)?;
+    if opt(lex('=')).parse_next(input)?.is_none() {
+        return Ok((MatrixKey { name, values: None }, None));
+    }
+    let before_values = *input;
+    let values = cut_err(expr)
+        .context(StrContext::Label("matrix key values"))
+        .parse_next(input)?;
+    let source = &before_values[..before_values.len() - input.len()];
+    Ok((
+        MatrixKey {
+            name,
+            values: Some(values),
+        },
+        Some(source),
+    ))
 }
 
 #[cfg(test)]
@@ -2638,7 +2682,7 @@ image[arch] = exec {
         match &result.statements[1] {
             Statement::Block(b) => {
                 assert_eq!(b.name, "image");
-                assert_eq!(b.matrix_keys, vec!["arch"]);
+                assert_eq!(b.matrix_key_names(), vec!["arch"]);
             }
             _ => panic!("expected Block"),
         }
@@ -2655,10 +2699,28 @@ image[arch, region] = exec {
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Block(b) => {
-                assert_eq!(b.matrix_keys, vec!["arch", "region"]);
+                assert_eq!(b.matrix_key_names(), vec!["arch", "region"]);
             }
             _ => panic!("expected Block"),
         }
+    }
+
+    #[test]
+    fn parse_matrix_key_with_values_expression() {
+        let input = r#"
+tests[module, package = go.packages("./...", module)] = exec {
+  command = "test #{package}"
+}
+"#;
+        let result = parse(input, "<test>").unwrap();
+        let Statement::Block(b) = &result.statements[0] else {
+            panic!("expected Block");
+        };
+        assert_eq!(b.matrix_key_names(), vec!["module", "package"]);
+        assert_eq!(b.matrix_keys[0].values, None);
+        assert!(
+            matches!(&b.matrix_keys[1].values, Some(Expr::Call(name, args)) if name == "go.packages" && args.len() == 2)
+        );
     }
 
     #[test]
@@ -2672,7 +2734,7 @@ target release = [build["arm64"](tag = "1.2.3")]
         let Statement::Block(build) = &module.statements[0] else {
             panic!("expected block");
         };
-        assert_eq!(build.matrix_keys, ["arch"]);
+        assert_eq!(build.matrix_key_names(), ["arch"]);
         assert_eq!(build.params[0].name, "tag");
         let Statement::Block(consumer) = &module.statements[1] else {
             panic!("expected block");

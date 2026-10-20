@@ -312,7 +312,7 @@ impl Instantiator<'_> {
         let substitutions: HashMap<_, _> = bound
             .substitutions
             .iter()
-            .filter(|(key, _)| !block.matrix_keys.contains(*key))
+            .filter(|(key, _)| !block.matrix_keys.iter().any(|matrix_key| &matrix_key.name == *key))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         let substituted: Vec<Field> = block
@@ -379,7 +379,7 @@ impl Instantiator<'_> {
                     .ok_or_else(|| invalid(&block.pos, &block.name, "matrix slice was not registered"))?
                     .fields = rewritten;
             }
-            self.matrix_blocks.insert(name.clone(), block.matrix_keys.clone());
+            self.matrix_blocks.insert(name.clone(), block.matrix_key_names());
             stack.pop();
             return Ok(name);
         }

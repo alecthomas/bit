@@ -54,7 +54,7 @@ pub enum Phase {
 }
 
 /// `[pre|post] [protected] [explicit] name = provider.resource { fields... }`
-/// or `name[key1, key2] = provider.resource { fields... }` (matrix expansion).
+/// or `name[key1, key2 = expr] = provider.resource { fields... }` (matrix expansion).
 ///
 /// `protected` and `explicit` may appear in either order and are independent:
 /// `protected` blocks must be named directly to destroy; `explicit` blocks are
@@ -69,11 +69,26 @@ pub struct Block {
     pub phase: Phase,
     pub protected: bool,
     pub explicit: bool,
-    /// Matrix expansion keys — list params to expand over.
-    pub matrix_keys: Vec<String>,
+    /// Matrix expansion keys, in declaration order.
+    pub matrix_keys: Vec<MatrixKey>,
     pub provider: String,
     pub resource: String,
     pub fields: Vec<Field>,
+}
+
+impl Block {
+    pub fn matrix_key_names(&self) -> Vec<String> {
+        self.matrix_keys.iter().map(|key| key.name.clone()).collect()
+    }
+}
+
+/// One matrix axis.
+///
+/// `values` is evaluated per combination of the earlier keys, so its list may depend on them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatrixKey {
+    pub name: String,
+    pub values: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

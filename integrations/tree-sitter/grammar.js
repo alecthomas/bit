@@ -145,9 +145,19 @@ module.exports = grammar({
 
     block_matrix_keys: $ => seq(
       '[',
-      $.identifier,
-      repeat(seq(',', $.identifier)),
+      $._block_matrix_key,
+      repeat(seq(',', $._block_matrix_key)),
       ']',
+    ),
+
+    _block_matrix_key: $ => choice($.identifier, $.matrix_key_binding),
+
+    // `key = expr`: the key's values are computed per combination of the
+    // keys before it.
+    matrix_key_binding: $ => seq(
+      field('name', $.identifier),
+      '=',
+      field('values', $._expression),
     ),
 
     field_assignment: $ => seq(

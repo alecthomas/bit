@@ -448,6 +448,10 @@
         {
           "type": "identifier",
           "named": true
+        },
+        {
+          "type": "matrix_key_binding",
+          "named": true
         }
       ]
     }
@@ -1317,6 +1321,92 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "matrix_key_binding",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "values": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "add_expression",
+            "named": true
+          },
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "block_call",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call",
+            "named": true
+          },
+          {
+            "type": "duration",
+            "named": true
+          },
+          {
+            "type": "heredoc",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "list",
+            "named": true
+          },
+          {
+            "type": "map",
+            "named": true
+          },
+          {
+            "type": "null",
+            "named": true
+          },
+          {
+            "type": "number",
+            "named": true
+          },
+          {
+            "type": "pipe_expression",
+            "named": true
+          },
+          {
+            "type": "raw_string",
+            "named": true
+          },
+          {
+            "type": "reference",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {

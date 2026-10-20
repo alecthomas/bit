@@ -216,6 +216,34 @@ deploy[arch, region] = kubernetes.deployment {}
     resource: (identifier)))
 
 ================================================================================
+matrix key with values expression
+================================================================================
+tests[module, package = go.packages("./...", module)] = go.test {
+  package = package
+}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    name: (identifier)
+    matrix_keys: (block_matrix_keys
+      (identifier)
+      (matrix_key_binding
+        name: (identifier)
+        values: (call
+          name: (provider_function
+            (identifier)
+            (identifier))
+          (string)
+          (reference
+            (identifier)))))
+    provider: (identifier)
+    resource: (identifier)
+    (field_assignment
+      name: (identifier)
+      value: (reference
+        (identifier)))))
+
+================================================================================
 matrix concurrency limit
 ================================================================================
 crate[package] = rust.build {

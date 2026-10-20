@@ -7,7 +7,7 @@ pub mod scanner;
 pub mod test;
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -124,6 +124,54 @@ fn packages(pattern: String, dir: Option<String>) -> Result<Vec<String>, BoxErro
     Ok(package_list(&output.stdout))
 }
 
+/// List Go modules at or below a directory.
+///
+/// Returns each `go.mod` directory relative to bit's working directory, skipping
+/// `vendor`, `testdata`, and directories starting with `.` or `_`, as `./...` does.
+#[bit_derive::provider_function]
+fn modules(dir: Option<String>) -> Result<Vec<String>, BoxError> {
+    let base = dir.unwrap_or_else(|| ".".to_owned());
+    let mut found = Vec::new();
+    visit_module_dirs(Path::new(&base), PathBuf::new(), &mut found)?;
+    let mut modules: Vec<_> = found
+        .into_iter()
+        .map(|relative| {
+            if relative.as_os_str().is_empty() {
+                base.clone()
+            } else if base == "." {
+                relative.to_string_lossy().into_owned()
+            } else {
+                Path::new(&base).join(relative).to_string_lossy().into_owned()
+            }
+        })
+        .collect();
+    modules.sort();
+    Ok(modules)
+}
+
+fn visit_module_dirs(base: &Path, relative: PathBuf, found: &mut Vec<PathBuf>) -> Result<(), BoxError> {
+    let dir = base.join(&relative);
+    if dir.join("go.mod").is_file() {
+        found.push(relative.clone());
+    }
+    let entries = std::fs::read_dir(&dir).map_err(|error| format!("reading {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !entry.file_type()?.is_dir()
+            || name.starts_with('.')
+            || name.starts_with('_')
+            || name == "vendor"
+            || name == "testdata"
+        {
+            continue;
+        }
+        visit_module_dirs(base, relative.join(name.as_ref()), found)?;
+    }
+    Ok(())
+}
+
 fn package_list(output: &[u8]) -> Vec<String> {
     let mut packages: Vec<_> = String::from_utf8_lossy(output)
         .lines()
@@ -165,12 +213,13 @@ impl Provider for GoProvider {
     }
 
     fn functions(&self) -> Vec<FuncSignature> {
-        vec![__bit_signature_packages()]
+        vec![__bit_signature_packages(), __bit_signature_modules()]
     }
 
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {
         match name {
             "packages" => __bit_call_packages(args),
+            "modules" => __bit_call_modules(args),
             _ => Err(format!("go provider has no function '{name}'").into()),
         }
     }
@@ -193,6 +242,31 @@ mod tests {
         assert_eq!(resources[4].name(), "lint");
         assert_eq!(resources[5].name(), "fmt");
         assert_eq!(resources[6].name(), "fmt-l");
+    }
+
+    #[test]
+    fn modules_lists_nested_modules_and_skips_ignored_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        for dir in [
+            "",
+            "svc",
+            "lib/inner",
+            "svc/vendor/dep",
+            "lib/testdata/fixture",
+            "_tools",
+            ".hidden",
+        ] {
+            let dir = root.path().join(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("go.mod"), "module example\n").unwrap();
+        }
+        std::fs::create_dir_all(root.path().join("plain")).unwrap();
+
+        let base = root.path().to_string_lossy().into_owned();
+        assert_eq!(
+            modules(Some(base.clone())).unwrap(),
+            [base.clone(), format!("{base}/lib/inner"), format!("{base}/svc")]
+        );
     }
 
     #[test]
