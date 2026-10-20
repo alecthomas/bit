@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -72,7 +71,7 @@ fn git_baseline_commit(against: &str, dir: Option<&str>) -> Result<Option<String
 
     // The path names the Git directory itself, which may be a bare repository.
     let repo = super::super::in_dir(dir, path);
-    let output = Command::new("git")
+    let output = crate::git::command()
         .arg("--git-dir")
         .arg(&repo)
         .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
@@ -178,7 +177,7 @@ mod tests {
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = crate::git::command()
             .arg("-C")
             .arg(dir)
             .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
