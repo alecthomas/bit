@@ -241,6 +241,52 @@ struct OutputInner {
     messaged: HashSet<String>,
 }
 
+/// The byte length of the longest prefix of `text` whose display width is at
+/// most `width`. Escape sequences take no width and stay whole.
+fn prefix_len_within(text: &str, width: usize) -> usize {
+    let mut used = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, c)) = chars.next() {
+        if c == '\x1b' && chars.peek().is_some_and(|&(_, next)| next == '[') {
+            chars.next();
+            // A CSI sequence ends at its first byte in `@`..=`~`.
+            for (_, c) in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+            continue;
+        }
+        let char_width = console::measure_text_width(c.encode_utf8(&mut [0; 4]));
+        if used + char_width > width {
+            return index;
+        }
+        used += char_width;
+    }
+    text.len()
+}
+
+/// Apply the SGR escape sequences in `text` to `style`, the sequences in
+/// effect so far: a reset clears it, any other sequence is appended.
+fn update_open_style(style: &mut String, text: &str) {
+    let mut rest = text;
+    while let Some(start) = rest.find("\x1b[") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find(|c: char| !(c.is_ascii_digit() || c == ';')) else {
+            break;
+        };
+        if after[end..].starts_with('m') {
+            let params = &after[..end];
+            if params.is_empty() || params == "0" {
+                style.clear();
+            } else {
+                style.push_str(&rest[start..start + 2 + end + 1]);
+            }
+        }
+        rest = &after[end..];
+    }
+}
+
 /// Format a `Duration` as a compact relative offset for debug output:
 /// sub-second values are printed in ms (`+12ms`), sub-minute in seconds with
 /// one decimal (`+1.2s`), and longer durations as `+1m23s`.
@@ -470,26 +516,38 @@ impl OutputInner {
     /// Split (possibly ANSI-styled) `content` into chunks whose display
     /// width is at most `width`. When `width == 0` (unknown terminal
     /// size) or `content` already fits, returns a single-chunk Vec.
+    ///
+    /// Each row is printed after its own prefix, so a style still open at
+    /// the end of a chunk is closed there and reopened at the start of the
+    /// next; otherwise continuation rows lose the colour and the prefix
+    /// between them picks it up.
     fn wrap_content(content: &str, width: usize) -> Vec<String> {
         if width == 0 || content.is_empty() || console::measure_text_width(content) <= width {
             return vec![content.to_string()];
         }
         let mut out = Vec::new();
         let mut remaining = content;
+        let mut style = String::new();
         while !remaining.is_empty() {
-            if console::measure_text_width(remaining) <= width {
-                out.push(remaining.to_string());
+            let head_len = prefix_len_within(remaining, width);
+            // Safety: if no progress is possible (e.g. a single character
+            // wider than `width`), emit the rest as-is and stop.
+            let last = head_len == 0 || head_len == remaining.len();
+            let head = if head_len == 0 {
+                remaining
+            } else {
+                &remaining[..head_len]
+            };
+            let mut chunk = style.clone();
+            chunk.push_str(head);
+            update_open_style(&mut style, head);
+            if !last && !style.is_empty() {
+                chunk.push_str("\x1b[0m");
+            }
+            out.push(chunk);
+            if last {
                 break;
             }
-            let head = console::truncate_str(remaining, width, "");
-            let head_len = head.len();
-            // Safety: if truncate_str couldn't make progress (e.g. a single
-            // grapheme wider than `width`), emit the rest as-is and stop.
-            if head_len == 0 {
-                out.push(remaining.to_string());
-                break;
-            }
-            out.push(head.into_owned());
             remaining = &remaining[head_len..];
         }
         out
@@ -1320,6 +1378,12 @@ mod tests {
         for cont in &lines[1..] {
             assert!(cont.contains('┆'), "continuation should use ┆, got {cont:?}");
         }
+    }
+
+    #[test]
+    fn wrap_content_carries_style_onto_continuation_rows() {
+        let chunks = OutputInner::wrap_content("\x1b[36mabcdef\x1b[0m", 3);
+        assert_eq!(chunks, ["\x1b[36mabc\x1b[0m", "\x1b[36mdef\x1b[0m"]);
     }
 
     #[test]
