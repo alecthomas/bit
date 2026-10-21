@@ -11,6 +11,19 @@ use crate::expr::{self, EvalError, Scope};
 use crate::provider::DynResource;
 use crate::value::{Type, Value};
 
+/// Content-coupled dependencies of a block.
+pub const DEPENDS_ON_FIELD: &str = "depends_on";
+/// Ordering-only dependencies of a block.
+pub const AFTER_FIELD: &str = "after";
+/// Maximum number of a block's matrix slices that may run at once.
+pub const CONCURRENCY_FIELD: &str = "concurrency";
+/// Outputs the shared cache must not store.
+pub const UNCACHED_FIELD: &str = "uncached";
+
+/// Block fields the engine reads itself. They are valid on every resource
+/// block even though no resource schema declares them.
+pub const ENGINE_FIELDS: [&str; 4] = [DEPENDS_ON_FIELD, AFTER_FIELD, CONCURRENCY_FIELD, UNCACHED_FIELD];
+
 /// The type of edge between two blocks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EdgeKind {
@@ -547,7 +560,7 @@ fn collect_transitive_dependents(graph: &DiGraph<DagNode, EdgeKind>, node: NodeI
 pub fn collect_block_refs(fields: &[Field], scope: &Scope) -> Result<HashSet<String>, EvalError> {
     let mut refs = HashSet::new();
     for field in fields {
-        if field.name == "depends_on" || field.name == "after" || field.name == "concurrency" {
+        if field.name == DEPENDS_ON_FIELD || field.name == AFTER_FIELD || field.name == CONCURRENCY_FIELD {
             continue;
         }
         collect_expr_refs(&field.value, scope, &mut refs)?;
@@ -558,7 +571,7 @@ pub fn collect_block_refs(fields: &[Field], scope: &Scope) -> Result<HashSet<Str
 /// Extract explicit `depends_on` entries from fields.
 pub fn collect_depends_on(fields: &[Field]) -> Vec<String> {
     for field in fields {
-        if field.name == "depends_on"
+        if field.name == DEPENDS_ON_FIELD
             && let Expr::List(items) = &field.value
         {
             return items
@@ -632,7 +645,7 @@ pub fn collect_dependency_refs(fields: &[Field], field_name: &str, scope: &Scope
 /// Extract explicit `after` entries from fields (ordering-only edges).
 pub fn collect_after(fields: &[Field]) -> Vec<String> {
     for field in fields {
-        if field.name == "after"
+        if field.name == AFTER_FIELD
             && let Expr::List(items) = &field.value
         {
             return items
@@ -654,7 +667,7 @@ pub fn collect_after(fields: &[Field]) -> Vec<String> {
 pub fn collect_all_refs(fields: &[Field]) -> HashSet<String> {
     let mut refs = HashSet::new();
     for field in fields {
-        if field.name == "depends_on" || field.name == "after" || field.name == "concurrency" {
+        if field.name == DEPENDS_ON_FIELD || field.name == AFTER_FIELD || field.name == CONCURRENCY_FIELD {
             continue; // validated separately
         }
         collect_all_expr_refs(&field.value, &mut refs);

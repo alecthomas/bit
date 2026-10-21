@@ -576,6 +576,21 @@ fn get_schema_type(attrs: &[syn::Attribute]) -> syn::Result<Option<Expr>> {
 /// `has_default` indicates `#[serde(default)]` — Vec/HashMap/bool and other
 /// named types become optional.
 fn rust_type_to_schema_type(ty: &Type, has_default: bool) -> TokenStream2 {
+    let typ = required_schema_type(ty);
+    // serde fills in a defaulted field, so a block may omit it.
+    if has_default && !is_option(ty) {
+        quote! { crate::value::Type::Optional(Box::new(#typ)) }
+    } else {
+        typ
+    }
+}
+
+fn is_option(ty: &Type) -> bool {
+    matches!(ty, Type::Path(tp) if tp.path.segments.last().is_some_and(|seg| seg.ident == "Option"))
+}
+
+/// The schema type of a value that must be present.
+fn required_schema_type(ty: &Type) -> TokenStream2 {
     match ty {
         Type::Path(tp) => {
             let seg = tp.path.segments.last().unwrap();
@@ -584,51 +599,25 @@ fn rust_type_to_schema_type(ty: &Type, has_default: bool) -> TokenStream2 {
             match ident.as_str() {
                 "String" => quote! { crate::value::Type::String },
                 "BlockRef" => quote! { crate::value::Type::BlockRef },
-                "bool" => {
-                    if has_default {
-                        quote! { crate::value::Type::Optional(Box::new(crate::value::Type::Bool)) }
-                    } else {
-                        quote! { crate::value::Type::Bool }
-                    }
-                }
+                "bool" => quote! { crate::value::Type::Bool },
                 "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "usize" | "isize" => {
                     quote! { crate::value::Type::Number }
                 }
                 "Duration" => quote! { crate::value::Type::Duration },
                 "Option" => {
-                    let inner = extract_generic_arg(seg);
-                    let inner_expr = rust_type_to_schema_type(&inner, false);
-                    quote! { crate::value::Type::Optional(Box::new(#inner_expr)) }
+                    let inner = required_schema_type(&extract_generic_arg(seg));
+                    quote! { crate::value::Type::Optional(Box::new(#inner)) }
                 }
                 "Vec" => {
-                    let inner = extract_generic_arg(seg);
-                    let inner_expr = rust_type_to_schema_type(&inner, false);
-                    let list = quote! { crate::value::Type::List(Box::new(#inner_expr)) };
-                    if has_default {
-                        quote! { crate::value::Type::Optional(Box::new(#list)) }
-                    } else {
-                        list
-                    }
+                    let inner = required_schema_type(&extract_generic_arg(seg));
+                    quote! { crate::value::Type::List(Box::new(#inner)) }
                 }
                 "HashMap" => {
-                    let inner = extract_second_generic_arg(seg);
-                    let inner_expr = rust_type_to_schema_type(&inner, false);
-                    let map = quote! { crate::value::Type::Map(Box::new(#inner_expr)) };
-                    if has_default {
-                        quote! { crate::value::Type::Optional(Box::new(#map)) }
-                    } else {
-                        map
-                    }
+                    let inner = required_schema_type(&extract_second_generic_arg(seg));
+                    quote! { crate::value::Type::Map(Box::new(#inner)) }
                 }
                 // Unknown named type — delegate to its SchemaType impl.
-                _ => {
-                    let named = quote! { <#ty as crate::schema::SchemaType>::schema_type() };
-                    if has_default {
-                        quote! { crate::value::Type::Optional(Box::new(#named)) }
-                    } else {
-                        named
-                    }
-                }
+                _ => quote! { <#ty as crate::schema::SchemaType>::schema_type() },
             }
         }
         // Unknown complex type shape — delegate to its SchemaType impl.

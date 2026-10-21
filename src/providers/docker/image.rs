@@ -37,6 +37,7 @@ pub struct ImageInputs {
     pub build_args: HashMap<String, String>,
     /// Target platform(s)
     #[serde(default, deserialize_with = "string_or_vec")]
+    #[schema(typ = crate::schema::optional_string_or_list())]
     pub platform: Vec<String>,
 }
 

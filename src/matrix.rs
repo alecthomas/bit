@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Block, Expr, Field, MatrixKey, StringPart};
-use crate::dag::{Dag, DagNode, collect_block_refs, collect_dependency_refs};
+use crate::dag::{AFTER_FIELD, DEPENDS_ON_FIELD, Dag, DagNode, collect_block_refs, collect_dependency_refs};
 use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::provider::ProviderRegistry;
@@ -183,7 +183,7 @@ pub fn expand_matrix(
                 dag.add_dep_edge(&dep, expanded)?;
             }
         }
-        for dep in collect_dependency_refs(node_fields, "depends_on", scope).map_err(|source| LoadError::Eval {
+        for dep in collect_dependency_refs(node_fields, DEPENDS_ON_FIELD, scope).map_err(|source| LoadError::Eval {
             pos: block.pos.clone(),
             source,
         })? {
@@ -191,7 +191,7 @@ pub fn expand_matrix(
                 dag.add_dep_edge(&dep, expanded)?;
             }
         }
-        for dep in collect_dependency_refs(node_fields, "after", scope).map_err(|source| LoadError::Eval {
+        for dep in collect_dependency_refs(node_fields, AFTER_FIELD, scope).map_err(|source| LoadError::Eval {
             pos: block.pos.clone(),
             source,
         })? {

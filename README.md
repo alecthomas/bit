@@ -229,6 +229,8 @@ Special fields:
 - `concurrency = N` — maximum number of this block's matrix slices that may run at once (`go.lint` defaults to 1)
 - `uncached = [output, ...]` — outputs to keep out of the [shared build cache](#shared-build-cache)
 
+Every other field must be an input of the block's resource, as listed under [Providers](#providers) or by `bit --schema`. bit checks fields when it loads `BUILD.bit` and rejects unknown fields, missing required fields, and values of the wrong type. A value taken from another block's outputs is checked against that output's declared type, and checked again just before the block runs.
+
 Prefix with `protected` to prevent destruction, `explicit` to exclude from `...`, or both (in either order):
 
 ```hcl
@@ -670,10 +672,10 @@ block = buf.breaking {
 ```bit
 block = docker.image {
   tag = string                     # Image tag
-  context = string                 # Build context directory
-  dockerfile = string              # Dockerfile path
+  context = string?                # Build context directory
+  dockerfile = string?             # Dockerfile path
   build_args = {string = string}?  # Docker build arguments
-  platform = [string]?             # Target platform(s)
+  platform = (string | [string])?  # Target platform(s)
 }
 ```
 
@@ -710,10 +712,10 @@ block = docker.container {
   environment = {string = string}?      # Environment variables
   command = string?                     # Override CMD
   entrypoint = string?                  # Override ENTRYPOINT
-  restart = string                      # Restart policy
+  restart = string?                     # Restart policy
   network = string?                     # Docker network
   working_dir = string?                 # Working directory
-  healthcheck = (string | {test = string, interval = duration, timeout = duration, retries = number, start_period = duration?})?  # Health check command or config
+  healthcheck = (string | {test = string, interval = duration?, timeout = duration?, retries = number?, start_period = duration?})?  # Health check command or config
   extra_hosts = {string = string}?      # Extra /etc/hosts entries (hostname → address). On Linux, `host.docker.internal: host-gateway` is auto-added if not present.
 }
 ```
@@ -884,7 +886,7 @@ block = go.test {
 
 ```bit
 block = go.lint {
-  package = string    # Go package pattern
+  package = string?   # Go package pattern
   flags = [string]?   # Extra flags passed to golangci-lint run
   inputs = [string]?  # Input file glob patterns (in addition to Go sources)
   dir = string?       # Working directory for the command
@@ -901,8 +903,8 @@ block = go.lint {
 
 ```bit
 block = go.fmt {
-  package = string  # Go package pattern
-  dir = string?     # Working directory for the command
+  package = string?  # Go package pattern
+  dir = string?      # Working directory for the command
 }
 ```
 
@@ -910,8 +912,8 @@ block = go.fmt {
 
 ```bit
 block = go.fmt-l {
-  package = string  # Go package pattern
-  dir = string?     # Working directory for the command
+  package = string?  # Go package pattern
+  dir = string?      # Working directory for the command
 }
 ```
 
@@ -931,7 +933,7 @@ block = go.fmt-l {
 
 ```bit
 block = pnpm.install {
-  dir = string    # Workspace root directory (defaults to the current directory)
+  dir = string?   # Workspace root directory (defaults to the current directory)
   frozen = bool?  # Pass `--frozen-lockfile` (reproducible installs, default `true`)
 }
 ```
@@ -951,7 +953,7 @@ block = pnpm.run {
   args = [string]?               # Additional arguments passed to the script after `--`
   output = (string | [string])?  # Output file or list of output files/directories produced by the script
   inputs = [string]?             # Extra input file globs (added to auto-detected sources)
-  dir = string                   # Workspace root directory (defaults to the current directory)
+  dir = string?                  # Workspace root directory (defaults to the current directory)
 }
 ```
 
@@ -966,11 +968,11 @@ block = pnpm.run {
 
 ```bit
 block = pnpm.test {
-  script = string     # Script name from `package.json` (defaults to "test")
+  script = string?    # Script name from `package.json` (defaults to "test")
   package = string?   # Package name from its `package.json`. Omit to run at the workspace root.
   args = [string]?    # Additional arguments passed to the script after `--`
   inputs = [string]?  # Extra input file globs (added to auto-detected sources)
-  dir = string        # Workspace root directory (defaults to the current directory)
+  dir = string?       # Workspace root directory (defaults to the current directory)
 }
 ```
 

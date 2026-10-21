@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::cache::{ActionKey, ActionKeyInput, BuildCache, PublishOutcome, RECEIPT_VERSION, Receipt};
-use crate::dag::{self, Dag, DagError, DagNode};
+use crate::dag::{self, AFTER_FIELD, CONCURRENCY_FIELD, DEPENDS_ON_FIELD, Dag, DagError, DagNode, UNCACHED_FIELD};
 use crate::expr::{self, EvalError, Scope};
 use crate::file_tracker::FileTracker;
 use crate::loader::BaseScope;
@@ -24,6 +24,12 @@ pub enum EngineError {
         pos: crate::ast::Pos,
         block: String,
         source: EvalError,
+    },
+    #[error("{pos}: block '{block}': {source}")]
+    InvalidInputs {
+        pos: crate::ast::Pos,
+        block: String,
+        source: Box<crate::input_check::InputError>,
     },
     #[error("{pos}: block '{block}' {phase} failed: {source}")]
     Provider {
@@ -495,9 +501,6 @@ impl Prepared {
         }
     }
 }
-
-/// Block field listing outputs the shared cache must not store.
-const UNCACHED_FIELD: &str = "uncached";
 
 /// Pair each key a resource declares as an output with its project-relative
 /// form. The relative form is what a receipt records, so that a receipt
@@ -1321,6 +1324,16 @@ fn execute_block(
         block: name.to_owned(),
         source: e,
     })?;
+    // The loader could not see values that come from upstream outputs.
+    if !crate::module::is_instance(node) {
+        crate::input_check::check_values(&inputs, &node.resource.schema().inputs).map_err(|source| {
+            EngineError::InvalidInputs {
+                pos: node.pos.clone(),
+                block: name.to_owned(),
+                source: Box::new(source),
+            }
+        })?;
+    }
 
     let mut prepared = prepare_block(
         name,
@@ -1611,27 +1624,28 @@ pub fn dump_selected(dag: &mut Dag, base: &BaseScope, order: &[String], quiet: b
             block: name.clone(),
             source: e,
         })?;
-        let depends_on =
-            dag::collect_dependency_refs(&node.fields, "depends_on", &scope).map_err(|source| EngineError::Eval {
+        let depends_on = dag::collect_dependency_refs(&node.fields, DEPENDS_ON_FIELD, &scope).map_err(|source| {
+            EngineError::Eval {
                 pos: node.pos.clone(),
                 block: name.clone(),
                 source,
-            })?;
+            }
+        })?;
         if !depends_on.is_empty() {
             inputs.insert(
-                "depends_on".into(),
+                DEPENDS_ON_FIELD.into(),
                 Value::List(Type::String, depends_on.into_iter().map(Value::Str).collect()),
             );
         }
         let after =
-            dag::collect_dependency_refs(&node.fields, "after", &scope).map_err(|source| EngineError::Eval {
+            dag::collect_dependency_refs(&node.fields, AFTER_FIELD, &scope).map_err(|source| EngineError::Eval {
                 pos: node.pos.clone(),
                 block: name.clone(),
                 source,
             })?;
         if !after.is_empty() {
             inputs.insert(
-                "after".into(),
+                AFTER_FIELD.into(),
                 Value::List(Type::String, after.into_iter().map(Value::Str).collect()),
             );
         }
@@ -1721,7 +1735,7 @@ fn emit_event(writer: &crate::output::BlockWriter, event: Event, description: &s
 fn eval_fields(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalError> {
     let mut inputs = Map::new();
     for field in fields {
-        if field.name == "concurrency" {
+        if field.name == CONCURRENCY_FIELD {
             continue;
         }
         let value = expr::eval(&field.value, scope)?;
@@ -1733,7 +1747,7 @@ fn eval_fields(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalE
 fn eval_fields_lenient(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalError> {
     let mut inputs = Map::new();
     for field in fields {
-        if field.name == "concurrency" {
+        if field.name == CONCURRENCY_FIELD {
             continue;
         }
         let value = expr::eval_lenient(&field.value, scope)?;
@@ -1743,7 +1757,7 @@ fn eval_fields_lenient(fields: &[crate::ast::Field], scope: &Scope) -> Result<Ma
 }
 
 fn evaluate_concurrency(node: &DagNode, scope: &Scope) -> Result<Option<ConcurrencyLimit>, EngineError> {
-    let Some(field) = node.fields.iter().find(|field| field.name == "concurrency") else {
+    let Some(field) = node.fields.iter().find(|field| field.name == CONCURRENCY_FIELD) else {
         return Ok(node.resource.default_concurrency().map(|limit| ConcurrencyLimit {
             group: node.concurrency_group.clone(),
             limit,
@@ -2167,6 +2181,21 @@ other-b = probe.run { label = "other-b" }
             .err()
             .expect("invalid concurrency should fail");
         assert!(matches!(error, EngineError::InvalidConcurrency { .. }));
+    }
+
+    #[test]
+    fn upstream_outputs_are_checked_before_a_block_runs() {
+        // exec's outputs command declares no types, so the loader cannot
+        // check `version.dir`.
+        let input = r#"
+version = exec { command = "true" outputs = 'echo "{\"dir\": [\"a\"]}"' }
+build = exec { command = "true" dir = version.dir }
+"#;
+        let error = load_and_apply(input).err().expect("a list dir should fail");
+        assert_eq!(
+            error.to_string(),
+            "<test>:3:1: block 'build': field 'dir': expected string, got list"
+        );
     }
 
     fn go_lint_concurrency_limits(input: &str) -> HashMap<String, Option<ConcurrencyLimit>> {

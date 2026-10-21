@@ -426,6 +426,21 @@ pub fn builtin_return_type(name: &str) -> Option<Type> {
     builtins().get(name).map(|b| b.return_type.clone())
 }
 
+/// Look up the declared return type of a builtin or `provider.function` call.
+/// Unlike [`builtin_return_type`], this keeps a polymorphic builtin's full type.
+pub fn function_return_type(name: &str, scope: &Scope) -> Option<Type> {
+    let Some((provider, function)) = name.split_once('.') else {
+        return builtins().get(name).map(|def| def.signature.returns.clone());
+    };
+    scope
+        .providers
+        .as_ref()?
+        .provider_functions(provider)
+        .into_iter()
+        .find(|signature| signature.name == function)
+        .map(|signature| signature.returns)
+}
+
 fn call_builtin(name: &str, args: &[Value]) -> Result<Value, EvalError> {
     let def = builtins()
         .get(name)

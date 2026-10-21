@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::ast::{Block, Expr, Field, Module, Statement, StringPart};
-use crate::dag::{Dag, DagNode, collect_block_refs, collect_dependency_refs};
+use crate::dag::{AFTER_FIELD, DEPENDS_ON_FIELD, Dag, DagNode, collect_block_refs, collect_dependency_refs};
 use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::output::BlockWriter;
@@ -12,6 +12,15 @@ use crate::provider::{
 };
 use crate::state::StateStore;
 use crate::value::{Map, Value, validate_type};
+
+/// Provider name of module instance nodes.
+const INSTANCE_PROVIDER: &str = "module";
+
+/// Whether `node` is a module instance. Its fields are the module's output
+/// expressions, not inputs of a resource.
+pub fn is_instance(node: &DagNode) -> bool {
+    node.provider == INSTANCE_PROVIDER
+}
 
 /// A pass-through resource for module instance blocks.
 ///
@@ -26,7 +35,7 @@ pub struct ModuleResource {
 
 impl DynResource for ModuleResource {
     fn name(&self) -> &str {
-        "module"
+        INSTANCE_PROVIDER
     }
 
     fn kind(&self) -> ResourceKind {
@@ -162,7 +171,7 @@ pub fn expand_module(
     // Map outer fields to param expressions
     let mut param_exprs: HashMap<String, Expr> = HashMap::new();
     for field in outer_fields {
-        if (field.name == "depends_on" || field.name == "after") && !param_names.contains(&field.name) {
+        if (field.name == DEPENDS_ON_FIELD || field.name == AFTER_FIELD) && !param_names.contains(&field.name) {
             continue;
         }
         param_exprs.insert(field.name.clone(), field.value.clone());
@@ -329,15 +338,17 @@ pub fn expand_module(
                 ctx.dag.add_dep_edge(&dep, &qualified_name)?;
             }
         }
-        for dep in collect_dependency_refs(node_fields, "depends_on", ctx.scope).map_err(|source| LoadError::Eval {
-            pos: block.pos.clone(),
-            source,
-        })? {
+        for dep in
+            collect_dependency_refs(node_fields, DEPENDS_ON_FIELD, ctx.scope).map_err(|source| LoadError::Eval {
+                pos: block.pos.clone(),
+                source,
+            })?
+        {
             if ctx.dag.has_block(&dep) && dep != qualified_name {
                 ctx.dag.add_dep_edge(&dep, &qualified_name)?;
             }
         }
-        for dep in collect_dependency_refs(node_fields, "after", ctx.scope).map_err(|source| LoadError::Eval {
+        for dep in collect_dependency_refs(node_fields, AFTER_FIELD, ctx.scope).map_err(|source| LoadError::Eval {
             pos: block.pos.clone(),
             source,
         })? {
@@ -350,9 +361,9 @@ pub fn expand_module(
     // Handle non-param depends_on/after: create edges from external blocks
     // to all inner blocks so the module waits for them.
     for field in outer_fields {
-        if field.name == "depends_on" && !param_names.contains("depends_on") {
+        if field.name == DEPENDS_ON_FIELD && !param_names.contains(DEPENDS_ON_FIELD) {
             for dep in
-                collect_dependency_refs(std::slice::from_ref(field), "depends_on", ctx.scope).map_err(|source| {
+                collect_dependency_refs(std::slice::from_ref(field), DEPENDS_ON_FIELD, ctx.scope).map_err(|source| {
                     LoadError::Eval {
                         pos: crate::ast::Pos::default(),
                         source,
@@ -369,13 +380,15 @@ pub fn expand_module(
                 }
             }
         }
-        if field.name == "after" && !param_names.contains("after") {
-            for dep in collect_dependency_refs(std::slice::from_ref(field), "after", ctx.scope).map_err(|source| {
-                LoadError::Eval {
-                    pos: crate::ast::Pos::default(),
-                    source,
-                }
-            })? {
+        if field.name == AFTER_FIELD && !param_names.contains(AFTER_FIELD) {
+            for dep in
+                collect_dependency_refs(std::slice::from_ref(field), AFTER_FIELD, ctx.scope).map_err(|source| {
+                    LoadError::Eval {
+                        pos: crate::ast::Pos::default(),
+                        source,
+                    }
+                })?
+            {
                 if ctx.dag.has_block(&dep) {
                     for inner in &iface.blocks {
                         let qname = format!("{instance_name}.{}", inner.name);
@@ -453,8 +466,8 @@ pub fn expand_module(
         name: instance_name.to_owned(),
         doc: None,
         phase: crate::ast::Phase::Default,
-        provider: "module".into(),
-        resource_name: "module".into(),
+        provider: INSTANCE_PROVIDER.into(),
+        resource_name: INSTANCE_PROVIDER.into(),
         protected: false,
         explicit: false,
         concurrency_group: instance_name.to_owned(),

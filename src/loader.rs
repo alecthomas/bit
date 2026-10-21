@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use crate::ast::{Module, Statement};
-use crate::dag::{Dag, DagError, DagNode, collect_all_refs, collect_block_refs, collect_dependency_refs};
+use crate::dag::{
+    AFTER_FIELD, DEPENDS_ON_FIELD, Dag, DagError, DagNode, collect_all_refs, collect_block_refs,
+    collect_dependency_refs,
+};
 use crate::expr::{self, EvalError, Scope};
 use crate::matrix;
 use crate::module;
@@ -52,6 +55,12 @@ pub enum LoadError {
         pos: crate::ast::Pos,
         name: String,
         existing: &'static str,
+    },
+    #[error("{pos}: block '{block}': {source}")]
+    InvalidInputs {
+        pos: crate::ast::Pos,
+        block: String,
+        source: Box<crate::input_check::InputError>,
     },
     #[error("{pos}: invalid invocation of '{name}': {message}")]
     InvalidInvocation {
@@ -324,10 +333,12 @@ pub fn load_selected(
             }
         }
         // Explicit depends_on — must reference known blocks.
-        for dep in collect_dependency_refs(block_fields, "depends_on", &scope).map_err(|source| LoadError::Eval {
-            pos: block_pos.clone(),
-            source,
-        })? {
+        for dep in
+            collect_dependency_refs(block_fields, DEPENDS_ON_FIELD, &scope).map_err(|source| LoadError::Eval {
+                pos: block_pos.clone(),
+                source,
+            })?
+        {
             let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope).ok_or_else(|| LoadError::UnknownBlock {
                 pos: block_pos.clone(),
                 name: dep.clone(),
@@ -342,7 +353,7 @@ pub fn load_selected(
             }
         }
         // Explicit after — must reference known blocks.
-        for dep in collect_dependency_refs(block_fields, "after", &scope).map_err(|source| LoadError::Eval {
+        for dep in collect_dependency_refs(block_fields, AFTER_FIELD, &scope).map_err(|source| LoadError::Eval {
             pos: block_pos.clone(),
             source,
         })? {
@@ -377,6 +388,8 @@ pub fn load_selected(
             }
         }
     }
+
+    crate::input_check::check_dag(&dag, &scope)?;
 
     dag.wire_phase_edges();
     dag.validate()?;
@@ -2020,5 +2033,198 @@ build[version] = exec { command = "build #{version}" }
         // Only identifiers are bare strings; `1.2` stays a number and is
         // left unresolved.
         assert_eq!(select(input, &["build[1.2]"]).unwrap(), vec!["build[1.2]"]);
+    }
+
+    fn go_registry() -> ProviderRegistry {
+        let mut reg = test_registry();
+        reg.register(Box::new(crate::providers::go::GoProvider::new(Arc::new(
+            FileTracker::new(),
+        ))));
+        reg
+    }
+
+    fn input_error(input: &str, registry: &ProviderRegistry, roots: &[crate::import::ImportRoot]) -> String {
+        let module = parser::parse(input, "<test>").unwrap();
+        match load(&module, &Map::new(), registry, &EmptyStore, roots) {
+            Err(error @ LoadError::InvalidInputs { .. }) => error.to_string(),
+            Err(error) => panic!("expected invalid inputs, got {error}"),
+            Ok(_) => panic!("expected invalid inputs"),
+        }
+    }
+
+    #[test]
+    fn unknown_field_on_matrix_block_is_rejected() {
+        let input = r#"
+let module = [".", "open"]
+
+go-test[module] = go.test {
+  module = module
+  flags = ["-short"]
+  package = "./..."
+}
+"#;
+        assert_eq!(
+            input_error(input, &go_registry(), &[]),
+            "<test>:4:1: block 'go-test[\".\"]': unknown field 'module'; valid fields: package, flags, inputs, \
+             report, dir, goos, goarch, cgo, depends_on, after, concurrency, uncached"
+        );
+    }
+
+    #[test]
+    fn unknown_field_suggests_closest_name() {
+        let error = input_error("build = exec { comand = \"true\" }\n", &test_registry(), &[]);
+        assert!(
+            error.starts_with("<test>:1:1: block 'build': unknown field 'comand' (did you mean 'command'?)"),
+            "{error}"
+        );
+        let error = input_error(
+            "build = exec { command = \"true\" dri = \"x\" }\n",
+            &test_registry(),
+            &[],
+        );
+        assert!(error.contains("(did you mean 'dir'?)"), "{error}");
+    }
+
+    #[test]
+    fn field_types_are_checked_against_the_schema() {
+        let cases = [
+            (
+                "build = go.test { package = \"./...\" flags = \"-short\" }",
+                "field 'flags': expected [string], got \"-short\"",
+            ),
+            (
+                "build = go.test { package = \"./...\" report = \"test\" }",
+                "field 'report': expected \"suites\" | \"tests\" | \"verbose\", got \"test\"",
+            ),
+            ("build = go.test { flags = [] }", "missing required field 'package'"),
+            (
+                "let flags = [1]\nbuild = go.test { package = \"./...\" flags = flags }",
+                "field 'flags[0]': expected string, got number",
+            ),
+            (
+                "build = go.test { package = \"./...\" concurrency = \"1\" }",
+                "field 'concurrency': expected number, got \"1\"",
+            ),
+            (
+                "build = go.test { package = \"./...\" uncached = [true] }",
+                "field 'uncached[0]': expected string, got bool",
+            ),
+        ];
+        for (input, expected) in cases {
+            let error = input_error(input, &go_registry(), &[]);
+            assert!(error.ends_with(expected), "{input}: {error}");
+        }
+    }
+
+    #[test]
+    fn upstream_outputs_are_checked_against_their_declared_type() {
+        let input = r#"
+pass = go.test { package = "./..." }
+build = go.test { package = pass.passed }
+"#;
+        assert!(input_error(input, &go_registry(), &[]).ends_with("field 'package': expected string, got bool"));
+
+        // exec's outputs command declares no types, so its outputs pass
+        // until the block runs.
+        let input = r#"
+version = exec { command = "true" outputs = "echo {}" }
+build = go.test { package = version.package }
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        load(&module, &Map::new(), &go_registry(), &EmptyStore, &[]).unwrap();
+    }
+
+    #[test]
+    fn engine_fields_are_accepted_on_every_resource() {
+        let input = r#"
+setup = exec { command = "true" }
+build = exec {
+  command = "true"
+  output = "out"
+  depends_on = [setup]
+  after = [setup]
+  concurrency = 1
+  uncached = ["out"]
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
+    }
+
+    #[test]
+    fn flattened_input_fields_are_accepted() {
+        let input = r#"
+app = go.exe {
+  package = "./cmd/app"
+  goos = "linux"
+  goarch = "arm64"
+  cgo = false
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        load(&module, &Map::new(), &go_registry(), &EmptyStore, &[]).unwrap();
+    }
+
+    #[test]
+    fn defaulted_fields_may_be_omitted() {
+        let module = parser::parse("lint = go.lint {}\n", "<test>").unwrap();
+        load(&module, &Map::new(), &go_registry(), &EmptyStore, &[]).unwrap();
+    }
+
+    #[test]
+    fn parameterized_block_inputs_are_checked_when_invoked() {
+        let input = r#"
+image(tag : string) = exec {
+  command = "build #{tag}"
+  tags = [tag]
+}
+target publish(tag : string) = [image(tag = tag)]
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let invocations = [crate::invocation::Invocation {
+            name: "publish".into(),
+            args: vec![("tag".into(), "v1".into())],
+        }];
+        let error = match load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("expected invalid inputs"),
+        };
+        assert!(
+            error.starts_with("<test>:2:1: block 'image(tag=\"v1\")': unknown field 'tags'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn module_blocks_are_checked_and_module_params_pass_through() {
+        let dir = tempfile::tempdir().unwrap();
+        write_module(
+            dir.path(),
+            "mymod",
+            "mymod",
+            "param name : string\nbuild = exec { command = \"build #{name}\" outptu = \"out\" }\n",
+        );
+        let error = input_error(
+            "inst = mymod { name = \"app\" }\n",
+            &test_registry(),
+            &roots(dir.path(), "mymod"),
+        );
+        assert!(error.contains("block 'inst.build': unknown field 'outptu'"), "{error}");
+
+        write_module(
+            dir.path(),
+            "mymod",
+            "mymod",
+            "param name : string\nbuild = exec { command = \"build #{name}\" output = \"out\" }\noutput path = build.path\n",
+        );
+        let module = parser::parse("inst = mymod { name = \"app\" }\n", "<test>").unwrap();
+        load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &roots(dir.path(), "mymod"),
+        )
+        .unwrap();
     }
 }
