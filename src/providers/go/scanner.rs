@@ -8,15 +8,22 @@ use dashmap::DashMap;
 use crate::provider::BoxError;
 
 /// Cached per-directory scan result: direct files and local import directories.
+///
+/// What test files reference is kept apart from what sources reference, so a
+/// scan that excludes tests does not track test-only dependencies either.
 struct PackageScan {
     /// .go source files in this directory (non-test).
     go_files: HashSet<PathBuf>,
     /// .go test files in this directory.
     test_files: HashSet<PathBuf>,
-    /// Embedded files referenced by //go:embed directives.
+    /// Files embedded by //go:embed directives in source files.
     embed_files: HashSet<PathBuf>,
-    /// Directories of local (same-module) imports.
-    local_import_dirs: HashSet<PathBuf>,
+    /// Files embedded by //go:embed directives in test files.
+    test_embed_files: HashSet<PathBuf>,
+    /// Directories of local (same-module) packages imported by source files.
+    import_dirs: HashSet<PathBuf>,
+    /// Directories of local packages imported by test files.
+    test_import_dirs: HashSet<PathBuf>,
 }
 
 /// A module's identity and the scans of its package directories.
@@ -71,10 +78,14 @@ fn scan_package_dir(module: &Module, pkg_dir: &Path, canonical: &Path) -> Result
 
     let entries = fs::read_dir(pkg_dir).map_err(|e| format!("reading {}: {e}", pkg_dir.display()))?;
 
-    let mut go_files = HashSet::new();
-    let mut test_files = HashSet::new();
-    let mut embed_files = HashSet::new();
-    let mut local_import_dirs = HashSet::new();
+    let mut scan = PackageScan {
+        go_files: HashSet::new(),
+        test_files: HashSet::new(),
+        embed_files: HashSet::new(),
+        test_embed_files: HashSet::new(),
+        import_dirs: HashSet::new(),
+        test_import_dirs: HashSet::new(),
+    };
 
     for entry in entries {
         let entry = entry?;
@@ -90,11 +101,16 @@ fn scan_package_dir(module: &Module, pkg_dir: &Path, canonical: &Path) -> Result
         let path = entry.path();
         let source = fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
 
-        if name_str.ends_with("_test.go") {
-            test_files.insert(path);
+        let (files, embed_files, import_dirs) = if name_str.ends_with("_test.go") {
+            (
+                &mut scan.test_files,
+                &mut scan.test_embed_files,
+                &mut scan.test_import_dirs,
+            )
         } else {
-            go_files.insert(path);
-        }
+            (&mut scan.go_files, &mut scan.embed_files, &mut scan.import_dirs)
+        };
+        files.insert(path);
 
         for imp in parse_imports(&source) {
             if is_stdlib(&imp) {
@@ -108,56 +124,71 @@ fn scan_package_dir(module: &Module, pkg_dir: &Path, canonical: &Path) -> Result
                     module.root.join(rel)
                 };
                 if dep_dir.is_dir() {
-                    local_import_dirs.insert(dep_dir);
+                    import_dirs.insert(dep_dir);
                 }
             }
         }
 
         let embeds = parse_embeds(&source);
         if !embeds.is_empty() {
-            for f in expand_embeds(pkg_dir, &embeds) {
-                embed_files.insert(f);
-            }
+            embed_files.extend(expand_embeds(pkg_dir, &embeds));
         }
     }
 
-    let scan = Arc::new(PackageScan {
-        go_files,
-        test_files,
-        embed_files,
-        local_import_dirs,
-    });
+    let scan = Arc::new(scan);
     module.packages.insert(canonical.to_path_buf(), Arc::clone(&scan));
     Ok(scan)
 }
 
-/// Collect all files transitively from a package directory using the cache.
-fn collect_transitive(
+/// Scan a package directory, returning its canonical path and cached scan.
+fn package_scan(module: &Module, pkg_dir: &Path) -> Result<(PathBuf, Arc<PackageScan>), BoxError> {
+    let canonical = pkg_dir.canonicalize().unwrap_or_else(|_| pkg_dir.to_path_buf());
+    let scan = scan_package_dir(module, pkg_dir, &canonical)?;
+    Ok((canonical, scan))
+}
+
+/// Collect a package's non-test files and those of its transitive local
+/// imports. `visited` holds packages whose sources are already collected.
+fn collect_sources(
+    module: &Module,
+    pkg_dir: &Path,
+    files: &mut HashSet<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<(), BoxError> {
+    let (canonical, scan) = package_scan(module, pkg_dir)?;
+    if !visited.insert(canonical) {
+        return Ok(());
+    }
+
+    files.extend(scan.go_files.iter().cloned());
+    files.extend(scan.embed_files.iter().cloned());
+    for dep_dir in &scan.import_dirs {
+        collect_sources(module, dep_dir, files, visited)?;
+    }
+
+    Ok(())
+}
+
+/// Collect a pattern-named package's test inputs and test-only imports.
+///
+/// Skips the `visited` check for the package itself: it may have been visited
+/// only as another package's import, which collects no test inputs.
+fn collect_tests(
     module: &Module,
     pkg_dir: &Path,
     tests: Tests,
     files: &mut HashSet<PathBuf>,
     visited: &mut HashSet<PathBuf>,
 ) -> Result<(), BoxError> {
-    let canonical = pkg_dir.canonicalize().unwrap_or_else(|_| pkg_dir.to_path_buf());
-    if !visited.insert(canonical.clone()) {
-        return Ok(());
-    }
-
-    let scan = scan_package_dir(module, pkg_dir, &canonical)?;
-    files.extend(scan.go_files.iter().cloned());
-    files.extend(scan.embed_files.iter().cloned());
-    if tests != Tests::Excluded {
-        files.extend(scan.test_files.iter().cloned());
-    }
+    let (_, scan) = package_scan(module, pkg_dir)?;
+    files.extend(scan.test_files.iter().cloned());
+    files.extend(scan.test_embed_files.iter().cloned());
     if tests == Tests::SourcesAndTestdata {
         files.extend(files_under(&pkg_dir.join("testdata")));
     }
-
-    for dep_dir in &scan.local_import_dirs {
-        collect_transitive(module, dep_dir, Tests::Excluded, files, visited)?;
+    for dep_dir in &scan.test_import_dirs {
+        collect_sources(module, dep_dir, files, visited)?;
     }
-
     Ok(())
 }
 
@@ -186,7 +217,10 @@ pub fn scan(pattern: &str, tests: Tests, base_dir: Option<&Path>) -> Result<Hash
     let mut visited = HashSet::new();
 
     for dir in &pkg_dirs {
-        collect_transitive(&module, dir, tests, &mut all_files, &mut visited)?;
+        collect_sources(&module, dir, &mut all_files, &mut visited)?;
+        if tests != Tests::Excluded {
+            collect_tests(&module, dir, tests, &mut all_files, &mut visited)?;
+        }
     }
 
     let go_mod = module.root.join("go.mod");
@@ -707,6 +741,66 @@ func Hello() { fmt.Println("hello") }
         assert!(testdata.contains(Path::new("pkg/testdata/nested/golden.txt")));
         assert!(testdata.contains(Path::new("dep/dep.go")));
         assert!(!testdata.contains(Path::new("dep/testdata/fixture.txt")));
+    }
+
+    #[test]
+    fn scan_tracks_tests_of_named_package_imported_by_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        fs::write(
+            root.join("main.go"),
+            "package main\nimport \"example.com/test/lib\"\nfunc main() { lib.F() }\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("lib/testdata")).unwrap();
+        fs::write(root.join("lib/lib.go"), "package lib\nfunc F() {}\n").unwrap();
+        fs::write(root.join("lib/lib_test.go"), "package lib\n").unwrap();
+        fs::write(root.join("lib/testdata/golden.txt"), "golden\n").unwrap();
+
+        let canon_root = root.canonicalize().unwrap();
+        let files: HashSet<_> = scan_from(root, "./...", Tests::SourcesAndTestdata)
+            .unwrap()
+            .iter()
+            .map(|p| p.strip_prefix(&canon_root).unwrap().to_path_buf())
+            .collect();
+
+        assert!(files.contains(Path::new("lib/lib_test.go")), "{files:?}");
+        assert!(files.contains(Path::new("lib/testdata/golden.txt")), "{files:?}");
+    }
+
+    #[test]
+    fn scan_tracks_test_only_references_only_with_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        fs::create_dir_all(root.join("pkg")).unwrap();
+        fs::write(root.join("pkg/lib.go"), "package pkg\n").unwrap();
+        fs::write(
+            root.join("pkg/lib_test.go"),
+            "package pkg\nimport \"example.com/test/testutil\"\n//go:embed fixture.txt\nvar fixture string\n",
+        )
+        .unwrap();
+        fs::write(root.join("pkg/fixture.txt"), "fixture\n").unwrap();
+        fs::create_dir_all(root.join("testutil")).unwrap();
+        fs::write(root.join("testutil/util.go"), "package testutil\n").unwrap();
+
+        let canon_root = root.canonicalize().unwrap();
+        let relative = |files: HashSet<PathBuf>| -> HashSet<PathBuf> {
+            files
+                .iter()
+                .map(|p| p.strip_prefix(&canon_root).unwrap().to_path_buf())
+                .collect()
+        };
+        let excluded = relative(scan_from(root, "./pkg", Tests::Excluded).unwrap());
+        let sources = relative(scan_from(root, "./pkg", Tests::Sources).unwrap());
+
+        for test_only in ["testutil/util.go", "pkg/fixture.txt"] {
+            assert!(!excluded.contains(Path::new(test_only)), "{excluded:?}");
+            assert!(sources.contains(Path::new(test_only)), "{sources:?}");
+        }
     }
 
     #[test]
