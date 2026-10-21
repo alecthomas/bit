@@ -2120,9 +2120,10 @@ go-test[module] = go.test {
     fn upstream_outputs_are_checked_against_their_declared_type() {
         let input = r#"
 pass = go.test { package = "./..." }
-build = go.test { package = pass.passed }
+build = go.test { package = "./..." dir = pass.passed }
 "#;
-        assert!(input_error(input, &go_registry(), &[]).ends_with("field 'package': expected string, got bool"));
+        let error = input_error(input, &go_registry(), &[]);
+        assert!(error.ends_with("field 'dir': expected string, got bool"), "{error}");
 
         // exec's outputs command declares no types, so its outputs pass
         // until the block runs.
