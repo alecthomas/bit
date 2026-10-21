@@ -108,9 +108,7 @@ impl CargoCommand {
 
     /// Return the display string (e.g. "cargo build --profile release").
     pub fn display(&self) -> String {
-        let mut parts = vec![self.program.clone()];
-        parts.extend(self.args.iter().cloned());
-        parts.join(" ")
+        crate::providers::display_command(&self.program, &self.args)
     }
 
     /// Build a `std::process::Command` ready to spawn. In a linked worktree,

@@ -19,7 +19,7 @@ fn default_dir() -> String {
 }
 
 /// Build a list of pnpm command arguments from resource inputs.
-fn pnpm_args(script: &str, package: Option<&str>, script_args: &[String]) -> Vec<String> {
+pub(super) fn pnpm_args(script: &str, package: Option<&str>, script_args: &[String]) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(pkg) = package {
         args.push("--filter".to_owned());
@@ -35,19 +35,8 @@ fn pnpm_args(script: &str, package: Option<&str>, script_args: &[String]) -> Vec
 }
 
 /// Render a shell-ish description of the `pnpm` invocation (for plan output).
-fn describe(script: &str, package: Option<&str>, script_args: &[String]) -> String {
-    let mut parts = vec!["pnpm".to_owned()];
-    if let Some(pkg) = package {
-        parts.push("--filter".to_owned());
-        parts.push(pkg.to_owned());
-    }
-    parts.push("run".to_owned());
-    parts.push(script.to_owned());
-    if !script_args.is_empty() {
-        parts.push("--".to_owned());
-        parts.extend(script_args.iter().cloned());
-    }
-    parts.join(" ")
+pub(super) fn describe(script: &str, package: Option<&str>, script_args: &[String]) -> String {
+    crate::providers::display_command("pnpm", &pnpm_args(script, package, script_args))
 }
 
 /// Resolve input files for a `pnpm.run` or `pnpm.test` block: auto-scan the

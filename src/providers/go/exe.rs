@@ -138,7 +138,7 @@ impl Resource for GoExeResource {
 
     fn plan(&self, inputs: &GoExeInputs, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {
         let output = GoExeResource::output_path(inputs);
-        let description = format!("go {}", GoExeResource::build_args(inputs, &output).join(" "));
+        let description = crate::providers::display_command("go", &GoExeResource::build_args(inputs, &output));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {

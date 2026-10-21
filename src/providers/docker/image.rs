@@ -372,7 +372,7 @@ impl Resource for ImageResource {
         }
 
         let args = build_args(inputs, None);
-        let desc = format!("docker {}", args.join(" "));
+        let desc = crate::providers::display_command("docker", &args);
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {

@@ -94,7 +94,7 @@ impl Resource for GoBuildResource {
     }
 
     fn plan(&self, inputs: &GoBuildInputs, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
-        let description = format!("go {}", build_args(inputs).join(" "));
+        let description = crate::providers::display_command("go", &build_args(inputs));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {

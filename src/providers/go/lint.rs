@@ -166,7 +166,7 @@ impl Resource for GoLintResource {
     }
 
     fn plan(&self, inputs: &GoLintInputs, prior_state: Option<&GoLintState>) -> Result<PlanResult, BoxError> {
-        let description = format!("golangci-lint {}", lint_args(inputs, &inputs.package).join(" "));
+        let description = crate::providers::display_command("golangci-lint", &lint_args(inputs, &inputs.package));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -219,7 +219,10 @@ impl Resource for GoLintResource {
             None => (inputs.package.clone(), inputs.package.clone()),
         };
         let args = lint_args(inputs, &packages);
-        writer.starting(&format!("golangci-lint {}", lint_args(inputs, &shown).join(" ")));
+        writer.starting(&crate::providers::display_command(
+            "golangci-lint",
+            &lint_args(inputs, &shown),
+        ));
         if let Some(Affected { dirs, total }) = &affected {
             writer.line(&format!("{} of {total} packages affected", dirs.len()));
         }

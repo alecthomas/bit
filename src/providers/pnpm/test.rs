@@ -10,7 +10,8 @@ use crate::provider::{
 };
 use crate::sha256::SHA256;
 
-use super::{run::resolve_inputs, run_pnpm};
+use super::run::{describe, pnpm_args, resolve_inputs};
+use super::run_pnpm;
 
 fn default_dir() -> String {
     ".".to_owned()
@@ -114,18 +115,7 @@ impl Resource for PnpmTestResource {
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<PnpmTestState, PnpmTestOutputs>, BoxError> {
-        let mut args = Vec::new();
-        if let Some(pkg) = &inputs.package {
-            args.push("--filter".to_owned());
-            args.push(pkg.clone());
-        }
-        args.push("run".to_owned());
-        args.push(inputs.script.clone());
-        if !inputs.args.is_empty() {
-            args.push("--".to_owned());
-            args.extend(inputs.args.iter().cloned());
-        }
-
+        let args = pnpm_args(&inputs.script, inputs.package.as_deref(), &inputs.args);
         let passed = run_pnpm(&args, Some(&inputs.dir), writer).is_ok();
 
         Ok(ApplyResult {
@@ -148,21 +138,6 @@ impl Resource for PnpmTestResource {
     fn cache_policy(&self, _inputs: &PnpmTestInputs) -> CachePolicy {
         CachePolicy::Local
     }
-}
-
-fn describe(script: &str, package: Option<&str>, script_args: &[String]) -> String {
-    let mut parts = vec!["pnpm".to_owned()];
-    if let Some(pkg) = package {
-        parts.push("--filter".to_owned());
-        parts.push(pkg.to_owned());
-    }
-    parts.push("run".to_owned());
-    parts.push(script.to_owned());
-    if !script_args.is_empty() {
-        parts.push("--".to_owned());
-        parts.extend(script_args.iter().cloned());
-    }
-    parts.join(" ")
 }
 
 #[cfg(test)]

@@ -92,7 +92,7 @@ impl Resource for NetworkResource {
     }
 
     fn plan(&self, inputs: &NetworkInputs, prior_state: Option<&NetworkState>) -> Result<PlanResult, BoxError> {
-        let desc = format!("docker {}", create_args(inputs).join(" "));
+        let desc = crate::providers::display_command("docker", &create_args(inputs));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {

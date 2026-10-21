@@ -39,7 +39,7 @@ impl BufTarget {
 
     /// Plan description for `buf <args...> [input]`.
     fn describe(&self, args: &[String]) -> String {
-        format!("buf {}", self.args(args).join(" "))
+        crate::providers::display_command("buf", &self.args(args))
     }
 
     fn args(&self, args: &[String]) -> Vec<String> {

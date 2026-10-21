@@ -271,7 +271,7 @@ impl Resource for NetworkAttachResource {
         inputs: &NetworkAttachInputs,
         prior_state: Option<&NetworkAttachState>,
     ) -> Result<PlanResult, BoxError> {
-        let desc = format!("docker {}", build_connect_args(inputs).join(" "));
+        let desc = crate::providers::display_command("docker", &build_connect_args(inputs));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {

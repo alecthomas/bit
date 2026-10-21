@@ -306,7 +306,7 @@ impl Resource for GoTestResource {
     }
 
     fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
-        let description = format!("go {}", test_args(inputs, &inputs.package).join(" "));
+        let description = crate::providers::display_command("go", &test_args(inputs, &inputs.package));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -354,7 +354,7 @@ impl Resource for GoTestResource {
         }
         let packages = affected.as_ref().map_or(&inputs.package, |affected| &affected.packages);
         let args = test_args(inputs, packages);
-        writer.starting(&format!("go {}", args.join(" ")));
+        writer.starting(&crate::providers::display_command("go", &args));
         if let Some(Affected { packages, total }) = &affected {
             writer.line(&format!("{} of {total} packages affected", packages.len()));
         }

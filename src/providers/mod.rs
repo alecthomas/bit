@@ -38,6 +38,47 @@ impl ReportMode {
     }
 }
 
+/// Widest a displayed command may be before its middle arguments are elided:
+/// four 80-column rows, which the live region shows alongside a task's
+/// output. Fixed rather than the terminal's width so logs read the same
+/// everywhere.
+const MAX_COMMAND_WIDTH: usize = 80 * 4;
+
+/// `program` and `args` joined for display. A command wider than
+/// [`MAX_COMMAND_WIDTH`] keeps its leading arguments, which hold the
+/// subcommand and flags, and its last, with `…` in place of the rest. Long
+/// argument lists, such as every package a test run names, otherwise wrap
+/// across many lines and bury the command.
+pub(crate) fn display_command<S: AsRef<str>>(program: &str, args: &[S]) -> String {
+    let width = |s: &str| s.chars().count();
+    let full: Vec<&str> = std::iter::once(program).chain(args.iter().map(AsRef::as_ref)).collect();
+    let full = full.join(" ");
+    let Some((last, leading)) = args.split_last() else {
+        return full;
+    };
+    if width(&full) <= MAX_COMMAND_WIDTH || leading.is_empty() {
+        return full;
+    }
+    let last = last.as_ref();
+    let tail = format!(" … {last}");
+    let mut line = program.to_owned();
+    let mut kept = 0;
+    for arg in leading {
+        let arg = arg.as_ref();
+        if width(&line) + 1 + width(arg) + width(&tail) > MAX_COMMAND_WIDTH {
+            break;
+        }
+        line.push(' ');
+        line.push_str(arg);
+        kept += 1;
+    }
+    // Hiding a single argument saves little and loses it, often a flag.
+    if leading.len() - kept < 2 {
+        return full;
+    }
+    line + &tail
+}
+
 /// Deserialize a field that can be either a single string or a list of
 /// strings, as described by [`crate::schema::string_or_list`]. `null` is an
 /// empty list. Supports `#[serde(default)]`: when the field is absent serde
@@ -262,6 +303,34 @@ mod tests {
 
     use super::*;
     use crate::output::Output;
+
+    #[test]
+    fn display_command_keeps_short_commands() {
+        assert_eq!(
+            display_command("go", &["test", "-json", "./..."]),
+            "go test -json ./..."
+        );
+    }
+
+    #[test]
+    fn display_command_never_hides_a_single_argument() {
+        let flag = "-x".repeat(MAX_COMMAND_WIDTH);
+        let line = display_command("go", &["test", flag.as_str(), "./..."]);
+        assert_eq!(line, format!("go test {flag} ./..."));
+    }
+
+    #[test]
+    fn display_command_elides_middle_arguments() {
+        let mut args = vec!["test".to_owned(), "-json".to_owned()];
+        args.extend((0..50).map(|i| format!("github.com/gohugoio/hugo/pkg{i:02}")));
+        let line = display_command("go", &args);
+        assert!(line.chars().count() <= MAX_COMMAND_WIDTH, "{line}");
+        assert!(
+            line.starts_with("go test -json github.com/gohugoio/hugo/pkg00 "),
+            "{line}"
+        );
+        assert!(line.ends_with(" … github.com/gohugoio/hugo/pkg49"), "{line}");
+    }
 
     #[test]
     fn remove_path_removes_files_and_directories_and_allows_missing_paths() {

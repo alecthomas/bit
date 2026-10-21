@@ -430,7 +430,7 @@ impl ProtocGenerateResource {
 fn command_line(inputs: &ProtocGenerateInputs, sources: &[String]) -> String {
     let mut args = inputs.args(str::to_owned);
     args.extend(sources.iter().cloned());
-    format!("protoc {}", args.join(" "))
+    crate::providers::display_command("protoc", &args)
 }
 
 /// Compile only `batches`. Returns every generated file, or `None` when the

@@ -311,7 +311,7 @@ impl Resource for ContainerResource {
     }
 
     fn plan(&self, inputs: &ContainerInputs, prior_state: Option<&ContainerState>) -> Result<PlanResult, BoxError> {
-        let desc = format!("docker {}", run_args(inputs, EnvValues::Masked).join(" "));
+        let desc = crate::providers::display_command("docker", &run_args(inputs, EnvValues::Masked));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
