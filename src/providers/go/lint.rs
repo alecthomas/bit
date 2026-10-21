@@ -80,6 +80,33 @@ fn golangci_config_files(lint_dir: &Path, package: &str, home: Option<&Path>) ->
     Vec::new()
 }
 
+/// The directories of the packages a narrowed run lints, out of the `total`
+/// the pattern names.
+struct Affected {
+    dirs: Vec<PathBuf>,
+    total: usize,
+}
+
+/// The packages whose own or imported files include a changed path, or
+/// `None` to lint the whole pattern.
+fn affected_packages(inputs: &GoLintInputs, changes: &Changes) -> Result<Option<Affected>, BoxError> {
+    let env = super::GoEnv::default();
+    let Some(affected) = super::affected_packages(&inputs.package, inputs.dir.as_deref(), &[], &env, changes)? else {
+        return Ok(None);
+    };
+    // Build tags from flags or the golangci-lint config may include a package
+    // the listing excludes, so a change to one lints the whole pattern.
+    if affected.excluded {
+        return Ok(None);
+    }
+    // golangci-lint resolves a bare import path as a directory, so packages
+    // are named by their absolute directories.
+    Ok(Some(Affected {
+        dirs: affected.packages.into_iter().map(|p| p.dir).collect(),
+        total: affected.total,
+    }))
+}
+
 pub struct GoLintResource {
     tracker: Arc<FileTracker>,
 }
@@ -153,12 +180,31 @@ impl Resource for GoLintResource {
         &self,
         inputs: &GoLintInputs,
         _prior_state: Option<&GoLintState>,
-        _changes: &Changes,
+        changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoLintState, GoLintOutputs>, BoxError> {
+        let state = GoLintState {
+            package: inputs.package.clone(),
+            flags: inputs.flags.clone(),
+            dir: inputs.dir.clone(),
+        };
+        let packages = match affected_packages(inputs, changes)? {
+            Some(Affected { dirs, total }) => {
+                writer.line(&format!("{} of {total} packages affected", dirs.len()));
+                if dirs.is_empty() {
+                    return Ok(ApplyResult {
+                        outputs: GoLintOutputs { passed: true },
+                        state: Some(state),
+                    });
+                }
+                dirs.into_iter().map(|dir| dir.to_string_lossy().into_owned()).collect()
+            }
+            None => vec![inputs.package.clone()],
+        };
+
         let mut args = vec!["run".to_owned()];
         args.extend(inputs.flags.iter().cloned());
-        args.push(inputs.package.clone());
+        args.extend(packages);
 
         let mut cmd = Command::new("golangci-lint");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -187,11 +233,7 @@ impl Resource for GoLintResource {
 
         Ok(ApplyResult {
             outputs: GoLintOutputs { passed },
-            state: Some(GoLintState {
-                package: inputs.package.clone(),
-                flags: inputs.flags.clone(),
-                dir: inputs.dir.clone(),
-            }),
+            state: Some(state),
         })
     }
 
@@ -293,6 +335,43 @@ mod tests {
             resolved.contains_key(&root.join(".golangci.yml").to_string_lossy().into_owned()),
             "{resolved:?}"
         );
+    }
+
+    #[test]
+    fn affected_packages_follow_changed_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("go.mod"), "module example.com/m\n").unwrap();
+        std::fs::write(root.join(".golangci.yml"), "version: \"2\"\n").unwrap();
+        std::fs::write(root.join("main.go"), "package main\nimport \"example.com/m/lib\"\n").unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("lib/lib.go"), "package lib\n").unwrap();
+        std::fs::create_dir_all(root.join("util")).unwrap();
+        std::fs::write(root.join("util/util.go"), "package util\n").unwrap();
+        // The default listing excludes this package, but build tags may not.
+        std::fs::create_dir_all(root.join("tagged")).unwrap();
+        std::fs::write(root.join("tagged/tagged.go"), "//go:build extra\n\npackage tagged\n").unwrap();
+        let inputs = GoLintInputs {
+            package: "./...".into(),
+            flags: vec![],
+            inputs: vec![],
+            dir: Some(root.to_string_lossy().into_owned()),
+        };
+        let affected = |names: &[&str]| {
+            let changes = Changes::Paths(names.iter().map(|name| root.join(name)).collect());
+            affected_packages(&inputs, &changes).unwrap().map(|affected| {
+                assert_eq!(affected.total, 3);
+                let mut dirs = affected.dirs;
+                dirs.sort();
+                dirs
+            })
+        };
+
+        assert_eq!(affected(&["lib/lib.go"]).unwrap(), [root.clone(), root.join("lib")]);
+        assert_eq!(affected(&["util/util.go"]).unwrap(), [root.join("util")]);
+        assert_eq!(affected(&["tagged/tagged.go"]), None);
+        assert_eq!(affected(&[".golangci.yml"]), None);
+        assert!(affected_packages(&inputs, &Changes::All).unwrap().is_none());
     }
 
     #[test]

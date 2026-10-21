@@ -220,6 +220,8 @@ pub fn scan(pattern: &str, tests: Tests, base_dir: Option<&Path>) -> Result<Hash
 /// A package a pattern names, with every file its tests depend on.
 pub struct TestedPackage {
     pub import_path: String,
+    /// Absolute package directory.
+    pub dir: PathBuf,
     pub files: HashSet<PathBuf>,
 }
 
@@ -236,6 +238,7 @@ pub fn tested_packages(pattern: &str, base_dir: Option<&Path>) -> Result<Vec<Tes
             collect_tests(&module, dir, Tests::SourcesAndTestdata, &mut files, &mut visited)?;
             Ok(TestedPackage {
                 import_path: import_path(&module, dir),
+                dir: dir.clone(),
                 files,
             })
         })

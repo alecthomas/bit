@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::BufReader;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
@@ -62,6 +63,19 @@ fn go_source_files(package: &str, dir: Option<&std::path::Path>) -> Result<Vec<S
         .collect();
     paths.sort();
     Ok(paths)
+}
+
+/// The block's `.go` files that changed since its last success, or all of
+/// them when anything may have changed.
+fn changed_go_files(inputs: &GoFmtInputs, changes: &Changes) -> Result<Vec<String>, BoxError> {
+    let files = go_source_files(&inputs.package, inputs.dir.as_deref().map(Path::new))?;
+    Ok(match changes {
+        Changes::All => files,
+        Changes::Paths(changed) => files
+            .into_iter()
+            .filter(|file| changed.contains(Path::new(file)))
+            .collect(),
+    })
 }
 
 // ── go.fmt (build) ──────────────────────────────────────────────────────
@@ -128,10 +142,10 @@ impl Resource for GoFmtResource {
         &self,
         inputs: &GoFmtInputs,
         _prior_state: Option<&GoFmtState>,
-        _changes: &Changes,
+        changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoFmtState, GoFmtOutputs>, BoxError> {
-        let files = go_source_files(&inputs.package, inputs.dir.as_deref().map(std::path::Path::new))?;
+        let files = changed_go_files(inputs, changes)?;
         if files.is_empty() {
             return Ok(ApplyResult {
                 outputs: GoFmtOutputs {},
@@ -247,10 +261,10 @@ impl Resource for GoFmtCheckResource {
         &self,
         inputs: &GoFmtInputs,
         _prior_state: Option<&GoFmtState>,
-        _changes: &Changes,
+        changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoFmtState, GoFmtCheckOutputs>, BoxError> {
-        let files = go_source_files(&inputs.package, inputs.dir.as_deref().map(std::path::Path::new))?;
+        let files = changed_go_files(inputs, changes)?;
         if files.is_empty() {
             return Ok(ApplyResult {
                 outputs: GoFmtCheckOutputs { passed: true },
@@ -415,6 +429,28 @@ mod tests {
         )
         .unwrap();
         assert!(!result.outputs.passed);
+    }
+
+    #[test]
+    fn fmt_check_reads_only_changed_files() {
+        let (dir, inputs) = module_with_unformatted_test_file();
+        let root = dir.path().canonicalize().unwrap();
+        let output = crate::output::Output::new(&[]);
+        let check = |name: &str| {
+            let changes = Changes::Paths([root.join(name)].into());
+            Resource::apply(
+                &test_fmt_check_resource(),
+                &inputs,
+                None,
+                &changes,
+                &output.writer("fmt-l"),
+            )
+            .unwrap()
+            .outputs
+            .passed
+        };
+        assert!(check("pkg/lib.go"));
+        assert!(!check("pkg/lib_test.go"));
     }
 
     #[test]

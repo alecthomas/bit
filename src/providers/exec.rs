@@ -152,12 +152,44 @@ fn shell(command: &str, dir: Option<&str>) -> Command {
     cmd
 }
 
+/// Lists the block's inputs that changed since its last success.
+const CHANGED_FILES_VAR: &str = "BIT_CHANGED_FILES";
+
+/// Linux rejects an environment string over 128 KiB (`MAX_ARG_STRLEN`), so a
+/// longer list is withheld and the command does a full run.
+const MAX_CHANGED_FILES_LEN: usize = 64 * 1024;
+
+/// Set `BIT_CHANGED_FILES` to the changed inputs, one absolute path per line.
+/// It is unset when the command must do a full run: anything may have
+/// changed, no input changed, or the list can't be passed. Removing it also
+/// stops a value inherited from an enclosing bit run leaking in.
+fn set_changed_files(cmd: &mut Command, changes: &Changes) {
+    match changed_files(changes) {
+        Some(list) => cmd.env(CHANGED_FILES_VAR, list),
+        None => cmd.env_remove(CHANGED_FILES_VAR),
+    };
+}
+
+/// The value of `BIT_CHANGED_FILES`, or `None` to leave it unset.
+fn changed_files(changes: &Changes) -> Option<String> {
+    let Changes::Paths(paths) = changes else {
+        return None;
+    };
+    // A path that isn't UTF-8 or contains a newline can't be listed.
+    let paths: Vec<&str> = paths
+        .iter()
+        .map(|path| path.to_str().filter(|path| !path.contains('\n')))
+        .collect::<Option<_>>()?;
+    let list = paths.join("\n");
+    (!list.is_empty() && list.len() <= MAX_CHANGED_FILES_LEN).then_some(list)
+}
+
 /// Run a shell command under `bash -eo pipefail`, piping stdout/stderr through the block
 /// writer. Returns `Err` if the command exits non-zero.
-fn run_command(command: &str, dir: Option<&str>, writer: &BlockWriter) -> Result<(), BoxError> {
-    let mut child = shell(command, dir)
-        .spawn()
-        .map_err(|e| format!("failed to execute command: {e}"))?;
+fn run_command(command: &str, dir: Option<&str>, changes: &Changes, writer: &BlockWriter) -> Result<(), BoxError> {
+    let mut cmd = shell(command, dir);
+    set_changed_files(&mut cmd, changes);
+    let mut child = cmd.spawn().map_err(|e| format!("failed to execute command: {e}"))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -324,7 +356,7 @@ impl Resource for ExecResource {
         &self,
         inputs: &ExecInputs,
         _prior_state: Option<&ExecState>,
-        _changes: &Changes,
+        changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
         for output in &inputs.output {
@@ -338,7 +370,7 @@ impl Resource for ExecResource {
             }
         }
 
-        run_command(&inputs.command, inputs.dir.as_deref(), writer)?;
+        run_command(&inputs.command, inputs.dir.as_deref(), changes, writer)?;
 
         let resolve_output = inputs
             .resolve
@@ -372,7 +404,7 @@ impl Resource for ExecResource {
         use crate::output::Event;
         if let Some(clean) = &prior_state.clean {
             writer.event(Event::Starting, clean);
-            return run_command(clean, prior_state.dir.as_deref(), writer);
+            return run_command(clean, prior_state.dir.as_deref(), &Changes::All, writer);
         }
         for output in &prior_state.output {
             super::remove_path(Path::new(output), writer)?;
@@ -465,11 +497,12 @@ pub struct ExecTestState {
 fn run_with_results(
     filter: &results::ResultsFilter,
     inputs: &ExecTestInputs,
+    changes: &Changes,
     writer: &BlockWriter,
 ) -> Result<bool, BoxError> {
-    let mut child = shell(&inputs.command, inputs.dir.as_deref())
-        .spawn()
-        .map_err(|e| format!("failed to execute command: {e}"))?;
+    let mut cmd = shell(&inputs.command, inputs.dir.as_deref());
+    set_changed_files(&mut cmd, changes);
+    let mut child = cmd.spawn().map_err(|e| format!("failed to execute command: {e}"))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -583,12 +616,12 @@ impl Resource for ExecTestResource {
         &self,
         inputs: &ExecTestInputs,
         _prior_state: Option<&ExecTestState>,
-        _changes: &Changes,
+        changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
         let passed = match &inputs.results {
-            Some(code) => run_with_results(&results::ResultsFilter::compile(code)?, inputs, writer)?,
-            None => run_command(&inputs.command, inputs.dir.as_deref(), writer).is_ok(),
+            Some(code) => run_with_results(&results::ResultsFilter::compile(code)?, inputs, changes, writer)?,
+            None => run_command(&inputs.command, inputs.dir.as_deref(), changes, writer).is_ok(),
         };
 
         Ok(ApplyResult {
@@ -606,7 +639,7 @@ impl Resource for ExecTestResource {
         use crate::output::Event;
         if let Some(clean) = &prior_state.clean {
             writer.event(Event::Starting, clean);
-            return run_command(clean, prior_state.dir.as_deref(), writer);
+            return run_command(clean, prior_state.dir.as_deref(), &Changes::All, writer);
         }
         Ok(())
     }
@@ -916,6 +949,35 @@ mod tests {
         Ok(Resource::apply(&resource, inputs, None, &Changes::All, &writer)?
             .outputs
             .passed)
+    }
+
+    #[test]
+    fn test_command_sees_changed_files() {
+        let run = |command: &str, results: Option<&str>, changes: &Changes| {
+            let resource = ExecTestResource {
+                tracker: test_tracker(),
+            };
+            let out = crate::output::Output::silent();
+            let writer = out.writer("test");
+            Resource::apply(&resource, &test_inputs(command, results), None, changes, &writer)
+                .unwrap()
+                .outputs
+                .passed
+        };
+        let listed = r#"test "$BIT_CHANGED_FILES" = "$(printf '/a\n/b c')""#;
+        let unset = r#"test -z "${BIT_CHANGED_FILES+set}""#;
+        let changed = Changes::Paths(["/a", "/b c"].map(std::path::PathBuf::from).into());
+
+        assert!(run(listed, None, &changed));
+        assert!(run(&format!("{listed}; echo '{{}}'"), Some("empty"), &changed));
+        assert!(run(unset, None, &Changes::All));
+        assert!(run(unset, None, &Changes::Paths(Default::default())));
+        let long = "/x".repeat(MAX_CHANGED_FILES_LEN);
+        assert!(run(
+            unset,
+            None,
+            &Changes::Paths([std::path::PathBuf::from(long)].into())
+        ));
     }
 
     #[test]

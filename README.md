@@ -106,7 +106,10 @@ When only Go files changed since `go.test` last passed, it tests just the
 packages whose sources, tests, `testdata/` or local imports include a changed
 file. It tests the whole pattern on its first run, with `--force`, or when its
 fields, toolchain, dependencies or extra `inputs` changed, or a tracked file
-was deleted.
+was deleted. `go.lint` narrows its run the same way. It lints the whole
+pattern when the golangci-lint config changed, or when a changed package is
+excluded by build constraints without extra build tags. `go.fmt` and
+`go.fmt-l` format or check only the changed `.go` files.
 
 `exec.test` can report individual tests from any runner with JSON or JSONL
 output. Its `results` field is a jq filter that maps each JSON value to test
@@ -1201,6 +1204,22 @@ don't repeat its messages.
 stops and fails at its first failing line, including a failure anywhere in a
 pipeline. A trailing `echo "::success::..."` can't hide an earlier failure.
 Append `|| true` to a line whose failure should be ignored.
+
+`exec` and `exec.test` set `BIT_CHANGED_FILES` to the `inputs` that changed
+since the block last succeeded, one absolute path per line. A command can use
+it to process only those files:
+
+```hcl
+lint = exec.test {
+  command = "eslint ${BIT_CHANGED_FILES:-.}"
+  inputs  = ["src/**/*.ts"]
+}
+```
+
+The variable is unset when the command must do a full run: on the first run,
+with `--force`, when the block's fields, tools or dependencies changed, when
+the block reruns without a changed input, or when the list is too long to
+pass.
 
 ### Shared build cache
 

@@ -233,62 +233,14 @@ struct Affected {
 /// The packages whose tests depend on a changed path, or `None` to test the
 /// whole pattern.
 fn affected_packages(inputs: &GoTestInputs, changes: &Changes) -> Result<Option<Affected>, BoxError> {
-    let Changes::Paths(changed) = changes else {
-        return Ok(None);
-    };
-    let dir = inputs.dir.as_deref().map(std::path::Path::new);
-    let scanned = super::scanner::tested_packages(&inputs.package, dir)?;
-    // A path no package depends on is an extra input or a deleted file, whose
-    // dependents cannot be found.
-    if changed
-        .iter()
-        .any(|path| !scanned.iter().any(|p| p.files.contains(path)))
-    {
-        return Ok(None);
-    }
-    // The scanner ignores build constraints, and `go test` fails on a named
-    // package they exclude, so only packages `go` lists may be named.
-    let listed = listed_packages(inputs)?;
-    if listed
-        .iter()
-        .any(|path| !scanned.iter().any(|p| &p.import_path == path))
-    {
-        return Ok(None);
-    }
-    let packages = scanned
-        .into_iter()
-        .filter(|p| listed.contains(&p.import_path) && changed.iter().any(|path| p.files.contains(path)))
-        .map(|p| p.import_path)
-        .collect();
-    Ok(Some(Affected {
-        packages,
-        total: listed.len(),
+    let tags = tag_flags(&inputs.flags);
+    let affected = super::affected_packages(&inputs.package, inputs.dir.as_deref(), &tags, &inputs.env, changes)?;
+    // The listing uses the test's own tags and environment, so `go test` on
+    // the whole pattern skips excluded packages too.
+    Ok(affected.map(|affected| Affected {
+        packages: affected.packages.into_iter().map(|p| p.import_path).collect(),
+        total: affected.total,
     }))
-}
-
-/// The packages `go test` would test for the block's pattern, with the same
-/// environment and build tags.
-fn listed_packages(inputs: &GoTestInputs) -> Result<Vec<String>, BoxError> {
-    let mut cmd = Command::new("go");
-    cmd.args(["list", "-e"])
-        .args(tag_flags(&inputs.flags))
-        .arg(&inputs.package);
-    if let Some(dir) = &inputs.dir {
-        cmd.current_dir(dir);
-    }
-    inputs.env.apply_to(&mut cmd);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to execute `go list {}`: {e}", inputs.package))?;
-    if !output.status.success() {
-        return Err(format!(
-            "`go list {}` failed: {}",
-            inputs.package,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-        .into());
-    }
-    Ok(super::package_list(&output.stdout))
 }
 
 /// The `-tags` flags among `go test` flags, which `go list` also accepts and

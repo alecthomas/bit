@@ -14,7 +14,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider, VersionCommand};
+use crate::provider::{Ambient, BoxError, Changes, DynResource, FuncSignature, Provider, VersionCommand};
 use crate::sha256::SHA256;
 use crate::value::Value;
 use scanner::Tests;
@@ -182,6 +182,81 @@ pub(super) fn package_list(output: &[u8]) -> Vec<String> {
     packages.sort();
     packages.dedup();
     packages
+}
+
+/// The packages `go list -e` reports for `pattern` in `dir`, with extra
+/// `args` such as build tags.
+fn list_packages(pattern: &str, args: &[String], dir: Option<&str>, env: &GoEnv) -> Result<Vec<String>, BoxError> {
+    let mut cmd = Command::new("go");
+    cmd.args(["list", "-e"]).args(args).arg(pattern);
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+    env.apply_to(&mut cmd);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to execute `go list {pattern}`: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`go list {pattern}` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    Ok(package_list(&output.stdout))
+}
+
+/// The packages of a pattern that a change affects.
+struct Affected {
+    /// Packages `go` lists whose files include a changed path.
+    packages: Vec<scanner::TestedPackage>,
+    /// Whether a changed path also affects a package that build constraints
+    /// exclude from the listing.
+    excluded: bool,
+    /// How many packages `go` lists.
+    total: usize,
+}
+
+/// The packages `pattern` names whose files include a changed path, or `None`
+/// to run the whole pattern. `list` reports the packages `go` matches for the
+/// pattern, so `args` and `env` must match those of the narrowed command.
+fn affected_packages(
+    pattern: &str,
+    dir: Option<&str>,
+    args: &[String],
+    env: &GoEnv,
+    changes: &Changes,
+) -> Result<Option<Affected>, BoxError> {
+    let Changes::Paths(changed) = changes else {
+        return Ok(None);
+    };
+    let scanned = scanner::tested_packages(pattern, dir.map(Path::new))?;
+    // A path no package depends on is an extra input, a config file or a
+    // deleted file, whose dependents cannot be found.
+    if changed
+        .iter()
+        .any(|path| !scanned.iter().any(|p| p.files.contains(path)))
+    {
+        return Ok(None);
+    }
+    // The scanner ignores build constraints, and go fails on a named package
+    // they exclude, so only packages `go` lists may be named.
+    let listed = list_packages(pattern, args, dir, env)?;
+    if listed
+        .iter()
+        .any(|path| !scanned.iter().any(|p| &p.import_path == path))
+    {
+        return Ok(None);
+    }
+    let (packages, excluded): (Vec<_>, Vec<_>) = scanned
+        .into_iter()
+        .filter(|p| changed.iter().any(|path| p.files.contains(path)))
+        .partition(|p| listed.contains(&p.import_path));
+    Ok(Some(Affected {
+        packages,
+        excluded: !excluded.is_empty(),
+        total: listed.len(),
+    }))
 }
 
 /// Go provider with `exe`, `build`, and `test` resources.
