@@ -89,6 +89,7 @@ bit --cache --clean  # delete every cached receipt and artifact
 bit --long       # disable live scrolling regions and stream every output line
 bit --quiet      # suppress output unless an error occurs (also -q)
 bit --since origin/master  # apply blocks affected since the branch point
+bit --since      # same, using the remote default branch (origin/HEAD)
 ```
 
 `bit -ll` renders blocks as a dependency tree. A block's prerequisites are
@@ -151,6 +152,10 @@ or when it content-depends on an affected block. Required prerequisites are
 included. `bit -ll --since <ref>` prints affected blocks across the full DAG;
 positional targets optionally narrow that list. `-l --since` is rejected
 because `-l` lists target definitions rather than blocks.
+
+A bare `--since` uses `origin/HEAD`, the remote's default branch. Because the
+ref is optional, a target directly after a bare `--since` is read as the ref.
+Write `bit <target> --since` or `bit --since -- <target>` instead.
 
 Blocks without source paths are always included because Git cannot prove them
 unaffected. A changed `.bit` build definition selects the full requested target

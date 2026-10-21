@@ -471,4 +471,21 @@ e = exec {
     assert!(stdout.contains("d ("), "{stdout:?}");
     assert!(stdout.contains("e ("), "{stdout:?}");
     assert!(!stdout.contains("b ("), "{stdout:?}");
+
+    assert!(
+        run_git(project.path(), &["update-ref", "refs/remotes/origin/master", base])
+            .status
+            .success()
+    );
+    assert!(
+        run_git(
+            project.path(),
+            &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master"],
+        )
+        .status
+        .success()
+    );
+    let bare = run_bit(project.path(), &["-ll", "--since"]);
+    assert!(bare.status.success(), "{}", String::from_utf8_lossy(&bare.stderr));
+    assert_eq!(String::from_utf8(bare.stdout).unwrap(), stdout);
 }

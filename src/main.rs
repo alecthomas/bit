@@ -92,8 +92,8 @@ struct Cli {
     #[arg(short = 'P', long = "param", value_name = "KEY=VALUE")]
     params: Vec<String>,
 
-    /// Limit blocks to those affected since merge-base(REF, HEAD)
-    #[arg(long, value_name = "REF")]
+    /// Limit blocks to those affected since merge-base(REF, HEAD); REF defaults to origin/HEAD
+    #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "origin/HEAD")]
     since: Option<String>,
 
     /// Show what would change without applying
