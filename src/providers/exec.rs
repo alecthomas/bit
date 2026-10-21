@@ -25,7 +25,7 @@ pub struct ExecInputs {
     /// Shell command to execute
     pub command: String,
     /// Output file or list of output files
-    #[serde(default, deserialize_with = "string_or_vec_opt")]
+    #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub output: Vec<String>,
     /// Input file glob patterns
@@ -99,40 +99,6 @@ pub struct ExecState {
     pub outputs: Option<String>,
     #[serde(default, skip_serializing_if = "crate::value::Map::is_empty")]
     pub outputs_values: crate::value::Map,
-}
-
-/// Deserialize a field that can be either a single string or a list of strings.
-/// Supports `#[serde(default)]` — when the field is absent serde uses `Default`
-/// and this function is never called.
-fn string_or_vec_opt<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct StringOrVec;
-
-    impl<'de> de::Visitor<'de> for StringOrVec {
-        type Value = Vec<String>;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a string or list of strings")
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
-            Ok(vec![v.to_owned()])
-        }
-
-        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
-            let mut v = Vec::new();
-            while let Some(s) = seq.next_element()? {
-                v.push(s);
-            }
-            Ok(v)
-        }
-    }
-
-    deserializer.deserialize_any(StringOrVec)
 }
 
 /// Build a `bash -eo pipefail -c` command with piped stdout and stderr. `-e`

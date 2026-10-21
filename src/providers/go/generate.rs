@@ -19,8 +19,10 @@ use super::scanner::Tests;
 /// Run go generate
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoGenerateInputs {
-    /// Go package pattern (e.g. "./...")
-    pub package: String,
+    /// Go package pattern or list of patterns (e.g. "./...")
+    #[serde(deserialize_with = "super::package_patterns")]
+    #[schema(typ = crate::schema::string_or_list())]
+    pub package: Vec<String>,
     /// Extra flags passed to go generate
     #[serde(default)]
     pub flags: Vec<String>,
@@ -44,7 +46,9 @@ pub struct GoGenerateOutputs {}
 /// Persisted state for a `go.generate` block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoGenerateState {
-    pub package: String,
+    /// A string in state written before `package` took a list.
+    #[serde(deserialize_with = "crate::providers::string_or_vec")]
+    pub package: Vec<String>,
     pub flags: Vec<String>,
     #[serde(default)]
     pub outputs: Vec<String>,
@@ -90,7 +94,7 @@ impl Resource for GoGenerateResource {
     }
 
     fn plan(&self, inputs: &GoGenerateInputs, prior_state: Option<&GoGenerateState>) -> Result<PlanResult, BoxError> {
-        let description = format!("go generate {}", inputs.package);
+        let description = format!("go generate {}", inputs.package.join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -122,7 +126,7 @@ impl Resource for GoGenerateResource {
     ) -> Result<ApplyResult<GoGenerateState, GoGenerateOutputs>, BoxError> {
         let mut args = vec!["generate".to_owned()];
         args.extend(inputs.flags.iter().cloned());
-        args.push(inputs.package.clone());
+        args.extend(inputs.package.iter().cloned());
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -201,7 +205,7 @@ mod tests {
         std::fs::write(root.join("lib.go"), "package lib\n").unwrap();
         std::fs::write(root.join("lib_test.go"), "package lib\n\n//go:generate echo test\n").unwrap();
         let inputs = GoGenerateInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             outputs: vec![],
@@ -220,7 +224,7 @@ mod tests {
     #[test]
     fn plan_create_when_no_prior_state() {
         let inputs = GoGenerateInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             outputs: vec![],
@@ -234,7 +238,7 @@ mod tests {
     #[test]
     fn plan_none_when_unchanged() {
         let inputs = GoGenerateInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             outputs: vec![],
@@ -242,7 +246,7 @@ mod tests {
             env: GoEnv::default(),
         };
         let prior = GoGenerateState {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             outputs: vec![],
             dir: None,
@@ -255,7 +259,7 @@ mod tests {
     #[test]
     fn plan_update_when_flags_changed() {
         let inputs = GoGenerateInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec!["-v".into()],
             inputs: vec![],
             outputs: vec![],
@@ -263,7 +267,7 @@ mod tests {
             env: GoEnv::default(),
         };
         let prior = GoGenerateState {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             outputs: vec![],
             dir: None,
@@ -282,7 +286,7 @@ mod tests {
         std::fs::create_dir(&output_dir).unwrap();
         std::fs::write(output_dir.join("data.go"), "package generated").unwrap();
         let state = GoGenerateState {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             outputs: vec![
                 file.to_string_lossy().into_owned(),

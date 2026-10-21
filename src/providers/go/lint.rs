@@ -18,9 +18,10 @@ use super::scanner::Tests;
 /// Run golangci-lint
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoLintInputs {
-    /// Go package pattern
-    #[serde(default = "default_package")]
-    pub package: String,
+    /// Go package pattern or list of patterns
+    #[serde(default = "default_package", deserialize_with = "super::package_patterns")]
+    #[schema(typ = crate::schema::optional_string_or_list())]
+    pub package: Vec<String>,
     /// Extra flags passed to golangci-lint run
     #[serde(default)]
     pub flags: Vec<String>,
@@ -32,8 +33,8 @@ pub struct GoLintInputs {
     pub dir: Option<String>,
 }
 
-fn default_package() -> String {
-    "./...".to_owned()
+fn default_package() -> Vec<String> {
+    vec!["./...".to_owned()]
 }
 
 /// Outputs from a `go.lint` block.
@@ -46,7 +47,9 @@ pub struct GoLintOutputs {
 /// Persisted state for a `go.lint` block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoLintState {
-    pub package: String,
+    /// A string in state written before `package` took a list.
+    #[serde(deserialize_with = "crate::providers::string_or_vec")]
+    pub package: Vec<String>,
     pub flags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
@@ -54,7 +57,8 @@ pub struct GoLintState {
 
 const GOLANGCI_CONFIG_NAMES: [&str; 4] = [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"];
 
-/// Config files golangci-lint may load when run in `lint_dir` on `package`.
+/// Config files golangci-lint may load when run in `lint_dir` on `package`,
+/// the first package argument.
 ///
 /// Mirrors golangci-lint: `lint_dir`, the package dir and its ancestors, then
 /// `home`. All candidates in the first matching dir are returned.
@@ -145,7 +149,8 @@ impl Resource for GoLintResource {
         let mut files = super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &inputs.inputs, tracker)?;
         let lint_dir = std::env::current_dir()?.join(dir.unwrap_or(Path::new("")));
         let home = dirs::home_dir();
-        for path in golangci_config_files(&lint_dir, &inputs.package, home.as_deref()) {
+        // golangci-lint searches for its config from the first package only.
+        for path in golangci_config_files(&lint_dir, &inputs.package[0], home.as_deref()) {
             let hash = tracker.hash_file(&path)?;
             files.insert(path.to_string_lossy().into_owned(), hash);
         }
@@ -153,7 +158,7 @@ impl Resource for GoLintResource {
     }
 
     fn plan(&self, inputs: &GoLintInputs, prior_state: Option<&GoLintState>) -> Result<PlanResult, BoxError> {
-        let description = format!("golangci-lint run {}", inputs.package);
+        let description = format!("golangci-lint run {}", inputs.package.join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -199,7 +204,7 @@ impl Resource for GoLintResource {
                 }
                 dirs.into_iter().map(|dir| dir.to_string_lossy().into_owned()).collect()
             }
-            None => vec![inputs.package.clone()],
+            None => inputs.package.clone(),
         };
 
         let mut args = vec!["run".to_owned()];
@@ -308,7 +313,7 @@ mod tests {
         std::fs::write(root.join("lib.go"), "package lib\n").unwrap();
         std::fs::write(root.join("lib_test.go"), "package lib\n").unwrap();
         let inputs = GoLintInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             dir: Some(root.to_string_lossy().into_owned()),
@@ -325,7 +330,7 @@ mod tests {
         std::fs::write(root.join("main.go"), "package main\n").unwrap();
         std::fs::write(root.join(".golangci.yml"), "version: \"2\"\n").unwrap();
         let inputs = GoLintInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             dir: Some(root.to_string_lossy().into_owned()),
@@ -352,7 +357,7 @@ mod tests {
         std::fs::create_dir_all(root.join("tagged")).unwrap();
         std::fs::write(root.join("tagged/tagged.go"), "//go:build extra\n\npackage tagged\n").unwrap();
         let inputs = GoLintInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             dir: Some(root.to_string_lossy().into_owned()),
@@ -382,7 +387,7 @@ mod tests {
     #[test]
     fn plan_create_when_no_prior_state() {
         let inputs = GoLintInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             dir: None,
@@ -394,13 +399,13 @@ mod tests {
     #[test]
     fn plan_none_when_unchanged() {
         let inputs = GoLintInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             dir: None,
         };
         let prior = GoLintState {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             dir: None,
         };
@@ -411,13 +416,13 @@ mod tests {
     #[test]
     fn plan_update_when_flags_changed() {
         let inputs = GoLintInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec!["--fast".into()],
             inputs: vec![],
             dir: None,
         };
         let prior = GoLintState {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             dir: None,
         };
@@ -428,6 +433,6 @@ mod tests {
     #[test]
     fn default_package_is_all() {
         let inputs: GoLintInputs = serde_json::from_str("{}").unwrap();
-        assert_eq!(inputs.package, "./...");
+        assert_eq!(inputs.package, ["./..."]);
     }
 }

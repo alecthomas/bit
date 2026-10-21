@@ -20,8 +20,10 @@ use crate::providers::ReportMode;
 /// Run Go tests
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoTestInputs {
-    /// Go package pattern (e.g. "./...")
-    pub package: String,
+    /// Go package pattern or list of patterns (e.g. "./...")
+    #[serde(deserialize_with = "super::package_patterns")]
+    #[schema(typ = crate::schema::string_or_list())]
+    pub package: Vec<String>,
     /// Extra flags passed to go test
     #[serde(default)]
     pub flags: Vec<String>,
@@ -50,7 +52,9 @@ pub struct GoTestOutputs {
 /// Persisted state for a `go.test` block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoTestState {
-    pub package: String,
+    /// A string in state written before `package` took a list.
+    #[serde(deserialize_with = "crate::providers::string_or_vec")]
+    pub package: Vec<String>,
     pub flags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
@@ -294,7 +298,7 @@ impl Resource for GoTestResource {
     }
 
     fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
-        let description = format!("go test {}", inputs.package);
+        let description = format!("go test {}", inputs.package.join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -341,7 +345,7 @@ impl Resource for GoTestResource {
                 }
                 packages
             }
-            None => vec![inputs.package.clone()],
+            None => inputs.package.clone(),
         };
 
         let mut args = vec!["test".to_owned(), "-json".to_owned()];
@@ -447,7 +451,7 @@ mod tests {
         std::fs::write(root.join("testdata/golden.txt"), "golden\n").unwrap();
         std::fs::write(root.join("schema.json"), "{}\n").unwrap();
         let inputs = GoTestInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![root.join("*.json").to_string_lossy().into_owned()],
             report: ReportMode::default(),
@@ -481,7 +485,7 @@ mod tests {
         )
         .unwrap();
         let inputs = GoTestInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             report: ReportMode::default(),
@@ -520,7 +524,7 @@ mod tests {
     #[test]
     fn plan_create_when_no_prior_state() {
         let inputs = GoTestInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             report: ReportMode::default(),
@@ -554,9 +558,25 @@ mod tests {
     }
 
     #[test]
+    fn package_accepts_a_list() {
+        let inputs: GoTestInputs = serde_json::from_str(r#"{"package": ["./a/...", "./b"]}"#).unwrap();
+        assert_eq!(inputs.package, ["./a/...", "./b"]);
+        let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
+        assert_eq!(result.description, "go test ./a/... ./b");
+
+        assert!(serde_json::from_str::<GoTestInputs>(r#"{"package": []}"#).is_err());
+    }
+
+    #[test]
+    fn state_with_a_single_package_still_loads() {
+        let state: GoTestState = serde_json::from_str(r#"{"package": "./...", "flags": []}"#).unwrap();
+        assert_eq!(state.package, ["./..."]);
+    }
+
+    #[test]
     fn plan_update_when_flags_changed() {
         let inputs = GoTestInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec!["-v".into()],
             inputs: vec![],
             report: ReportMode::default(),
@@ -564,7 +584,7 @@ mod tests {
             env: GoEnv::default(),
         };
         let prior = GoTestState {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             dir: None,
             env: GoEnv::default(),

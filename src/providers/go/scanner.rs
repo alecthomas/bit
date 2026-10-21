@@ -201,8 +201,8 @@ fn collect_tests(
 /// upward looking for `go.mod`). Pass `Some(dir)` when the calling block runs
 /// `go` from a non-project-root directory — e.g. a `go.exe` block with a `dir`
 /// pointing at a separate-module subdirectory. `None` starts from bit's CWD.
-pub fn scan(pattern: &str, tests: Tests, base_dir: Option<&Path>) -> Result<HashSet<PathBuf>, BoxError> {
-    let (module, pkg_dirs) = pattern_packages(pattern, base_dir)?;
+pub fn scan(patterns: &[String], tests: Tests, base_dir: Option<&Path>) -> Result<HashSet<PathBuf>, BoxError> {
+    let (module, pkg_dirs) = pattern_packages(patterns, base_dir)?;
 
     let mut all_files = module_files(&module);
     let mut visited = HashSet::new();
@@ -225,10 +225,10 @@ pub struct TestedPackage {
     pub files: HashSet<PathBuf>,
 }
 
-/// List the packages a pattern names, each with the files a
+/// List the packages the patterns name, each with the files a
 /// [`Tests::SourcesAndTestdata`] scan of that package alone would return.
-pub fn tested_packages(pattern: &str, base_dir: Option<&Path>) -> Result<Vec<TestedPackage>, BoxError> {
-    let (module, pkg_dirs) = pattern_packages(pattern, base_dir)?;
+pub fn tested_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<Vec<TestedPackage>, BoxError> {
+    let (module, pkg_dirs) = pattern_packages(patterns, base_dir)?;
     pkg_dirs
         .iter()
         .map(|dir| {
@@ -246,8 +246,8 @@ pub fn tested_packages(pattern: &str, base_dir: Option<&Path>) -> Result<Vec<Tes
 }
 
 /// The module `base_dir` (or bit's CWD) belongs to, and the package
-/// directories `pattern` names in it.
-fn pattern_packages(pattern: &str, base_dir: Option<&Path>) -> Result<(Arc<Module>, Vec<PathBuf>), BoxError> {
+/// directories `patterns` name in it, each once.
+fn pattern_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<(Arc<Module>, Vec<PathBuf>), BoxError> {
     let cwd;
     let start = match base_dir {
         Some(dir) => dir,
@@ -257,7 +257,15 @@ fn pattern_packages(pattern: &str, base_dir: Option<&Path>) -> Result<(Arc<Modul
         }
     };
     let module = module(start)?;
-    let pkg_dirs = resolve_package_dirs(&module.root, &module.path, pattern)?;
+    let mut seen = HashSet::new();
+    let mut pkg_dirs = Vec::new();
+    for pattern in patterns {
+        for dir in resolve_package_dirs(&module.root, &module.path, pattern)? {
+            if seen.insert(dir.clone()) {
+                pkg_dirs.push(dir);
+            }
+        }
+    }
     Ok((module, pkg_dirs))
 }
 
@@ -680,7 +688,7 @@ var content embed.FS
     // Each test uses its own temporary module, and caches are keyed by
     // module root, so tests running in parallel share no cache entries.
     fn scan_from(root: &Path, pattern: &str, tests: Tests) -> Result<HashSet<PathBuf>, BoxError> {
-        scan(pattern, tests, Some(root))
+        scan(&[pattern.to_owned()], tests, Some(root))
     }
 
     /// How many package directories the module rooted at `root` has cached.
@@ -947,7 +955,7 @@ func Hello() { fmt.Println("hello") }
 
         // base_dir = inner_root → scanner finds the inner module's go.mod
         // and returns only inner.go (plus go.mod).
-        let inner_files = scan(".", Tests::Excluded, Some(&inner_root)).unwrap();
+        let inner_files = scan_from(&inner_root, ".", Tests::Excluded).unwrap();
         assert!(
             inner_files.iter().any(|p| p.ends_with("inner.go")),
             "expected inner.go in {inner_files:?}"
@@ -959,7 +967,7 @@ func Hello() { fmt.Println("hello") }
 
         // base_dir = outer_root → scanner finds the outer module and skips
         // inner.go (different module).
-        let outer_files = scan(".", Tests::Excluded, Some(outer_root)).unwrap();
+        let outer_files = scan_from(outer_root, ".", Tests::Excluded).unwrap();
         assert!(
             outer_files.iter().any(|p| p.ends_with("outer.go")),
             "expected outer.go in {outer_files:?}"
@@ -998,5 +1006,29 @@ func Hello() { fmt.Println("hello") }
         assert_eq!(results[0].len(), 6, "five sources and go.mod: {:?}", results[0]);
         assert!(results.iter().all(|files| *files == results[0]));
         assert_eq!(cached_packages(root), 5);
+    }
+
+    #[test]
+    fn patterns_name_each_package_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        for name in ["a", "b", "c"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+            fs::write(root.join(name).join("lib.go"), "package lib\n").unwrap();
+        }
+
+        let patterns = ["./a".to_owned(), "./b".to_owned(), "./a".to_owned()];
+        let mut packages: Vec<_> = tested_packages(&patterns, Some(root))
+            .unwrap()
+            .into_iter()
+            .map(|p| p.import_path)
+            .collect();
+        packages.sort();
+        assert_eq!(packages, ["example.com/test/a", "example.com/test/b"]);
+
+        let files = scan(&patterns, Tests::Excluded, Some(root)).unwrap();
+        assert!(files.iter().any(|p| p.ends_with("b/lib.go")), "{files:?}");
+        assert!(!files.iter().any(|p| p.ends_with("c/lib.go")), "{files:?}");
     }
 }

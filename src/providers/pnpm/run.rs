@@ -14,39 +14,6 @@ use crate::sha256::SHA256;
 
 use super::{run_pnpm, workspace};
 
-/// Deserialize a field as either a single string or a list of strings.
-/// Matches the ergonomics of the `exec` provider's `output` field.
-fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct V;
-
-    impl<'de> de::Visitor<'de> for V {
-        type Value = Vec<String>;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a string or list of strings")
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
-            Ok(vec![v.to_owned()])
-        }
-
-        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
-            let mut out = Vec::new();
-            while let Some(s) = seq.next_element()? {
-                out.push(s);
-            }
-            Ok(out)
-        }
-    }
-
-    deserializer.deserialize_any(V)
-}
-
 fn default_dir() -> String {
     ".".to_owned()
 }
@@ -139,7 +106,7 @@ pub struct PnpmRunInputs {
     #[serde(default)]
     pub args: Vec<String>,
     /// Output file or list of output files/directories produced by the script
-    #[serde(default, deserialize_with = "string_or_vec")]
+    #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub output: Vec<String>,
     /// Extra input file globs (added to auto-detected sources)

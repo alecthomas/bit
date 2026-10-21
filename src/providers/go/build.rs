@@ -18,8 +18,10 @@ use super::scanner::Tests;
 /// Compile Go packages without producing a binary
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoBuildInputs {
-    /// Go package pattern (e.g. "./...")
-    pub package: String,
+    /// Go package pattern or list of patterns (e.g. "./...")
+    #[serde(deserialize_with = "super::package_patterns")]
+    #[schema(typ = crate::schema::string_or_list())]
+    pub package: Vec<String>,
     /// Extra flags passed to go build
     #[serde(default)]
     pub flags: Vec<String>,
@@ -40,7 +42,9 @@ pub struct GoBuildOutputs {}
 /// Persisted state for a `go.build` block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoBuildState {
-    pub package: String,
+    /// A string in state written before `package` took a list.
+    #[serde(deserialize_with = "crate::providers::string_or_vec")]
+    pub package: Vec<String>,
     pub flags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
@@ -82,7 +86,7 @@ impl Resource for GoBuildResource {
     }
 
     fn plan(&self, inputs: &GoBuildInputs, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
-        let description = format!("go build {}", inputs.package);
+        let description = format!("go build {}", inputs.package.join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -114,7 +118,7 @@ impl Resource for GoBuildResource {
     ) -> Result<ApplyResult<GoBuildState, GoBuildOutputs>, BoxError> {
         let mut args = vec!["build".to_owned()];
         args.extend(inputs.flags.iter().cloned());
-        args.push(inputs.package.clone());
+        args.extend(inputs.package.iter().cloned());
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -180,7 +184,7 @@ mod tests {
     #[test]
     fn plan_create_when_no_prior_state() {
         let inputs = GoBuildInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             dir: None,
@@ -194,14 +198,14 @@ mod tests {
     #[test]
     fn plan_none_when_unchanged() {
         let inputs = GoBuildInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             inputs: vec![],
             dir: None,
             env: GoEnv::default(),
         };
         let prior = GoBuildState {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             flags: vec![],
             dir: None,
             env: GoEnv::default(),

@@ -839,13 +839,13 @@ block = go.exe {
 
 ```bit
 block = go.build {
-  package = string    # Go package pattern (e.g. "./...")
-  flags = [string]?   # Extra flags passed to go build
-  inputs = [string]?  # Input file glob patterns (in addition to Go sources)
-  dir = string?       # Working directory for the command
-  goos = string?      # Target OS
-  goarch = string?    # Target architecture
-  cgo = bool?         # Enable cgo
+  package = string | [string]  # Go package pattern or list of patterns (e.g. "./...")
+  flags = [string]?            # Extra flags passed to go build
+  inputs = [string]?           # Input file glob patterns (in addition to Go sources)
+  dir = string?                # Working directory for the command
+  goos = string?               # Target OS
+  goarch = string?             # Target architecture
+  cgo = bool?                  # Enable cgo
 }
 ```
 
@@ -853,14 +853,14 @@ block = go.build {
 
 ```bit
 block = go.generate {
-  package = string     # Go package pattern (e.g. "./...")
-  flags = [string]?    # Extra flags passed to go generate
-  inputs = [string]?   # Input file glob patterns (in addition to Go sources)
-  outputs = [string]?  # Output file paths produced by generate commands
-  dir = string?        # Working directory for the command
-  goos = string?       # Target OS
-  goarch = string?     # Target architecture
-  cgo = bool?          # Enable cgo
+  package = string | [string]  # Go package pattern or list of patterns (e.g. "./...")
+  flags = [string]?            # Extra flags passed to go generate
+  inputs = [string]?           # Input file glob patterns (in addition to Go sources)
+  outputs = [string]?          # Output file paths produced by generate commands
+  dir = string?                # Working directory for the command
+  goos = string?               # Target OS
+  goarch = string?             # Target architecture
+  cgo = bool?                  # Enable cgo
 }
 ```
 
@@ -868,7 +868,7 @@ block = go.generate {
 
 ```bit
 block = go.test {
-  package = string                      # Go package pattern (e.g. "./...")
+  package = string | [string]           # Go package pattern or list of patterns (e.g. "./...")
   flags = [string]?                     # Extra flags passed to go test
   inputs = [string]?                    # Input file glob patterns (in addition to Go sources and `testdata/`)
   report = ("suites" | "tests" | "verbose")?  # What to show: a line per package (`suites`), a line per test (`tests`), or a line per test plus go's output as it arrives (`verbose`). Outside `verbose`, go's output is shown only on failure.
@@ -889,10 +889,10 @@ block = go.test {
 
 ```bit
 block = go.lint {
-  package = string?   # Go package pattern
-  flags = [string]?   # Extra flags passed to golangci-lint run
-  inputs = [string]?  # Input file glob patterns (in addition to Go sources)
-  dir = string?       # Working directory for the command
+  package = (string | [string])?  # Go package pattern or list of patterns
+  flags = [string]?               # Extra flags passed to golangci-lint run
+  inputs = [string]?              # Input file glob patterns (in addition to Go sources)
+  dir = string?                   # Working directory for the command
 }
 ```
 
@@ -906,8 +906,8 @@ block = go.lint {
 
 ```bit
 block = go.fmt {
-  package = string?  # Go package pattern
-  dir = string?      # Working directory for the command
+  package = (string | [string])?  # Go package pattern or list of patterns
+  dir = string?                   # Working directory for the command
 }
 ```
 
@@ -915,8 +915,8 @@ block = go.fmt {
 
 ```bit
 block = go.fmt-l {
-  package = string?  # Go package pattern
-  dir = string?      # Working directory for the command
+  package = (string | [string])?  # Go package pattern or list of patterns
+  dir = string?                   # Working directory for the command
 }
 ```
 

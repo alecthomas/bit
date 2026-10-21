@@ -36,7 +36,7 @@ pub struct ImageInputs {
     #[serde(default)]
     pub build_args: HashMap<String, String>,
     /// Target platform(s)
-    #[serde(default, deserialize_with = "string_or_vec")]
+    #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub platform: Vec<String>,
 }
@@ -47,42 +47,6 @@ fn default_context() -> String {
 
 fn default_dockerfile() -> String {
     "Dockerfile".into()
-}
-
-/// Deserialize a field that can be either a single string or a list of strings.
-fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct StringOrVec;
-
-    impl<'de> de::Visitor<'de> for StringOrVec {
-        type Value = Vec<String>;
-
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a string or list of strings")
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
-            Ok(vec![v.to_owned()])
-        }
-
-        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
-            let mut vec = Vec::new();
-            while let Some(s) = seq.next_element()? {
-                vec.push(s);
-            }
-            Ok(vec)
-        }
-
-        fn visit_unit<E: de::Error>(self) -> Result<Vec<String>, E> {
-            Ok(Vec::new())
-        }
-    }
-
-    deserializer.deserialize_any(StringOrVec)
 }
 
 #[derive(Debug, Serialize, bit_derive::Schema)]

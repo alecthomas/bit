@@ -54,7 +54,23 @@ impl GoEnv {
     }
 }
 
-/// Scan Go source files for a package pattern and return hashed inputs,
+/// Deserialize a block's `package` field: one Go package pattern or a list of
+/// them. The list must not be empty, so a deserialized field always has a
+/// first pattern.
+fn package_patterns<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let packages = crate::providers::string_or_vec(deserializer)?;
+    // The go command treats no patterns as the current directory's package,
+    // so an empty list would silently build something the block never named.
+    if packages.is_empty() {
+        return Err(serde::de::Error::custom("package list must not be empty"));
+    }
+    Ok(packages)
+}
+
+/// Scan Go source files for package patterns and return hashed inputs,
 /// together with the files matching the block's extra `inputs` globs.
 ///
 /// `dir`, when set, is the working directory where `go` would be invoked — the
@@ -62,13 +78,13 @@ impl GoEnv {
 /// build a separate Go module via the `dir` field; `None` starts from bit's CWD.
 /// The `inputs` globs are relative to bit's CWD, as in every other block.
 pub fn resolve_go_inputs(
-    pkg: &str,
+    patterns: &[String],
     dir: Option<&Path>,
     tests: Tests,
     inputs: &[String],
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let files: Vec<_> = scanner::scan(pkg, tests, dir)?.into_iter().collect();
+    let files: Vec<_> = scanner::scan(patterns, tests, dir)?.into_iter().collect();
     let mut hashes = tracker.hash_files(&files)?;
     for pattern in inputs {
         hashes.extend(tracker.hash_glob(pattern)?);
@@ -184,21 +200,27 @@ pub(super) fn package_list(output: &[u8]) -> Vec<String> {
     packages
 }
 
-/// The packages `go list -e` reports for `pattern` in `dir`, with extra
+/// The packages `go list -e` reports for `patterns` in `dir`, with extra
 /// `args` such as build tags.
-fn list_packages(pattern: &str, args: &[String], dir: Option<&str>, env: &GoEnv) -> Result<Vec<String>, BoxError> {
+fn list_packages(
+    patterns: &[String],
+    args: &[String],
+    dir: Option<&str>,
+    env: &GoEnv,
+) -> Result<Vec<String>, BoxError> {
     let mut cmd = Command::new("go");
-    cmd.args(["list", "-e"]).args(args).arg(pattern);
+    cmd.args(["list", "-e"]).args(args).args(patterns);
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
     env.apply_to(&mut cmd);
+    let patterns = patterns.join(" ");
     let output = cmd
         .output()
-        .map_err(|e| format!("failed to execute `go list {pattern}`: {e}"))?;
+        .map_err(|e| format!("failed to execute `go list {patterns}`: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "`go list {pattern}` failed: {}",
+            "`go list {patterns}` failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )
         .into());
@@ -217,11 +239,11 @@ struct Affected {
     total: usize,
 }
 
-/// The packages `pattern` names whose files include a changed path, or `None`
-/// to run the whole pattern. `list` reports the packages `go` matches for the
-/// pattern, so `args` and `env` must match those of the narrowed command.
+/// The packages `patterns` name whose files include a changed path, or `None`
+/// to run the whole patterns. `list` reports the packages `go` matches for
+/// the patterns, so `args` and `env` must match those of the narrowed command.
 fn affected_packages(
-    pattern: &str,
+    patterns: &[String],
     dir: Option<&str>,
     args: &[String],
     env: &GoEnv,
@@ -230,7 +252,7 @@ fn affected_packages(
     let Changes::Paths(changed) = changes else {
         return Ok(None);
     };
-    let scanned = scanner::tested_packages(pattern, dir.map(Path::new))?;
+    let scanned = scanner::tested_packages(patterns, dir.map(Path::new))?;
     // A path no package depends on is an extra input, a config file or a
     // deleted file, whose dependents cannot be found.
     if changed
@@ -241,7 +263,7 @@ fn affected_packages(
     }
     // The scanner ignores build constraints, and go fails on a named package
     // they exclude, so only packages `go` lists may be named.
-    let listed = list_packages(pattern, args, dir, env)?;
+    let listed = list_packages(patterns, args, dir, env)?;
     if listed
         .iter()
         .any(|path| !scanned.iter().any(|p| &p.import_path == path))

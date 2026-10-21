@@ -119,7 +119,13 @@ impl Resource for GoExeResource {
     fn resolve(&self, inputs: &GoExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, Tests::Excluded, &inputs.inputs, tracker)
+        super::resolve_go_inputs(
+            std::slice::from_ref(&inputs.package),
+            dir,
+            Tests::Excluded,
+            &inputs.inputs,
+            tracker,
+        )
     }
 
     fn plan(&self, inputs: &GoExeInputs, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {

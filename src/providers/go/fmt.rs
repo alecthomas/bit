@@ -15,16 +15,17 @@ use crate::sha256::SHA256;
 
 use super::scanner::Tests;
 
-fn default_package() -> String {
-    "./...".to_owned()
+fn default_package() -> Vec<String> {
+    vec!["./...".to_owned()]
 }
 
 /// Format Go source files
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoFmtInputs {
-    /// Go package pattern
-    #[serde(default = "default_package")]
-    pub package: String,
+    /// Go package pattern or list of patterns
+    #[serde(default = "default_package", deserialize_with = "super::package_patterns")]
+    #[schema(typ = crate::schema::optional_string_or_list())]
+    pub package: Vec<String>,
     /// Working directory for the command
     #[serde(default)]
     pub dir: Option<String>,
@@ -44,18 +45,20 @@ pub struct GoFmtCheckOutputs {
 /// Persisted state for `go.fmt` / `go.fmt-l` blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoFmtState {
-    pub package: String,
+    /// A string in state written before `package` took a list.
+    #[serde(deserialize_with = "crate::providers::string_or_vec")]
+    pub package: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
 }
 
-/// Collect `.go` file paths, including `_test.go` files, for the given package pattern.
+/// Collect `.go` file paths, including `_test.go` files, for the given package patterns.
 ///
 /// `dir` mirrors [`super::scanner::scan`]'s `base_dir`: when set, module-root
 /// discovery starts from that directory so a block targeting a separate-module
 /// subdirectory scans the right module.
-fn go_source_files(package: &str, dir: Option<&std::path::Path>) -> Result<Vec<String>, BoxError> {
-    let files = super::scanner::scan(package, Tests::Sources, dir)?;
+fn go_source_files(patterns: &[String], dir: Option<&std::path::Path>) -> Result<Vec<String>, BoxError> {
+    let files = super::scanner::scan(patterns, Tests::Sources, dir)?;
     let mut paths: Vec<String> = files
         .into_iter()
         .filter(|p| p.extension().is_some_and(|e| e == "go"))
@@ -115,7 +118,7 @@ impl Resource for GoFmtResource {
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
-        let description = format!("gofmt -w {}", inputs.package);
+        let description = format!("gofmt -w {}", inputs.package.join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -234,7 +237,7 @@ impl Resource for GoFmtCheckResource {
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
-        let description = format!("gofmt -l {}", inputs.package);
+        let description = format!("gofmt -l {}", inputs.package.join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -334,7 +337,7 @@ mod tests {
         std::fs::write(root.join("pkg/lib.go"), "package pkg\n").unwrap();
         std::fs::write(root.join("pkg/lib_test.go"), UNFORMATTED_TEST).unwrap();
         let inputs = GoFmtInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             dir: Some(root.to_string_lossy().into_owned()),
         };
         (dir, inputs)
@@ -353,7 +356,7 @@ mod tests {
     #[test]
     fn fmt_plan_create_when_no_prior_state() {
         let inputs = GoFmtInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             dir: None,
         };
         let result = Resource::plan(&test_fmt_resource(), &inputs, None).unwrap();
@@ -364,7 +367,7 @@ mod tests {
     #[test]
     fn fmt_check_plan_create_when_no_prior_state() {
         let inputs = GoFmtInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             dir: None,
         };
         let result = Resource::plan(&test_fmt_check_resource(), &inputs, None).unwrap();
@@ -375,11 +378,11 @@ mod tests {
     #[test]
     fn fmt_plan_none_when_unchanged() {
         let inputs = GoFmtInputs {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             dir: None,
         };
         let prior = GoFmtState {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             dir: None,
         };
         let result = Resource::plan(&test_fmt_resource(), &inputs, Some(&prior)).unwrap();
@@ -389,11 +392,11 @@ mod tests {
     #[test]
     fn fmt_plan_update_when_package_changed() {
         let inputs = GoFmtInputs {
-            package: "./cmd/...".into(),
+            package: vec!["./cmd/...".into()],
             dir: None,
         };
         let prior = GoFmtState {
-            package: "./...".into(),
+            package: vec!["./...".into()],
             dir: None,
         };
         let result = Resource::plan(&test_fmt_resource(), &inputs, Some(&prior)).unwrap();
@@ -466,6 +469,6 @@ mod tests {
     #[test]
     fn default_package_is_all() {
         let inputs: GoFmtInputs = serde_json::from_str("{}").unwrap();
-        assert_eq!(inputs.package, "./...");
+        assert_eq!(inputs.package, ["./..."]);
     }
 }
