@@ -98,8 +98,14 @@ struct PackageResults {
 }
 
 /// Parse `go test -json` stdout lines, accumulate per-package, and emit
-/// test or package results via the writer as `mode` asks.
-fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, mode: ReportMode) -> TestJsonResult {
+/// test or package results via the writer as `mode` asks. `module` is the
+/// tested module's path, which result lines elide.
+fn process_go_test_json(
+    reader: impl BufRead,
+    writer: &BlockWriter,
+    mode: ReportMode,
+    module: Option<&str>,
+) -> TestJsonResult {
     let verbose = mode == ReportMode::Verbose;
     let per_test = mode.per_test();
     let mut all_passed = true;
@@ -121,6 +127,7 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, mode: Report
         let Ok(event) = serde_json::from_str::<GoTestEvent>(&line) else {
             continue;
         };
+        let shown = super::display_package(&event.package, module);
 
         match event.action.as_str() {
             "output" if event.test.is_some() => {
@@ -147,7 +154,7 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, mode: Report
                 pkg.passed += 1;
                 if per_test {
                     let duration = event.elapsed.map(Duration::from_secs_f64);
-                    writer.test_passed(&event.package, test_name, duration);
+                    writer.test_passed(&shown, test_name, duration);
                 }
                 pkg.outputs.remove(test_name);
             }
@@ -162,7 +169,7 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, mode: Report
                     .unwrap_or_default();
                 pkg.failed += 1;
                 if per_test {
-                    writer.test_failed(&event.package, test_name, duration, &output);
+                    writer.test_failed(&shown, test_name, duration, &output);
                 } else {
                     pkg.failures.push((test_name.clone(), duration, output));
                 }
@@ -172,7 +179,7 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, mode: Report
                 pkg.skipped += 1;
                 if per_test {
                     let test_name = event.test.as_ref().unwrap();
-                    writer.test_skipped(&event.package, test_name);
+                    writer.test_skipped(&shown, test_name);
                 }
             }
             "pass" if event.test.is_none() => {
@@ -184,7 +191,7 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, mode: Report
                     continue;
                 }
                 if !per_test {
-                    writer.test_suite_passed(&event.package, duration, pkg.passed, pkg.skipped);
+                    writer.test_suite_passed(&shown, duration, pkg.passed, pkg.skipped);
                 }
             }
             "fail" if event.test.is_none() => {
@@ -195,14 +202,14 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, mode: Report
                 // Per-test lines already show failing tests; a package that
                 // fails without one (e.g. a build failure) still needs a line.
                 if !per_test || pkg.failed == 0 {
-                    writer.test_suite_failed(&event.package, duration, pkg.passed, pkg.failed, &pkg.failures);
+                    writer.test_suite_failed(&shown, duration, pkg.passed, pkg.failed, &pkg.failures);
                 }
             }
             "skip" if event.test.is_none() => {
                 had_events = true;
                 packages.remove(&event.package);
                 if !per_test {
-                    writer.test_suite_skipped(&event.package);
+                    writer.test_suite_skipped(&shown);
                 }
             }
             // Package-level output (no Test): the per-package summary line emitted
@@ -306,7 +313,7 @@ impl Resource for GoTestResource {
     }
 
     fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
-        let description = crate::providers::display_command("go", &test_args(inputs, &inputs.package));
+        let description = super::display_command("go", &test_args(inputs, &inputs.package), inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -354,7 +361,7 @@ impl Resource for GoTestResource {
         }
         let packages = affected.as_ref().map_or(&inputs.package, |affected| &affected.packages);
         let args = test_args(inputs, packages);
-        writer.starting(&crate::providers::display_command("go", &args));
+        writer.starting(&super::display_command("go", &args, inputs.dir.as_deref()));
         if let Some(Affected { packages, total }) = &affected {
             writer.line(&format!("{} of {total} packages affected", packages.len()));
         }
@@ -373,6 +380,10 @@ impl Resource for GoTestResource {
 
         let mode = inputs.report;
         let verbose = mode == ReportMode::Verbose;
+        // Only shortens result lines, so full import paths are shown when the
+        // module cannot be read.
+        let module = super::scanner::module_path(inputs.dir.as_deref().map(std::path::Path::new)).ok();
+        let module = module.as_deref();
         let mut result = TestJsonResult {
             passed: true,
             had_events: false,
@@ -381,7 +392,7 @@ impl Resource for GoTestResource {
         let mut stderr_lines = Vec::new();
         std::thread::scope(|s| {
             let json_handle =
-                stdout.map(|out| s.spawn(move || process_go_test_json(BufReader::new(out), writer, mode)));
+                stdout.map(|out| s.spawn(move || process_go_test_json(BufReader::new(out), writer, mode, module)));
             let stderr_handle = stderr.map(|err| {
                 s.spawn(move || {
                     if verbose {
@@ -616,7 +627,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites);
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites, None);
         assert!(result.passed);
         assert!(result.had_events);
     }
@@ -633,7 +644,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites);
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites, None);
         assert!(!result.passed);
         assert!(result.had_events);
     }
@@ -648,7 +659,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites);
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites, None);
         assert!(result.passed);
         assert!(result.had_events);
     }
@@ -667,7 +678,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites);
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites, None);
         assert!(!result.passed);
     }
 
@@ -675,7 +686,7 @@ mod tests {
     fn process_json_no_events() {
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_go_test_json(std::io::Cursor::new(""), &writer, ReportMode::Suites);
+        let result = process_go_test_json(std::io::Cursor::new(""), &writer, ReportMode::Suites, None);
         assert!(result.passed);
         assert!(!result.had_events);
     }
@@ -699,7 +710,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites);
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites, None);
         assert!(!result.passed);
         assert!(result.had_events);
         assert_eq!(
@@ -722,7 +733,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Verbose);
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Verbose, None);
         assert!(result.diagnostics.is_empty());
     }
 
@@ -736,7 +747,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Tests);
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Tests, None);
         assert!(result.passed);
         assert_eq!(result.diagnostics, ["ok\texample.com/pkg\t0.1s"]);
     }
@@ -749,7 +760,7 @@ mod tests {
         let json = concat!(r#"{"ImportPath":"x","Action":"build-fail"}"#, "\n",);
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites);
+        let result = process_go_test_json(std::io::Cursor::new(json), &writer, ReportMode::Suites, None);
         assert!(!result.passed);
     }
 }

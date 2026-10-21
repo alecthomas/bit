@@ -138,7 +138,8 @@ impl Resource for GoExeResource {
 
     fn plan(&self, inputs: &GoExeInputs, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {
         let output = GoExeResource::output_path(inputs);
-        let description = crate::providers::display_command("go", &GoExeResource::build_args(inputs, &output));
+        let description =
+            super::display_command("go", &GoExeResource::build_args(inputs, &output), inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {

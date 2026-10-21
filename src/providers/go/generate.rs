@@ -102,7 +102,7 @@ impl Resource for GoGenerateResource {
     }
 
     fn plan(&self, inputs: &GoGenerateInputs, prior_state: Option<&GoGenerateState>) -> Result<PlanResult, BoxError> {
-        let description = crate::providers::display_command("go", &generate_args(inputs));
+        let description = super::display_command("go", &generate_args(inputs), inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {

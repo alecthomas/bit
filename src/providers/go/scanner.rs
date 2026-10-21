@@ -248,15 +248,7 @@ pub fn tested_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<V
 /// The module `base_dir` (or bit's CWD) belongs to, and the package
 /// directories `patterns` name in it, each once.
 fn pattern_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<(Arc<Module>, Vec<PathBuf>), BoxError> {
-    let cwd;
-    let start = match base_dir {
-        Some(dir) => dir,
-        None => {
-            cwd = std::env::current_dir()?;
-            &cwd
-        }
-    };
-    let module = module(start)?;
+    let module = base_module(base_dir)?;
     let mut seen = HashSet::new();
     let mut pkg_dirs = Vec::new();
     for pattern in patterns {
@@ -267,6 +259,19 @@ fn pattern_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<(Arc
         }
     }
     Ok((module, pkg_dirs))
+}
+
+/// The module `base_dir` (or bit's CWD) belongs to.
+fn base_module(base_dir: Option<&Path>) -> Result<Arc<Module>, BoxError> {
+    match base_dir {
+        Some(dir) => module(dir),
+        None => module(&std::env::current_dir()?),
+    }
+}
+
+/// The import path of the module `base_dir` (or bit's CWD) belongs to.
+pub fn module_path(base_dir: Option<&Path>) -> Result<String, BoxError> {
+    Ok(base_module(base_dir)?.path.clone())
 }
 
 /// The module's `go.mod` and `go.sum`, which every package depends on.

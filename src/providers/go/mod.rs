@@ -109,6 +109,31 @@ fn display_paths<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Vec<String> {
         .collect()
 }
 
+/// `package` relative to `module`, as `./sub/pkg` or `.` for the module's
+/// root package, so displayed lines are not dominated by the module path.
+/// Anything outside the module, including flags, is returned unchanged.
+fn display_package<'a>(package: &'a str, module: Option<&str>) -> std::borrow::Cow<'a, str> {
+    let Some(module) = module else {
+        return package.into();
+    };
+    if package == module {
+        return ".".into();
+    }
+    match package.strip_prefix(module).and_then(|rest| rest.strip_prefix('/')) {
+        Some(rest) => format!("./{rest}").into(),
+        None => package.into(),
+    }
+}
+
+/// `program` and `args` for display, with import paths inside the module
+/// that `dir` (or bit's CWD) belongs to shortened by [`display_package`].
+/// Only the displayed line changes; the command still receives `args`.
+fn display_command(program: &str, args: &[String], dir: Option<&str>) -> String {
+    let module = scanner::module_path(dir.map(Path::new)).ok();
+    let shown: Vec<_> = args.iter().map(|arg| display_package(arg, module.as_deref())).collect();
+    crate::providers::display_command(program, &shown)
+}
+
 /// The effective Go toolchain and target, as `go env` reports them once the
 /// block's `GoEnv` overrides and the ambient environment apply. Run in
 /// `dir`, the go command honours the module's `toolchain` line, so a
@@ -381,6 +406,34 @@ mod tests {
             modules(Some(base.clone())).unwrap(),
             [base.clone(), format!("{base}/lib/inner"), format!("{base}/svc")]
         );
+    }
+
+    #[test]
+    fn display_package_elides_the_module_path() {
+        let module = Some("github.com/gohugoio/hugo");
+        assert_eq!(
+            display_package("github.com/gohugoio/hugo/tpl/safe", module),
+            "./tpl/safe"
+        );
+        assert_eq!(display_package("github.com/gohugoio/hugo", module), ".");
+        assert_eq!(
+            display_package("github.com/gohugoio/hugoext/x", module),
+            "github.com/gohugoio/hugoext/x"
+        );
+        assert_eq!(display_package("-json", module), "-json");
+        assert_eq!(
+            display_package("github.com/gohugoio/hugo/tpl", None),
+            "github.com/gohugoio/hugo/tpl"
+        );
+    }
+
+    #[test]
+    fn display_command_shortens_import_paths_in_the_module() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/m\n").unwrap();
+        let args = ["test", "-json", "example.com/m/lib", "example.com/other"].map(String::from);
+        let line = display_command("go", &args, dir.path().to_str());
+        assert_eq!(line, "go test -json ./lib example.com/other");
     }
 
     #[test]

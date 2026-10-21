@@ -69,11 +69,11 @@ fn go_source_files(patterns: &[String], dir: Option<&std::path::Path>) -> Result
 }
 
 /// `gofmt` with `mode` (`-w` or `-l`) over `targets`, for display.
-fn gofmt_command(mode: &str, targets: &[String]) -> String {
-    let args: Vec<&str> = std::iter::once(mode)
-        .chain(targets.iter().map(String::as_str))
+fn gofmt_command(mode: &str, targets: &[String], dir: Option<&str>) -> String {
+    let args: Vec<String> = std::iter::once(mode.to_owned())
+        .chain(targets.iter().cloned())
         .collect();
-    crate::providers::display_command("gofmt", &args)
+    super::display_command("gofmt", &args, dir)
 }
 
 /// The block's `.go` files that changed since its last success, or all of
@@ -126,7 +126,7 @@ impl Resource for GoFmtResource {
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
-        let description = gofmt_command("-w", &inputs.package);
+        let description = gofmt_command("-w", &inputs.package, inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -168,7 +168,11 @@ impl Resource for GoFmtResource {
             });
         }
 
-        writer.starting(&gofmt_command("-w", &super::display_paths(files.iter().map(Path::new))));
+        writer.starting(&gofmt_command(
+            "-w",
+            &super::display_paths(files.iter().map(Path::new)),
+            inputs.dir.as_deref(),
+        ));
         let mut cmd = Command::new("gofmt");
         cmd.arg("-w").args(&files).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(dir) = &inputs.dir {
@@ -252,7 +256,7 @@ impl Resource for GoFmtCheckResource {
     }
 
     fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
-        let description = gofmt_command("-l", &inputs.package);
+        let description = gofmt_command("-l", &inputs.package, inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -294,7 +298,11 @@ impl Resource for GoFmtCheckResource {
             });
         }
 
-        writer.starting(&gofmt_command("-l", &super::display_paths(files.iter().map(Path::new))));
+        writer.starting(&gofmt_command(
+            "-l",
+            &super::display_paths(files.iter().map(Path::new)),
+            inputs.dir.as_deref(),
+        ));
         let mut cmd = Command::new("gofmt");
         cmd.arg("-l").args(&files);
         if let Some(dir) = &inputs.dir {
