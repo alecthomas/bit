@@ -153,9 +153,9 @@ included. `bit -ll --since <ref>` prints affected blocks across the full DAG;
 positional targets optionally narrow that list. `-l --since` is rejected
 because `-l` lists target definitions rather than blocks.
 
-A bare `--since` uses `origin/HEAD`, the remote's default branch. Because the
-ref is optional, a target directly after a bare `--since` is read as the ref.
-Write `bit <target> --since` or `bit --since -- <target>` instead.
+A bare `--since` uses `origin/HEAD`, the remote's default branch. If the
+argument after `--since` is not a Git commit, it is treated as a target, so
+`bit --since build` builds the affected blocks of `build`.
 
 Blocks without source paths are always included because Git cannot prove them
 unaffected. A changed `.bit` build definition selects the full requested target

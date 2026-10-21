@@ -31,6 +31,16 @@ pub fn command() -> Command {
     cmd
 }
 
+/// Whether `rev` names a commit in the repository containing `dir`.
+pub fn is_commit(dir: &Path, rev: &str) -> bool {
+    command()
+        .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
+        .arg(format!("{rev}^{{commit}}"))
+        .current_dir(dir)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 /// Paths changed between the merge base of a requested ref and the worktree.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Changes {

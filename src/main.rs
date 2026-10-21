@@ -2,7 +2,7 @@ use std::fs;
 use std::process;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use yansi::Paint;
 
 use bit::cache::BuildCache;
@@ -93,7 +93,7 @@ struct Cli {
     params: Vec<String>,
 
     /// Limit blocks to those affected since merge-base(REF, HEAD); REF defaults to origin/HEAD
-    #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "origin/HEAD")]
+    #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = DEFAULT_SINCE)]
     since: Option<String>,
 
     /// Show what would change without applying
@@ -201,6 +201,25 @@ fn parse_params(raw: &[String]) -> Map {
         params.insert(key.to_owned(), value);
     }
     params
+}
+
+const DEFAULT_SINCE: &str = "origin/HEAD";
+
+/// Clap reads `bit --since build` as ref `build`; a non-commit value is
+/// returned to its place among the targets and the default ref is used.
+fn reclaim_since_target(cli: &mut Cli, matches: &clap::ArgMatches) {
+    let Some(since) = cli
+        .since
+        .take_if(|since| since != DEFAULT_SINCE && !bit::git::is_commit(std::path::Path::new("."), since))
+    else {
+        return;
+    };
+    let since_index = matches.index_of("since").expect("--since has a value");
+    let position = matches
+        .indices_of("targets")
+        .map_or(0, |indices| indices.filter(|&index| index < since_index).count());
+    cli.targets.insert(position, since);
+    cli.since = Some(DEFAULT_SINCE.to_owned());
 }
 
 fn parse_invocations(raw: &[String]) -> Result<Vec<bit::invocation::Invocation>, String> {
@@ -548,7 +567,8 @@ fn selected_order_or_exit(
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     let Some(operation) = cli.selected() else {
         eprintln!(
             "{} operation modes are mutually exclusive (except --plan --graph and --clean --cache)",
@@ -662,6 +682,7 @@ fn main() {
     }
 
     find_and_chdir_project_root();
+    reclaim_since_target(&mut cli, &matches);
     let registry = default_registry(&tracker);
     let params = parse_params(&cli.params);
     let invocations = match parse_invocations(&cli.targets) {

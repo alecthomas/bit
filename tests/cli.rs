@@ -488,4 +488,14 @@ e = exec {
     let bare = run_bit(project.path(), &["-ll", "--since"]);
     assert!(bare.status.success(), "{}", String::from_utf8_lossy(&bare.stderr));
     assert_eq!(String::from_utf8(bare.stdout).unwrap(), stdout);
+
+    let narrowed = run_bit(project.path(), &["-ll", "--since", "c"]);
+    assert!(
+        narrowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&narrowed.stderr)
+    );
+    let narrowed = String::from_utf8(narrowed.stdout).unwrap();
+    assert!(narrowed.contains("c ("), "{narrowed:?}");
+    assert!(!narrowed.contains("e ("), "{narrowed:?}");
 }
