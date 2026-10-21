@@ -501,15 +501,16 @@ impl OutputInner {
 
     /// Painted head and continuation prefixes for an event. The block name
     /// takes its own colour and the event's sigil takes the event's colour.
+    /// A dim event fades only its sigil, so the block name reads the same on
+    /// every line.
     fn event_prefixes(&self, name: &str, event: Event, indent: Option<usize>) -> (String, String) {
         let color = color_for_name(name);
-        let dim = event.is_dim();
         let head = format!(
             "{} {}",
-            self.label(name, indent).paint(color).dim_if(dim),
-            event.symbol().paint(event.color()).dim_if(dim),
+            self.label(name, indent).paint(color),
+            event.symbol().paint(event.color()).dim_if(event.is_dim()),
         );
-        let cont = self.prefix(name, "┆", indent).paint(color).dim_if(dim).to_string();
+        let cont = self.prefix(name, "┆", indent).paint(color).to_string();
         (head, cont)
     }
 
@@ -1384,6 +1385,16 @@ mod tests {
     fn wrap_content_carries_style_onto_continuation_rows() {
         let chunks = OutputInner::wrap_content("\x1b[36mabcdef\x1b[0m", 3);
         assert_eq!(chunks, ["\x1b[36mabc\x1b[0m", "\x1b[36mdef\x1b[0m"]);
+    }
+
+    #[test]
+    fn dim_event_keeps_block_name_colour() {
+        let inner = inner_tty(7, 80);
+        let (head, cont) = inner.event_prefixes("backend", Event::Skipped, None);
+        let name = "backend".paint(color_for_name("backend")).to_string();
+        assert!(head.starts_with(&name), "{head:?}");
+        assert!(head[name.len()..].contains("\x1b[2"), "sigil should be dim: {head:?}");
+        assert!(!cont.contains("\x1b[2"), "{cont:?}");
     }
 
     #[test]
