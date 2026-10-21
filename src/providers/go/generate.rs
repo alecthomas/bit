@@ -58,6 +58,14 @@ pub struct GoGenerateState {
     pub env: GoEnv,
 }
 
+/// The arguments to `go` that run the block's generate directives.
+fn generate_args(inputs: &GoGenerateInputs) -> Vec<String> {
+    let mut args = vec!["generate".to_owned()];
+    args.extend(inputs.flags.iter().cloned());
+    args.extend(inputs.package.iter().cloned());
+    args
+}
+
 pub struct GoGenerateResource {
     tracker: Arc<FileTracker>,
 }
@@ -94,7 +102,7 @@ impl Resource for GoGenerateResource {
     }
 
     fn plan(&self, inputs: &GoGenerateInputs, prior_state: Option<&GoGenerateState>) -> Result<PlanResult, BoxError> {
-        let description = format!("go generate {}", inputs.package.join(" "));
+        let description = format!("go {}", generate_args(inputs).join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -124,9 +132,7 @@ impl Resource for GoGenerateResource {
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoGenerateState, GoGenerateOutputs>, BoxError> {
-        let mut args = vec!["generate".to_owned()];
-        args.extend(inputs.flags.iter().cloned());
-        args.extend(inputs.package.iter().cloned());
+        let args = generate_args(inputs);
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());

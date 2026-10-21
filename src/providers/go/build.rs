@@ -52,6 +52,14 @@ pub struct GoBuildState {
     pub env: GoEnv,
 }
 
+/// The arguments to `go` that compile the block's packages.
+fn build_args(inputs: &GoBuildInputs) -> Vec<String> {
+    let mut args = vec!["build".to_owned()];
+    args.extend(inputs.flags.iter().cloned());
+    args.extend(inputs.package.iter().cloned());
+    args
+}
+
 pub struct GoBuildResource {
     tracker: Arc<FileTracker>,
 }
@@ -86,7 +94,7 @@ impl Resource for GoBuildResource {
     }
 
     fn plan(&self, inputs: &GoBuildInputs, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
-        let description = format!("go build {}", inputs.package.join(" "));
+        let description = format!("go {}", build_args(inputs).join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -116,9 +124,7 @@ impl Resource for GoBuildResource {
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoBuildState, GoBuildOutputs>, BoxError> {
-        let mut args = vec!["build".to_owned()];
-        args.extend(inputs.flags.iter().cloned());
-        args.extend(inputs.package.iter().cloned());
+        let args = build_args(inputs);
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -185,7 +191,7 @@ mod tests {
     fn plan_create_when_no_prior_state() {
         let inputs = GoBuildInputs {
             package: vec!["./...".into()],
-            flags: vec![],
+            flags: vec!["-race".into()],
             inputs: vec![],
             dir: None,
             env: GoEnv::default(),
@@ -193,6 +199,7 @@ mod tests {
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
+        assert_eq!(result.description, "go build -race ./...");
     }
 
     #[test]

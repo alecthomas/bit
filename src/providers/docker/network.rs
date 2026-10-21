@@ -47,6 +47,16 @@ fn network_id(name: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// The arguments to `docker` that create the block's network.
+fn create_args(inputs: &NetworkInputs) -> Vec<String> {
+    let mut args = vec!["network".to_owned(), "create".to_owned()];
+    if let Some(driver) = &inputs.driver {
+        args.extend(["--driver".to_owned(), driver.clone()]);
+    }
+    args.push(inputs.name.clone());
+    args
+}
+
 pub struct NetworkResource {
     #[allow(dead_code)]
     tracker: Arc<FileTracker>,
@@ -82,7 +92,7 @@ impl Resource for NetworkResource {
     }
 
     fn plan(&self, inputs: &NetworkInputs, prior_state: Option<&NetworkState>) -> Result<PlanResult, BoxError> {
-        let desc = format!("docker network create {}", inputs.name);
+        let desc = format!("docker {}", create_args(inputs).join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -147,11 +157,7 @@ impl Resource for NetworkResource {
         }
 
         let mut cmd = Command::new("docker");
-        cmd.arg("network").arg("create");
-        if let Some(driver) = &inputs.driver {
-            cmd.arg("--driver").arg(driver);
-        }
-        cmd.arg(&inputs.name);
+        cmd.args(create_args(inputs));
 
         let output = cmd.output().map_err(|e| format!("docker network create failed: {e}"))?;
         if !output.status.success() {
@@ -211,6 +217,16 @@ mod tests {
         };
         let result = Resource::plan(&NetworkResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
+    }
+
+    #[test]
+    fn description_includes_driver() {
+        let inputs = NetworkInputs {
+            name: "test-net".into(),
+            driver: Some("bridge".into()),
+        };
+        let result = Resource::plan(&NetworkResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
+        assert_eq!(result.description, "docker network create --driver bridge test-net");
     }
 
     #[test]

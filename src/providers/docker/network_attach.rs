@@ -271,7 +271,7 @@ impl Resource for NetworkAttachResource {
         inputs: &NetworkAttachInputs,
         prior_state: Option<&NetworkAttachState>,
     ) -> Result<PlanResult, BoxError> {
-        let desc = format!("docker network connect {} {}", inputs.network, inputs.container);
+        let desc = format!("docker {}", build_connect_args(inputs).join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -309,7 +309,7 @@ impl Resource for NetworkAttachResource {
         inputs: &NetworkAttachInputs,
         prior_state: Option<&NetworkAttachState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        _writer: &BlockWriter,
     ) -> Result<ApplyResult<NetworkAttachState, NetworkAttachOutputs>, BoxError> {
         // Endpoint options (aliases, ip, links, ...) can't be changed in
         // place — Docker only honours them at connect time. If we have any
@@ -325,10 +325,6 @@ impl Resource for NetworkAttachResource {
             run_disconnect(&inputs.network, &inputs.container)?;
         }
 
-        writer.event(
-            Event::Starting,
-            &format!("docker network connect {} {}", inputs.network, inputs.container),
-        );
         run_connect(inputs)?;
 
         let (ip_address, ip6_address) = read_endpoint_ips(&inputs.container, &inputs.network)?;

@@ -96,6 +96,8 @@ fn exe_command(inputs: &RustExeInputs) -> CargoCommand {
         cargo.arg2("-p", pkg);
     }
     cargo.features(&inputs.features).extra_flags(&inputs.flags);
+    // Apply reads the built binary's path from the JSON messages.
+    cargo.arg2("--message-format", "json");
     cargo
 }
 
@@ -189,8 +191,7 @@ impl Resource for RustExeResource {
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<RustExeState, RustExeOutputs>, BoxError> {
-        let mut cargo = exe_command(inputs);
-        cargo.arg2("--message-format", "json");
+        let cargo = exe_command(inputs);
         let mut child = cargo
             .command()
             .stdout(Stdio::piped())
@@ -339,7 +340,7 @@ mod tests {
         };
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
-        assert_eq!(result.description, "cargo build --bin myapp");
+        assert_eq!(result.description, "cargo build --bin myapp --message-format json");
     }
 
     #[test]
@@ -353,7 +354,7 @@ mod tests {
         };
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
-        assert_eq!(result.description, "cargo build");
+        assert_eq!(result.description, "cargo build --message-format json");
     }
 
     #[test]
@@ -366,7 +367,7 @@ mod tests {
             env: RustEnv::default(),
         };
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
-        assert_eq!(result.description, "cargo build -p my-crate");
+        assert_eq!(result.description, "cargo build -p my-crate --message-format json");
     }
 
     #[test]

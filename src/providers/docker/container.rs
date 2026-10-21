@@ -221,6 +221,61 @@ fn wait_healthy(name: &str, hc: &Healthcheck, writer: &BlockWriter) -> Result<()
     }
 }
 
+/// Whether [`run_args`] includes environment values.
+#[derive(Clone, Copy, PartialEq)]
+enum EnvValues {
+    Shown,
+    /// Values may hold secrets, so a displayed command replaces them.
+    Masked,
+}
+
+/// The arguments to `docker` that start the block's container.
+fn run_args(inputs: &ContainerInputs, env_values: EnvValues) -> Vec<String> {
+    let mut args: Vec<String> = vec!["run".into(), "-d".into(), "--name".into(), inputs.name.clone()];
+    for port in &inputs.ports {
+        args.extend(["-p".into(), port.clone()]);
+    }
+    for vol in &inputs.volumes {
+        args.extend(["-v".into(), vol.clone()]);
+    }
+    let mut env_keys: Vec<&String> = inputs.environment.keys().collect();
+    env_keys.sort();
+    for k in env_keys {
+        let value = match env_values {
+            EnvValues::Shown => inputs.environment[k].as_str(),
+            EnvValues::Masked => "***",
+        };
+        args.extend(["-e".into(), format!("{k}={value}")]);
+    }
+    if let Some(ep) = &inputs.entrypoint {
+        args.extend(["--entrypoint".into(), ep.clone()]);
+    }
+    args.extend(["--restart".into(), inputs.restart.clone()]);
+    if let Some(net) = &inputs.network {
+        args.extend(["--network".into(), net.clone()]);
+    }
+    for (host, addr) in resolve_extra_hosts(&inputs.extra_hosts, cfg!(target_os = "linux")) {
+        args.extend(["--add-host".into(), format!("{host}:{addr}")]);
+    }
+    if let Some(wd) = &inputs.working_dir {
+        args.extend(["-w".into(), wd.clone()]);
+    }
+    if let Some(hc) = &inputs.healthcheck {
+        args.extend(["--health-cmd".into(), hc.test().to_owned()]);
+        args.extend(["--health-interval".into(), hc.interval().to_string()]);
+        args.extend(["--health-timeout".into(), hc.timeout().to_string()]);
+        args.extend(["--health-retries".into(), hc.retries().to_string()]);
+        if let Some(sp) = hc.start_period() {
+            args.extend(["--health-start-period".into(), sp.to_string()]);
+        }
+    }
+    args.push(inputs.image.clone());
+    if let Some(command) = &inputs.command {
+        args.extend(command.split_whitespace().map(str::to_owned));
+    }
+    args
+}
+
 pub struct ContainerResource {
     #[allow(dead_code)]
     tracker: Arc<FileTracker>,
@@ -256,7 +311,7 @@ impl Resource for ContainerResource {
     }
 
     fn plan(&self, inputs: &ContainerInputs, prior_state: Option<&ContainerState>) -> Result<PlanResult, BoxError> {
-        let desc = format!("docker run {}", inputs.image);
+        let desc = format!("docker {}", run_args(inputs, EnvValues::Masked).join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -297,49 +352,7 @@ impl Resource for ContainerResource {
         let _ = remove_container(&inputs.name);
 
         let mut cmd = Command::new("docker");
-        cmd.arg("run").arg("-d").arg("--name").arg(&inputs.name);
-
-        for port in &inputs.ports {
-            cmd.arg("-p").arg(port);
-        }
-        for vol in &inputs.volumes {
-            cmd.arg("-v").arg(vol);
-        }
-        let mut env_keys: Vec<&String> = inputs.environment.keys().collect();
-        env_keys.sort();
-        for k in env_keys {
-            cmd.arg("-e").arg(format!("{}={}", k, inputs.environment[k]));
-        }
-        if let Some(ep) = &inputs.entrypoint {
-            cmd.arg("--entrypoint").arg(ep);
-        }
-        cmd.arg("--restart").arg(&inputs.restart);
-        if let Some(net) = &inputs.network {
-            cmd.arg("--network").arg(net);
-        }
-        for (host, addr) in resolve_extra_hosts(&inputs.extra_hosts, cfg!(target_os = "linux")) {
-            cmd.arg("--add-host").arg(format!("{host}:{addr}"));
-        }
-        if let Some(wd) = &inputs.working_dir {
-            cmd.arg("-w").arg(wd);
-        }
-
-        if let Some(hc) = &inputs.healthcheck {
-            cmd.arg("--health-cmd").arg(hc.test());
-            cmd.arg("--health-interval").arg(hc.interval().to_string());
-            cmd.arg("--health-timeout").arg(hc.timeout().to_string());
-            cmd.arg("--health-retries").arg(hc.retries().to_string());
-            if let Some(sp) = hc.start_period() {
-                cmd.arg("--health-start-period").arg(sp.to_string());
-            }
-        }
-
-        cmd.arg(&inputs.image);
-
-        if let Some(command) = &inputs.command {
-            cmd.args(command.split_whitespace());
-        }
-
+        cmd.args(run_args(inputs, EnvValues::Shown));
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to run docker run: {e}"))?;
@@ -431,6 +444,22 @@ mod tests {
         let result = Resource::plan(&ContainerResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert!(result.description.contains("nginx:latest"));
+    }
+
+    #[test]
+    fn description_shows_run_flags_with_masked_environment() {
+        let mut inputs = test_inputs();
+        inputs.environment.insert("TOKEN".into(), "s3cr3t".into());
+        let result = Resource::plan(&ContainerResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
+        assert!(
+            result
+                .description
+                .starts_with("docker run -d --name test-nginx -p 8080:80 -e TOKEN=*** --restart no"),
+            "{}",
+            result.description
+        );
+        assert!(!result.description.contains("s3cr3t"));
+        assert!(run_args(&inputs, EnvValues::Shown).contains(&"TOKEN=s3cr3t".to_owned()));
     }
 
     #[test]

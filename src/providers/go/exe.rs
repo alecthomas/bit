@@ -88,6 +88,14 @@ impl GoExeResource {
         }
     }
 
+    /// The arguments to `go` that build the binary to `output`.
+    fn build_args(inputs: &GoExeInputs, output: &str) -> Vec<String> {
+        let mut args = vec!["build".to_owned(), "-o".to_owned(), output.to_owned()];
+        args.extend(inputs.flags.iter().cloned());
+        args.push(inputs.package.clone());
+        args
+    }
+
     fn state_for(inputs: &GoExeInputs, output: String) -> GoExeState {
         GoExeState {
             package: inputs.package.clone(),
@@ -130,7 +138,7 @@ impl Resource for GoExeResource {
 
     fn plan(&self, inputs: &GoExeInputs, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {
         let output = GoExeResource::output_path(inputs);
-        let description = format!("go build -o {output} {}", inputs.package);
+        let description = format!("go {}", GoExeResource::build_args(inputs, &output).join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -174,9 +182,7 @@ impl Resource for GoExeResource {
 
         let cwd = std::env::current_dir()?;
         let output_arg = GoExeResource::output_arg(&output, inputs.dir.is_some(), &cwd);
-        let mut args = vec!["build".to_owned(), "-o".to_owned(), output_arg];
-        args.extend(inputs.flags.iter().cloned());
-        args.push(inputs.package.clone());
+        let args = GoExeResource::build_args(inputs, &output_arg);
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -303,7 +309,7 @@ mod tests {
         let inputs = GoExeInputs {
             package: "./cmd/app".into(),
             output: Some("bin/app".into()),
-            flags: vec![],
+            flags: vec!["-trimpath".into()],
             inputs: vec![],
             dir: None,
             env: GoEnv::default(),
@@ -311,6 +317,7 @@ mod tests {
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
+        assert_eq!(result.description, "go build -o bin/app -trimpath ./cmd/app");
     }
 
     #[test]

@@ -425,6 +425,14 @@ impl ProtocGenerateResource {
     }
 }
 
+/// The protoc command that compiles `sources`, for display. The real run
+/// passes the arguments through a file and writes to a staging directory.
+fn command_line(inputs: &ProtocGenerateInputs, sources: &[String]) -> String {
+    let mut args = inputs.args(str::to_owned);
+    args.extend(sources.iter().cloned());
+    format!("protoc {}", args.join(" "))
+}
+
 /// Compile only `batches`. Returns every generated file, or `None` when the
 /// run showed that a full run is needed.
 fn run_incremental(
@@ -434,8 +442,10 @@ fn run_incremental(
     total: usize,
     writer: &BlockWriter,
 ) -> Result<Option<Vec<String>>, BoxError> {
-    let count = batches.changed.len() + batches.added.len();
-    writer.line(&format!("compiling {count} of {total} sources"));
+    // One start line covers both batches, though each runs its own protoc.
+    let sources: Vec<String> = batches.changed.iter().chain(&batches.added).cloned().collect();
+    writer.starting(&command_line(inputs, &sources));
+    writer.line(&format!("compiling {} of {total} sources", sources.len()));
     let mut generated: BTreeSet<String> = prior.generated.iter().cloned().collect();
     if !batches.changed.is_empty() {
         let staged = stage(inputs, &batches.changed, writer)?;
@@ -506,10 +516,8 @@ impl Resource for ProtocGenerateResource {
         inputs: &ProtocGenerateInputs,
         prior_state: Option<&ProtocGenerateState>,
     ) -> Result<PlanResult, BoxError> {
-        let mut args = inputs.args(str::to_owned);
-        args.extend(inputs.sources.iter().cloned());
         Ok(super::plan(
-            format!("protoc {}", args.join(" ")),
+            command_line(inputs, &inputs.sources),
             prior_state.map(|prior| &prior.inputs),
             inputs,
         ))
@@ -531,12 +539,14 @@ impl Resource for ProtocGenerateResource {
             inputs.hashes(&compilation, tracker)?
         };
 
-        let incremental = match prior_state {
-            Some(prior) => match incremental_batches(inputs, prior, &compilation, &hashes) {
-                Some(batches) => run_incremental(inputs, prior, &batches, compilation.files.len(), writer)?,
-                None => None,
-            },
-            None => None,
+        let batches =
+            prior_state.and_then(|prior| Some((prior, incremental_batches(inputs, prior, &compilation, &hashes)?)));
+        let incremental = match batches {
+            Some((prior, batches)) => run_incremental(inputs, prior, &batches, compilation.files.len(), writer)?,
+            None => {
+                writer.starting(&command_line(inputs, &inputs.sources));
+                None
+            }
         };
         let generated = match incremental {
             Some(generated) => generated,
@@ -566,6 +576,11 @@ impl Resource for ProtocGenerateResource {
 
     fn destroy(&self, prior_state: &ProtocGenerateState, writer: &BlockWriter) -> Result<(), BoxError> {
         remove_generated(&prior_state.generated, &prior_state.inputs.outputs(), writer)
+    }
+
+    /// Incremental runs compile only the sources that changed.
+    fn announces_start(&self) -> bool {
+        true
     }
 
     /// Generators other than protoc's built-in ones are `protoc-gen-*`

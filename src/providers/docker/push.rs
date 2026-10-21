@@ -79,7 +79,10 @@ impl Resource for PushResource {
     }
 
     fn plan(&self, inputs: &PushInputs, prior_state: Option<&PushState>) -> Result<PlanResult, BoxError> {
-        let desc = format!("docker push {}", inputs.tag);
+        let desc = format!(
+            "docker tag {} {} && docker push {}",
+            inputs.image, inputs.tag, inputs.tag
+        );
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -198,6 +201,10 @@ mod tests {
         };
         let result = Resource::plan(&PushResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
+        assert_eq!(
+            result.description,
+            "docker tag myapp:latest localhost:5000/myapp:abc123 && docker push localhost:5000/myapp:abc123"
+        );
     }
 
     #[test]
