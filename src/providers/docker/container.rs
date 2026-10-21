@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 use crate::value::Duration;
 
@@ -288,6 +288,7 @@ impl Resource for ContainerResource {
         &self,
         inputs: &ContainerInputs,
         _prior_state: Option<&ContainerState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ContainerState, ContainerOutputs>, BoxError> {
         // Remove any existing container with this name (running, stopped, or

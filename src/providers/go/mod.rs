@@ -172,7 +172,7 @@ fn visit_module_dirs(base: &Path, relative: PathBuf, found: &mut Vec<PathBuf>) -
     Ok(())
 }
 
-fn package_list(output: &[u8]) -> Vec<String> {
+pub(super) fn package_list(output: &[u8]) -> Vec<String> {
     let mut packages: Vec<_> = String::from_utf8_lossy(output)
         .lines()
         .map(str::trim)

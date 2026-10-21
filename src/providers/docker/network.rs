@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 /// Create a Docker network (Terraform-style: tracked state, drift detection)
@@ -119,6 +119,7 @@ impl Resource for NetworkResource {
         &self,
         inputs: &NetworkInputs,
         prior_state: Option<&NetworkState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<NetworkState, NetworkOutputs>, BoxError> {
         // Adopt an existing network with the same name. If the driver

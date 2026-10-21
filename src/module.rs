@@ -7,8 +7,8 @@ use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult as ProviderApplyResult, BoxError, CachePolicy, DynResource, PlanAction, PlanResult, ProviderRegistry,
-    ResourceKind, ResourceSchema, StructField, StructType,
+    ApplyResult as ProviderApplyResult, BoxError, CachePolicy, Changes, DynResource, PlanAction, PlanResult,
+    ProviderRegistry, ResourceKind, ResourceSchema, StructField, StructType,
 };
 use crate::state::StateStore;
 use crate::value::{Map, Value, validate_type};
@@ -58,6 +58,7 @@ impl DynResource for ModuleResource {
         &self,
         inputs: &Map,
         _prior_state: Option<&serde_json::Value>,
+        _changes: &Changes,
         _writer: &BlockWriter,
     ) -> Result<ProviderApplyResult<serde_json::Value, Map>, BoxError> {
         Ok(ProviderApplyResult {

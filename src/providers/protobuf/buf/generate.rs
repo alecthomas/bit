@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::{BufTarget, PluginCommand};
@@ -191,6 +191,7 @@ impl Resource for BufGenerateResource {
         &self,
         inputs: &BufGenerateInputs,
         _prior_state: Option<&BufGenerateState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufGenerateState, BufGenerateOutputs>, BoxError> {
         let outputs = inputs.outputs()?;

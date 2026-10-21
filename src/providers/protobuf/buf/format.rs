@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::BufTarget;
@@ -91,6 +91,7 @@ impl Resource for BufFormatResource {
         &self,
         inputs: &BufFormatInputs,
         _prior_state: Option<&BufFormatInputs>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufFormatInputs, BufFormatOutputs>, BoxError> {
         let status = inputs.target.run(&inputs.args(&WRITE), writer)?;
@@ -160,6 +161,7 @@ impl Resource for BufFormatCheckResource {
         &self,
         inputs: &BufFormatInputs,
         _prior_state: Option<&BufFormatInputs>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufFormatInputs, BufFormatCheckOutputs>, BoxError> {
         let status = inputs.target.run(&inputs.args(&CHECK), writer)?;

@@ -10,8 +10,8 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, ReceiptCheck,
-    Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
+    ReceiptCheck, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -186,6 +186,7 @@ impl Resource for RustExeResource {
         &self,
         inputs: &RustExeInputs,
         _prior_state: Option<&RustExeState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<RustExeState, RustExeOutputs>, BoxError> {
         let mut cargo = exe_command(inputs);

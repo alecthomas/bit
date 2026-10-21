@@ -1,8 +1,8 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cache::{ArtifactRef, Cas};
@@ -52,6 +52,19 @@ pub fn serialize_function_value<T: Serialize>(value: &T, typ: &crate::value::Typ
         *actual = expected.as_ref().clone();
     }
     Ok(value)
+}
+
+/// What may have changed since a block last ran successfully.
+///
+/// A failed test run does not count, so its changes are reported again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Changes {
+    /// Anything: no prior success, forced, or a field, dependency result,
+    /// tool or environment variable changed.
+    All,
+    /// Resolved paths added, modified or removed, absolute under the canonical
+    /// project root. Empty when only the resource's own plan asked for a run.
+    Paths(BTreeSet<PathBuf>),
 }
 
 /// What action the plan phase determined is needed.
@@ -351,6 +364,7 @@ pub trait Resource {
         &self,
         inputs: &Self::Inputs,
         prior_state: Option<&Self::State>,
+        changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
     fn destroy(&self, prior_state: &Self::State, writer: &BlockWriter) -> Result<(), BoxError>;
@@ -464,6 +478,7 @@ pub trait DynResource: Send + Sync {
         &self,
         inputs: &Map,
         prior_state: Option<&serde_json::Value>,
+        changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError>;
@@ -563,12 +578,13 @@ impl<R: Resource + Send + Sync> DynResource for R {
         &self,
         inputs: &Map,
         prior_state: Option<&serde_json::Value>,
+        changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         // Discard prior state if it can't be deserialized (e.g. resource type changed).
         let state = prior_state.and_then(|v| serde_json::from_value(v.clone()).ok());
-        let result = Resource::apply(self, &typed, state.as_ref(), writer)?;
+        let result = Resource::apply(self, &typed, state.as_ref(), changes, writer)?;
         Ok(ApplyResult {
             outputs: serialize_outputs(&result.outputs)?,
             state: result.state.map(serde_json::to_value).transpose()?,
@@ -785,6 +801,7 @@ mod tests {
             &self,
             _inputs: &StubInputs,
             _prior_state: Option<&StubState>,
+            _changes: &Changes,
             _writer: &BlockWriter,
         ) -> Result<ApplyResult<StubState, StubOutputs>, BoxError> {
             Ok(ApplyResult {
@@ -881,7 +898,7 @@ mod tests {
         let resource = StubResource;
         let output = crate::output::Output::new(&[]);
         let writer = output.writer("test");
-        let result = Resource::apply(&resource, &StubInputs {}, None, &writer).unwrap();
+        let result = Resource::apply(&resource, &StubInputs {}, None, &Changes::All, &writer).unwrap();
         assert_eq!(result.state, Some(StubState { version: 1 }));
     }
 
@@ -893,7 +910,7 @@ mod tests {
 
         let output = crate::output::Output::new(&[]);
         let writer = output.writer("test");
-        let result = resource.apply(&Map::new(), None, &writer).unwrap();
+        let result = resource.apply(&Map::new(), None, &Changes::All, &writer).unwrap();
         let json_state = result.state.unwrap();
         assert_eq!(json_state, serde_json::json!({"version": 1}));
 

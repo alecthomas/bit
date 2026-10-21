@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, PlanResult, Provider, Resource,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanResult, Provider, Resource,
     ResourceKind,
 };
 use crate::sha256::SHA256;
@@ -519,6 +519,7 @@ impl Resource for ProtocGenerateResource {
         &self,
         inputs: &ProtocGenerateInputs,
         prior_state: Option<&ProtocGenerateState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ProtocGenerateState, ProtocGenerateOutputs>, BoxError> {
         if inputs.out.is_empty() {

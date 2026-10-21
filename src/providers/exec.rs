@@ -13,7 +13,7 @@ use super::ReportMode;
 use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Message};
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, PlanAction, PlanResult, Provider,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanAction, PlanResult, Provider,
     Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
@@ -324,6 +324,7 @@ impl Resource for ExecResource {
         &self,
         inputs: &ExecInputs,
         _prior_state: Option<&ExecState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
         for output in &inputs.output {
@@ -582,6 +583,7 @@ impl Resource for ExecTestResource {
         &self,
         inputs: &ExecTestInputs,
         _prior_state: Option<&ExecTestState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
         let passed = match &inputs.results {
@@ -753,7 +755,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         assert!(result.state.is_some());
         assert!(output.exists());
         assert_eq!(fs::read_to_string(&output).unwrap().trim(), "hello");
@@ -775,7 +777,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        assert!(Resource::apply(&resource, &inputs, None, &writer).is_err());
+        assert!(Resource::apply(&resource, &inputs, None, &Changes::All, &writer).is_err());
     }
 
     #[test]
@@ -789,7 +791,7 @@ mod tests {
         };
         let out = crate::output::Output::silent();
         let writer = out.writer("test");
-        assert!(Resource::apply(&resource, &inputs, None, &writer).is_err());
+        assert!(Resource::apply(&resource, &inputs, None, &Changes::All, &writer).is_err());
     }
 
     #[test]
@@ -845,7 +847,7 @@ mod tests {
         });
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        let result = resource.apply(&inputs, None, &writer).unwrap();
+        let result = resource.apply(&inputs, None, &Changes::All, &writer).unwrap();
         assert!(result.state.is_some());
         assert_eq!(
             result.outputs.get("path").and_then(|v| v.as_str()),
@@ -861,7 +863,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         assert!(result.outputs.passed);
     }
 
@@ -873,7 +875,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         assert!(!result.outputs.passed);
     }
 
@@ -911,7 +913,9 @@ mod tests {
         };
         let out = crate::output::Output::silent();
         let writer = out.writer("test");
-        Ok(Resource::apply(&resource, inputs, None, &writer)?.outputs.passed)
+        Ok(Resource::apply(&resource, inputs, None, &Changes::All, &writer)?
+            .outputs
+            .passed)
     }
 
     #[test]
@@ -1088,7 +1092,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         assert!(result.state.is_some());
         let state = result.state.unwrap();
         assert_eq!(state.dir.as_deref(), Some(canon.to_str().unwrap()));
@@ -1109,7 +1113,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         assert!(result.outputs.passed);
         assert_eq!(
             result.state.as_ref().unwrap().dir.as_deref(),
@@ -1349,7 +1353,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         let state = result.state.unwrap();
         assert_eq!(state.resolve_output.as_deref(), Some("captured\n"));
     }
@@ -1372,7 +1376,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         let state = result.state.unwrap();
         assert!(state.resolve_output.is_none());
     }
@@ -1400,7 +1404,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        let result = Resource::apply(&resource, &inputs, None, &writer).unwrap();
+        let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         let state = result.state.unwrap();
         assert_eq!(state.outputs_values.get("name").and_then(|v| v.as_str()), Some("test"));
         assert_eq!(result.outputs.extra.get("name").and_then(|v| v.as_str()), Some("test"));

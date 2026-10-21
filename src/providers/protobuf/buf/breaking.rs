@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::BufTarget;
@@ -142,6 +144,7 @@ impl Resource for BufBreakingResource {
         &self,
         inputs: &BufBreakingInputs,
         _prior_state: Option<&BufBreakingState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufBreakingState, BufBreakingOutputs>, BoxError> {
         let against_commit = git_baseline_commit(&inputs.against, inputs.target.dir.as_deref())?;

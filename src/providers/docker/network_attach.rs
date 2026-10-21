@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
-use crate::provider::{ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 /// Attach a container to a Docker network (equivalent of `docker network connect`).
@@ -308,6 +308,7 @@ impl Resource for NetworkAttachResource {
         &self,
         inputs: &NetworkAttachInputs,
         prior_state: Option<&NetworkAttachState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<NetworkAttachState, NetworkAttachOutputs>, BoxError> {
         // Endpoint options (aliases, ip, links, ...) can't be changed in

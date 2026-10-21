@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::GoEnv;
@@ -107,6 +109,7 @@ impl Resource for GoBuildResource {
         &self,
         inputs: &GoBuildInputs,
         _prior_state: Option<&GoBuildState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoBuildState, GoBuildOutputs>, BoxError> {
         let mut args = vec!["build".to_owned()];

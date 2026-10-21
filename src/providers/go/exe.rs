@@ -11,8 +11,8 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, Resource,
-    ResourceKind, restore_output_files,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
+    Resource, ResourceKind, restore_output_files,
 };
 use crate::sha256::SHA256;
 
@@ -155,6 +155,7 @@ impl Resource for GoExeResource {
         &self,
         inputs: &GoExeInputs,
         _prior_state: Option<&GoExeState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoExeState, GoExeOutputs>, BoxError> {
         let output = GoExeResource::output_path(inputs);

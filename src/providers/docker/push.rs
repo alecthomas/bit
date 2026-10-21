@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 /// Push a Docker image to a registry
@@ -115,6 +117,7 @@ impl Resource for PushResource {
         &self,
         inputs: &PushInputs,
         _prior_state: Option<&PushState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<PushState, PushOutputs>, BoxError> {
         let tag_status = Command::new("docker")

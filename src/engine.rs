@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use crate::file_tracker::FileTracker;
 use crate::loader::BaseScope;
 use crate::output::{BlockWriter, Event, Output};
 use crate::provider::{
-    ApplyResult, BoxError, CachePolicy, OutputFile, PlanAction, PlanResult, ReceiptCheck, ResourceKind,
+    ApplyResult, BoxError, CachePolicy, Changes, OutputFile, PlanAction, PlanResult, ReceiptCheck, ResourceKind,
 };
 use crate::sha256::{Hasher, SHA256};
 use crate::state::{StateError, StateStore};
@@ -469,6 +469,7 @@ struct Prepared {
     input_hash: SHA256,
     dep_hashes: BTreeMap<String, SHA256>,
     content_hash: SHA256,
+    changes: Changes,
     plan: PlanResult,
     /// Declared outputs paired with their project-relative roles. Empty for
     /// resources the shared cache never consults.
@@ -615,6 +616,36 @@ fn provider_error(node: &DagNode, name: &str, phase: &'static str) -> impl FnOnc
     }
 }
 
+/// What changed since the baseline the prior state records, which a failed
+/// test run leaves at the last success.
+fn changes_since_success(
+    prior: &PriorState,
+    input_hash: &SHA256,
+    tracked: &BTreeMap<String, SHA256>,
+    dep_hashes: &BTreeMap<String, SHA256>,
+    cache: &BuildCache,
+    mode: ApplyMode,
+) -> Changes {
+    if mode == ApplyMode::Force
+        || prior.provider_state.is_none()
+        || *input_hash != prior.input_hash
+        || *dep_hashes != prior.dep_hashes
+    {
+        return Changes::All;
+    }
+    let mut paths = BTreeSet::new();
+    for key in tracked.keys().chain(prior.resolve_map.keys()) {
+        if tracked.get(key) == prior.resolve_map.get(key) {
+            continue;
+        }
+        if is_ambient_key(key) {
+            return Changes::All;
+        }
+        paths.insert(cache.absolute(key));
+    }
+    Changes::Paths(paths)
+}
+
 /// Resolve inputs, compute hashes, plan, and consult the shared cache.
 #[allow(clippy::too_many_arguments)]
 fn prepare_block(
@@ -653,6 +684,7 @@ fn prepare_block(
 
     let previously_failed = node.resource.kind() == ResourceKind::Test
         && prior.outputs.get("passed").and_then(|v| v.as_bool()) == Some(false);
+    let changes = changes_since_success(&prior, &input_hash, &resolve_map, &dep_hashes, cache, mode);
 
     let mut plan = node
         .resource
@@ -694,6 +726,7 @@ fn prepare_block(
         input_hash,
         dep_hashes,
         content_hash,
+        changes,
         plan,
         outputs,
         cached_outputs: Vec::new(),
@@ -1355,7 +1388,12 @@ fn execute_block(
                 prepared.plan.reason.as_deref(),
             );
             node.resource
-                .apply(&prepared.inputs, prepared.prior.provider_state.as_ref(), writer)
+                .apply(
+                    &prepared.inputs,
+                    prepared.prior.provider_state.as_ref(),
+                    &prepared.changes,
+                    writer,
+                )
                 .map_err(|e| {
                     writer.event(Event::Failed, &e.to_string());
                     EngineError::Provider {
@@ -1400,13 +1438,24 @@ fn execute_block(
             );
         }
 
+        // A failed test run keeps the last success as the baseline, so the
+        // next run's changes still include those this run tested.
+        let (input_hash, resolve_map, dep_hashes) = if test_failed {
+            (
+                prepared.prior.input_hash,
+                prepared.prior.resolve_map,
+                prepared.prior.dep_hashes,
+            )
+        } else {
+            (prepared.input_hash, post_resolve, prepared.dep_hashes)
+        };
         let wrapped = WrappedState {
             state: new_state.clone(),
             outputs: apply_result.outputs.clone(),
             content_hash: post_hash,
-            input_hash: prepared.input_hash,
-            resolve_map: post_resolve,
-            dep_hashes: prepared.dep_hashes,
+            input_hash,
+            resolve_map,
+            dep_hashes,
         };
         Some(serde_json::to_value(&wrapped).expect("serialize wrapped state"))
     } else {
@@ -1815,6 +1864,153 @@ mod tests {
     }
 
     #[test]
+    fn apply_reports_changes_since_last_success() {
+        use std::path::{Path, PathBuf};
+        use std::sync::Mutex;
+
+        #[derive(Debug, serde::Deserialize, bit_derive::Schema)]
+        struct Inputs {
+            dir: String,
+        }
+
+        #[derive(Debug, serde::Serialize, bit_derive::Schema)]
+        struct Outputs {
+            passed: bool,
+        }
+
+        struct RecordProvider {
+            seen: Arc<Mutex<Vec<Changes>>>,
+        }
+
+        impl Provider for RecordProvider {
+            fn name(&self) -> &str {
+                "record"
+            }
+            fn resources(&self) -> Vec<Box<dyn DynResource>> {
+                vec![Box::new(RecordResource {
+                    seen: self.seen.clone(),
+                })]
+            }
+            fn functions(&self) -> Vec<FuncSignature> {
+                vec![]
+            }
+            fn call_function(&self, name: &str, _args: &[Value]) -> Result<Value, BoxError> {
+                Err(format!("unknown function: {name}").into())
+            }
+        }
+
+        /// A test resource over `a.txt` and `b.txt` that fails while a
+        /// `fail` file, which it does not resolve, exists.
+        struct RecordResource {
+            seen: Arc<Mutex<Vec<Changes>>>,
+        }
+
+        impl Resource for RecordResource {
+            type State = ();
+            type Inputs = Inputs;
+            type Outputs = Outputs;
+
+            fn name(&self) -> &str {
+                "check"
+            }
+            fn kind(&self) -> ResourceKind {
+                ResourceKind::Test
+            }
+            fn resolve(&self, inputs: &Inputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+                let mut map = BTreeMap::new();
+                for name in ["a.txt", "b.txt"] {
+                    let path = Path::new(&inputs.dir).join(name);
+                    map.insert(path.to_string_lossy().into_owned(), crate::providers::hash_file(&path)?);
+                }
+                Ok(map)
+            }
+            fn plan(&self, _inputs: &Inputs, prior_state: Option<&()>) -> Result<PlanResult, BoxError> {
+                Ok(PlanResult {
+                    action: if prior_state.is_some() {
+                        PlanAction::None
+                    } else {
+                        PlanAction::Create
+                    },
+                    description: "check".into(),
+                    reason: None,
+                })
+            }
+            fn apply(
+                &self,
+                inputs: &Inputs,
+                _prior_state: Option<&()>,
+                changes: &Changes,
+                _writer: &BlockWriter,
+            ) -> Result<ApplyResult<(), Outputs>, BoxError> {
+                self.seen.lock().unwrap().push(changes.clone());
+                Ok(ApplyResult {
+                    outputs: Outputs {
+                        passed: !Path::new(&inputs.dir).join("fail").exists(),
+                    },
+                    state: Some(()),
+                })
+            }
+            fn destroy(&self, _prior_state: &(), _writer: &BlockWriter) -> Result<(), BoxError> {
+                Ok(())
+            }
+            fn cache_policy(&self, _inputs: &Inputs) -> CachePolicy {
+                CachePolicy::Local
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        std::fs::write(root.join("b.txt"), "b").unwrap();
+        let input = format!("check = record.check {{\n  dir = \"{}\"\n}}\n", root.display());
+        let module = parser::parse(&input, "<test>").unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = ProviderRegistry::new();
+        registry.register(Box::new(RecordProvider { seen: seen.clone() }));
+        let store = MemoryStore::new();
+        let cache = BuildCache::local_only(&root);
+        let run = |forced: bool| {
+            let tracker = test_tracker();
+            let (mut dag, base) = loader::load(&module, &Map::new(), &registry, &store, &[]).unwrap();
+            let order = resolve_order(&dag, &[]).unwrap();
+            let output = Output::new(&[]);
+            let result = if forced {
+                apply_selected_forced(&mut dag, &base, &store, &cache, &output, &order, 1, &tracker)
+            } else {
+                apply_selected(&mut dag, &base, &store, &cache, &output, &order, 1, &tracker)
+            };
+            result.is_ok()
+        };
+        let last = || seen.lock().unwrap().last().cloned().unwrap();
+        let paths =
+            |names: &[&str]| Changes::Paths(names.iter().map(|name| root.join(name)).collect::<BTreeSet<PathBuf>>());
+
+        assert!(run(false));
+        assert_eq!(last(), Changes::All);
+
+        std::fs::write(root.join("a.txt"), "a2").unwrap();
+        assert!(run(false));
+        assert_eq!(last(), paths(&["a.txt"]));
+
+        std::fs::write(root.join("b.txt"), "b2").unwrap();
+        std::fs::write(root.join("fail"), "").unwrap();
+        assert!(!run(false));
+        assert_eq!(last(), paths(&["b.txt"]));
+
+        // The rerun after a failure still sees what the failed run tested.
+        std::fs::remove_file(root.join("fail")).unwrap();
+        assert!(run(false));
+        assert_eq!(last(), paths(&["b.txt"]));
+
+        let applies = seen.lock().unwrap().len();
+        assert!(run(false));
+        assert_eq!(seen.lock().unwrap().len(), applies, "unchanged block must not run");
+
+        assert!(run(true));
+        assert_eq!(last(), Changes::All);
+    }
+
+    #[test]
     fn matrix_concurrency_does_not_limit_unrelated_blocks() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1891,6 +2087,7 @@ mod tests {
                 &self,
                 inputs: &Inputs,
                 _prior_state: Option<&()>,
+                _changes: &Changes,
                 _writer: &BlockWriter,
             ) -> Result<ApplyResult<(), Outputs>, BoxError> {
                 let running = self.counts.running.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2722,8 +2919,8 @@ lint[module] = go.lint {
         use crate::cache::{ArtifactRef, Cas};
         use crate::output::BlockWriter;
         use crate::provider::{
-            Ambient, ApplyResult, BoxError, CachePolicy, DynResource, FuncSignature, MaterializeResult, OutputFile,
-            PlanAction, PlanResult, Provider, Resource, ResourceKind,
+            Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, MaterializeResult,
+            OutputFile, PlanAction, PlanResult, Provider, Resource, ResourceKind,
         };
         use crate::sha256::SHA256;
         use crate::value::Value;
@@ -2827,6 +3024,7 @@ lint[module] = go.lint {
                 &self,
                 inputs: &Inputs,
                 _prior: Option<&State>,
+                _changes: &Changes,
                 _writer: &BlockWriter,
             ) -> Result<ApplyResult<State, Outputs>, BoxError> {
                 self.applies.fetch_add(1, Ordering::SeqCst);

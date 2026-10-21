@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::GoEnv;
@@ -115,6 +117,7 @@ impl Resource for GoGenerateResource {
         &self,
         inputs: &GoGenerateInputs,
         _prior_state: Option<&GoGenerateState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoGenerateState, GoGenerateOutputs>, BoxError> {
         let mut args = vec!["generate".to_owned()];

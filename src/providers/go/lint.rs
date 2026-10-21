@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::scanner::Tests;
@@ -151,6 +153,7 @@ impl Resource for GoLintResource {
         &self,
         inputs: &GoLintInputs,
         _prior_state: Option<&GoLintState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoLintState, GoLintOutputs>, BoxError> {
         let mut args = vec!["run".to_owned()];

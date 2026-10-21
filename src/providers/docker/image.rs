@@ -12,8 +12,8 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, MaterializeResult, OutputFile, PlanAction, PlanResult, ReceiptCheck,
-    Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
+    ReceiptCheck, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -464,6 +464,7 @@ impl Resource for ImageResource {
         &self,
         inputs: &ImageInputs,
         _prior_state: Option<&ImageState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ImageState, ImageOutputs>, BoxError> {
         let metadata = (inputs.platform.len() > 1)
@@ -974,7 +975,14 @@ exit 91
         };
         let output = crate::output::Output::new(&[]);
 
-        let result = Resource::apply(&resource, &multi_platform_inputs(), None, &output.writer("image")).unwrap();
+        let result = Resource::apply(
+            &resource,
+            &multi_platform_inputs(),
+            None,
+            &Changes::All,
+            &output.writer("image"),
+        )
+        .unwrap();
 
         let digest = "a".repeat(64);
         let image_ref = format!("registry.example.com:5000/team/myapp@sha256:{digest}");
@@ -1068,7 +1076,7 @@ exit 91
         };
         let output = crate::output::Output::new(&[]);
 
-        let error = Resource::apply(&resource, &test_inputs(), None, &output.writer("image"))
+        let error = Resource::apply(&resource, &test_inputs(), None, &Changes::All, &output.writer("image"))
             .unwrap_err()
             .to_string();
 

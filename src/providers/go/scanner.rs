@@ -202,6 +202,49 @@ fn collect_tests(
 /// `go` from a non-project-root directory — e.g. a `go.exe` block with a `dir`
 /// pointing at a separate-module subdirectory. `None` starts from bit's CWD.
 pub fn scan(pattern: &str, tests: Tests, base_dir: Option<&Path>) -> Result<HashSet<PathBuf>, BoxError> {
+    let (module, pkg_dirs) = pattern_packages(pattern, base_dir)?;
+
+    let mut all_files = module_files(&module);
+    let mut visited = HashSet::new();
+
+    for dir in &pkg_dirs {
+        collect_sources(&module, dir, &mut all_files, &mut visited)?;
+        if tests != Tests::Excluded {
+            collect_tests(&module, dir, tests, &mut all_files, &mut visited)?;
+        }
+    }
+
+    Ok(all_files)
+}
+
+/// A package a pattern names, with every file its tests depend on.
+pub struct TestedPackage {
+    pub import_path: String,
+    pub files: HashSet<PathBuf>,
+}
+
+/// List the packages a pattern names, each with the files a
+/// [`Tests::SourcesAndTestdata`] scan of that package alone would return.
+pub fn tested_packages(pattern: &str, base_dir: Option<&Path>) -> Result<Vec<TestedPackage>, BoxError> {
+    let (module, pkg_dirs) = pattern_packages(pattern, base_dir)?;
+    pkg_dirs
+        .iter()
+        .map(|dir| {
+            let mut files = module_files(&module);
+            let mut visited = HashSet::new();
+            collect_sources(&module, dir, &mut files, &mut visited)?;
+            collect_tests(&module, dir, Tests::SourcesAndTestdata, &mut files, &mut visited)?;
+            Ok(TestedPackage {
+                import_path: import_path(&module, dir),
+                files,
+            })
+        })
+        .collect()
+}
+
+/// The module `base_dir` (or bit's CWD) belongs to, and the package
+/// directories `pattern` names in it.
+fn pattern_packages(pattern: &str, base_dir: Option<&Path>) -> Result<(Arc<Module>, Vec<PathBuf>), BoxError> {
     let cwd;
     let start = match base_dir {
         Some(dir) => dir,
@@ -212,27 +255,25 @@ pub fn scan(pattern: &str, tests: Tests, base_dir: Option<&Path>) -> Result<Hash
     };
     let module = module(start)?;
     let pkg_dirs = resolve_package_dirs(&module.root, &module.path, pattern)?;
+    Ok((module, pkg_dirs))
+}
 
-    let mut all_files = HashSet::new();
-    let mut visited = HashSet::new();
+/// The module's `go.mod` and `go.sum`, which every package depends on.
+fn module_files(module: &Module) -> HashSet<PathBuf> {
+    ["go.mod", "go.sum"]
+        .into_iter()
+        .map(|name| module.root.join(name))
+        .filter(|path| path.exists())
+        .collect()
+}
 
-    for dir in &pkg_dirs {
-        collect_sources(&module, dir, &mut all_files, &mut visited)?;
-        if tests != Tests::Excluded {
-            collect_tests(&module, dir, tests, &mut all_files, &mut visited)?;
-        }
+fn import_path(module: &Module, pkg_dir: &Path) -> String {
+    let rel = pkg_dir.strip_prefix(&module.root).unwrap_or(pkg_dir);
+    if rel.as_os_str().is_empty() {
+        return module.path.clone();
     }
-
-    let go_mod = module.root.join("go.mod");
-    let go_sum = module.root.join("go.sum");
-    if go_mod.exists() {
-        all_files.insert(go_mod);
-    }
-    if go_sum.exists() {
-        all_files.insert(go_sum);
-    }
-
-    Ok(all_files)
+    let rel: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+    format!("{}/{}", module.path, rel.join("/"))
 }
 
 /// Find the module root by walking up from `start` looking for `go.mod`.
@@ -421,8 +462,15 @@ fn visit_go_dirs(dir: &Path, result: &mut Vec<PathBuf>) -> Result<(), BoxError> 
         let name_str = name.to_string_lossy();
 
         if ft.is_dir() {
-            if !name_str.starts_with('.') && name_str != "vendor" && name_str != "testdata" {
-                subdirs.push(entry.path());
+            let path = entry.path();
+            // As with `go`, a nested module's packages are not part of this one.
+            if !name_str.starts_with('.')
+                && !name_str.starts_with('_')
+                && name_str != "vendor"
+                && name_str != "testdata"
+                && !path.join("go.mod").is_file()
+            {
+                subdirs.push(path);
             }
             continue;
         }
@@ -804,12 +852,19 @@ func Hello() { fmt.Println("hello") }
     }
 
     #[test]
-    fn scan_skips_vendor_and_testdata() {
+    fn scan_skips_dirs_go_ignores() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
         fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
         fs::write(root.join("main.go"), "package main\n").unwrap();
+
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("nested/go.mod"), "module example.com/nested\n").unwrap();
+        fs::write(root.join("nested/nested.go"), "package nested\n").unwrap();
+
+        fs::create_dir_all(root.join("_tools")).unwrap();
+        fs::write(root.join("_tools/tools.go"), "package tools\n").unwrap();
 
         fs::create_dir_all(root.join("vendor/github.com/foo")).unwrap();
         fs::write(root.join("vendor/github.com/foo/bar.go"), "package foo\n").unwrap();
@@ -820,9 +875,7 @@ func Hello() { fmt.Println("hello") }
         let dirs = resolve_package_dirs(root, "example.com/test", "./...").unwrap();
         let dir_strs: Vec<_> = dirs.iter().map(|d| d.to_string_lossy().to_string()).collect();
 
-        assert_eq!(dirs.len(), 1);
-        assert!(!dir_strs.iter().any(|d| d.contains("vendor")));
-        assert!(!dir_strs.iter().any(|d| d.contains("testdata")));
+        assert_eq!(dirs, [root.to_path_buf()], "{dir_strs:?}");
     }
 
     #[test]

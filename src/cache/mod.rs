@@ -235,6 +235,11 @@ impl BuildCache {
         }
     }
 
+    /// Make a path [`BuildCache::normalize_str`] produced absolute again.
+    pub fn absolute(&self, s: &str) -> PathBuf {
+        if s == "." { self.root.clone() } else { self.root.join(s) }
+    }
+
     /// Normalize every string in a JSON value.
     pub fn normalize_json(&self, value: serde_json::Value) -> serde_json::Value {
         use serde_json::Value;

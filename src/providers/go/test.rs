@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::GoEnv;
@@ -222,6 +224,90 @@ fn process_go_test_json(reader: impl BufRead, writer: &BlockWriter, mode: Report
     }
 }
 
+/// The packages a narrowed run tests, out of the `total` the pattern names.
+struct Affected {
+    packages: Vec<String>,
+    total: usize,
+}
+
+/// The packages whose tests depend on a changed path, or `None` to test the
+/// whole pattern.
+fn affected_packages(inputs: &GoTestInputs, changes: &Changes) -> Result<Option<Affected>, BoxError> {
+    let Changes::Paths(changed) = changes else {
+        return Ok(None);
+    };
+    let dir = inputs.dir.as_deref().map(std::path::Path::new);
+    let scanned = super::scanner::tested_packages(&inputs.package, dir)?;
+    // A path no package depends on is an extra input or a deleted file, whose
+    // dependents cannot be found.
+    if changed
+        .iter()
+        .any(|path| !scanned.iter().any(|p| p.files.contains(path)))
+    {
+        return Ok(None);
+    }
+    // The scanner ignores build constraints, and `go test` fails on a named
+    // package they exclude, so only packages `go` lists may be named.
+    let listed = listed_packages(inputs)?;
+    if listed
+        .iter()
+        .any(|path| !scanned.iter().any(|p| &p.import_path == path))
+    {
+        return Ok(None);
+    }
+    let packages = scanned
+        .into_iter()
+        .filter(|p| listed.contains(&p.import_path) && changed.iter().any(|path| p.files.contains(path)))
+        .map(|p| p.import_path)
+        .collect();
+    Ok(Some(Affected {
+        packages,
+        total: listed.len(),
+    }))
+}
+
+/// The packages `go test` would test for the block's pattern, with the same
+/// environment and build tags.
+fn listed_packages(inputs: &GoTestInputs) -> Result<Vec<String>, BoxError> {
+    let mut cmd = Command::new("go");
+    cmd.args(["list", "-e"])
+        .args(tag_flags(&inputs.flags))
+        .arg(&inputs.package);
+    if let Some(dir) = &inputs.dir {
+        cmd.current_dir(dir);
+    }
+    inputs.env.apply_to(&mut cmd);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to execute `go list {}`: {e}", inputs.package))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`go list {}` failed: {}",
+            inputs.package,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    Ok(super::package_list(&output.stdout))
+}
+
+/// The `-tags` flags among `go test` flags, which `go list` also accepts and
+/// which change the packages a pattern matches.
+fn tag_flags(flags: &[String]) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        let name = flag.trim_start_matches('-');
+        if flag.starts_with('-') && name.starts_with("tags=") {
+            tags.push(flag.clone());
+        } else if flag.starts_with('-') && name == "tags" {
+            tags.push(flag.clone());
+            tags.extend(flags.next().cloned());
+        }
+    }
+    tags
+}
+
 pub struct GoTestResource {
     tracker: Arc<FileTracker>,
 }
@@ -283,11 +369,32 @@ impl Resource for GoTestResource {
         &self,
         inputs: &GoTestInputs,
         _prior_state: Option<&GoTestState>,
+        changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoTestState, GoTestOutputs>, BoxError> {
+        let state = GoTestState {
+            package: inputs.package.clone(),
+            flags: inputs.flags.clone(),
+            dir: inputs.dir.clone(),
+            env: inputs.env.clone(),
+        };
+        let packages = match affected_packages(inputs, changes)? {
+            Some(Affected { packages, total }) => {
+                writer.line(&format!("{} of {total} packages affected", packages.len()));
+                if packages.is_empty() {
+                    return Ok(ApplyResult {
+                        outputs: GoTestOutputs { passed: true },
+                        state: Some(state),
+                    });
+                }
+                packages
+            }
+            None => vec![inputs.package.clone()],
+        };
+
         let mut args = vec!["test".to_owned(), "-json".to_owned()];
         args.extend(inputs.flags.iter().cloned());
-        args.push(inputs.package.clone());
+        args.extend(packages);
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -350,12 +457,7 @@ impl Resource for GoTestResource {
 
         Ok(ApplyResult {
             outputs: GoTestOutputs { passed },
-            state: Some(GoTestState {
-                package: inputs.package.clone(),
-                flags: inputs.flags.clone(),
-                dir: inputs.dir.clone(),
-                env: inputs.env.clone(),
-            }),
+            state: Some(state),
         })
     }
 
@@ -406,6 +508,61 @@ mod tests {
             "{resolved:?}"
         );
         assert!(resolved.keys().any(|p| p.ends_with("schema.json")), "{resolved:?}");
+    }
+
+    #[test]
+    fn affected_packages_follow_changed_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("go.mod"), "module example.com/m\n").unwrap();
+        std::fs::write(root.join("main.go"), "package main\nimport \"example.com/m/lib\"\n").unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("lib/lib.go"), "package lib\n").unwrap();
+        std::fs::write(root.join("lib/lib_test.go"), "package lib\n").unwrap();
+        std::fs::create_dir_all(root.join("util")).unwrap();
+        std::fs::write(root.join("util/util.go"), "package util\n").unwrap();
+        // Build constraints exclude this package everywhere tests run.
+        std::fs::create_dir_all(root.join("plan9only")).unwrap();
+        std::fs::write(
+            root.join("plan9only/main_plan9.go"),
+            "package main\nimport \"example.com/m/lib\"\n",
+        )
+        .unwrap();
+        let inputs = GoTestInputs {
+            package: "./...".into(),
+            flags: vec![],
+            inputs: vec![],
+            report: ReportMode::default(),
+            dir: Some(root.to_string_lossy().into_owned()),
+            env: GoEnv::default(),
+        };
+        let affected = |names: &[&str]| {
+            let changes = Changes::Paths(names.iter().map(|name| root.join(name)).collect());
+            affected_packages(&inputs, &changes).unwrap().map(|affected| {
+                assert_eq!(affected.total, 3);
+                let mut packages = affected.packages;
+                packages.sort();
+                packages
+            })
+        };
+
+        assert_eq!(
+            affected(&["lib/lib.go"]).unwrap(),
+            ["example.com/m", "example.com/m/lib"]
+        );
+        assert_eq!(affected(&["lib/lib_test.go"]).unwrap(), ["example.com/m/lib"]);
+        assert_eq!(affected(&["util/util.go"]).unwrap(), ["example.com/m/util"]);
+        assert_eq!(affected(&["go.mod"]).unwrap().len(), 3);
+        assert_eq!(affected(&["lib/removed.go"]), None);
+        assert!(affected_packages(&inputs, &Changes::All).unwrap().is_none());
+    }
+
+    #[test]
+    fn tag_flags_are_forwarded_to_go_list() {
+        let flags: Vec<String> = ["-short", "-tags=a,b", "-run", "TestX", "--tags", "c", "-race"]
+            .map(String::from)
+            .into();
+        assert_eq!(tag_flags(&flags), ["-tags=a,b", "--tags", "c"]);
     }
 
     #[test]

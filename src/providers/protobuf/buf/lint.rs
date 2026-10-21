@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanResult, Resource, ResourceKind};
+use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
 use super::BufTarget;
@@ -77,6 +77,7 @@ impl Resource for BufLintResource {
         &self,
         inputs: &BufLintInputs,
         _prior_state: Option<&BufLintInputs>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufLintInputs, BufLintOutputs>, BoxError> {
         let status = inputs.target.run(&lint_args(inputs), writer)?;

@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv};
@@ -138,6 +140,7 @@ impl Resource for RustFmtResource {
         &self,
         inputs: &RustFmtInputs,
         _prior_state: Option<&RustFmtState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<RustFmtState, RustFmtOutputs>, BoxError> {
         fmt_command(inputs).run(writer)?;
@@ -196,6 +199,7 @@ impl Resource for RustFmtCheckResource {
         &self,
         inputs: &RustFmtInputs,
         _prior_state: Option<&RustFmtState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<RustFmtState, RustFmtCheckOutputs>, BoxError> {
         let passed = fmt_check_command(inputs).run(writer).is_ok();

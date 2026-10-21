@@ -102,6 +102,12 @@ streams the tool's output. `rust.test` names unit test suites by crate. It
 prints Cargo compiler diagnostics when `cargo test` fails, including when
 another workspace suite has already passed.
 
+When only Go files changed since `go.test` last passed, it tests just the
+packages whose sources, tests, `testdata/` or local imports include a changed
+file. It tests the whole pattern on its first run, with `--force`, or when its
+fields, toolchain, dependencies or extra `inputs` changed, or a tracked file
+was deleted.
+
 `exec.test` can report individual tests from any runner with JSON or JSONL
 output. Its `results` field is a jq filter that maps each JSON value to test
 and suite results. Records without a `name` describe the suite, so a runner

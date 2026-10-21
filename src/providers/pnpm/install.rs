@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::{run_pnpm, workspace};
@@ -122,6 +124,7 @@ impl Resource for PnpmInstallResource {
         &self,
         inputs: &PnpmInstallInputs,
         _prior_state: Option<&PnpmInstallState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<PnpmInstallState, PnpmInstallOutputs>, BoxError> {
         let mut args = vec!["install".to_owned()];

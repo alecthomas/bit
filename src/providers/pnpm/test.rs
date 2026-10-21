@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::{run::resolve_inputs, run_pnpm};
@@ -109,6 +111,7 @@ impl Resource for PnpmTestResource {
         &self,
         inputs: &PnpmTestInputs,
         _prior_state: Option<&PnpmTestState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<PnpmTestState, PnpmTestOutputs>, BoxError> {
         let mut args = Vec::new();

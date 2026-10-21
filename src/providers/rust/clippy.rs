@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv, RustFeatures};
@@ -110,6 +112,7 @@ impl Resource for RustClippyResource {
         &self,
         inputs: &RustClippyInputs,
         _prior_state: Option<&RustClippyState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<RustClippyState, RustClippyOutputs>, BoxError> {
         let passed = clippy_command(inputs).run(writer).is_ok();

@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::scanner::Tests;
@@ -126,6 +128,7 @@ impl Resource for GoFmtResource {
         &self,
         inputs: &GoFmtInputs,
         _prior_state: Option<&GoFmtState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoFmtState, GoFmtOutputs>, BoxError> {
         let files = go_source_files(&inputs.package, inputs.dir.as_deref().map(std::path::Path::new))?;
@@ -244,6 +247,7 @@ impl Resource for GoFmtCheckResource {
         &self,
         inputs: &GoFmtInputs,
         _prior_state: Option<&GoFmtState>,
+        _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoFmtState, GoFmtCheckOutputs>, BoxError> {
         let files = go_source_files(&inputs.package, inputs.dir.as_deref().map(std::path::Path::new))?;
@@ -386,7 +390,14 @@ mod tests {
     fn fmt_apply_formats_test_files() {
         let (dir, inputs) = module_with_unformatted_test_file();
         let output = crate::output::Output::new(&[]);
-        Resource::apply(&test_fmt_resource(), &inputs, None, &output.writer("fmt")).unwrap();
+        Resource::apply(
+            &test_fmt_resource(),
+            &inputs,
+            None,
+            &Changes::All,
+            &output.writer("fmt"),
+        )
+        .unwrap();
         let formatted = std::fs::read_to_string(dir.path().join("pkg/lib_test.go")).unwrap();
         assert_eq!(formatted, FORMATTED_TEST);
     }
@@ -395,7 +406,14 @@ mod tests {
     fn fmt_check_fails_on_unformatted_test_files() {
         let (_dir, inputs) = module_with_unformatted_test_file();
         let output = crate::output::Output::new(&[]);
-        let result = Resource::apply(&test_fmt_check_resource(), &inputs, None, &output.writer("fmt-l")).unwrap();
+        let result = Resource::apply(
+            &test_fmt_check_resource(),
+            &inputs,
+            None,
+            &Changes::All,
+            &output.writer("fmt-l"),
+        )
+        .unwrap();
         assert!(!result.outputs.passed);
     }
 
