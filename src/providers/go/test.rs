@@ -247,6 +247,14 @@ fn affected_packages(inputs: &GoTestInputs, changes: &Changes) -> Result<Option<
     }))
 }
 
+/// The arguments to `go` that test `packages`.
+fn test_args(inputs: &GoTestInputs, packages: &[String]) -> Vec<String> {
+    let mut args = vec!["test".to_owned(), "-json".to_owned()];
+    args.extend(inputs.flags.iter().cloned());
+    args.extend(packages.iter().cloned());
+    args
+}
+
 /// The `-tags` flags among `go test` flags, which `go list` also accepts and
 /// which change the packages a pattern matches.
 fn tag_flags(flags: &[String]) -> Vec<String> {
@@ -298,7 +306,7 @@ impl Resource for GoTestResource {
     }
 
     fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
-        let description = format!("go test {}", inputs.package.join(" "));
+        let description = format!("go {}", test_args(inputs, &inputs.package).join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -334,23 +342,22 @@ impl Resource for GoTestResource {
             dir: inputs.dir.clone(),
             env: inputs.env.clone(),
         };
-        let packages = match affected_packages(inputs, changes)? {
-            Some(Affected { packages, total }) => {
-                writer.line(&format!("{} of {total} packages affected", packages.len()));
-                if packages.is_empty() {
-                    return Ok(ApplyResult {
-                        outputs: GoTestOutputs { passed: true },
-                        state: Some(state),
-                    });
-                }
-                packages
-            }
-            None => inputs.package.clone(),
-        };
-
-        let mut args = vec!["test".to_owned(), "-json".to_owned()];
-        args.extend(inputs.flags.iter().cloned());
-        args.extend(packages);
+        let affected = affected_packages(inputs, changes)?;
+        if let Some(Affected { packages, total }) = &affected
+            && packages.is_empty()
+        {
+            writer.starting(&format!("0 of {total} packages affected"));
+            return Ok(ApplyResult {
+                outputs: GoTestOutputs { passed: true },
+                state: Some(state),
+            });
+        }
+        let packages = affected.as_ref().map_or(&inputs.package, |affected| &affected.packages);
+        let args = test_args(inputs, packages);
+        writer.starting(&format!("go {}", args.join(" ")));
+        if let Some(Affected { packages, total }) = &affected {
+            writer.line(&format!("{} of {total} packages affected", packages.len()));
+        }
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -419,6 +426,11 @@ impl Resource for GoTestResource {
 
     fn destroy(&self, _prior_state: &GoTestState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
+    }
+
+    /// The packages tested depend on the changes.
+    fn announces_start(&self) -> bool {
+        true
     }
 
     fn cache_policy(&self, _inputs: &GoTestInputs) -> CachePolicy {
@@ -562,7 +574,7 @@ mod tests {
         let inputs: GoTestInputs = serde_json::from_str(r#"{"package": ["./a/...", "./b"]}"#).unwrap();
         assert_eq!(inputs.package, ["./a/...", "./b"]);
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
-        assert_eq!(result.description, "go test ./a/... ./b");
+        assert_eq!(result.description, "go test -json ./a/... ./b");
 
         assert!(serde_json::from_str::<GoTestInputs>(r#"{"package": []}"#).is_err());
     }

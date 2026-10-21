@@ -150,6 +150,7 @@ impl Resource for GoFmtResource {
     ) -> Result<ApplyResult<GoFmtState, GoFmtOutputs>, BoxError> {
         let files = changed_go_files(inputs, changes)?;
         if files.is_empty() {
+            writer.starting("no Go files changed");
             return Ok(ApplyResult {
                 outputs: GoFmtOutputs {},
                 state: Some(GoFmtState {
@@ -159,6 +160,10 @@ impl Resource for GoFmtResource {
             });
         }
 
+        writer.starting(&format!(
+            "gofmt -w {}",
+            super::display_paths(files.iter().map(Path::new)).join(" ")
+        ));
         let mut cmd = Command::new("gofmt");
         cmd.arg("-w").args(&files).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(dir) = &inputs.dir {
@@ -193,6 +198,11 @@ impl Resource for GoFmtResource {
 
     fn destroy(&self, _prior_state: &GoFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
+    }
+
+    /// The files formatted depend on the changes.
+    fn announces_start(&self) -> bool {
+        true
     }
 
     fn cache_policy(&self, _inputs: &GoFmtInputs) -> CachePolicy {
@@ -269,6 +279,7 @@ impl Resource for GoFmtCheckResource {
     ) -> Result<ApplyResult<GoFmtState, GoFmtCheckOutputs>, BoxError> {
         let files = changed_go_files(inputs, changes)?;
         if files.is_empty() {
+            writer.starting("no Go files changed");
             return Ok(ApplyResult {
                 outputs: GoFmtCheckOutputs { passed: true },
                 state: Some(GoFmtState {
@@ -278,6 +289,10 @@ impl Resource for GoFmtCheckResource {
             });
         }
 
+        writer.starting(&format!(
+            "gofmt -l {}",
+            super::display_paths(files.iter().map(Path::new)).join(" ")
+        ));
         let mut cmd = Command::new("gofmt");
         cmd.arg("-l").args(&files);
         if let Some(dir) = &inputs.dir {
@@ -306,6 +321,11 @@ impl Resource for GoFmtCheckResource {
 
     fn destroy(&self, _prior_state: &GoFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
+    }
+
+    /// The files checked depend on the changes.
+    fn announces_start(&self) -> bool {
+        true
     }
 
     fn cache_policy(&self, _inputs: &GoFmtInputs) -> CachePolicy {

@@ -335,6 +335,7 @@ impl Output {
             name: name.to_owned(),
             color: color_for_name(name),
             indent: None,
+            start_reason: None,
         }
     }
 
@@ -345,6 +346,7 @@ impl Output {
             name: name.to_owned(),
             color: color_for_name(name),
             indent: Some(indent),
+            start_reason: None,
         }
     }
 
@@ -772,12 +774,49 @@ pub struct BlockWriter {
     color: Color,
     /// `None` = right-aligned (apply mode), `Some(n)` = left-aligned with indent (plan mode).
     indent: Option<usize>,
+    /// Why the block runs, shown on the line [`BlockWriter::starting`] prints.
+    start_reason: Option<String>,
 }
 
 impl BlockWriter {
     pub fn event(&self, event: Event, message: &str) {
         self.output
             .dispatch_event(&self.name, event, self.indent, message, /*raw=*/ false);
+    }
+
+    /// Emit an event whose first line is followed by a dimmed `(reason)`.
+    pub fn event_with_reason(&self, event: Event, description: &str, reason: Option<&str>) {
+        let Some(reason) = reason else {
+            self.event(event, description);
+            return;
+        };
+        let mut lines = description.lines();
+        let first = lines.next().unwrap_or("");
+        let mut styled = format!("{} {}", first.paint(event.color()), format!("({reason})").dim());
+        for line in lines {
+            styled.push('\n');
+            styled.push_str(&line.paint(event.color()).to_string());
+        }
+        self.event_raw(event, &styled);
+    }
+
+    /// A copy of this writer whose [`BlockWriter::starting`] line shows
+    /// `reason`. The engine hands it to resources that announce their own
+    /// start, since only the engine knows why a block runs.
+    pub fn with_start_reason(&self, reason: Option<&str>) -> BlockWriter {
+        BlockWriter {
+            output: self.output.clone(),
+            name: self.name.clone(),
+            color: self.color,
+            indent: self.indent,
+            start_reason: reason.map(str::to_owned),
+        }
+    }
+
+    /// Announce the work a resource is starting, for resources whose
+    /// [`crate::provider::Resource::announces_start`] is true.
+    pub fn starting(&self, description: &str) {
+        self.event_with_reason(Event::Starting, description, self.start_reason.as_deref());
     }
 
     /// Whether debug output is enabled for the underlying Output.

@@ -111,6 +111,14 @@ fn affected_packages(inputs: &GoLintInputs, changes: &Changes) -> Result<Option<
     }))
 }
 
+/// The arguments to `golangci-lint` that lint `packages`.
+fn lint_args(inputs: &GoLintInputs, packages: &[String]) -> Vec<String> {
+    let mut args = vec!["run".to_owned()];
+    args.extend(inputs.flags.iter().cloned());
+    args.extend(packages.iter().cloned());
+    args
+}
+
 pub struct GoLintResource {
     tracker: Arc<FileTracker>,
 }
@@ -158,7 +166,7 @@ impl Resource for GoLintResource {
     }
 
     fn plan(&self, inputs: &GoLintInputs, prior_state: Option<&GoLintState>) -> Result<PlanResult, BoxError> {
-        let description = format!("golangci-lint run {}", inputs.package.join(" "));
+        let description = format!("golangci-lint {}", lint_args(inputs, &inputs.package).join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -193,23 +201,28 @@ impl Resource for GoLintResource {
             flags: inputs.flags.clone(),
             dir: inputs.dir.clone(),
         };
-        let packages = match affected_packages(inputs, changes)? {
-            Some(Affected { dirs, total }) => {
-                writer.line(&format!("{} of {total} packages affected", dirs.len()));
-                if dirs.is_empty() {
-                    return Ok(ApplyResult {
-                        outputs: GoLintOutputs { passed: true },
-                        state: Some(state),
-                    });
-                }
-                dirs.into_iter().map(|dir| dir.to_string_lossy().into_owned()).collect()
-            }
-            None => inputs.package.clone(),
+        let affected = affected_packages(inputs, changes)?;
+        if let Some(Affected { dirs, total }) = &affected
+            && dirs.is_empty()
+        {
+            writer.starting(&format!("0 of {total} packages affected"));
+            return Ok(ApplyResult {
+                outputs: GoLintOutputs { passed: true },
+                state: Some(state),
+            });
+        }
+        let (packages, shown) = match &affected {
+            Some(Affected { dirs, .. }) => (
+                dirs.iter().map(|dir| dir.to_string_lossy().into_owned()).collect(),
+                super::display_paths(dirs.iter().map(PathBuf::as_path)),
+            ),
+            None => (inputs.package.clone(), inputs.package.clone()),
         };
-
-        let mut args = vec!["run".to_owned()];
-        args.extend(inputs.flags.iter().cloned());
-        args.extend(packages);
+        let args = lint_args(inputs, &packages);
+        writer.starting(&format!("golangci-lint {}", lint_args(inputs, &shown).join(" ")));
+        if let Some(Affected { dirs, total }) = &affected {
+            writer.line(&format!("{} of {total} packages affected", dirs.len()));
+        }
 
         let mut cmd = Command::new("golangci-lint");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -244,6 +257,11 @@ impl Resource for GoLintResource {
 
     fn destroy(&self, _prior_state: &GoLintState, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
+    }
+
+    /// The packages linted depend on the changes.
+    fn announces_start(&self) -> bool {
+        true
     }
 
     /// golangci-lint takes a global lock and exits when another instance holds it.

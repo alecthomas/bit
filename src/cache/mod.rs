@@ -161,6 +161,23 @@ struct Shared {
     cas: Cas,
 }
 
+/// Rewrite an absolute path inside `root` to one relative to it, with `root`
+/// itself as `.`. Paths outside `root` and non-path strings are returned
+/// as-is. `root` must be canonical to match the canonical paths providers
+/// report.
+pub fn project_relative<'a>(root: &Path, s: &'a str) -> std::borrow::Cow<'a, str> {
+    let Some(root) = root.to_str() else {
+        return s.into();
+    };
+    if s == root {
+        return ".".into();
+    }
+    match s.strip_prefix(root).and_then(|rest| rest.strip_prefix('/')) {
+        Some(rel) => rel.into(),
+        None => s.into(),
+    }
+}
+
 /// Engine-side view of the cache for one project root.
 ///
 /// Always provides path normalization; receipt lookup and artifact storage
@@ -223,16 +240,7 @@ impl BuildCache {
     /// Rewrite an absolute path inside the project root to a project-relative
     /// one. Paths outside the project and non-path strings are returned as-is.
     pub fn normalize_str<'a>(&self, s: &'a str) -> std::borrow::Cow<'a, str> {
-        let Some(root) = self.root.to_str() else {
-            return s.into();
-        };
-        if s == root {
-            return ".".into();
-        }
-        match s.strip_prefix(root).and_then(|rest| rest.strip_prefix('/')) {
-            Some(rel) => rel.into(),
-            None => s.into(),
-        }
+        project_relative(&self.root, s)
     }
 
     /// Make a path [`BuildCache::normalize_str`] produced absolute again.

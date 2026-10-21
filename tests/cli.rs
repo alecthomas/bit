@@ -392,6 +392,35 @@ explicit specified = exec {
 }
 
 #[test]
+fn narrowed_run_prints_only_the_command_it_runs() {
+    let project = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("go.mod"), "module example.com/m\n").unwrap();
+    fs::write(project.path().join("a.go"), "package m\n").unwrap();
+    fs::write(project.path().join("b.go"), "package m\n").unwrap();
+    fs::write(project.path().join("BUILD.bit"), "check = go.fmt-l {}\n").unwrap();
+
+    let gofmt_lines = || {
+        let output = run_bit_with_cache(project.path(), cache.path(), &[]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains("gofmt -l"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+
+    let lines = gofmt_lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("gofmt -l a.go b.go"), "{lines:?}");
+
+    fs::write(project.path().join("b.go"), "package m\n\nconst B = 1\n").unwrap();
+    let lines = gofmt_lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("gofmt -l b.go"), "{lines:?}");
+}
+
+#[test]
 fn since_lists_changed_blocks_and_content_dependents() {
     let project = tempfile::tempdir().unwrap();
     fs::write(project.path().join("a.txt"), "a\n").unwrap();

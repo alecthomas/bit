@@ -92,6 +92,23 @@ pub fn resolve_go_inputs(
     Ok(hashes)
 }
 
+/// `paths` shortened for display in a start line: project-relative, as the
+/// engine shows input paths. bit's working directory is the project root;
+/// it is canonicalized to match the scanner's canonical paths.
+fn display_paths<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Vec<String> {
+    let root = std::env::current_dir().and_then(|dir| dir.canonicalize()).ok();
+    paths
+        .into_iter()
+        .map(|path| {
+            let path = path.to_string_lossy();
+            match &root {
+                Some(root) => crate::cache::project_relative(root, &path).into_owned(),
+                None => path.into_owned(),
+            }
+        })
+        .collect()
+}
+
 /// The effective Go toolchain and target, as `go env` reports them once the
 /// block's `GoEnv` overrides and the ambient environment apply. Run in
 /// `dir`, the go command honours the module's `toolchain` line, so a

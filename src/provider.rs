@@ -369,6 +369,15 @@ pub trait Resource {
     ) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
     fn destroy(&self, prior_state: &Self::State, writer: &BlockWriter) -> Result<(), BoxError>;
 
+    /// Whether `apply` prints its own start line through
+    /// [`BlockWriter::starting`] rather than the engine printing the plan
+    /// description. Return true when what `apply` runs depends on the
+    /// changes, which `plan` cannot see, so the line shows the command that
+    /// actually runs.
+    fn announces_start(&self) -> bool {
+        false
+    }
+
     /// Concurrency limit for a block's matrix slices when the block sets no
     /// `concurrency` field. Use it for tools that cannot run alongside
     /// another instance of themselves.
@@ -482,6 +491,9 @@ pub trait DynResource: Send + Sync {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError>;
+    fn announces_start(&self) -> bool {
+        false
+    }
     fn default_concurrency(&self) -> Option<usize> {
         None
     }
@@ -594,6 +606,10 @@ impl<R: Resource + Send + Sync> DynResource for R {
     fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError> {
         let state: R::State = serde_json::from_value(prior_state.clone())?;
         Resource::destroy(self, &state, writer)
+    }
+
+    fn announces_start(&self) -> bool {
+        Resource::announces_start(self)
     }
 
     fn default_concurrency(&self) -> Option<usize> {

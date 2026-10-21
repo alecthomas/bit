@@ -860,12 +860,7 @@ pub fn plan_selected(
 
         crate::debug!(writer, "planned action: {:?}", prepared.plan.action);
         let event = plan_action_to_event(&prepared.plan.action);
-        emit_event(
-            &writer,
-            event,
-            &prepared.plan.description,
-            prepared.plan.reason.as_deref(),
-        );
+        writer.event_with_reason(event, &prepared.plan.description, prepared.plan.reason.as_deref());
 
         let outputs = match prepared.hit {
             Some(hit) => hit.receipt.outputs,
@@ -1354,8 +1349,7 @@ fn execute_block(
     let mut bound: Option<ApplyResult<serde_json::Value, Map>> = None;
     if let Some(hit) = &prepared.hit {
         if hit.check == ReceiptCheck::Restore {
-            emit_event(
-                writer,
+            writer.event_with_reason(
                 Event::Restore,
                 &prepared.plan.description,
                 prepared.plan.reason.as_deref(),
@@ -1394,18 +1388,21 @@ fn execute_block(
     let apply_result = match bound {
         Some(result) => result,
         None => {
-            emit_event(
-                writer,
-                Event::Starting,
-                &prepared.plan.description,
-                prepared.plan.reason.as_deref(),
-            );
+            let reason = prepared.plan.reason.as_deref();
+            let announcing;
+            let apply_writer = if node.resource.announces_start() {
+                announcing = writer.with_start_reason(reason);
+                &announcing
+            } else {
+                writer.event_with_reason(Event::Starting, &prepared.plan.description, reason);
+                writer
+            };
             node.resource
                 .apply(
                     &prepared.inputs,
                     prepared.prior.provider_state.as_ref(),
                     &prepared.changes,
-                    writer,
+                    apply_writer,
                 )
                 .map_err(|e| {
                     writer.event(Event::Failed, &e.to_string());
@@ -1705,30 +1702,6 @@ fn print_value(key: &str, value: &Value, indent: usize) {
             }
         }
         _ => println!("{pad}{key}: {value}"),
-    }
-}
-
-/// Emit an event, appending a dimmed reason to the first line if present.
-fn emit_event(writer: &crate::output::BlockWriter, event: Event, description: &str, reason: Option<&str>) {
-    use yansi::Paint;
-    match reason {
-        Some(reason) => {
-            let mut lines = description.lines();
-            let first = lines.next().unwrap_or("");
-            let styled_first = format!("{} {}", first.paint(event.color()), format!("({reason})").dim());
-            let rest: Vec<_> = lines.map(|l| format!("{}", l.paint(event.color()))).collect();
-            if rest.is_empty() {
-                writer.event_raw(event, &styled_first);
-            } else {
-                let styled_rest: Vec<&str> = rest.iter().map(|s| s.as_str()).collect();
-                let full = std::iter::once(styled_first.as_str())
-                    .chain(styled_rest)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                writer.event_raw(event, &full);
-            }
-        }
-        None => writer.event(event, description),
     }
 }
 
