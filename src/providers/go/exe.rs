@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
@@ -17,14 +17,14 @@ use crate::provider::{
 use crate::sha256::SHA256;
 
 use super::GoEnv;
-use super::scanner::Tests;
+use super::scanner::{self, Tests};
 
 /// Build a Go binary
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoExeInputs {
     /// Go package to build (e.g. "./cmd/myapp")
     pub package: String,
-    /// Output binary path (defaults to package base name)
+    /// Output binary path (defaults to the name `go build` gives it: the last element of the package's import path)
     #[serde(default)]
     pub output: Option<String>,
     /// Extra flags passed to go build
@@ -68,10 +68,33 @@ impl GoExeResource {
         Self { tracker }
     }
 
+    /// `output`, or the name `go build` gives the binary: the last element
+    /// of the package's import path. A relative pattern such as `.` names a
+    /// directory, so taking its text instead would make the output the
+    /// directory itself.
     fn output_path(inputs: &GoExeInputs) -> String {
         inputs.output.clone().unwrap_or_else(|| {
-            let base = inputs.package.rsplit('/').next().unwrap_or(&inputs.package);
-            base.to_owned()
+            let package = &inputs.package;
+            let import_path = if package.starts_with('.') {
+                let dir = inputs.dir.as_deref().map(Path::new);
+                // Without a module `go build` fails, so only the output key
+                // matters, and it must not name a directory such as `.`.
+                scanner::package_import_path(dir, package).unwrap_or_else(|_| {
+                    let pkg_dir = Path::new(inputs.dir.as_deref().unwrap_or(".")).join(package);
+                    let pkg_dir = pkg_dir.canonicalize().unwrap_or(pkg_dir);
+                    pkg_dir
+                        .components()
+                        .rev()
+                        .find_map(|c| match c {
+                            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| "main".to_owned())
+                })
+            } else {
+                package.clone()
+            };
+            default_exec_name(&import_path).to_owned()
         })
     }
 
@@ -104,6 +127,22 @@ impl GoExeResource {
             dir: inputs.dir.clone(),
             env: inputs.env.clone(),
         }
+    }
+}
+
+/// The last element of `import_path`, skipping a major version suffix such
+/// as `/v2`, as `go build` names a binary.
+fn default_exec_name(import_path: &str) -> &str {
+    let import_path = import_path.trim_end_matches('/');
+    let (parent, elem) = import_path.rsplit_once('/').unwrap_or(("", import_path));
+    // `v0` and `v1` are never major version suffixes.
+    let is_version = elem
+        .strip_prefix('v')
+        .is_some_and(|n| n != "1" && !n.starts_with('0') && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    if is_version && !parent.is_empty() {
+        parent.rsplit('/').next().unwrap_or(parent)
+    } else {
+        elem
     }
 }
 
@@ -424,6 +463,36 @@ mod tests {
             env: GoEnv::default(),
         };
         assert_eq!(GoExeResource::output_path(&inputs), "foo");
+    }
+
+    #[test]
+    fn output_path_default_names_the_package_not_the_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/app/v2\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("cmd/tool")).unwrap();
+        let inputs = |package: &str| GoExeInputs {
+            package: package.into(),
+            output: None,
+            flags: vec![],
+            inputs: vec![],
+            dir: Some(dir.path().to_string_lossy().into_owned()),
+            env: GoEnv::default(),
+        };
+        assert_eq!(GoExeResource::output_path(&inputs(".")), "app");
+        assert_eq!(GoExeResource::output_path(&inputs("./")), "app");
+        assert_eq!(GoExeResource::output_path(&inputs("./cmd/tool/")), "tool");
+        assert_eq!(
+            GoExeResource::output_path(&inputs("example.com/app/v2/cmd/tool")),
+            "tool"
+        );
+    }
+
+    #[test]
+    fn default_exec_name_skips_major_versions() {
+        assert_eq!(default_exec_name("example.com/app/v2"), "app");
+        assert_eq!(default_exec_name("example.com/app/v1"), "v1");
+        assert_eq!(default_exec_name("example.com/app/v0"), "v0");
+        assert_eq!(default_exec_name("v2"), "v2");
     }
 
     #[test]

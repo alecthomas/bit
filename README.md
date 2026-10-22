@@ -819,7 +819,7 @@ block = exec.test {
 ```bit
 block = go.exe {
   package = string    # Go package to build (e.g. "./cmd/myapp")
-  output = string?    # Output binary path (defaults to package base name)
+  output = string?    # Output binary path (defaults to the name `go build` gives it: the last element of the package's import path)
   flags = [string]?   # Extra flags passed to go build
   inputs = [string]?  # Input file glob patterns (in addition to Go sources)
   dir = string?       # Working directory for the command

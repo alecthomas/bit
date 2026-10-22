@@ -274,6 +274,17 @@ pub fn module_path(base_dir: Option<&Path>) -> Result<String, BoxError> {
     Ok(base_module(base_dir)?.path.clone())
 }
 
+/// The import path of the package in `rel_dir`, a directory relative to
+/// `base_dir` (or bit's CWD), as the go command resolves a `./` pattern.
+pub fn package_import_path(base_dir: Option<&Path>, rel_dir: &str) -> Result<String, BoxError> {
+    let base = match base_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    let pkg_dir = base.join(rel_dir).canonicalize()?;
+    Ok(import_path(&*module(&pkg_dir)?, &pkg_dir))
+}
+
 /// The module's `go.mod` and `go.sum`, which every package depends on.
 fn module_files(module: &Module) -> HashSet<PathBuf> {
     ["go.mod", "go.sum"]
