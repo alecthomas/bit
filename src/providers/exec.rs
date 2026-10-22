@@ -28,7 +28,7 @@ pub struct ExecInputs {
     #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub outputs: Vec<String>,
-    /// Input file glob patterns
+    /// Input file glob patterns. A directory names every file beneath it
     #[serde(default)]
     pub inputs: Vec<String>,
     /// Working directory for the command
@@ -207,6 +207,27 @@ fn run_values(command: &str, dir: Option<&str>) -> Result<crate::value::Map, Box
     Ok(map)
 }
 
+/// Hash the files `patterns` name. A directory names every file beneath it;
+/// matched as a glob, it would name only itself, which is not a file, and
+/// the block would track none of what its command reads.
+///
+/// An invalid pattern is an error rather than an empty match. A valid one
+/// may match nothing, as an input a dependency has yet to generate does:
+/// files appearing there later change the hash all the same.
+fn hash_inputs(tracker: &FileTracker, patterns: &[String]) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let mut files = BTreeMap::new();
+    for pattern in patterns {
+        glob::Pattern::new(pattern).map_err(|e| format!("invalid input pattern `{pattern}`: {e}"))?;
+        if Path::new(pattern).is_dir() {
+            let dir = glob::Pattern::escape(pattern.trim_end_matches('/'));
+            files.extend(tracker.hash_glob(&format!("{dir}/**/*"))?);
+        } else {
+            files.extend(tracker.hash_glob(pattern)?);
+        }
+    }
+    Ok(files)
+}
+
 /// Provider for running arbitrary shell commands.
 pub struct ExecProvider {
     tracker: Arc<FileTracker>,
@@ -268,12 +289,7 @@ impl Resource for ExecResource {
     }
 
     fn resolve(&self, inputs: &ExecInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        let mut files = BTreeMap::new();
-        for pattern in &inputs.inputs {
-            files.extend(tracker.hash_glob(pattern)?);
-        }
-        Ok(files)
+        hash_inputs(&self.tracker, &inputs.inputs)
     }
 
     fn plan(&self, inputs: &ExecInputs, prior_state: Option<&ExecState>) -> Result<PlanResult, BoxError> {
@@ -416,7 +432,7 @@ impl Resource for ExecResource {
 pub struct ExecTestInputs {
     /// Shell command to execute
     pub command: String,
-    /// Input file glob patterns
+    /// Input file glob patterns. A directory names every file beneath it
     #[serde(default)]
     pub inputs: Vec<String>,
     /// Output files to track
@@ -546,12 +562,7 @@ impl Resource for ExecTestResource {
     }
 
     fn resolve(&self, inputs: &ExecTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        let mut files = BTreeMap::new();
-        for pattern in &inputs.inputs {
-            files.extend(tracker.hash_glob(pattern)?);
-        }
-        Ok(files)
+        hash_inputs(&self.tracker, &inputs.inputs)
     }
 
     fn plan(&self, inputs: &ExecTestInputs, prior_state: Option<&ExecTestState>) -> Result<PlanResult, BoxError> {
@@ -1042,6 +1053,44 @@ mod tests {
         let inputs = exec_inputs(vec!["dist/".into(), "bin/app".into()]);
 
         assert_eq!(Resource::output_keys(&resource, &inputs), ["dist", "bin/app"]);
+    }
+
+    #[test]
+    fn resolve_expands_directories_and_rejects_invalid_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("nested")).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        fs::write(src.join("nested/.b"), "b").unwrap();
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
+        let resolve = |patterns: &[String]| {
+            let mut inputs = exec_inputs(vec![]);
+            inputs.inputs = patterns.to_vec();
+            Resource::resolve(&resource, &inputs)
+        };
+
+        let mut names: Vec<_> = resolve(&[format!("{}/", src.display())])
+            .unwrap()
+            .into_keys()
+            .map(|path| {
+                Path::new(&path)
+                    .strip_prefix(&src)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a.txt", "nested/.b"]);
+
+        // A dependency may not have generated an input yet.
+        let missing = dir.path().join("missing/*.txt");
+        assert!(resolve(&[missing.to_string_lossy().into_owned()]).unwrap().is_empty());
+
+        let err = resolve(&["src/[".into()]).unwrap_err().to_string();
+        assert!(err.contains("invalid input pattern `src/[`"), "{err}");
     }
 
     #[test]

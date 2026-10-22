@@ -779,7 +779,7 @@ block = docker.network_attach {
 block = exec {
   command = string                # Shell command to execute
   outputs = (string | [string])?  # Output file or list of output files
-  inputs = [string]?              # Input file glob patterns
+  inputs = [string]?              # Input file glob patterns. A directory names every file beneath it
   dir = string?                   # Working directory for the command
   clean = string?                 # Shell command to run on `bit --clean` (replaces the default removal of outputs)
   resolve = string?               # Shell command whose stdout is captured as state. Used to detect whether the resource exists and whether it has drifted.
@@ -799,7 +799,7 @@ block = exec {
 ```bit
 block = exec.test {
   command = string                      # Shell command to execute
-  inputs = [string]?                    # Input file glob patterns
+  inputs = [string]?                    # Input file glob patterns. A directory names every file beneath it
   outputs = [string]?                   # Output files to track
   dir = string?                         # Working directory for the command
   clean = string?                       # Shell command to run on `bit --clean`
