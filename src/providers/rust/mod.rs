@@ -413,7 +413,6 @@ fn discover_paths(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
         .ok_or("`cargo metadata` output has no workspace_root")?;
     let mut config = vec![workspace_root.join("Cargo.toml"), workspace_root.join("Cargo.lock")];
     config.extend(cargo_config_files(&cwd));
-    config.push(PathBuf::from(crate::provider::in_dir(dir, "rustfmt.toml")));
 
     Ok(DiscoveredPaths {
         workspace,

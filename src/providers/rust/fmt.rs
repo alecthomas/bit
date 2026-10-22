@@ -72,12 +72,30 @@ fn fmt_check_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
 }
 
 fn resolve(inputs: &Block<RustFmtInputs>, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let mut files = super::resolve_rust_inputs(inputs.dir.as_deref(), inputs.package.as_deref(), tracker)?;
-    let name = inputs.path(".rustfmt.toml");
-    let path = std::path::Path::new(&name);
-    if path.is_file() {
-        files.insert(name.clone(), tracker.hash_file(path)?);
-    }
+    let dir = inputs.dir.as_deref();
+    let mut files = super::resolve_rust_inputs(dir, inputs.package.as_deref(), tracker)?;
+    files.extend(super::hash_existing(
+        &rustfmt_config(dir, inputs.package.as_deref())?,
+        tracker,
+    )?);
+    Ok(files)
+}
+
+/// The config files rustfmt may load: `.rustfmt.toml` or `rustfmt.toml` in
+/// the directory of a file it formats or any parent, then in the home
+/// directory and the user's `rustfmt` config directory, as rustfmt
+/// searches. Files inside a package are already its inputs, so the search
+/// starts at each package's directory.
+fn rustfmt_config(dir: Option<&str>, package: Option<&str>) -> Result<Vec<std::path::PathBuf>, BoxError> {
+    const NAMES: [&str; 2] = [".rustfmt.toml", "rustfmt.toml"];
+    let mut files = super::config_in_ancestors(&super::package_roots(dir, package)?, &NAMES);
+    let user_dirs = [dirs::home_dir(), dirs::config_dir().map(|dir| dir.join("rustfmt"))];
+    files.extend(
+        user_dirs
+            .into_iter()
+            .flatten()
+            .flat_map(|dir| NAMES.map(|name| dir.join(name))),
+    );
     Ok(files)
 }
 
@@ -221,6 +239,20 @@ impl Resource for RustFmtCheckResource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rustfmt_config_is_searched_above_packages_and_in_user_dirs() {
+        // bit's own workspace, which the tests run in.
+        let files = rustfmt_config(None, Some("bit")).unwrap();
+        let root = std::env::current_dir().unwrap();
+        for file in [
+            root.parent().unwrap().join("rustfmt.toml"),
+            dirs::home_dir().unwrap().join(".rustfmt.toml"),
+            dirs::config_dir().unwrap().join("rustfmt/rustfmt.toml"),
+        ] {
+            assert!(files.contains(&file), "missing {}: {files:?}", file.display());
+        }
+    }
 
     fn make_fmt_resource() -> RustFmtResource {
         RustFmtResource {

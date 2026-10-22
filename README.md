@@ -1129,11 +1129,14 @@ include path dependencies and `[patch]` paths outside the workspace. Without
 in its directory that Git does not ignore, apart from the target directory and
 nested packages, because builds also read `include_str!` data, files a build
 script reads, and test fixtures. All Rust resources also track the workspace
-root's `Cargo.toml` and `Cargo.lock`, `rustfmt.toml` where cargo runs, and
-every Cargo config file cargo merges: `.cargo/config.toml` or `.cargo/config`
-where cargo runs, in each parent directory, and in `CARGO_HOME`. `rust.clippy`
-also tracks `.clippy.toml` and `clippy.toml` in each linted package's directory
-and its parents, or from `CLIPPY_CONF_DIR` when that is set.
+root's `Cargo.toml` and `Cargo.lock`, and every Cargo config file cargo
+merges: `.cargo/config.toml` or `.cargo/config` where cargo runs, in each
+parent directory, and in `CARGO_HOME`. `rust.clippy` also tracks
+`.clippy.toml` and `clippy.toml` in each linted package's directory and its
+parents, or from `CLIPPY_CONF_DIR` when that is set. `rust.fmt` and
+`rust.fmt-check` track `.rustfmt.toml` and `rustfmt.toml` in each package's
+directory and its parents, in the home directory, and in the user's `rustfmt`
+config directory.
 
 Each resource also fingerprints the ambient state its result depends on:
 the tools it runs and the environment variables it reads. bit records it
