@@ -942,8 +942,8 @@ block = pnpm.run {
   script = string                 # Script name from `package.json` (e.g. "build")
   package = string?               # Package name from its `package.json`. Omit to run at the workspace root.
   args = [string]?                # Additional arguments passed to the script after `--`
-  outputs = (string | [string])?  # Output file or list of output files/directories produced by the script
-  inputs = [string]?              # Extra input file globs (added to auto-detected sources)
+  outputs = (string | [string])?  # Output file or list of output files/directories produced by the script, relative to `dir`
+  inputs = [string]?              # Extra input file globs, relative to `dir` (added to auto-detected sources)
 }
 ```
 
@@ -961,7 +961,7 @@ block = pnpm.test {
   script = string?    # Script name from `package.json` (defaults to "test")
   package = string?   # Package name from its `package.json`. Omit to run at the workspace root.
   args = [string]?    # Additional arguments passed to the script after `--`
-  inputs = [string]?  # Extra input file globs (added to auto-detected sources)
+  inputs = [string]?  # Extra input file globs, relative to `dir` (added to auto-detected sources)
 }
 ```
 

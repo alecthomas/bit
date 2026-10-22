@@ -29,7 +29,7 @@ pub struct PnpmTestInputs {
     /// Additional arguments passed to the script after `--`
     #[serde(default)]
     pub args: Vec<String>,
-    /// Extra input file globs (added to auto-detected sources)
+    /// Extra input file globs, relative to `dir` (added to auto-detected sources)
     #[serde(default)]
     pub inputs: Vec<String>,
 }
@@ -72,13 +72,7 @@ impl Resource for PnpmTestResource {
 
     fn resolve(&self, inputs: &Block<PnpmTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        resolve_inputs(
-            workspace_dir(inputs),
-            inputs.package.as_deref(),
-            &[],
-            &inputs.inputs,
-            tracker,
-        )
+        resolve_inputs(inputs, inputs.package.as_deref(), &[], &inputs.inputs, tracker)
     }
 
     fn plan(

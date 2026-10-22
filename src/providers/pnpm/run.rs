@@ -40,14 +40,16 @@ pub(super) fn describe(script: &str, package: Option<&str>, script_args: &[Strin
 /// directories and declared outputs) plus the workspace lockfile. When no
 /// `package` is given, only the root `package.json` and lockfile are
 /// included — root-level scripts rarely need the whole tree hashed.
-pub(super) fn resolve_inputs(
-    dir: &str,
+///
+/// `outputs` and `extra_globs` are relative to the block's `dir`.
+pub(super) fn resolve_inputs<T>(
+    block: &Block<T>,
     package: Option<&str>,
     outputs: &[String],
     extra_globs: &[String],
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    workspace::with_workspace(Path::new(dir), |ws| {
+    workspace::with_workspace(Path::new(workspace_dir(block)), |ws| {
         let mut files = BTreeMap::new();
 
         if let Some(lf) = &ws.lockfile {
@@ -60,7 +62,7 @@ pub(super) fn resolve_inputs(
                     .package_dir(pkg)
                     .ok_or_else(|| format!("pnpm: package '{pkg}' not found in workspace"))?
                     .to_path_buf();
-                let exclude_outputs: Vec<PathBuf> = outputs.iter().map(PathBuf::from).collect();
+                let exclude_outputs: Vec<PathBuf> = outputs.iter().map(|output| block.path(output).into()).collect();
                 let sources = workspace::scan_sources(&pkg_dir, &exclude_outputs);
                 files.extend(tracker.hash_files(&sources)?);
             }
@@ -73,7 +75,7 @@ pub(super) fn resolve_inputs(
         }
 
         for glob in extra_globs {
-            files.extend(tracker.hash_glob(glob)?);
+            files.extend(tracker.hash_glob(&block.glob(glob))?);
         }
         Ok(files)
     })
@@ -90,11 +92,11 @@ pub struct PnpmRunInputs {
     /// Additional arguments passed to the script after `--`
     #[serde(default)]
     pub args: Vec<String>,
-    /// Output file or list of output files/directories produced by the script
+    /// Output file or list of output files/directories produced by the script, relative to `dir`
     #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub outputs: Vec<String>,
-    /// Extra input file globs (added to auto-detected sources)
+    /// Extra input file globs, relative to `dir` (added to auto-detected sources)
     #[serde(default)]
     pub inputs: Vec<String>,
 }
@@ -165,7 +167,7 @@ impl Resource for PnpmRunResource {
     fn resolve(&self, inputs: &Block<PnpmRunInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         resolve_inputs(
-            workspace_dir(inputs),
+            inputs,
             inputs.package.as_deref(),
             &inputs.outputs,
             &inputs.inputs,
@@ -205,7 +207,8 @@ impl Resource for PnpmRunResource {
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<PnpmRunState, PnpmRunOutputs>, BoxError> {
-        for output in &inputs.outputs {
+        let outputs: Vec<String> = inputs.outputs.iter().map(|output| inputs.path(output)).collect();
+        for output in &outputs {
             let p = Path::new(output);
             if output.ends_with('/') {
                 fs::create_dir_all(p)?;
@@ -220,7 +223,7 @@ impl Resource for PnpmRunResource {
         run_pnpm(&args, Some(workspace_dir(inputs)), writer)?;
 
         Ok(ApplyResult {
-            outputs: PnpmRunOutputs::from_paths(&inputs.outputs),
+            outputs: PnpmRunOutputs::from_paths(&outputs),
             state: Some(PnpmRunState {
                 script: inputs.script.clone(),
                 package: inputs.package.clone(),
@@ -232,7 +235,7 @@ impl Resource for PnpmRunResource {
 
     fn destroy(&self, prior_state: &Block<PnpmRunState>, writer: &BlockWriter) -> Result<(), BoxError> {
         for output in &prior_state.outputs {
-            crate::providers::remove_path(Path::new(output), writer)?;
+            crate::providers::remove_path(Path::new(&prior_state.path(output)), writer)?;
         }
         Ok(())
     }
@@ -248,7 +251,7 @@ impl Resource for PnpmRunResource {
         inputs
             .outputs
             .iter()
-            .map(|path| path.trim_end_matches('/').to_owned())
+            .map(|path| inputs.path(path).trim_end_matches('/').to_owned())
             .collect()
     }
 }
@@ -325,6 +328,24 @@ mod tests {
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn outputs_are_relative_to_dir() {
+        let inputs = Block::new(
+            Some("web".into()),
+            PnpmRunInputs {
+                script: "build".into(),
+                package: None,
+                args: vec![],
+                outputs: vec!["dist/".into(), "/abs/out".into()],
+                inputs: vec![],
+            },
+        );
+        assert_eq!(
+            Resource::output_keys(&test_resource(), &inputs),
+            ["web/dist", "/abs/out"]
+        );
     }
 
     #[test]
