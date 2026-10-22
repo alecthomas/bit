@@ -53,6 +53,11 @@ pub struct RustExeState {
     /// portable identity shared through the cache; `path` is not.
     #[serde(default)]
     pub target_rel: String,
+    /// Hash of the binary as built or restored. Cargo reports the binary's
+    /// path only while it builds, so the plan checks the file there against
+    /// this rather than the engine tracking a declared output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<SHA256>,
     pub flags: Vec<String>,
     #[serde(flatten)]
     pub features: RustFeatures,
@@ -75,10 +80,11 @@ fn exe_destination(target_dir: &Path, target_rel: &str) -> Result<PathBuf, BoxEr
     Ok(target_dir.join(target_rel))
 }
 
-fn state_for(inputs: &Block<RustExeInputs>, path: String, target_rel: String) -> RustExeState {
+fn state_for(inputs: &Block<RustExeInputs>, path: String, target_rel: String, tracker: &FileTracker) -> RustExeState {
     RustExeState {
         bin: inputs.bin.clone(),
         package: inputs.package.clone(),
+        binary: tracker.hash_executable(Path::new(&path)).ok(),
         path,
         target_rel,
         flags: inputs.flags.clone(),
@@ -176,6 +182,18 @@ impl Resource for RustExeResource {
         } else {
             PlanAction::None
         };
+        // `cargo clean`, or a manual build with other features, replaces the
+        // binary without changing any input.
+        let binary_changed = prior
+            .binary
+            .is_some_and(|hash| self.tracker.hash_executable(Path::new(&prior.path)).ok() != Some(hash));
+        if action == PlanAction::None && binary_changed {
+            return Ok(PlanResult {
+                action: PlanAction::Update,
+                description,
+                reason: Some("binary changed".to_owned()),
+            });
+        }
 
         Ok(PlanResult {
             action,
@@ -228,7 +246,7 @@ impl Resource for RustExeResource {
 
         Ok(ApplyResult {
             outputs: RustExeOutputs { path: path.clone() },
-            state: Some(state_for(inputs, path, target_rel)),
+            state: Some(state_for(inputs, path, target_rel, &self.tracker)),
         })
     }
 
@@ -297,7 +315,7 @@ impl Resource for RustExeResource {
         let path = dest.to_string_lossy().into_owned();
         Ok(Some(ApplyResult {
             outputs: RustExeOutputs { path: path.clone() },
-            state: Some(state_for(inputs, path, state.target_rel.clone())),
+            state: Some(state_for(inputs, path, state.target_rel.clone(), &self.tracker)),
         }))
     }
 }
@@ -396,12 +414,52 @@ mod tests {
             package: None,
             path: "target/debug/myapp".into(),
             target_rel: "debug/myapp".into(),
+            binary: None,
             flags: vec![],
             features: RustFeatures::default(),
             env: RustEnv::default(),
         };
         let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
+    }
+
+    #[test]
+    fn plan_update_when_the_binary_was_replaced_or_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("myapp");
+        std::fs::write(&path, "built").unwrap();
+        let resource = make_resource();
+        let inputs = Block::new(
+            None,
+            RustExeInputs {
+                bin: Some("myapp".into()),
+                package: None,
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
+        let prior = state_for(
+            &inputs,
+            path.to_string_lossy().into_owned(),
+            "debug/myapp".into(),
+            &resource.tracker,
+        );
+        assert_eq!(
+            Resource::plan(&resource, &inputs, Some(&prior)).unwrap().action,
+            PlanAction::None
+        );
+
+        std::fs::write(&path, "rebuilt with other features").unwrap();
+        let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
+        assert_eq!(result.action, PlanAction::Update);
+        assert_eq!(result.reason.as_deref(), Some("binary changed"));
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            Resource::plan(&resource, &inputs, Some(&prior)).unwrap().action,
+            PlanAction::Update
+        );
     }
 
     #[test]
@@ -421,6 +479,7 @@ mod tests {
             package: None,
             path: "target/debug/myapp".into(),
             target_rel: "debug/myapp".into(),
+            binary: None,
             flags: vec![],
             features: RustFeatures::default(),
             env: RustEnv::default(),
@@ -439,6 +498,7 @@ mod tests {
             package: None,
             path: path.to_string_lossy().into_owned(),
             target_rel: "debug/myapp".into(),
+            binary: None,
             flags: vec![],
             features: RustFeatures::default(),
             env: RustEnv::default(),
