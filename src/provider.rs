@@ -355,12 +355,7 @@ impl<T> Block<T> {
     /// is joined onto `dir`. `dir` is literal text, so its glob
     /// metacharacters are escaped.
     pub fn glob(&self, pattern: &str) -> String {
-        match &self.dir {
-            Some(dir) if Path::new(pattern).is_relative() => {
-                format!("{}/{pattern}", glob::Pattern::escape(dir.trim_end_matches('/')))
-            }
-            _ => pattern.to_owned(),
-        }
+        glob_in_dir(self.dir.as_deref(), pattern)
     }
 }
 
@@ -375,6 +370,17 @@ impl<T> std::ops::Deref for Block<T> {
 impl<T> std::ops::DerefMut for Block<T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.value
+    }
+}
+
+/// The glob `pattern` joined onto `dir` when it is relative. See
+/// [`Block::glob`].
+pub fn glob_in_dir(dir: Option<&str>, pattern: &str) -> String {
+    match dir {
+        Some(dir) if Path::new(pattern).is_relative() => {
+            format!("{}/{pattern}", glob::Pattern::escape(dir.trim_end_matches('/')))
+        }
+        _ => pattern.to_owned(),
     }
 }
 

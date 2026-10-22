@@ -24,13 +24,13 @@ use super::scanner::{self, Tests};
 pub struct GoExeInputs {
     /// Go package to build (e.g. "./cmd/myapp")
     pub package: String,
-    /// Output binary path (defaults to the name `go build` gives it: the last element of the package's import path)
+    /// Output binary path, relative to `dir` (defaults to the name `go build` gives it: the last element of the package's import path)
     #[serde(default)]
     pub output: Option<String>,
     /// Extra flags passed to go build
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Input file glob patterns (in addition to Go sources)
+    /// Input file glob patterns, relative to `dir` (in addition to Go sources)
     #[serde(default)]
     pub inputs: Vec<String>,
     #[serde(flatten)]
@@ -63,11 +63,16 @@ impl GoExeResource {
         Self { tracker }
     }
 
-    /// `output`, or the name `go build` gives the binary: the last element
-    /// of the package's import path. A relative pattern such as `.` names a
+    /// The binary as bit's process sees it: `output`, relative to `dir`, or
+    /// the name `go build` gives it there, the last element of the
+    /// package's import path. A relative pattern such as `.` names a
     /// directory, so taking its text instead would make the output the
     /// directory itself.
     fn output_path(inputs: &Block<GoExeInputs>) -> String {
+        inputs.path(&Self::output_name(inputs))
+    }
+
+    fn output_name(inputs: &Block<GoExeInputs>) -> String {
         inputs.output.clone().unwrap_or_else(|| {
             let package = &inputs.package;
             let import_path = if package.starts_with('.') {
@@ -91,19 +96,6 @@ impl GoExeResource {
             };
             default_exec_name(&import_path).to_owned()
         })
-    }
-
-    /// Build the `-o` argument for `go build`. When `dir` is set the child
-    /// process runs in that subdirectory, so a relative `output` would land
-    /// the artifact in the wrong place; this absolutises against `cwd` so it
-    /// matches the bit-CWD-relative path that `resolve()` and
-    /// `create_dir_all` use.
-    fn output_arg(output: &str, dir_set: bool, cwd: &Path) -> String {
-        if dir_set {
-            cwd.join(output).to_string_lossy().into_owned()
-        } else {
-            output.to_owned()
-        }
     }
 
     /// The arguments to `go` that build the binary to `output`.
@@ -214,9 +206,9 @@ impl Resource for GoExeResource {
             fs::create_dir_all(parent)?;
         }
 
-        let cwd = std::env::current_dir()?;
-        let output_arg = GoExeResource::output_arg(&output, inputs.dir.is_some(), &cwd);
-        let args = GoExeResource::build_args(inputs, &output_arg);
+        // go runs in `dir`, and `output` is as bit's process sees it.
+        let output_arg = std::env::current_dir()?.join(&output);
+        let args = GoExeResource::build_args(inputs, &output_arg.to_string_lossy());
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -488,12 +480,17 @@ mod tests {
                 },
             )
         };
-        assert_eq!(GoExeResource::output_path(&inputs(".")), "app");
-        assert_eq!(GoExeResource::output_path(&inputs("./")), "app");
-        assert_eq!(GoExeResource::output_path(&inputs("./cmd/tool/")), "tool");
+        assert_eq!(GoExeResource::output_name(&inputs(".")), "app");
+        assert_eq!(GoExeResource::output_name(&inputs("./")), "app");
+        assert_eq!(GoExeResource::output_name(&inputs("./cmd/tool/")), "tool");
         assert_eq!(
-            GoExeResource::output_path(&inputs("example.com/app/v2/cmd/tool")),
+            GoExeResource::output_name(&inputs("example.com/app/v2/cmd/tool")),
             "tool"
+        );
+        // `go build` writes the binary in the directory it runs in.
+        assert_eq!(
+            GoExeResource::output_path(&inputs(".")),
+            dir.path().join("app").to_string_lossy()
         );
     }
 
@@ -521,26 +518,21 @@ mod tests {
     }
 
     #[test]
-    fn output_arg_relative_when_no_dir() {
-        // Without `dir`, go runs in bit's CWD, so a relative path resolves
-        // correctly. We pass it through unchanged.
-        let arg = GoExeResource::output_arg("build/chromad", false, Path::new("/project"));
-        assert_eq!(arg, "build/chromad");
-    }
-
-    #[test]
-    fn output_arg_absolute_when_dir_set() {
-        // With `dir`, go runs in the subdirectory, so we must absolutise the
-        // output against bit's CWD or the binary lands in the wrong place.
-        let arg = GoExeResource::output_arg("build/chromad", true, Path::new("/project"));
-        assert_eq!(arg, "/project/build/chromad");
-    }
-
-    #[test]
-    fn output_arg_preserves_absolute_path() {
-        // An already-absolute output path is preserved as-is.
-        let arg = GoExeResource::output_arg("/tmp/out/bin", true, Path::new("/project"));
-        assert_eq!(arg, "/tmp/out/bin");
+    fn output_path_is_relative_to_dir() {
+        let inputs = |output: &str| {
+            Block::new(
+                Some("svc".into()),
+                GoExeInputs {
+                    package: "./cmd/foo".into(),
+                    output: Some(output.into()),
+                    flags: vec![],
+                    inputs: vec![],
+                    env: GoEnv::default(),
+                },
+            )
+        };
+        assert_eq!(GoExeResource::output_path(&inputs("bin/foo")), "svc/bin/foo");
+        assert_eq!(GoExeResource::output_path(&inputs("/tmp/out/bin")), "/tmp/out/bin");
     }
 
     #[test]

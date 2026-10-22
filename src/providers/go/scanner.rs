@@ -249,10 +249,16 @@ pub fn tested_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<V
 /// directories `patterns` name in it, each once.
 fn pattern_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<(Arc<Module>, Vec<PathBuf>), BoxError> {
     let module = base_module(base_dir)?;
+    let cwd = match base_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    // Canonical, like the module root, so package directories compare equal.
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
     let mut seen = HashSet::new();
     let mut pkg_dirs = Vec::new();
     for pattern in patterns {
-        for dir in resolve_package_dirs(&module.root, &module.path, pattern)? {
+        for dir in resolve_package_dirs(&module.root, &module.path, &cwd, pattern)? {
             if seen.insert(dir.clone()) {
                 pkg_dirs.push(dir);
             }
@@ -430,13 +436,24 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
     entries.flatten().filter(|entry| entry.is_file()).collect()
 }
 
-/// Resolve a package pattern to a list of package directories.
-fn resolve_package_dirs(module_root: &Path, module_path: &str, pattern: &str) -> Result<Vec<PathBuf>, BoxError> {
+/// Resolve a package pattern to a list of package directories. A relative
+/// pattern is relative to `cwd`, where the go command runs, as the go
+/// command resolves it.
+fn resolve_package_dirs(
+    module_root: &Path,
+    module_path: &str,
+    cwd: &Path,
+    pattern: &str,
+) -> Result<Vec<PathBuf>, BoxError> {
     if let Some(base) = pattern.strip_suffix("/...") {
         let base_dir = if base == "." {
-            module_root.to_path_buf()
+            cwd.to_path_buf()
+        } else if let Some(rel) = base.strip_prefix("./") {
+            cwd.join(rel)
+        } else if let Some(rel) = base.strip_prefix(module_path) {
+            module_root.join(rel.trim_start_matches('/'))
         } else {
-            module_root.join(base.strip_prefix("./").unwrap_or(base))
+            module_root.join(base)
         };
         return find_go_package_dirs(&base_dir);
     }
@@ -444,9 +461,9 @@ fn resolve_package_dirs(module_root: &Path, module_path: &str, pattern: &str) ->
     if pattern.starts_with("./") || pattern == "." {
         let rel = pattern.strip_prefix("./").unwrap_or("");
         let dir = if rel.is_empty() {
-            module_root.to_path_buf()
+            cwd.to_path_buf()
         } else {
-            module_root.join(rel)
+            cwd.join(rel)
         };
         if dir.is_dir() {
             return Ok(vec![dir]);
@@ -666,8 +683,26 @@ var content embed.FS
         fs::write(cmd_dir.join("main.go"), "package main").unwrap();
         fs::write(dir.path().join("go.mod"), "module example.com/test\n").unwrap();
 
-        let dirs = resolve_package_dirs(dir.path(), "example.com/test", "./cmd/app").unwrap();
+        let dirs = resolve_package_dirs(dir.path(), "example.com/test", dir.path(), "./cmd/app").unwrap();
         assert_eq!(dirs, vec![cmd_dir]);
+    }
+
+    #[test]
+    fn relative_patterns_resolve_against_the_directory_go_runs_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        fs::create_dir_all(root.join("svc/cmd")).unwrap();
+        fs::write(root.join("svc/main.go"), "package main").unwrap();
+        fs::write(root.join("svc/cmd/cmd.go"), "package cmd").unwrap();
+        fs::write(root.join("root.go"), "package root").unwrap();
+
+        let files = scan(&[".".into()], Tests::Excluded, Some(&root.join("svc"))).unwrap();
+        assert!(files.contains(&root.join("svc/main.go")), "{files:?}");
+        assert!(!files.contains(&root.join("root.go")), "{files:?}");
+        let mut dirs = resolve_package_dirs(&root, "example.com/test", &root.join("svc"), "./...").unwrap();
+        dirs.sort();
+        assert_eq!(dirs, [root.join("svc"), root.join("svc/cmd")]);
     }
 
     #[test]
@@ -678,7 +713,13 @@ var content embed.FS
         fs::write(pkg_dir.join("cache.go"), "package cache").unwrap();
         fs::write(dir.path().join("go.mod"), "module example.com/test\n").unwrap();
 
-        let dirs = resolve_package_dirs(dir.path(), "example.com/test", "example.com/test/internal/cache").unwrap();
+        let dirs = resolve_package_dirs(
+            dir.path(),
+            "example.com/test",
+            dir.path(),
+            "example.com/test/internal/cache",
+        )
+        .unwrap();
         assert_eq!(dirs, vec![pkg_dir]);
     }
 
@@ -694,7 +735,7 @@ var content embed.FS
         fs::write(root.join("internal/lib/lib.go"), "package lib").unwrap();
         fs::create_dir_all(root.join("docs")).unwrap();
 
-        let mut dirs = resolve_package_dirs(root, "example.com/test", "./...").unwrap();
+        let mut dirs = resolve_package_dirs(root, "example.com/test", root, "./...").unwrap();
         dirs.sort();
         assert_eq!(dirs.len(), 2);
         assert!(dirs.contains(&root.join("cmd/app")));
@@ -899,7 +940,7 @@ func Hello() { fmt.Println("hello") }
         fs::create_dir_all(root.join("testdata")).unwrap();
         fs::write(root.join("testdata/fixture.go"), "package testdata\n").unwrap();
 
-        let dirs = resolve_package_dirs(root, "example.com/test", "./...").unwrap();
+        let dirs = resolve_package_dirs(root, "example.com/test", root, "./...").unwrap();
         let dir_strs: Vec<_> = dirs.iter().map(|d| d.to_string_lossy().to_string()).collect();
 
         assert_eq!(dirs, [root.to_path_buf()], "{dir_strs:?}");

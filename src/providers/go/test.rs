@@ -27,7 +27,7 @@ pub struct GoTestInputs {
     /// Extra flags passed to go test
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Input file glob patterns (in addition to Go sources and `testdata/`)
+    /// Input file glob patterns, relative to `dir` (in addition to Go sources and `testdata/`)
     #[serde(default)]
     pub inputs: Vec<String>,
     /// What to show: a line per package (`suites`), a line per test

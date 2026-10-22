@@ -25,7 +25,7 @@ pub struct GoBuildInputs {
     /// Extra flags passed to go build
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Input file glob patterns (in addition to Go sources)
+    /// Input file glob patterns, relative to `dir` (in addition to Go sources)
     #[serde(default)]
     pub inputs: Vec<String>,
     #[serde(flatten)]

@@ -76,7 +76,7 @@ where
 /// `dir`, when set, is the working directory where `go` would be invoked — the
 /// scanner walks up from there to locate `go.mod`. Required for blocks that
 /// build a separate Go module via the `dir` field; `None` starts from bit's CWD.
-/// The `inputs` globs are relative to bit's CWD, as in every other block.
+/// The `inputs` globs are relative to `dir`, as in every other block.
 pub fn resolve_go_inputs(
     patterns: &[String],
     dir: Option<&Path>,
@@ -86,8 +86,9 @@ pub fn resolve_go_inputs(
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let files: Vec<_> = scanner::scan(patterns, tests, dir)?.into_iter().collect();
     let mut hashes = tracker.hash_files(&files)?;
+    let dir = dir.map(|dir| dir.to_string_lossy());
     for pattern in inputs {
-        hashes.extend(tracker.hash_glob(pattern)?);
+        hashes.extend(tracker.hash_glob(&crate::provider::glob_in_dir(dir.as_deref(), pattern))?);
     }
     Ok(hashes)
 }

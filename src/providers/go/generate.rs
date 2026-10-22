@@ -26,10 +26,10 @@ pub struct GoGenerateInputs {
     /// Extra flags passed to go generate
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Input file glob patterns (in addition to Go sources)
+    /// Input file glob patterns, relative to `dir` (in addition to Go sources)
     #[serde(default)]
     pub inputs: Vec<String>,
-    /// Output file paths produced by generate commands
+    /// Output file paths produced by generate commands, relative to `dir`
     #[serde(default)]
     pub outputs: Vec<String>,
     #[serde(flatten)]
@@ -175,7 +175,7 @@ impl Resource for GoGenerateResource {
 
     fn destroy(&self, prior_state: &Block<GoGenerateState>, writer: &BlockWriter) -> Result<(), BoxError> {
         for output in &prior_state.outputs {
-            crate::providers::remove_path(Path::new(output), writer)?;
+            crate::providers::remove_path(Path::new(&prior_state.path(output)), writer)?;
         }
         Ok(())
     }
@@ -189,7 +189,7 @@ impl Resource for GoGenerateResource {
     }
 
     fn output_keys(&self, inputs: &Block<GoGenerateInputs>) -> Vec<String> {
-        inputs.outputs.clone()
+        inputs.outputs.iter().map(|output| inputs.path(output)).collect()
     }
 }
 
