@@ -52,9 +52,11 @@ let tree_sitter_rev = exec("git log -1 --format=%H -- integrations/tree-sitter")
 
 # Sync the Zed extension's grammar rev to the latest commit touching
 # integrations/tree-sitter. The SHA is baked into the command, so bit's
-# content hash re-runs this only when a new commit lands.
+# content hash re-runs this only when a new commit lands. The edited file is
+# an input too, so a manual edit to it changes the cache key instead of
+# being reverted by restoring an earlier result.
 protected sync-zed-rev = exec {
-  inputs = ["integrations/tree-sitter/**/*"]
+  inputs = ["integrations/tree-sitter/**/*", "integrations/zed/extension.toml"]
   command = <<-EOF
     sed -i.bak 's|^rev = ".*"|rev = "#{tree_sitter_rev}"|' integrations/zed/extension.toml
     rm integrations/zed/extension.toml.bak
