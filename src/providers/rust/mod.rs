@@ -272,6 +272,9 @@ struct InputPaths {
 struct DiscoveredPaths {
     workspace: InputPaths,
     packages: HashMap<String, InputPaths>,
+    /// Configuration every package of the workspace is built with, hashed
+    /// when it exists.
+    config: Vec<PathBuf>,
     target_dir: PathBuf,
 }
 
@@ -330,7 +333,7 @@ pub fn resolve_rust_inputs(
     for root in &paths.roots {
         result.extend(tracker.hash_files(&package_files(root, &paths.excluded))?);
     }
-    for path in &paths.files {
+    for path in paths.files.iter().chain(&discovered.config) {
         if path.is_file() {
             let key = path.display().to_string();
             result.insert(key, tracker.hash_file(path)?);
@@ -363,9 +366,22 @@ fn discover_paths(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
         packages.insert(name, discover_input_paths(&values, &cwd, dir, &excluded));
     }
 
+    // The workspace root holds the lockfile and the `[patch]`, `[profile]`
+    // and `[workspace]` tables every member is built with, even when cargo
+    // runs in a member's directory.
+    let workspace_root = meta
+        .get("workspace_root")
+        .and_then(|root| root.as_str())
+        .map(PathBuf::from)
+        .ok_or("`cargo metadata` output has no workspace_root")?;
+    let mut config = vec![workspace_root.join("Cargo.toml"), workspace_root.join("Cargo.lock")];
+    let in_dir = |path: &str| PathBuf::from(crate::provider::in_dir(dir, path));
+    config.extend(["rustfmt.toml", ".cargo/config.toml"].map(in_dir));
+
     Ok(DiscoveredPaths {
         workspace,
         packages,
+        config,
         target_dir,
     })
 }
@@ -394,12 +410,6 @@ fn discover_input_paths(
         .map(PathBuf::from)
         .map(|manifest| in_dir(manifest.strip_prefix(cwd).unwrap_or(&manifest)))
         .collect();
-
-    for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
-        if cwd.join(path).is_file() {
-            files.push(in_dir(Path::new(path)));
-        }
-    }
 
     roots.sort();
     roots.dedup();
@@ -967,23 +977,15 @@ mod tests {
     }
 
     #[test]
-    fn input_paths_include_workspace_configuration() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join(".cargo")).unwrap();
-        for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
-            std::fs::write(dir.path().join(path), "").unwrap();
-        }
-
-        let paths = discover_input_paths(&[], dir.path(), None, &[]);
-        for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
-            assert!(paths.files.contains(&PathBuf::from(path)), "missing {path}");
-        }
-
-        // A block's `dir` prefixes every path, as bit's process sees it.
-        let paths = discover_input_paths(&[], dir.path(), Some("crates/app"), &[]);
-        for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
-            let path = Path::new("crates/app").join(path);
-            assert!(paths.files.contains(&path), "missing {}", path.display());
+    fn config_comes_from_the_workspace_root_when_run_in_a_member() {
+        let dir = workspace_with_path_dependencies();
+        let app = dir.path().join("ws/app").to_string_lossy().into_owned();
+        let config = discover_paths(Some(&app)).unwrap().config;
+        for file in ["ws/Cargo.toml", "ws/Cargo.lock"] {
+            assert!(
+                config.iter().any(|path| path.ends_with(file)),
+                "missing {file}: {config:?}"
+            );
         }
     }
 
