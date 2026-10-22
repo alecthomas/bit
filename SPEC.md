@@ -427,7 +427,7 @@ docs = exec {
 }
 ```
 
-`inputs` is a list of globs, expanded to concrete files by the provider's `resolve()`. `command` is the shell command to run. `outputs` is the output file or directory — it can be a single string or a list for blocks that produce multiple artifacts:
+`inputs` is a list of globs, expanded to concrete files by the provider's `resolve()`; a directory names every file beneath it. `command` is the shell command to run. `outputs` is the output file or directory — it can be a single string or a list for blocks that produce multiple artifacts. Relative `inputs`, `outputs` and `uncached` paths are relative to `dir`, where the command runs:
 
 ```
 build = exec {

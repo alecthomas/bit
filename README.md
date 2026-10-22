@@ -778,8 +778,8 @@ block = docker.network_attach {
 ```bit
 block = exec {
   command = string                # Shell command to execute
-  outputs = (string | [string])?  # Output file or list of output files
-  inputs = [string]?              # Input file glob patterns. A directory names every file beneath it
+  outputs = (string | [string])?  # Output file or list of output files, relative to `dir`
+  inputs = [string]?              # Input file glob patterns, relative to `dir`. A directory names every file beneath it
   dir = string?                   # Working directory for the command
   clean = string?                 # Shell command to run on `bit --clean` (replaces the default removal of outputs)
   resolve = string?               # Shell command whose stdout is captured as state. Used to detect whether the resource exists and whether it has drifted.
@@ -799,8 +799,8 @@ block = exec {
 ```bit
 block = exec.test {
   command = string                      # Shell command to execute
-  inputs = [string]?                    # Input file glob patterns. A directory names every file beneath it
-  outputs = [string]?                   # Output files to track
+  inputs = [string]?                    # Input file glob patterns, relative to `dir`. A directory names every file beneath it
+  outputs = [string]?                   # Output files to track, relative to `dir`
   dir = string?                         # Working directory for the command
   clean = string?                       # Shell command to run on `bit --clean`
   results = string?                     # jq filter mapping the command's JSON stdout to test results. Each JSON document or JSONL line is one filter input; other stdout lines are logs. Each filter output is `{suite?, name?, event?, status?, duration?, output?}`, about a test if it has a `name` and otherwise about its suite. `event` is `start` or `end`, and `status` (`pass`, `fail`, or `skip`) also ends the test or suite. `duration` is in seconds; without it, the time since `start` is used. A suite is summarized when it ends, or when the command exits.

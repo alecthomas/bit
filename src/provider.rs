@@ -418,6 +418,14 @@ pub trait Resource {
         vec![]
     }
 
+    /// The [`Resource::output_keys`] entry for an output path written as the
+    /// block's own fields write it. The engine resolves `uncached` entries
+    /// through this, so they match the outputs they name. Override it with
+    /// any resolution `output_keys` applies, such as against `dir`.
+    fn output_key(&self, _inputs: &Self::Inputs, path: &str) -> String {
+        path.to_owned()
+    }
+
     /// Capture durable artifacts produced by a successful apply into the CAS,
     /// keyed by a provider-defined role.
     ///
@@ -507,6 +515,9 @@ pub trait DynResource: Send + Sync {
     // through the blanket impl below instead.
     fn output_keys(&self, _inputs: &Map) -> Result<Vec<String>, BoxError> {
         Ok(vec![])
+    }
+    fn output_key(&self, _inputs: &Map, path: &str) -> Result<String, BoxError> {
+        Ok(path.to_owned())
     }
     fn capture_artifacts(
         &self,
@@ -626,6 +637,11 @@ impl<R: Resource + Send + Sync> DynResource for R {
     fn output_keys(&self, inputs: &Map) -> Result<Vec<String>, BoxError> {
         let typed: R::Inputs = deserialize_inputs(inputs)?;
         Ok(Resource::output_keys(self, &typed))
+    }
+
+    fn output_key(&self, inputs: &Map, path: &str) -> Result<String, BoxError> {
+        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        Ok(Resource::output_key(self, &typed, path))
     }
 
     fn capture_artifacts(

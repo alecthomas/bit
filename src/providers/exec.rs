@@ -24,11 +24,11 @@ use crate::value::Value;
 pub struct ExecInputs {
     /// Shell command to execute
     pub command: String,
-    /// Output file or list of output files
+    /// Output file or list of output files, relative to `dir`
     #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub outputs: Vec<String>,
-    /// Input file glob patterns. A directory names every file beneath it
+    /// Input file glob patterns, relative to `dir`. A directory names every file beneath it
     #[serde(default)]
     pub inputs: Vec<String>,
     /// Working directory for the command
@@ -214,18 +214,46 @@ fn run_values(command: &str, dir: Option<&str>) -> Result<crate::value::Map, Box
 /// An invalid pattern is an error rather than an empty match. A valid one
 /// may match nothing, as an input a dependency has yet to generate does:
 /// files appearing there later change the hash all the same.
-fn hash_inputs(tracker: &FileTracker, patterns: &[String]) -> Result<BTreeMap<String, SHA256>, BoxError> {
+///
+/// A relative pattern is relative to `dir`, where the command runs.
+fn hash_inputs(
+    tracker: &FileTracker,
+    dir: Option<&str>,
+    patterns: &[String],
+) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let mut files = BTreeMap::new();
     for pattern in patterns {
         glob::Pattern::new(pattern).map_err(|e| format!("invalid input pattern `{pattern}`: {e}"))?;
-        if Path::new(pattern).is_dir() {
-            let dir = glob::Pattern::escape(pattern.trim_end_matches('/'));
-            files.extend(tracker.hash_glob(&format!("{dir}/**/*"))?);
+        let path = in_dir(dir, pattern);
+        if Path::new(&path).is_dir() {
+            let path = glob::Pattern::escape(path.trim_end_matches('/'));
+            files.extend(tracker.hash_glob(&format!("{path}/**/*"))?);
         } else {
-            files.extend(tracker.hash_glob(pattern)?);
+            // `dir` is literal text, so only the pattern part is a glob.
+            let glob = match dir {
+                Some(dir) if Path::new(pattern).is_relative() => {
+                    format!("{}/{pattern}", glob::Pattern::escape(dir.trim_end_matches('/')))
+                }
+                _ => pattern.clone(),
+            };
+            files.extend(tracker.hash_glob(&glob)?);
         }
     }
     Ok(files)
+}
+
+/// `path` as bit's process sees it: a relative path is relative to `dir`,
+/// where the command runs. A trailing `/` is kept.
+fn in_dir(dir: Option<&str>, path: &str) -> String {
+    match dir {
+        Some(dir) if Path::new(path).is_relative() => Path::new(dir).join(path).to_string_lossy().into_owned(),
+        _ => path.to_owned(),
+    }
+}
+
+/// The block's `outputs`, as bit's process sees them.
+fn output_paths(dir: Option<&str>, outputs: &[String]) -> Vec<String> {
+    outputs.iter().map(|output| in_dir(dir, output)).collect()
 }
 
 /// Provider for running arbitrary shell commands.
@@ -289,7 +317,7 @@ impl Resource for ExecResource {
     }
 
     fn resolve(&self, inputs: &ExecInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        hash_inputs(&self.tracker, &inputs.inputs)
+        hash_inputs(&self.tracker, inputs.dir.as_deref(), &inputs.inputs)
     }
 
     fn plan(&self, inputs: &ExecInputs, prior_state: Option<&ExecState>) -> Result<PlanResult, BoxError> {
@@ -344,7 +372,8 @@ impl Resource for ExecResource {
         changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
-        for output in &inputs.outputs {
+        let outputs = output_paths(inputs.dir.as_deref(), &inputs.outputs);
+        for output in &outputs {
             let output_path = Path::new(output);
             if output.ends_with('/') {
                 fs::create_dir_all(output_path)?;
@@ -371,10 +400,10 @@ impl Resource for ExecResource {
             .unwrap_or_default();
 
         Ok(ApplyResult {
-            outputs: ExecOutputs::new(&inputs.outputs, values_output.clone()),
+            outputs: ExecOutputs::new(&outputs, values_output.clone()),
             state: Some(ExecState {
                 command: inputs.command.clone(),
-                outputs: inputs.outputs.clone(),
+                outputs,
                 dir: inputs.dir.clone(),
                 clean: inputs.clean.clone(),
                 resolve: inputs.resolve.clone(),
@@ -417,11 +446,14 @@ impl Resource for ExecResource {
     }
 
     fn output_keys(&self, inputs: &ExecInputs) -> Vec<String> {
-        inputs
-            .outputs
+        output_paths(inputs.dir.as_deref(), &inputs.outputs)
             .iter()
             .map(|o| o.trim_end_matches('/').to_owned())
             .collect()
+    }
+
+    fn output_key(&self, inputs: &ExecInputs, path: &str) -> String {
+        in_dir(inputs.dir.as_deref(), path)
     }
 }
 
@@ -432,10 +464,10 @@ impl Resource for ExecResource {
 pub struct ExecTestInputs {
     /// Shell command to execute
     pub command: String,
-    /// Input file glob patterns. A directory names every file beneath it
+    /// Input file glob patterns, relative to `dir`. A directory names every file beneath it
     #[serde(default)]
     pub inputs: Vec<String>,
-    /// Output files to track
+    /// Output files to track, relative to `dir`
     #[serde(default)]
     pub outputs: Vec<String>,
     /// Working directory for the command
@@ -562,7 +594,7 @@ impl Resource for ExecTestResource {
     }
 
     fn resolve(&self, inputs: &ExecTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        hash_inputs(&self.tracker, &inputs.inputs)
+        hash_inputs(&self.tracker, inputs.dir.as_deref(), &inputs.inputs)
     }
 
     fn plan(&self, inputs: &ExecTestInputs, prior_state: Option<&ExecTestState>) -> Result<PlanResult, BoxError> {
@@ -633,11 +665,14 @@ impl Resource for ExecTestResource {
     }
 
     fn output_keys(&self, inputs: &ExecTestInputs) -> Vec<String> {
-        inputs
-            .outputs
+        output_paths(inputs.dir.as_deref(), &inputs.outputs)
             .iter()
             .map(|o| o.trim_end_matches('/').to_owned())
             .collect()
+    }
+
+    fn output_key(&self, inputs: &ExecTestInputs, path: &str) -> String {
+        in_dir(inputs.dir.as_deref(), path)
     }
 }
 
@@ -1091,6 +1126,33 @@ mod tests {
 
         let err = resolve(&["src/[".into()]).unwrap_err().to_string();
         assert!(err.contains("invalid input pattern `src/[`"), "{err}");
+    }
+
+    #[test]
+    fn paths_are_relative_to_dir() {
+        let root = tempfile::tempdir().unwrap();
+        // `[` in `dir` is literal text, not a glob class.
+        let web = root.path().join("we[b]");
+        fs::create_dir_all(web.join("src")).unwrap();
+        fs::write(web.join("src/a.ts"), "").unwrap();
+        fs::write(root.path().join("a.ts"), "").unwrap();
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
+        let mut inputs = exec_inputs(vec!["dist/".into(), "/abs/out".into()]);
+        inputs.dir = Some(web.to_string_lossy().into_owned());
+        inputs.inputs = vec!["src/*.ts".into(), "src".into()];
+
+        let resolved: Vec<_> = Resource::resolve(&resource, &inputs).unwrap().into_keys().collect();
+        assert_eq!(resolved, [web.join("src/a.ts").to_string_lossy().into_owned()]);
+        assert_eq!(
+            Resource::output_keys(&resource, &inputs),
+            [web.join("dist").to_string_lossy().into_owned(), "/abs/out".to_owned()]
+        );
+        assert_eq!(
+            Resource::output_key(&resource, &inputs, "dist/"),
+            web.join("dist/").to_string_lossy()
+        );
     }
 
     #[test]

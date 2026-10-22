@@ -601,21 +601,26 @@ fn files_under(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     Ok(files)
 }
 
-/// The entries of `uncached`. A trailing slash marks a directory in `output`,
-/// so it is optional here too and matching ignores it.
-fn uncached_outputs(inputs: &Map) -> HashSet<&str> {
-    fn trim(s: &str) -> &str {
-        s.trim_end_matches('/')
-    }
-    match inputs.get(UNCACHED_FIELD) {
-        Some(Value::List(_, items)) => items.iter().filter_map(|v| v.as_str()).map(trim).collect(),
-        Some(Value::Str(one)) => HashSet::from([trim(one)]),
-        _ => HashSet::new(),
-    }
+/// The entries of `uncached`, resolved as the resource resolves its outputs.
+/// A trailing slash marks a directory in `outputs`, so it is optional here
+/// too and matching ignores it.
+fn uncached_outputs(node: &DagNode, inputs: &Map) -> Result<HashSet<String>, BoxError> {
+    let entries: Vec<&str> = match inputs.get(UNCACHED_FIELD) {
+        Some(Value::List(_, items)) => items.iter().filter_map(|v| v.as_str()).collect(),
+        Some(Value::Str(one)) => vec![one.as_str()],
+        _ => vec![],
+    };
+    entries
+        .into_iter()
+        .map(|entry| {
+            let key = node.resource.output_key(inputs, entry)?;
+            Ok(key.trim_end_matches('/').to_owned())
+        })
+        .collect()
 }
 
 /// Whether `uncached` names this output, under either of its spellings.
-fn is_uncached(uncached: &HashSet<&str>, output: &OutputFile) -> bool {
+fn is_uncached(uncached: &HashSet<String>, output: &OutputFile) -> bool {
     uncached.contains(output.path.trim_end_matches('/')) || uncached.contains(output.role.trim_end_matches('/'))
 }
 
@@ -783,7 +788,7 @@ fn prepare_block(
     {
         return Ok(prepared);
     }
-    let uncached = uncached_outputs(&prepared.inputs);
+    let uncached = uncached_outputs(node, &prepared.inputs).map_err(provider_error(node, name, "resolve"))?;
     prepared.cached_outputs = prepared
         .outputs
         .iter()
@@ -3312,6 +3317,7 @@ lint[module] = go.lint {
             reg.register(Box::new(cached::CachedProvider {
                 applies: self.applies.clone(),
             }));
+            reg.register(Box::new(ExecProvider::new(test_tracker())));
             reg
         }
 
@@ -3506,6 +3512,28 @@ lint[module] = go.lint {
 
     /// An excluded output is still kept out of the action key -- it is a
     /// produced file, not a source -- but nothing about it is stored.
+    #[test]
+    fn uncached_entries_resolve_like_the_outputs_they_name() {
+        let h = Harness::new();
+        let a = h.worktree("a");
+        let block = format!(
+            concat!(
+                "app = exec {{\n",
+                "  command  = \"mkdir -p dist && touch dist/a keep.txt\"\n",
+                "  dir      = \"{}/web\"\n",
+                "  outputs  = [\"dist/\", \"keep.txt\"]\n",
+                "  uncached = [\"dist/\"]\n",
+                "}}\n",
+            ),
+            a.root.display()
+        );
+        std::fs::create_dir_all(a.root.join("web")).unwrap();
+        h.apply(&a, &block, 1).unwrap();
+
+        assert!(a.root.join("web/dist/a").is_file(), "outputs are relative to `dir`");
+        assert_eq!(h.only_receipt().artifacts.keys().collect::<Vec<_>>(), ["web/keep.txt"]);
+    }
+
     #[test]
     fn uncached_outputs_are_not_stored() {
         let h = Harness::new();
