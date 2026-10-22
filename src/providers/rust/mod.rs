@@ -235,6 +235,8 @@ pub fn toolchain(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec<Amb
     };
     let mut ambient = vec![version(&["rustc", "-vV"])];
     ambient.extend(extra.iter().map(|command| version(command)));
+    // Moves the config cargo merges last; the files themselves are inputs.
+    ambient.push(Ambient::Variable("CARGO_HOME".to_owned()));
     ambient
 }
 
@@ -375,8 +377,8 @@ fn discover_paths(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
         .map(PathBuf::from)
         .ok_or("`cargo metadata` output has no workspace_root")?;
     let mut config = vec![workspace_root.join("Cargo.toml"), workspace_root.join("Cargo.lock")];
-    let in_dir = |path: &str| PathBuf::from(crate::provider::in_dir(dir, path));
-    config.extend(["rustfmt.toml", ".cargo/config.toml"].map(in_dir));
+    config.extend(cargo_config_files(&cwd));
+    config.push(PathBuf::from(crate::provider::in_dir(dir, "rustfmt.toml")));
 
     Ok(DiscoveredPaths {
         workspace,
@@ -384,6 +386,20 @@ fn discover_paths(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
         config,
         target_dir,
     })
+}
+
+/// The config files cargo merges when run in `cwd`: `.cargo/config.toml`
+/// and the legacy `.cargo/config` in `cwd` and every parent directory, then
+/// in `CARGO_HOME`. Cargo cannot report them itself on stable.
+fn cargo_config_files(cwd: &Path) -> Vec<PathBuf> {
+    let home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".cargo")));
+    cwd.ancestors()
+        .map(|dir| dir.join(".cargo"))
+        .chain(home)
+        .flat_map(|dir| [dir.join("config.toml"), dir.join("config")])
+        .collect()
 }
 
 /// The directory of a package: where its manifest is.
@@ -974,6 +990,23 @@ mod tests {
         });
 
         assert_eq!(workspace_package_names(&metadata).unwrap(), vec!["a", "z"]);
+    }
+
+    #[test]
+    fn cargo_config_is_searched_in_every_parent_and_cargo_home() {
+        let files = cargo_config_files(Path::new("/work/repo/crate"));
+        for file in [
+            "/work/repo/crate/.cargo/config.toml",
+            "/work/repo/.cargo/config",
+            "/work/.cargo/config.toml",
+            "/.cargo/config.toml",
+        ] {
+            assert!(files.contains(&PathBuf::from(file)), "missing {file}: {files:?}");
+        }
+        let home = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dirs::home_dir().unwrap().join(".cargo"));
+        assert!(files.contains(&home.join("config.toml")), "{files:?}");
     }
 
     #[test]

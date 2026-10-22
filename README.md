@@ -1128,8 +1128,10 @@ include path dependencies and `[patch]` paths outside the workspace. Without
 `package`, they track every local package. A package's inputs are every file
 in its directory that Git does not ignore, apart from the target directory and
 nested packages, because builds also read `include_str!` data, files a build
-script reads, and test fixtures. All Rust resources also track
-`rustfmt.toml` and `.cargo/config.toml` at the workspace root.
+script reads, and test fixtures. All Rust resources also track the workspace
+root's `Cargo.toml` and `Cargo.lock`, `rustfmt.toml` where cargo runs, and
+every Cargo config file cargo merges: `.cargo/config.toml` or `.cargo/config`
+where cargo runs, in each parent directory, and in `CARGO_HOME`.
 
 Each resource also fingerprints the ambient state its result depends on:
 the tools it runs and the environment variables it reads. bit records it
@@ -1150,7 +1152,7 @@ in one of three ways:
 | `exec`   | `bash --version`; name any program a command depends on in `inputs`                                                                                         |
 | `docker` | `docker --version` for `docker.image` and `docker.push`. Containers and networks track none, so a CLI upgrade never recreates them                          |
 | `go`     | `go env GOVERSION GOOS GOARCH …` with the block's target; `golangci-lint version` for `go.lint`                                                             |
-| `rust`   | `rustc -vV`; `RUSTFLAGS`-style variables for building, testing, and linting; `cargo clippy --version` for `rust.clippy`; `rustfmt --version` for formatting |
+| `rust`   | `rustc -vV`; `CARGO_HOME`; `RUSTFLAGS`-style variables for building, testing, and linting; `cargo clippy --version` for `rust.clippy`; `rustfmt --version` for formatting |
 | `pnpm`   | `pnpm --version` and `node --version` in the workspace                                                                                                      |
 | `buf`    | `buf --version`; the content of local plugins in `buf.gen.yaml` and check plugins in `buf.yaml`                                                             |
 | `protoc` | `protoc --version`; the content of each `protoc-gen-*` plugin and `--plugin` path                                                                           |
