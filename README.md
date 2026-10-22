@@ -233,7 +233,7 @@ Special fields:
 - `after = [block, ...]` — ordering-only dependency
 - `concurrency = N` — maximum number of this block's matrix slices that may run at once (`go.lint` defaults to 1)
 - `uncached = [output, ...]` — outputs to keep out of the [shared build cache](#shared-build-cache)
-- `dir = path` — directory the block's commands run in, relative to the project root (defaults to the project root). `bit --clean` runs in the `dir` the block last ran in
+- `dir = path` — directory the block's commands run in, relative to the project root (defaults to the project root). Relative paths in the block's other fields are relative to `dir`, and a Dockerfile is relative to its build `context`. `bit --clean` runs in the `dir` the block last ran in
 
 Every other field must be an input of the block's resource, as listed under [Providers](#providers) or by `bit --schema`. bit checks fields when it loads `BUILD.bit` and rejects unknown fields, missing required fields, and values of the wrong type. A value taken from another block's outputs is checked against that output's declared type, and checked again just before the block runs.
 
@@ -673,8 +673,8 @@ block = buf.breaking {
 ```bit
 block = docker.image {
   tag = string                     # Image tag
-  context = string?                # Build context directory
-  dockerfile = string?             # Dockerfile path
+  context = string?                # Build context directory, relative to `dir`
+  dockerfile = string?             # Dockerfile path, relative to `context`
   build_args = {string = string}?  # Docker build arguments
   platform = (string | [string])?  # Target platform(s)
 }
@@ -709,7 +709,7 @@ block = docker.container {
   image = string                        # Docker image reference
   name = string                         # Container name
   ports = [string]?                     # Port mappings (e.g. "8080:80")
-  volumes = [string]?                   # Volume mounts
+  volumes = [string]?                   # Volume mounts; relative host paths are relative to `dir`
   environment = {string = string}?      # Environment variables
   command = string?                     # Override CMD
   entrypoint = string?                  # Override ENTRYPOINT

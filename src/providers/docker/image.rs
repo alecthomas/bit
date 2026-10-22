@@ -26,10 +26,10 @@ const MANIFEST_ROLE: &str = "manifest.json";
 pub struct ImageInputs {
     /// Image tag
     pub tag: String,
-    /// Build context directory
+    /// Build context directory, relative to `dir`
     #[serde(default = "default_context")]
     pub context: String,
-    /// Dockerfile path
+    /// Dockerfile path, relative to `context`
     #[serde(default = "default_dockerfile")]
     pub dockerfile: String,
     /// Docker build arguments
@@ -215,15 +215,29 @@ fn materialize_archive(
     Ok(())
 }
 
+impl Block<ImageInputs> {
+    /// The build context as bit's process sees it: relative to `dir`.
+    fn context_path(&self) -> PathBuf {
+        PathBuf::from(self.path(&self.context))
+    }
+
+    /// The Dockerfile, relative to the build context as Docker's own default
+    /// is. docker resolves `-f` against its working directory rather than
+    /// the context, so it is given this path, the one bit hashes.
+    fn dockerfile_path(&self) -> PathBuf {
+        self.context_path().join(&self.dockerfile)
+    }
+}
+
 /// Build the argument list for `docker buildx build`.
-fn build_args(inputs: &ImageInputs, metadata_path: Option<&Path>) -> Vec<String> {
+fn build_args(inputs: &Block<ImageInputs>, metadata_path: Option<&Path>) -> Vec<String> {
     let mut args = vec![
         "buildx".into(),
         "build".into(),
         "-t".into(),
         inputs.tag.clone(),
         "-f".into(),
-        inputs.dockerfile.clone(),
+        inputs.dockerfile_path().to_string_lossy().into_owned(),
     ];
     if inputs.platform.len() > 1 {
         args.push("--platform".into());
@@ -244,7 +258,7 @@ fn build_args(inputs: &ImageInputs, metadata_path: Option<&Path>) -> Vec<String>
         args.push("--metadata-file".into());
         args.push(path.to_string_lossy().into_owned());
     }
-    args.push(inputs.context.clone());
+    args.push(inputs.context_path().to_string_lossy().into_owned());
     args
 }
 
@@ -341,8 +355,8 @@ impl Resource for ImageResource {
     }
 
     fn resolve(&self, inputs: &Block<ImageInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let context = Path::new(&inputs.context);
-        let dockerfile = context.join(&inputs.dockerfile);
+        let context = &inputs.context_path();
+        let dockerfile = inputs.dockerfile_path();
         let dockerignore = parse::DockerIgnore::load(context);
 
         let tracker = &*self.tracker;
@@ -693,6 +707,40 @@ mod tests {
                 platform: vec!["linux/amd64".into(), "linux/arm64".into()],
             },
         )
+    }
+
+    #[test]
+    fn context_is_relative_to_dir_and_dockerfile_to_context() {
+        let mut inputs = test_inputs();
+        inputs.dir = Some("services".into());
+        inputs.context = "web".into();
+        inputs.dockerfile = "docker/Dockerfile".into();
+        let args = build_args(&inputs, None);
+        let dockerfile = args.iter().position(|arg| arg == "-f").unwrap() + 1;
+        assert_eq!(args[dockerfile], "services/web/docker/Dockerfile");
+        assert_eq!(args.last().unwrap(), "services/web");
+
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(web.join("src")).unwrap();
+        std::fs::write(web.join("Dockerfile"), "FROM scratch\nCOPY src /src\n").unwrap();
+        std::fs::write(web.join("src/a.txt"), "").unwrap();
+        let mut inputs = test_inputs();
+        inputs.dir = Some(dir.path().to_string_lossy().into_owned());
+        inputs.context = "web".into();
+        let mut names: Vec<_> = Resource::resolve(&ImageResource::new(Arc::new(FileTracker::default())), &inputs)
+            .unwrap()
+            .into_keys()
+            .map(|path| {
+                Path::new(&path)
+                    .strip_prefix(&web)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Dockerfile", "src/a.txt"]);
     }
 
     #[test]

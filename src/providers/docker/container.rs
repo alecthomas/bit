@@ -107,7 +107,7 @@ pub struct ContainerInputs {
     /// Port mappings (e.g. "8080:80")
     #[serde(default)]
     pub ports: Vec<String>,
-    /// Volume mounts
+    /// Volume mounts; relative host paths are relative to `dir`
     #[serde(default)]
     pub volumes: Vec<String>,
     /// Environment variables
@@ -362,6 +362,11 @@ impl Resource for ContainerResource {
 
         let mut cmd = Command::new("docker");
         cmd.args(run_args(inputs, EnvValues::Shown));
+        // Relative host paths in `volumes` resolve against docker's working
+        // directory, which is `dir`.
+        if let Some(dir) = &inputs.dir {
+            cmd.current_dir(dir);
+        }
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to run docker run: {e}"))?;
