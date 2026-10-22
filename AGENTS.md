@@ -4,11 +4,12 @@
 
 bit's goal is minimal configuration. A resource should work out for itself what it reads and writes, so users don't have to list sources or outputs by hand. When you create or change a resource:
 
-1. Find the inputs from the tool's own configuration and conventions. Parse the config files the tool reads, such as `buf.yaml`, `buf.gen.yaml`, `go.mod`, `Cargo.toml` or `package.json`, and follow everything they point to: module and workspace paths, template inputs, imports, and dependency lock files. Hashing a config file is not enough if its contents name more inputs.
-2. Find the outputs the same way, from the paths the configuration or the tool's conventions name. Take flags that move outputs, such as `--output`, into account.
-3. When an input can't be determined exactly, track more rather than less. An extra input costs a rerun. A missing input gives a stale build that reports success.
-4. Check how the engine uses what you declare. For example, `output_keys` change detection hashes only regular files, so a declared directory is not tracked.
-5. Add a field for users to set only when the information can't be discovered. Document what the resource discovers in its schema doc comments.
+1. Ask the toolchain before reimplementing it. Prefer what the tool itself reports, such as `cargo metadata`, the dep-info files rustc and cargo write, `go list`, or `pnpm list`, over parsing its configuration or reproducing its resolution rules. The tool's answer follows its real semantics, including cases a reimplementation would miss. Parse configuration only when the tool has no way to report it, and then follow its rules exactly, from its source if the documentation is incomplete.
+2. Find the inputs from the tool's own configuration and conventions. Follow everything the configuration points to: module and workspace paths, template inputs, imports, and dependency lock files. Hashing a config file is not enough if its contents name more inputs.
+3. Find the outputs the same way, from the paths the tool or its configuration names. Take flags that move outputs, such as `--output`, into account.
+4. When an input can't be determined exactly, track more rather than less. An extra input costs a rerun. A missing input gives a stale build that reports success.
+5. Check how the engine uses what you declare. For example, the shared cache computes a block's key before it runs and again after, so inputs discovered only after a build, such as from dep-info files, must also be found the same way before it.
+6. Add a field for users to set only when the information can't be discovered. Document what the resource discovers in its schema doc comments.
 
 ## Editor integrations must track the bit parser
 
