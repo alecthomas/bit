@@ -48,6 +48,10 @@ pub struct Changes {
     pub paths: HashSet<PathBuf>,
     /// Paths which no longer exist at their old location.
     pub removed: HashSet<PathBuf>,
+    /// Every path Git tracks or would track. Git cannot report a change to
+    /// any other path, such as an ignored file or one outside the
+    /// repository.
+    pub visible: HashSet<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,27 +114,34 @@ pub fn changes_since(project_root: &Path, base: &str) -> Result<Changes, Changes
     }
     let mut changes = parse_name_status(&repository_root, &diff_output.stdout)?;
 
-    let untracked_output = command()
-        .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
-        .current_dir(&repository_root)
+    let untracked = ls_files(&repository_root, &["--others", "--exclude-standard"])?;
+    changes.visible = ls_files(&repository_root, &["--cached"])?;
+    changes.visible.extend(untracked.iter().cloned());
+    changes.paths.extend(untracked);
+    Ok(changes)
+}
+
+/// The absolute paths `git ls-files <args>` lists in the repository.
+fn ls_files(repository_root: &Path, args: &[&str]) -> Result<HashSet<PathBuf>, ChangesError> {
+    let output = command()
+        .arg("ls-files")
+        .args(args)
+        .args(["-z", "--"])
+        .current_dir(repository_root)
         .output()
         .map_err(|source| ChangesError::Spawn {
             operation: "ls-files",
             source,
         })?;
-    if !untracked_output.status.success() {
-        return Err(command_error("ls-files", &untracked_output.stderr));
+    if !output.status.success() {
+        return Err(command_error("ls-files", &output.stderr));
     }
-    for path in untracked_output
+    Ok(output
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-    {
-        changes
-            .paths
-            .insert(repository_root.join(String::from_utf8_lossy(path).as_ref()));
-    }
-    Ok(changes)
+        .map(|path| repository_root.join(String::from_utf8_lossy(path).as_ref()))
+        .collect())
 }
 
 fn command_error(operation: &'static str, stderr: &[u8]) -> ChangesError {
@@ -200,6 +211,39 @@ mod tests {
             !out.status.success(),
             "a plain directory must not look like a repository"
         );
+    }
+
+    #[test]
+    fn changes_list_tracked_and_untracked_paths_as_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let out = command()
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(root.join("tracked.txt"), "").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "one"]);
+        std::fs::write(root.join("untracked.txt"), "").unwrap();
+        std::fs::write(root.join("ignored.txt"), "").unwrap();
+
+        let changes = changes_since(&root, "HEAD").unwrap();
+        assert_eq!(
+            changes.visible,
+            HashSet::from([
+                root.join(".gitignore"),
+                root.join("tracked.txt"),
+                root.join("untracked.txt")
+            ])
+        );
+        assert_eq!(changes.paths, HashSet::from([root.join("untracked.txt")]));
     }
 
     #[test]

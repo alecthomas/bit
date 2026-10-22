@@ -351,6 +351,7 @@ pub fn affected_order(
     let normalize = |path: &std::path::Path| cache.normalize_str(&path.to_string_lossy()).into_owned();
     let changed: HashSet<String> = changes.paths.iter().map(|path| normalize(path)).collect();
     let mut unmatched_removed: HashSet<String> = changes.removed.iter().map(|path| normalize(path)).collect();
+    let visible: HashSet<String> = changes.visible.iter().map(|path| normalize(path)).collect();
 
     // Build definitions can change ownership, dependencies, or evaluated
     // inputs in ways that cannot be attributed from the new graph alone.
@@ -395,16 +396,31 @@ pub fn affected_order(
             Err(_) => direct = true,
         }
 
+        // The prior map tracks a directory output file by file, so a path
+        // beneath a declared output is an output too.
+        let is_output = |path: &str| {
+            outputs.iter().any(|output| {
+                path == output
+                    || path
+                        .strip_prefix(output.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+        };
+
         // Git cannot report a changed tool version or environment variable,
-        // so those fingerprints are compared with the prior run instead. As
+        // or a change to a file it does not see, such as an ignored file or
+        // one outside the repository. Those are compared with the prior run
+        // instead. Only the prior map holds output hashes, so an output that
+        // is not also a source is left out rather than always differing. As
         // with the inputs above, a block that never ran has nothing to
         // compare against.
         if prior.provider_state.is_some() {
-            let tool_keys = current
+            let unseen_keys = current
                 .keys()
                 .chain(prior.resolve_map.keys())
-                .filter(|key| is_ambient_key(key));
-            for key in tool_keys {
+                .filter(|key| is_ambient_key(key) || !visible.contains(key.as_str()))
+                .filter(|key| current.contains_key(*key) || !is_output(key));
+            for key in unseen_keys {
                 if current.get(key) != prior.resolve_map.get(key) {
                     direct = true;
                 }
@@ -426,16 +442,6 @@ pub fn affected_order(
         }
 
         // A block with no source paths cannot be proven unaffected by Git.
-        // The prior map tracks a directory output file by file, so a path
-        // beneath a declared output is an output too.
-        let is_output = |path: &str| {
-            outputs.iter().any(|output| {
-                path == output
-                    || path
-                        .strip_prefix(output.as_str())
-                        .is_some_and(|rest| rest.starts_with('/'))
-            })
-        };
         if tracked.iter().all(|path| is_output(path)) {
             direct = true;
         }
@@ -2469,7 +2475,7 @@ lint[module] = go.lint {
 
         let changed_a = crate::git::Changes {
             paths: HashSet::from([a.clone()]),
-            removed: HashSet::new(),
+            ..Default::default()
         };
         assert_eq!(
             affected_order(&dag, &base, &cache, &order, &changed_a, &tracker).unwrap(),
@@ -2478,12 +2484,52 @@ lint[module] = go.lint {
 
         let changed_c = crate::git::Changes {
             paths: HashSet::from([c]),
-            removed: HashSet::new(),
+            ..Default::default()
         };
         assert_eq!(
             affected_order(&dag, &base, &cache, &order, &changed_c, &tracker).unwrap(),
             vec!["a".to_owned(), "c".to_owned()]
         );
+    }
+
+    #[test]
+    fn affected_order_compares_inputs_git_cannot_see_with_the_prior_run() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let seen = dir.path().join("seen.txt");
+        let unseen = dir.path().join("unseen.txt");
+        let out = dir.path().join("dist");
+        std::fs::write(&seen, "seen").unwrap();
+        std::fs::write(&unseen, "unseen").unwrap();
+        let input = format!(
+            concat!(
+                "seen = exec {{ command = \"mkdir -p '{2}' && touch '{2}/a'\" inputs = [\"{0}\"] outputs = \"{2}/\" }}\n",
+                "unseen = exec {{ command = \"true\" inputs = [\"{1}\"] }}\n",
+            ),
+            seen.display(),
+            unseen.display(),
+            out.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let cache = BuildCache::local_only(dir.path());
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        apply(&mut dag, &base, &store, &cache, &Output::new(&[]), &[], 1, &tracker).unwrap();
+        // Git sees `seen.txt`, but not `unseen.txt` or the ignored output.
+        let changes = crate::git::Changes {
+            visible: HashSet::from([seen.clone()]),
+            ..Default::default()
+        };
+        let affected = || {
+            let (dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+            let order = resolve_order(&dag, &[]).unwrap();
+            affected_order(&dag, &base, &cache, &order, &changes, &tracker).unwrap()
+        };
+
+        assert!(affected().is_empty(), "nothing changed");
+        std::fs::write(&seen, "edited").unwrap();
+        std::fs::write(&unseen, "edited").unwrap();
+        assert_eq!(affected(), ["unseen"], "Git reports changes to the files it sees");
     }
 
     #[test]
@@ -2573,6 +2619,7 @@ lint[module] = go.lint {
         let deletion = crate::git::Changes {
             paths: HashSet::from([removed.clone()]),
             removed: HashSet::from([removed]),
+            ..Default::default()
         };
         assert_eq!(
             affected_order(&dag, &base, &cache, &order, &deletion, &tracker).unwrap(),

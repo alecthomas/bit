@@ -167,7 +167,9 @@ argument after `--since` is not a Git commit, it is treated as a target, so
 `bit --since build` builds the affected blocks of `build`.
 
 Blocks without source paths are always included because Git cannot prove them
-unaffected. A changed `.bit` build definition selects the full requested target
+unaffected. Git cannot see ignored files or files outside the repository, so a
+block is also affected when such an input, or a tool it runs, has changed since
+the block last ran. A changed `.bit` build definition selects the full requested target
 set. An unowned deleted path also selects the full set when prior state cannot
 identify its block. `--since` requires the ref and its merge base to exist
 locally, and cannot be combined with `--clean`.
