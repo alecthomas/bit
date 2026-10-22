@@ -592,13 +592,13 @@ output version = app.version
 
 ### buf
 
-**`buf.generate`** (build) — Generate code from Protobuf files with buf generate
+**`buf.generate`** (build) — Generate code from Protobuf files with buf generate. The sources, outputs, and plugins are discovered from the buf workspace and generation template.
 
 ```bit
 block = buf.generate {
   input = string?     # Buf input, relative to `dir` (defaults to the workspace in `dir`)
   dir = string?       # Working directory for the command
-  template = string?  # Generation template path, relative to `dir` (defaults to "buf.gen.yaml")
+  template = string?  # Generation template path relative to `dir`, or inline YAML or JSON (defaults to "buf.gen.yaml")
   flags = [string]?   # Extra flags passed to buf generate
 }
 ```
@@ -1131,6 +1131,7 @@ block = rust.fmt-check {
    - Resolve input files via the provider
    - Fingerprint the tools the resource runs alongside its input files, so a tool upgrade or toolchain switch reruns the blocks that use it and changes their shared cache key (see below)
    - Compute a content hash (file contents + dependency hashes). A symlinked input also hashes each link target in its chain, so a stable Hermit stub such as `bin/tsk` reruns blocks when the tool is upgraded
+   - Hash the block's declared outputs as well, so editing or deleting one reruns the block. Every file under a directory output is hashed
    - Skip if nothing changed; apply if inputs differ
 3. Persist state to the user's cache directory (e.g. `~/Library/Caches/bit/<hash>/state/` on macOS, `~/.cache/bit/<hash>/state/` on Linux, one file per block), partitioned by a hash of the project's absolute path
 
@@ -1176,6 +1177,17 @@ sources that import them. It runs a full compile after a configuration or
 tool change, a removed source, or an output that moved. When a recompiled
 source stops writing an output without writing a new one, the old output
 remains until the next full compile.
+
+`buf` resources find their sources the way buf does. From a local input,
+bit walks up to the workspace that controls it: a v2 `buf.yaml` whose
+modules contain the input, or a `buf.work.yaml` that lists it. bit then
+tracks every module in that workspace, along with its `buf.yaml` and
+`buf.lock` files. Without a workspace, bit uses the nearest v1 module or the
+input directory itself. Local image and archive inputs are tracked as files.
+Git and BSR inputs have no local sources. `buf.generate` without an `input`
+uses the `inputs` listed in its template. Its outputs are the template's
+plugin `out` paths, prefixed by any `--output` flag. `buf.breaking` tracks a
+local baseline the same way as its input.
 
 ### Messages
 

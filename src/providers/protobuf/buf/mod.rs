@@ -2,9 +2,8 @@ pub mod breaking;
 pub mod format;
 pub mod generate;
 pub mod lint;
+mod workspace;
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::Arc;
 
@@ -13,11 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider};
-use crate::sha256::SHA256;
 use crate::value::Value;
 
-/// Configuration files that change what every buf command does.
-const CONFIG_FILES: [&str; 3] = ["buf.yaml", "buf.lock", "buf.work.yaml"];
+use workspace::Sources;
 
 /// What a buf command operates on and where it runs. Shared by all buf
 /// resources.
@@ -48,24 +45,12 @@ impl BufTarget {
         args
     }
 
-    /// Hash the `.proto` sources and buf configuration the command reads,
-    /// plus `extra` files relative to `dir`.
-    ///
-    /// An input that is not a local directory, such as a Git or BSR
-    /// reference, contributes only the configuration in `dir`.
-    fn resolve(&self, extra: &[&str], tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let dir = self.dir.as_deref();
-        let config_dirs = self.config_dirs();
-        let source_root = config_dirs.last().expect("dir is always a config dir");
-        let mut hashes = super::hash_protos(std::slice::from_ref(source_root), tracker)?;
-        let files: Vec<PathBuf> = config_dirs
-            .iter()
-            .flat_map(|config_dir| CONFIG_FILES.iter().map(|name| config_dir.join(name)))
-            .chain(extra.iter().map(|path| super::in_dir(dir, path)))
-            .filter(|path| path.is_file())
-            .collect();
-        hashes.extend(tracker.hash_files(&files)?);
-        Ok(hashes)
+    /// The `.proto` sources and buf configuration the command reads for its
+    /// input, which defaults to the workspace in `dir`.
+    fn sources(&self) -> Result<Sources, BoxError> {
+        let mut sources = Sources::default();
+        sources.add_input(self.dir.as_deref(), self.input.as_deref().unwrap_or("."))?;
+        Ok(sources)
     }
 
     /// The buf CLI's version, as run in `dir`.
@@ -73,22 +58,8 @@ impl BufTarget {
         super::version("buf", self.dir.as_deref())
     }
 
-    /// `dir`, then the input when it is a local directory, which buf also
-    /// reads as a module root.
-    fn config_dirs(&self) -> Vec<PathBuf> {
-        let dir = self.dir.as_deref();
-        let mut config_dirs = vec![super::in_dir(dir, "")];
-        if let Some(input) = &self.input {
-            let input = super::in_dir(dir, input);
-            if input.is_dir() {
-                config_dirs.push(input);
-            }
-        }
-        config_dirs
-    }
-
-    /// buf and the check plugins `buf.yaml` names, which lint and breaking
-    /// change checks run.
+    /// buf and the check plugins the input's `buf.yaml` names, which lint
+    /// and breaking change checks run.
     fn check_ambient(&self) -> Vec<Ambient> {
         #[derive(Deserialize)]
         struct Config {
@@ -102,11 +73,15 @@ impl BufTarget {
 
         let dir = self.dir.as_deref();
         let mut tools = vec![self.buf()];
-        for config_dir in self.config_dirs() {
-            let Ok(text) = std::fs::read_to_string(config_dir.join("buf.yaml")) else {
+        // An input or configuration that cannot be read fails the buf
+        // command itself.
+        let Ok(sources) = self.sources() else {
+            return tools;
+        };
+        for path in sources.buf_yamls() {
+            let Ok(text) = std::fs::read_to_string(path) else {
                 continue;
             };
-            // An unreadable configuration fails the buf command itself.
             if let Ok(config) = serde_yml::from_str::<Config>(&text) {
                 let programs = config.plugins.iter().filter_map(|p| p.plugin.program());
                 tools.extend(programs.map(|program| super::plugin(&program, dir)));
@@ -193,26 +168,49 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tracks_input_sources_and_config() {
+    fn sources_follow_the_input_to_its_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("proto/acme")).unwrap();
         std::fs::create_dir_all(root.join("other")).unwrap();
-        std::fs::write(root.join("buf.yaml"), "version: v2\n").unwrap();
-        std::fs::write(root.join("buf.gen.yaml"), "version: v2\n").unwrap();
+        std::fs::write(root.join("buf.yaml"), "version: v2\nmodules:\n  - path: proto\n").unwrap();
         std::fs::write(root.join("proto/acme/a.proto"), "").unwrap();
         std::fs::write(root.join("other/b.proto"), "").unwrap();
         let target = BufTarget {
-            input: Some("proto".into()),
+            input: Some("proto/acme".into()),
             dir: Some(root.to_string_lossy().into_owned()),
         };
-        let resolved = target.resolve(&["buf.gen.yaml"], &FileTracker::default()).unwrap();
+        let resolved = target.sources().unwrap().hash(&FileTracker::default()).unwrap();
         let mut names: Vec<_> = resolved
             .keys()
             .map(|path| path.strip_prefix(&*root.to_string_lossy()).unwrap().to_owned())
             .collect();
         names.sort();
-        assert_eq!(names, ["/buf.gen.yaml", "/buf.yaml", "/proto/acme/a.proto"]);
+        assert_eq!(names, ["/buf.yaml", "/proto/acme/a.proto"]);
+    }
+
+    #[test]
+    fn check_tools_read_workspace_plugins_above_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("proto")).unwrap();
+        std::fs::write(
+            root.join("buf.yaml"),
+            "version: v2\nmodules:\n  - path: proto\nplugins:\n  - plugin: buf-plugin-a\n",
+        )
+        .unwrap();
+        let proto = root.join("proto").to_string_lossy().into_owned();
+        let target = BufTarget {
+            input: None,
+            dir: Some(proto.clone()),
+        };
+        assert_eq!(
+            target.check_ambient(),
+            [
+                crate::providers::version("buf", &["--version"], Some(&proto)),
+                Ambient::Executable("buf-plugin-a".into()),
+            ]
+        );
     }
 
     #[test]
@@ -249,7 +247,7 @@ mod tests {
             input: None,
             dir: Some(root.to_string_lossy().into_owned()),
         };
-        let resolved = target.resolve(&[], &FileTracker::default()).unwrap();
+        let resolved = target.sources().unwrap().hash(&FileTracker::default()).unwrap();
         assert!(
             resolved.keys().any(|path| path.ends_with("other/b.proto")),
             "{resolved:?}"

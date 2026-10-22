@@ -9,16 +9,17 @@ use crate::output::BlockWriter;
 use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind};
 use crate::sha256::SHA256;
 
-use super::{BufTarget, PluginCommand};
+use super::{BufTarget, PluginCommand, Sources};
 
 const DEFAULT_TEMPLATE: &str = "buf.gen.yaml";
 
-/// Generate code from Protobuf files with buf generate
+/// Generate code from Protobuf files with buf generate. The sources, outputs, and
+/// plugins are discovered from the buf workspace and generation template.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
 pub struct BufGenerateInputs {
     #[serde(flatten)]
     pub target: BufTarget,
-    /// Generation template path, relative to `dir` (defaults to "buf.gen.yaml")
+    /// Generation template path relative to `dir`, or inline YAML or JSON (defaults to "buf.gen.yaml")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     /// Extra flags passed to buf generate
@@ -31,6 +32,15 @@ impl BufGenerateInputs {
         self.template.as_deref().unwrap_or(DEFAULT_TEMPLATE)
     }
 
+    /// The template file, when `template` names one rather than holding
+    /// the template itself. buf decides by extension.
+    fn template_file(&self) -> Option<PathBuf> {
+        let template = self.template();
+        let extension = Path::new(template).extension().and_then(|ext| ext.to_str());
+        matches!(extension, Some("yaml" | "yml" | "json"))
+            .then(|| super::super::in_dir(self.target.dir.as_deref(), template))
+    }
+
     fn args(&self) -> Vec<String> {
         let mut args = vec!["generate".to_owned()];
         if let Some(template) = &self.template {
@@ -41,21 +51,53 @@ impl BufGenerateInputs {
     }
 
     fn read_template(&self) -> Result<Template, BoxError> {
-        let path = super::super::in_dir(self.target.dir.as_deref(), self.template());
+        let Some(path) = self.template_file() else {
+            return Ok(serde_yml::from_str(self.template())
+                .map_err(|e| format!("failed to parse inline generation template: {e}"))?);
+        };
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("failed to read generation template {}: {e}", path.display()))?;
         Ok(serde_yml::from_str(&text)
             .map_err(|e| format!("failed to parse generation template {}: {e}", path.display()))?)
     }
 
+    /// What buf reads: the input, or else the template's inputs, or else
+    /// the workspace in `dir`; plus the template itself.
+    fn sources(&self) -> Result<Sources, BoxError> {
+        let template_inputs = match (&self.target.input, self.read_template()) {
+            (None, Ok(template)) if !template.inputs.is_empty() => Some(template.inputs),
+            _ => None,
+        };
+        let mut sources = match template_inputs {
+            Some(inputs) => {
+                let mut sources = Sources::default();
+                for path in inputs.iter().filter_map(TemplateInput::path) {
+                    sources.add_input(self.target.dir.as_deref(), path)?;
+                }
+                sources
+            }
+            None => self.target.sources()?,
+        };
+        if let Some(path) = self.template_file() {
+            sources.add_file(path);
+        }
+        Ok(sources)
+    }
+
     /// Output paths of the template's plugins, as bit's process sees them.
+    /// buf prefixes each with `--output`, even an absolute one.
     fn outputs(&self) -> Result<Vec<PathBuf>, BoxError> {
         let dir = self.target.dir.as_deref();
+        let base = flag_value(&self.flags, "output", "o").filter(|base| !base.is_empty() && *base != ".");
         Ok(self
             .read_template()?
             .plugins
             .iter()
-            .map(|plugin| super::super::in_dir(dir, &plugin.out))
+            .map(|plugin| match base {
+                Some(base) => Path::new(base).join(plugin.out.trim_start_matches('/')),
+                None => PathBuf::from(&plugin.out),
+            })
+            .map(|out| Path::new(dir.unwrap_or("")).join(out))
             .collect())
     }
 
@@ -77,6 +119,67 @@ impl BufGenerateInputs {
 struct Template {
     #[serde(default)]
     plugins: Vec<TemplatePlugin>,
+    /// v2: what to generate from when the command names no input.
+    #[serde(default)]
+    inputs: Vec<TemplateInput>,
+}
+
+/// A v2 template input. Only the kinds that can name a local path are
+/// listed; a `module` or `git_repo` input has no local sources.
+#[derive(Deserialize)]
+struct TemplateInput {
+    #[serde(default)]
+    directory: Option<String>,
+    #[serde(default)]
+    proto_file: Option<String>,
+    #[serde(default)]
+    tarball: Option<String>,
+    #[serde(default)]
+    zip_archive: Option<String>,
+    #[serde(default)]
+    binary_image: Option<String>,
+    #[serde(default)]
+    json_image: Option<String>,
+    #[serde(default)]
+    txt_image: Option<String>,
+    #[serde(default)]
+    yaml_image: Option<String>,
+}
+
+impl TemplateInput {
+    fn path(&self) -> Option<&str> {
+        [
+            &self.directory,
+            &self.proto_file,
+            &self.tarball,
+            &self.zip_archive,
+            &self.binary_image,
+            &self.json_image,
+            &self.txt_image,
+            &self.yaml_image,
+        ]
+        .into_iter()
+        .find_map(Option::as_deref)
+    }
+}
+
+/// The last value given for `--long` or `-short` in `flags`, in any of the
+/// spellings the buf CLI accepts.
+fn flag_value<'a>(flags: &'a [String], long: &str, short: &str) -> Option<&'a str> {
+    let long = format!("--{long}");
+    let short = format!("-{short}");
+    let mut value = None;
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        if *flag == long || *flag == short {
+            value = flags.next().map(String::as_str);
+        } else if let Some(rest) = flag.strip_prefix(&long).and_then(|rest| rest.strip_prefix('=')) {
+            value = Some(rest);
+        } else if let Some(rest) = flag.strip_prefix(&short) {
+            value = Some(rest.strip_prefix('=').unwrap_or(rest));
+        }
+    }
+    value
 }
 
 #[derive(Deserialize)]
@@ -171,8 +274,7 @@ impl Resource for BufGenerateResource {
     }
 
     fn resolve(&self, inputs: &BufGenerateInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        inputs.target.resolve(&[inputs.template()], tracker)
+        inputs.sources()?.hash(&self.tracker)
     }
 
     fn ambient(&self, inputs: &BufGenerateInputs) -> Vec<Ambient> {
@@ -360,6 +462,64 @@ mod tests {
         };
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
         assert!(resolved.keys().any(|path| path.ends_with("gen.yaml")), "{resolved:?}");
+    }
+
+    #[test]
+    fn resolve_follows_template_inputs_without_an_input() {
+        let (dir, mut inputs) =
+            with_template("version: v2\ninputs:\n  - directory: proto\n  - module: buf.build/acme/api\n");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("proto")).unwrap();
+        std::fs::create_dir_all(root.join("other")).unwrap();
+        std::fs::write(root.join("proto/a.proto"), "").unwrap();
+        std::fs::write(root.join("other/b.proto"), "").unwrap();
+        let names = |inputs: &BufGenerateInputs| -> Vec<String> {
+            let mut names: Vec<_> = Resource::resolve(&test_resource(), inputs)
+                .unwrap()
+                .into_keys()
+                .map(|path| Path::new(&path).file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&inputs), ["a.proto", "buf.gen.yaml"]);
+        // An input on the command line replaces the template's.
+        inputs.target.input = Some("other".into());
+        assert_eq!(names(&inputs), ["b.proto", "buf.gen.yaml"]);
+    }
+
+    #[test]
+    fn reads_inline_template() {
+        let inputs = BufGenerateInputs {
+            target: BufTarget::default(),
+            template: Some(r#"{"version": "v2", "plugins": [{"local": "protoc-gen-go", "out": "gen"}]}"#.into()),
+            flags: vec![],
+        };
+        assert_eq!(inputs.outputs().unwrap(), [PathBuf::from("gen")]);
+        assert!(inputs.template_file().is_none());
+    }
+
+    #[test]
+    fn output_flag_prefixes_plugin_outputs() {
+        let (dir, mut inputs) = with_template(
+            "version: v2\nplugins:\n  - local: protoc-gen-go\n    out: gen\n  - local: protoc-gen-es\n    out: /abs\n",
+        );
+        for flags in [
+            vec!["-o", "base"],
+            vec!["--output=base"],
+            vec!["--output", "x", "-obase"],
+        ] {
+            inputs.flags = flags.into_iter().map(str::to_owned).collect();
+            assert_eq!(
+                inputs.outputs().unwrap(),
+                [dir.path().join("base/gen"), dir.path().join("base/abs")]
+            );
+        }
+        inputs.flags = vec!["--output=.".into()];
+        assert_eq!(
+            inputs.outputs().unwrap(),
+            [dir.path().join("gen"), PathBuf::from("/abs")]
+        );
     }
 
     #[test]

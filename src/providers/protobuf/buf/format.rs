@@ -71,8 +71,7 @@ impl Resource for BufFormatResource {
     }
 
     fn resolve(&self, inputs: &BufFormatInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        inputs.target.resolve(&[], tracker)
+        inputs.target.sources()?.hash(&self.tracker)
     }
 
     fn ambient(&self, inputs: &BufFormatInputs) -> Vec<Ambient> {
@@ -141,8 +140,7 @@ impl Resource for BufFormatCheckResource {
     }
 
     fn resolve(&self, inputs: &BufFormatInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        inputs.target.resolve(&[], tracker)
+        inputs.target.sources()?.hash(&self.tracker)
     }
 
     fn ambient(&self, inputs: &BufFormatInputs) -> Vec<Ambient> {

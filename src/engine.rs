@@ -557,9 +557,32 @@ fn resolve_hashes(
         let path = Path::new(&output.path);
         if path.is_file() {
             tracked.insert(output.role.clone(), tracker.hash_file(path)?);
+        } else if path.is_dir() {
+            // Each file is tracked under its own key, so deleting or editing
+            // one reruns the block and is reported as a changed path.
+            for file in files_under(path)? {
+                let key = cache.normalize_str(&file.to_string_lossy()).into_owned();
+                tracked.insert(key, tracker.hash_file(&file)?);
+            }
         }
     }
     Ok(ResolvedHashes { sources, tracked })
+}
+
+/// Every file beneath `dir`. Symlinked directories are not followed, so a
+/// link cycle cannot recurse forever.
+fn files_under(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            files.extend(files_under(&path)?);
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 /// The entries of `uncached`. A trailing slash marks a directory in `output`,
@@ -2900,6 +2923,36 @@ lint[module] = go.lint {
         assert_eq!(run()[0].plan.action, PlanAction::Create);
         assert_eq!(run()[0].plan.action, PlanAction::None);
         std::fs::remove_file(&file).unwrap();
+        assert_eq!(run()[0].plan.action, PlanAction::Update);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ok");
+    }
+
+    #[test]
+    fn declared_output_directory_drift_triggers_local_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("gen");
+        let file = out.join("nested/out.txt");
+        let tracker = test_tracker();
+        let store = MemoryStore::new();
+        let output = Output::new(&[]);
+        let input = format!(
+            "build = exec {{\n  command = \"mkdir -p '{}' && printf ok > '{}'\"\n  output = \"{}/\"\n}}\n",
+            file.parent().unwrap().display(),
+            file.display(),
+            out.display(),
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let run = || {
+            let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+            apply(&mut dag, &base, &store, &test_cache(), &output, &[], 1, &tracker).unwrap()
+        };
+
+        assert_eq!(run()[0].plan.action, PlanAction::Create);
+        assert_eq!(run()[0].plan.action, PlanAction::None);
+        std::fs::write(&file, "edited").unwrap();
+        assert_eq!(run()[0].plan.action, PlanAction::Update);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ok");
+        std::fs::remove_dir_all(&out).unwrap();
         assert_eq!(run()[0].plan.action, PlanAction::Update);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "ok");
     }

@@ -109,15 +109,12 @@ impl Resource for BufBreakingResource {
         ResourceKind::Test
     }
 
-    /// A baseline that is a local directory is tracked like the input.
+    /// A local baseline is tracked like the input. A Git baseline is
+    /// tracked by the commit it names, in `plan`.
     fn resolve(&self, inputs: &BufBreakingInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        let mut hashes = inputs.target.resolve(&[], tracker)?;
-        let baseline = super::super::in_dir(inputs.target.dir.as_deref(), &inputs.against);
-        if baseline.is_dir() {
-            hashes.extend(super::super::hash_protos(&[baseline], tracker)?);
-        }
-        Ok(hashes)
+        let mut sources = inputs.target.sources()?;
+        sources.add_input(inputs.target.dir.as_deref(), &inputs.against)?;
+        sources.hash(&self.tracker)
     }
 
     fn ambient(&self, inputs: &BufBreakingInputs) -> Vec<Ambient> {
@@ -231,6 +228,39 @@ mod tests {
         let dir = repo();
         let root = dir.path().to_string_lossy().into_owned();
         assert!(git_baseline_commit(".git#branch=missing", Some(&root)).is_err());
+    }
+
+    #[test]
+    fn resolve_tracks_a_local_baseline_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("current")).unwrap();
+        std::fs::create_dir_all(root.join("baseline/proto")).unwrap();
+        std::fs::write(root.join("current/a.proto"), "").unwrap();
+        std::fs::write(
+            root.join("baseline/buf.yaml"),
+            "version: v2\nmodules:\n  - path: proto\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("baseline/proto/a.proto"), "").unwrap();
+        let inputs = BufBreakingInputs {
+            target: BufTarget {
+                input: Some("current".into()),
+                dir: Some(root.to_string_lossy().into_owned()),
+            },
+            against: "baseline/proto".into(),
+            flags: vec![],
+        };
+        let mut names: Vec<_> = Resource::resolve(&test_resource(), &inputs)
+            .unwrap()
+            .into_keys()
+            .map(|path| path.strip_prefix(&*root.to_string_lossy()).unwrap().to_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["/baseline/buf.yaml", "/baseline/proto/a.proto", "/current/a.proto"]
+        );
     }
 
     #[test]
