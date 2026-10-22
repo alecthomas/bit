@@ -388,8 +388,12 @@ impl Resource for ExecResource {
     /// and `values` reads values back out of it. Neither is something a
     /// receipt written elsewhere can vouch for, so those blocks stay local
     /// and the rest share the files they produce.
+    ///
+    /// A block with no `outputs` produces nothing a receipt could restore,
+    /// so it runs for its side effects, such as a deploy. Another worktree
+    /// skipping it on a shared hit would never perform them.
     fn cache_policy(&self, inputs: &ExecInputs) -> CachePolicy {
-        if inputs.resolve.is_some() || inputs.values.is_some() {
+        if inputs.resolve.is_some() || inputs.values.is_some() || inputs.outputs.is_empty() {
             CachePolicy::Local
         } else {
             CachePolicy::Shared { version: 1 }
@@ -1051,7 +1055,7 @@ mod tests {
         );
     }
 
-    /// `resolve` and `outputs` read state that lives outside the worktree, so
+    /// `resolve` and `values` read state that lives outside the worktree, so
     /// no other worktree can act on what this one observed.
     #[test]
     fn blocks_watching_external_state_stay_local() {
@@ -1059,13 +1063,24 @@ mod tests {
             tracker: test_tracker(),
         };
 
-        let mut inputs = exec_inputs(vec![]);
+        let mut inputs = exec_inputs(vec!["dist/".into()]);
         inputs.resolve = Some("docker inspect thing".into());
         assert_eq!(Resource::cache_policy(&resource, &inputs), CachePolicy::Local);
 
-        let mut inputs = exec_inputs(vec![]);
+        let mut inputs = exec_inputs(vec!["dist/".into()]);
         inputs.values = Some("echo '{}'".into());
         assert_eq!(Resource::cache_policy(&resource, &inputs), CachePolicy::Local);
+    }
+
+    #[test]
+    fn blocks_without_outputs_stay_local() {
+        let resource = ExecResource {
+            tracker: test_tracker(),
+        };
+        assert_eq!(
+            Resource::cache_policy(&resource, &exec_inputs(vec![])),
+            CachePolicy::Local
+        );
     }
 
     #[test]

@@ -1261,7 +1261,9 @@ the worktree that produced them has been deleted:
   exactly that — anything already at the path is replaced, not merged. An
   `exec` block that sets `resolve` or `values` is never shared: those fields
   describe state outside the worktree, which a result recorded elsewhere
-  cannot speak for. If a file is both in `inputs` and `outputs`, its current
+  cannot speak for. An `exec` block with no `outputs` is never shared either:
+  it runs for its side effects, such as a deploy, so every worktree runs it
+  itself. If a file is both in `inputs` and `outputs`, its current
   contents participate in cache lookup. After the command runs, bit hashes
   the new contents before storing the result.
 
