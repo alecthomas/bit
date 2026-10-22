@@ -365,7 +365,14 @@ impl Resource for RustTestResource {
 
     fn resolve(&self, inputs: &Block<RustTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        super::resolve_rust_inputs(inputs.dir.as_deref(), inputs.package.as_deref(), tracker)
+        super::resolve_rust_inputs(
+            &super::Selection {
+                dir: inputs.dir.as_deref(),
+                package: inputs.package.as_deref(),
+                flags: &inputs.flags,
+            },
+            tracker,
+        )
     }
 
     fn plan(

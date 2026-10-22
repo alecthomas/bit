@@ -72,12 +72,13 @@ fn fmt_check_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
 }
 
 fn resolve(inputs: &Block<RustFmtInputs>, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let dir = inputs.dir.as_deref();
-    let mut files = super::resolve_rust_inputs(dir, inputs.package.as_deref(), tracker)?;
-    files.extend(super::hash_existing(
-        &rustfmt_config(dir, inputs.package.as_deref())?,
-        tracker,
-    )?);
+    let selection = super::Selection {
+        dir: inputs.dir.as_deref(),
+        package: inputs.package.as_deref(),
+        flags: &inputs.flags,
+    };
+    let mut files = super::resolve_rust_inputs(&selection, tracker)?;
+    files.extend(super::hash_existing(&rustfmt_config(&selection)?, tracker)?);
     Ok(files)
 }
 
@@ -86,9 +87,9 @@ fn resolve(inputs: &Block<RustFmtInputs>, tracker: &FileTracker) -> Result<BTree
 /// directory and the user's `rustfmt` config directory, as rustfmt
 /// searches. Files inside a package are already its inputs, so the search
 /// starts at each package's directory.
-fn rustfmt_config(dir: Option<&str>, package: Option<&str>) -> Result<Vec<std::path::PathBuf>, BoxError> {
+fn rustfmt_config(selection: &super::Selection) -> Result<Vec<std::path::PathBuf>, BoxError> {
     const NAMES: [&str; 2] = [".rustfmt.toml", "rustfmt.toml"];
-    let mut files = super::config_in_ancestors(&super::package_roots(dir, package)?, &NAMES);
+    let mut files = super::config_in_ancestors(&super::package_roots(selection)?, &NAMES);
     let user_dirs = [dirs::home_dir(), dirs::config_dir().map(|dir| dir.join("rustfmt"))];
     files.extend(
         user_dirs
@@ -243,7 +244,12 @@ mod tests {
     #[test]
     fn rustfmt_config_is_searched_above_packages_and_in_user_dirs() {
         // bit's own workspace, which the tests run in.
-        let files = rustfmt_config(None, Some("bit")).unwrap();
+        let selection = crate::providers::rust::Selection {
+            dir: None,
+            package: Some("bit"),
+            flags: &[],
+        };
+        let files = rustfmt_config(&selection).unwrap();
         let root = std::env::current_dir().unwrap();
         for file in [
             root.parent().unwrap().join("rustfmt.toml"),

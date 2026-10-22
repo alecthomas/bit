@@ -327,18 +327,103 @@ pub fn target_directory(dir: Option<&str>) -> Result<PathBuf, BoxError> {
     Ok(discovered(dir)?.target_dir)
 }
 
-/// The directories of the local packages a block with `package` builds,
-/// as [`resolve_rust_inputs`] selects them.
-pub fn package_roots(dir: Option<&str>, package: Option<&str>) -> Result<Vec<PathBuf>, BoxError> {
-    let discovered = discovered(dir)?;
-    let paths = match package {
-        Some(package) => discovered
-            .packages
-            .get(package)
-            .ok_or_else(|| format!("Rust package '{package}' not found in workspace"))?,
-        None => &discovered.workspace,
-    };
-    Ok(paths.roots.clone())
+/// What a rust block builds: the packages its `package` field and cargo
+/// `flags` select, in the workspace cargo finds from `dir`.
+pub struct Selection<'a> {
+    pub dir: Option<&'a str>,
+    pub package: Option<&'a str>,
+    pub flags: &'a [String],
+}
+
+/// The cargo flags in a block's `flags` that change which packages build.
+#[derive(Debug, Default, PartialEq)]
+struct SelectionFlags {
+    /// `-p`/`--package` specs, by package name.
+    packages: Vec<String>,
+    /// `--workspace` or its alias `--all`.
+    workspace: bool,
+    manifest_path: Option<String>,
+}
+
+impl SelectionFlags {
+    fn parse(flags: &[String]) -> Self {
+        let mut selection = Self::default();
+        let mut flags = flags.iter();
+        while let Some(flag) = flags.next() {
+            let value = |name: &str, flags: &mut std::slice::Iter<String>| match flag.strip_prefix(name) {
+                Some("") => flags.next().cloned(),
+                Some(rest) => rest.strip_prefix('=').map(str::to_owned),
+                None => None,
+            };
+            if flag == "--workspace" || flag == "--all" {
+                selection.workspace = true;
+            } else if let Some(spec) = value("--package", &mut flags).or_else(|| short_value(flag, "-p", &mut flags)) {
+                // A spec may pin a version, as in `name@1.2.3`.
+                let name = spec.split('@').next().unwrap_or(&spec);
+                selection.packages.push(name.to_owned());
+            } else if let Some(path) = value("--manifest-path", &mut flags) {
+                selection.manifest_path = Some(path);
+            }
+        }
+        selection
+    }
+}
+
+/// The value of short flag `name` in `flag`, as `-p name` or `-pname`.
+fn short_value(flag: &str, name: &str, flags: &mut std::slice::Iter<String>) -> Option<String> {
+    match flag.strip_prefix(name)? {
+        "" => flags.next().cloned(),
+        rest if !flag.starts_with("--") => Some(rest.trim_start_matches('=').to_owned()),
+        _ => None,
+    }
+}
+
+impl Selection<'_> {
+    /// The discovered workspace and the input paths of the selected packages.
+    fn paths(&self) -> Result<(DiscoveredPaths, InputPaths), BoxError> {
+        let flags = SelectionFlags::parse(self.flags);
+        // `--manifest-path` points cargo at another workspace, which it
+        // resolves from the manifest's directory.
+        let manifest_dir = flags.manifest_path.as_deref().map(|manifest| {
+            let parent = Path::new(manifest).parent().unwrap_or(Path::new(""));
+            crate::provider::in_dir(self.dir, &parent.to_string_lossy())
+        });
+        let dir = manifest_dir.as_deref().filter(|dir| !dir.is_empty()).or(self.dir);
+        let discovered = discovered(dir)?;
+        let names: Vec<&str> = self
+            .package
+            .into_iter()
+            .chain(flags.packages.iter().map(String::as_str))
+            .collect();
+        if flags.workspace || names.is_empty() {
+            let workspace = discovered.workspace.clone();
+            return Ok((discovered, workspace));
+        }
+        let mut selected = InputPaths {
+            roots: vec![],
+            excluded: discovered.workspace.excluded.clone(),
+            files: vec![],
+        };
+        for name in names {
+            let paths = discovered
+                .packages
+                .get(name)
+                .ok_or_else(|| format!("Rust package '{name}' not found in workspace"))?;
+            selected.roots.extend(paths.roots.iter().cloned());
+            selected.files.extend(paths.files.iter().cloned());
+        }
+        selected.roots.sort();
+        selected.roots.dedup();
+        selected.files.sort();
+        selected.files.dedup();
+        Ok((discovered, selected))
+    }
+}
+
+/// The directories of the local packages a block builds, as
+/// [`resolve_rust_inputs`] selects them.
+pub fn package_roots(selection: &Selection) -> Result<Vec<PathBuf>, BoxError> {
+    Ok(selection.paths()?.1.roots)
 }
 
 /// Each of `names` in every directory from each of `starts` up to the
@@ -371,19 +456,8 @@ pub fn hash_existing(files: &[PathBuf], tracker: &FileTracker) -> Result<BTreeMa
 /// `package` is set, only that package and its transitive local dependencies
 /// are included. The metadata discovery is cached so the call only happens
 /// once per run and `dir`.
-pub fn resolve_rust_inputs(
-    dir: Option<&str>,
-    package: Option<&str>,
-    tracker: &FileTracker,
-) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let discovered = discovered(dir)?;
-    let paths = match package {
-        Some(package) => discovered
-            .packages
-            .get(package)
-            .ok_or_else(|| format!("Rust package '{package}' not found in workspace"))?,
-        None => &discovered.workspace,
-    };
+pub fn resolve_rust_inputs(selection: &Selection, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let (discovered, paths) = selection.paths()?;
 
     let mut result = BTreeMap::new();
     for root in &paths.roots {
@@ -962,7 +1036,12 @@ mod tests {
             .unwrap();
         let ws = ws.to_string_lossy().into_owned();
         let tracker = FileTracker::default();
-        let names: Vec<String> = resolve_rust_inputs(Some(&ws), Some("app"), &tracker)
+        let selection = Selection {
+            dir: Some(&ws),
+            package: Some("app"),
+            flags: &[],
+        };
+        let names: Vec<String> = resolve_rust_inputs(&selection, &tracker)
             .unwrap()
             .into_keys()
             .map(|path| {
@@ -991,6 +1070,42 @@ mod tests {
                 "has {unexpected}: {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn selection_flags_are_parsed_as_cargo_reads_them() {
+        let flags =
+            |flags: &[&str]| SelectionFlags::parse(&flags.iter().map(|flag| (*flag).to_owned()).collect::<Vec<_>>());
+        assert_eq!(
+            flags(&["-p", "a", "--package=b@1.0", "-pc", "--package", "d", "--release"]).packages,
+            ["a", "b", "c", "d"]
+        );
+        assert!(flags(&["--workspace"]).workspace);
+        assert!(flags(&["--all"]).workspace);
+        assert_eq!(flags(&["--profile", "x"]), SelectionFlags::default());
+        assert_eq!(
+            flags(&["--manifest-path", "sub/Cargo.toml"]).manifest_path.as_deref(),
+            Some("sub/Cargo.toml")
+        );
+    }
+
+    #[test]
+    fn flags_widen_the_selected_packages() {
+        let dir = workspace_with_path_dependencies();
+        let ws = dir.path().join("ws").to_string_lossy().into_owned();
+        let roots = |flags: &[&str]| {
+            let flags: Vec<String> = flags.iter().map(|flag| (*flag).to_owned()).collect();
+            let selection = Selection {
+                dir: Some(&ws),
+                package: Some("app"),
+                flags: &flags,
+            };
+            package_roots(&selection).unwrap()
+        };
+        let has_other = |roots: &[PathBuf]| roots.iter().any(|root| root.ends_with("ws/other"));
+        assert!(!has_other(&roots(&[])));
+        assert!(has_other(&roots(&["-p", "other"])));
+        assert!(has_other(&roots(&["--workspace"])));
     }
 
     #[test]

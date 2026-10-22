@@ -56,10 +56,10 @@ const CLIPPY_CONF_DIR: &str = "CLIPPY_CONF_DIR";
 /// The config files clippy may load: `.clippy.toml` or `clippy.toml` from
 /// `CLIPPY_CONF_DIR`, or else from each linted package's directory, and
 /// every parent directory, as clippy searches.
-fn clippy_config(dir: Option<&str>, package: Option<&str>) -> Result<Vec<PathBuf>, BoxError> {
+fn clippy_config(selection: &super::Selection) -> Result<Vec<PathBuf>, BoxError> {
     let starts = match std::env::var_os(CLIPPY_CONF_DIR) {
         Some(conf_dir) => vec![PathBuf::from(conf_dir)],
-        None => super::package_roots(dir, package)?,
+        None => super::package_roots(selection)?,
     };
     Ok(super::config_in_ancestors(&starts, &[".clippy.toml", "clippy.toml"]))
 }
@@ -95,12 +95,13 @@ impl Resource for RustClippyResource {
 
     fn resolve(&self, inputs: &Block<RustClippyInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        let dir = inputs.dir.as_deref();
-        let mut hashes = super::resolve_rust_inputs(dir, inputs.package.as_deref(), tracker)?;
-        hashes.extend(super::hash_existing(
-            &clippy_config(dir, inputs.package.as_deref())?,
-            tracker,
-        )?);
+        let selection = super::Selection {
+            dir: inputs.dir.as_deref(),
+            package: inputs.package.as_deref(),
+            flags: &inputs.flags,
+        };
+        let mut hashes = super::resolve_rust_inputs(&selection, tracker)?;
+        hashes.extend(super::hash_existing(&clippy_config(&selection)?, tracker)?);
         Ok(hashes)
     }
 
