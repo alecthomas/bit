@@ -905,6 +905,15 @@ fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
         .unwrap();
         fs::write(root.join("src/main.rs"), "fn main() { println!(\"{}\", file!()); }\n").unwrap();
         fs::write(root.join("BUILD.bit"), "app = rust.exe {}\n").unwrap();
+        // The lockfile is an input. Without one the first build writes it,
+        // so the key A publishes would differ from the one B looks up.
+        let status = Command::new("cargo")
+            .args(["generate-lockfile", "--offline"])
+            .current_dir(root)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
     /// Whether any regular file under `dir` contains `needle`.
     fn artifacts_contain(dir: &std::path::Path, needle: &[u8]) -> bool {

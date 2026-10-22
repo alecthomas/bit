@@ -254,12 +254,17 @@ pub fn build_ambient(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec
     ambient
 }
 
-/// Cached source directories, individual files, and target directory
-/// discovered by `cargo metadata`. The cache avoids re-running the expensive
-/// metadata call on every resolve.
+/// Package directories, individual files, and directories to leave out,
+/// discovered by `cargo metadata`. The cache avoids re-running the
+/// expensive metadata call on every resolve.
 #[derive(Clone)]
 struct InputPaths {
-    globs: Vec<String>,
+    /// Directories of the local packages, whose files are listed afresh on
+    /// every resolve so a new file is seen.
+    roots: Vec<PathBuf>,
+    /// The target directory and every local package directory. A package
+    /// nested in another's directory is an input only through its own root.
+    excluded: Vec<PathBuf>,
     files: Vec<PathBuf>,
 }
 
@@ -300,11 +305,13 @@ pub fn target_directory(dir: Option<&str>) -> Result<PathBuf, BoxError> {
 
 /// Resolve Rust source files for change detection.
 ///
-/// Uses `cargo metadata` in `dir` to discover local package source
-/// directories, then hashes `.rs` files within them via the tracker. When
-/// `package` is set, only that package and its transitive local workspace
-/// dependencies are included. The metadata discovery is cached so the call
-/// only happens once per run and `dir`.
+/// Uses `cargo metadata` in `dir` to discover the local packages, then
+/// hashes every file in their directories that Git does not ignore. Builds
+/// read more than `.rs` files: `include_str!` and `include_bytes!` data,
+/// `#[path]` modules, files a build script reads, and test fixtures. When
+/// `package` is set, only that package and its transitive local dependencies
+/// are included. The metadata discovery is cached so the call only happens
+/// once per run and `dir`.
 pub fn resolve_rust_inputs(
     dir: Option<&str>,
     package: Option<&str>,
@@ -320,8 +327,8 @@ pub fn resolve_rust_inputs(
     };
 
     let mut result = BTreeMap::new();
-    for pattern in &paths.globs {
-        result.extend(tracker.hash_glob(pattern)?);
+    for root in &paths.roots {
+        result.extend(tracker.hash_files(&package_files(root, &paths.excluded))?);
     }
     for path in &paths.files {
         if path.is_file() {
@@ -344,11 +351,16 @@ fn discover_paths(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
         .ok_or("`cargo metadata` output has no target_directory")?;
     let local = local_packages(&meta);
     let workspace_values: Vec<_> = local.values().copied().collect();
-    let workspace = discover_input_paths(&workspace_values, &cwd, dir);
+    let mut excluded: Vec<PathBuf> = workspace_values
+        .iter()
+        .filter_map(|package| package_root(package))
+        .collect();
+    excluded.push(target_dir.clone());
+    let workspace = discover_input_paths(&workspace_values, &cwd, dir, &excluded);
     let mut packages = HashMap::new();
     for (name, member) in workspace_packages_by_name(&meta)? {
         let values = local_closure(&meta, &local, member)?;
-        packages.insert(name, discover_input_paths(&values, &cwd, dir));
+        packages.insert(name, discover_input_paths(&values, &cwd, dir, &excluded));
     }
 
     Ok(DiscoveredPaths {
@@ -358,21 +370,23 @@ fn discover_paths(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
     })
 }
 
-/// The input paths of `packages`, found relative to `cwd`, where cargo runs,
-/// and returned as bit's process sees them: prefixed by `dir`.
-fn discover_input_paths(packages: &[&serde_json::Value], cwd: &Path, dir: Option<&str>) -> InputPaths {
-    let source_dirs = discover_source_dirs(packages, cwd);
-    let in_dir = |path: &Path| PathBuf::from(crate::provider::in_dir(dir, &path.to_string_lossy()));
+/// The directory of a package: where its manifest is.
+fn package_root(package: &serde_json::Value) -> Option<PathBuf> {
+    let manifest = package.get("manifest_path")?.as_str()?;
+    Some(Path::new(manifest).parent()?.to_path_buf())
+}
 
-    let mut globs = Vec::new();
-    for source_dir in &source_dirs {
-        let rel = source_dir.strip_prefix(cwd).unwrap_or(source_dir);
-        if rel.as_os_str().is_empty() {
-            continue;
-        }
-        let rel = crate::provider::glob_in_dir(dir, &glob::Pattern::escape(&rel.to_string_lossy()));
-        globs.push(format!("{rel}/**/*.rs"));
-    }
+/// The input paths of `packages`, found relative to `cwd`, where cargo runs.
+/// Files are returned as bit's process sees them: prefixed by `dir`.
+fn discover_input_paths(
+    packages: &[&serde_json::Value],
+    cwd: &Path,
+    dir: Option<&str>,
+    excluded: &[PathBuf],
+) -> InputPaths {
+    let in_dir = |path: &Path| PathBuf::from(crate::provider::in_dir(dir, &path.to_string_lossy()));
+    let mut roots: Vec<PathBuf> = packages.iter().filter_map(|package| package_root(package)).collect();
+    roots.extend(packages.iter().flat_map(|package| outside_target_dirs(package)));
 
     let mut files: Vec<PathBuf> = packages
         .iter()
@@ -387,11 +401,77 @@ fn discover_input_paths(packages: &[&serde_json::Value], cwd: &Path, dir: Option
         }
     }
 
-    globs.sort();
-    globs.dedup();
+    roots.sort();
+    roots.dedup();
     files.sort();
     files.dedup();
-    InputPaths { globs, files }
+    InputPaths {
+        roots,
+        excluded: excluded.to_vec(),
+        files,
+    }
+}
+
+/// Every file in the package directory `root` that Git does not ignore,
+/// except those under `excluded` other than `root` itself. Outside a Git
+/// repository, such as for a path dependency elsewhere, every file but
+/// those in `.git` directories.
+fn package_files(root: &Path, excluded: &[PathBuf]) -> Vec<PathBuf> {
+    let files = git_files(root).unwrap_or_else(|| {
+        let mut files = Vec::new();
+        walk_files(root, &mut files);
+        files
+    });
+    files
+        .into_iter()
+        .filter(|file| !excluded.iter().any(|dir| dir != root && file.starts_with(dir)))
+        .collect()
+}
+
+/// The files under `root` that Git tracks or would track, or `None` when
+/// `root` is not in a Git work tree.
+fn git_files(root: &Path) -> Option<Vec<PathBuf>> {
+    let output = crate::git::command()
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            ".",
+        ])
+        .current_dir(root)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| root.join(String::from_utf8_lossy(path).as_ref()))
+            // A tracked file deleted from the work tree is still listed.
+            .filter(|path| path.is_file())
+            .collect(),
+    )
+}
+
+fn walk_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() && entry.file_name() != ".git" => walk_files(&path, files),
+            Ok(_) if path.is_file() => files.push(path),
+            _ => {}
+        }
+    }
 }
 
 /// Run `cargo metadata` once per process for `dir`.
@@ -654,39 +734,20 @@ enum DependencyKinds {
     NonDev,
 }
 
-/// Directories containing local package sources (the parent of each
-/// target's src_path), relative to `cwd`.
-fn discover_source_dirs(packages: &[&serde_json::Value], cwd: &Path) -> HashSet<PathBuf> {
-    let mut dirs = HashSet::new();
-
-    // Each package has targets with a src_path; collect their parent directories.
-    for package in packages {
-        // Add the package root (parent of Cargo.toml) for tests/, benches/, examples/.
-        if let Some(manifest) = package.get("manifest_path").and_then(|manifest| manifest.as_str())
-            && let Some(package_dir) = Path::new(manifest).parent()
-        {
-            dirs.insert(package_dir.to_path_buf());
-        }
-        // Add each target's source directory.
-        if let Some(targets) = package.get("targets").and_then(|targets| targets.as_array()) {
-            for target in targets {
-                if let Some(source) = target.get("src_path").and_then(|source| source.as_str())
-                    && let Some(parent) = Path::new(source).parent()
-                {
-                    dirs.insert(parent.to_path_buf());
-                }
-            }
-        }
-    }
-
-    // Canonicalize relative to cwd and deduplicate parents that are subdirs of others.
-    let canonical: HashSet<PathBuf> = dirs.into_iter().filter_map(|d| d.canonicalize().ok()).collect();
-
-    // Convert back to relative paths.
-    let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    canonical
-        .into_iter()
-        .map(|d| d.strip_prefix(&cwd_canon).unwrap_or(&d).to_path_buf())
+/// The directory of each of `package`'s targets that lies outside the
+/// package directory, which a `[[bin]]` or `[lib]` `path` can name.
+fn outside_target_dirs(package: &serde_json::Value) -> Vec<PathBuf> {
+    let Some(root) = package_root(package) else {
+        return vec![];
+    };
+    package
+        .get("targets")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|target| Some(Path::new(target.get("src_path")?.as_str()?).parent()?.to_path_buf()))
+        .filter(|dir| !dir.starts_with(&root))
         .collect()
 }
 
@@ -800,6 +861,60 @@ mod tests {
     }
 
     #[test]
+    fn inputs_are_every_package_file_git_does_not_ignore() {
+        let dir = workspace_with_path_dependencies();
+        write(
+            dir.path(),
+            &[
+                ("ws/.gitignore", "ignored.txt\n"),
+                ("ws/app/build.rs", "fn main() {}\n"),
+                ("ws/app/data/fixture.json", "{}"),
+                ("ws/app/ignored.txt", ""),
+                ("ws/target/debug/out.rs", ""),
+                ("lib/data.bin", ""),
+            ],
+        );
+        let ws = dir.path().join("ws");
+        crate::git::command()
+            .arg("init")
+            .arg("-q")
+            .current_dir(&ws)
+            .status()
+            .unwrap();
+        let ws = ws.to_string_lossy().into_owned();
+        let tracker = FileTracker::default();
+        let names: Vec<String> = resolve_rust_inputs(Some(&ws), Some("app"), &tracker)
+            .unwrap()
+            .into_keys()
+            .map(|path| {
+                let path = Path::new(&path);
+                path.strip_prefix(dir.path().canonicalize().unwrap())
+                    .or_else(|_| path.strip_prefix(dir.path()))
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        for expected in [
+            "ws/app/build.rs",
+            "ws/app/data/fixture.json",
+            "ws/app/src/main.rs",
+            "lib/data.bin",
+        ] {
+            assert!(
+                names.iter().any(|name| name.ends_with(expected)),
+                "missing {expected}: {names:?}"
+            );
+        }
+        for unexpected in ["ignored.txt", "target/debug/out.rs", "other/src/lib.rs"] {
+            assert!(
+                !names.iter().any(|name| name.ends_with(unexpected)),
+                "has {unexpected}: {names:?}"
+            );
+        }
+    }
+
+    #[test]
     fn discovery_follows_path_dependencies_and_patches_outside_the_workspace() {
         let dir = workspace_with_path_dependencies();
         let ws = dir.path().join("ws").to_string_lossy().into_owned();
@@ -859,13 +974,13 @@ mod tests {
             std::fs::write(dir.path().join(path), "").unwrap();
         }
 
-        let paths = discover_input_paths(&[], dir.path(), None);
+        let paths = discover_input_paths(&[], dir.path(), None, &[]);
         for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
             assert!(paths.files.contains(&PathBuf::from(path)), "missing {path}");
         }
 
         // A block's `dir` prefixes every path, as bit's process sees it.
-        let paths = discover_input_paths(&[], dir.path(), Some("crates/app"));
+        let paths = discover_input_paths(&[], dir.path(), Some("crates/app"), &[]);
         for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
             let path = Path::new("crates/app").join(path);
             assert!(paths.files.contains(&path), "missing {}", path.display());

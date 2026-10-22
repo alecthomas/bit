@@ -1125,7 +1125,10 @@ Parallel execution with `-j N` (defaults to CPU count).
 Rust resources with a `package` select that package and its transitive local
 dependencies for change detection, as cargo resolves them. Local dependencies
 include path dependencies and `[patch]` paths outside the workspace. Without
-`package`, they track every local package. All Rust resources also track
+`package`, they track every local package. A package's inputs are every file
+in its directory that Git does not ignore, apart from the target directory and
+nested packages, because builds also read `include_str!` data, files a build
+script reads, and test fixtures. All Rust resources also track
 `rustfmt.toml` and `.cargo/config.toml` at the workspace root.
 
 Each resource also fingerprints the ambient state its result depends on:
