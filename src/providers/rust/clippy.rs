@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,20 @@ pub struct RustClippyResource {
     pub tracker: Arc<FileTracker>,
 }
 
+/// Overrides where clippy starts its search for configuration.
+const CLIPPY_CONF_DIR: &str = "CLIPPY_CONF_DIR";
+
+/// The config files clippy may load: `.clippy.toml` or `clippy.toml` from
+/// `CLIPPY_CONF_DIR`, or else from each linted package's directory, and
+/// every parent directory, as clippy searches.
+fn clippy_config(dir: Option<&str>, package: Option<&str>) -> Result<Vec<PathBuf>, BoxError> {
+    let starts = match std::env::var_os(CLIPPY_CONF_DIR) {
+        Some(conf_dir) => vec![PathBuf::from(conf_dir)],
+        None => super::package_roots(dir, package)?,
+    };
+    Ok(super::config_in_ancestors(&starts, &[".clippy.toml", "clippy.toml"]))
+}
+
 fn clippy_command(inputs: &Block<RustClippyInputs>) -> CargoCommand {
     let mut cargo = inputs.env.cargo("clippy", inputs.dir.as_deref());
     if let Some(pkg) = &inputs.package {
@@ -72,12 +87,21 @@ impl Resource for RustClippyResource {
     }
 
     fn ambient(&self, inputs: &Block<RustClippyInputs>) -> Vec<Ambient> {
-        super::build_ambient(&inputs.env, inputs.dir.as_deref(), &[&["cargo", "clippy", "--version"]])
+        let mut ambient =
+            super::build_ambient(&inputs.env, inputs.dir.as_deref(), &[&["cargo", "clippy", "--version"]]);
+        ambient.push(Ambient::Variable(CLIPPY_CONF_DIR.to_owned()));
+        ambient
     }
 
     fn resolve(&self, inputs: &Block<RustClippyInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        super::resolve_rust_inputs(inputs.dir.as_deref(), inputs.package.as_deref(), tracker)
+        let dir = inputs.dir.as_deref();
+        let mut hashes = super::resolve_rust_inputs(dir, inputs.package.as_deref(), tracker)?;
+        hashes.extend(super::hash_existing(
+            &clippy_config(dir, inputs.package.as_deref())?,
+            tracker,
+        )?);
+        Ok(hashes)
     }
 
     fn plan(

@@ -308,6 +308,41 @@ pub fn target_directory(dir: Option<&str>) -> Result<PathBuf, BoxError> {
     Ok(discovered(dir)?.target_dir)
 }
 
+/// The directories of the local packages a block with `package` builds,
+/// as [`resolve_rust_inputs`] selects them.
+pub fn package_roots(dir: Option<&str>, package: Option<&str>) -> Result<Vec<PathBuf>, BoxError> {
+    let discovered = discovered(dir)?;
+    let paths = match package {
+        Some(package) => discovered
+            .packages
+            .get(package)
+            .ok_or_else(|| format!("Rust package '{package}' not found in workspace"))?,
+        None => &discovered.workspace,
+    };
+    Ok(paths.roots.clone())
+}
+
+/// Each of `names` in every directory from each of `starts` up to the
+/// filesystem root, as tools such as clippy and rustfmt search for their
+/// configuration. Hashed when they exist, so a file added closer to a
+/// package than the one in use is seen.
+pub fn config_in_ancestors(starts: &[PathBuf], names: &[&str]) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = starts
+        .iter()
+        .flat_map(|start| start.ancestors())
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .collect();
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Hash the `files` that exist.
+pub fn hash_existing(files: &[PathBuf], tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let existing: Vec<PathBuf> = files.iter().filter(|path| path.is_file()).cloned().collect();
+    tracker.hash_files(&existing)
+}
+
 /// Resolve Rust source files for change detection.
 ///
 /// Uses `cargo metadata` in `dir` to discover the local packages, then
@@ -990,6 +1025,26 @@ mod tests {
         });
 
         assert_eq!(workspace_package_names(&metadata).unwrap(), vec!["a", "z"]);
+    }
+
+    #[test]
+    fn config_in_ancestors_searches_every_parent_of_every_start() {
+        let files = config_in_ancestors(
+            &[PathBuf::from("/repo/a"), PathBuf::from("/repo/b")],
+            &[".clippy.toml", "clippy.toml"],
+        );
+        for file in [
+            "/repo/a/clippy.toml",
+            "/repo/b/.clippy.toml",
+            "/repo/clippy.toml",
+            "/clippy.toml",
+        ] {
+            assert!(files.contains(&PathBuf::from(file)), "missing {file}: {files:?}");
+        }
+        assert_eq!(
+            files.iter().filter(|file| file.ends_with("repo/clippy.toml")).count(),
+            1
+        );
     }
 
     #[test]

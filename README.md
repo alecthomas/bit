@@ -1131,7 +1131,9 @@ nested packages, because builds also read `include_str!` data, files a build
 script reads, and test fixtures. All Rust resources also track the workspace
 root's `Cargo.toml` and `Cargo.lock`, `rustfmt.toml` where cargo runs, and
 every Cargo config file cargo merges: `.cargo/config.toml` or `.cargo/config`
-where cargo runs, in each parent directory, and in `CARGO_HOME`.
+where cargo runs, in each parent directory, and in `CARGO_HOME`. `rust.clippy`
+also tracks `.clippy.toml` and `clippy.toml` in each linted package's directory
+and its parents, or from `CLIPPY_CONF_DIR` when that is set.
 
 Each resource also fingerprints the ambient state its result depends on:
 the tools it runs and the environment variables it reads. bit records it
