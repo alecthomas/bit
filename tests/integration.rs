@@ -99,7 +99,7 @@ fn single_exec_block() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("hello.txt");
     let input = format!(
-        "hello = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        "hello = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         out.display(),
         out.display(),
     );
@@ -118,8 +118,8 @@ fn chained_blocks_with_refs() {
     let file_b = dir.path().join("b.txt");
     let input = format!(
         concat!(
-            "a = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "a = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         ),
         file_a.display(),
         file_a.display(),
@@ -138,7 +138,7 @@ fn plan_then_apply() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.txt");
     let input = format!(
-        "build = exec {{\n  command = \"echo built > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        "build = exec {{\n  command = \"echo built > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         out.display(),
         out.display(),
     );
@@ -158,7 +158,7 @@ fn second_apply_is_noop() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.txt");
     let input = format!(
-        "build = exec {{\n  command = \"echo built > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        "build = exec {{\n  command = \"echo built > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         out.display(),
         out.display(),
     );
@@ -174,7 +174,7 @@ fn destroy_removes_state() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.txt");
     let input = format!(
-        "build = exec {{\n  command = \"echo hi > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        "build = exec {{\n  command = \"echo hi > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         out.display(),
         out.display(),
     );
@@ -194,8 +194,8 @@ fn explicit_block_excluded_from_default_apply() {
     let out_b = dir.path().join("b.txt");
     let input = format!(
         concat!(
-            "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "explicit b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "explicit b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         ),
         out_a.display(),
         out_a.display(),
@@ -232,7 +232,7 @@ fn protected_block_survives_destroy() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.txt");
     let input = format!(
-        "protected build = exec {{\n  command = \"echo hi > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        "protected build = exec {{\n  command = \"echo hi > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         out.display(),
         out.display(),
     );
@@ -250,8 +250,8 @@ fn target_filters_execution() {
     let out_b = dir.path().join("b.txt");
     let input = format!(
         concat!(
-            "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             "target just_a = [a]\n",
         ),
         out_a.display(),
@@ -286,7 +286,7 @@ fn let_bindings_in_block_fields() {
     let input = format!(
         concat!(
             "let msg = \"hello world\"\n",
-            "build = exec {{\n  command = \"echo #{{msg}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "build = exec {{\n  command = \"echo #{{msg}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         ),
         out.display(),
         out.display(),
@@ -303,7 +303,7 @@ fn params_with_defaults() {
     let input = format!(
         concat!(
             "param msg : string = \"default\"\n",
-            "build = exec {{\n  command = \"echo #{{msg}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "build = exec {{\n  command = \"echo #{{msg}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         ),
         out.display(),
         out.display(),
@@ -320,7 +320,7 @@ fn pipe_in_let_binding() {
     let input = format!(
         concat!(
             "let sha = exec(\"echo abc123\") | trim\n",
-            "build = exec {{\n  command = \"echo #{{sha}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "build = exec {{\n  command = \"echo #{{sha}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         ),
         out.display(),
         out.display(),
@@ -339,10 +339,10 @@ fn diamond_dependency() {
     let out_d = dir.path().join("d.txt");
     let input = format!(
         concat!(
-            "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo b #{{a.path}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "c = exec {{\n  command = \"echo c #{{a.path}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "d = exec {{\n  command = \"echo d #{{b.path}} #{{c.path}} > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo b #{{a.path}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "c = exec {{\n  command = \"echo c #{{a.path}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "d = exec {{\n  command = \"echo d #{{b.path}} #{{c.path}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         ),
         out_a.display(),
         out_a.display(),
@@ -371,8 +371,8 @@ fn dependency_change_propagates_to_plan() {
     // Apply both blocks
     let input_v1 = format!(
         concat!(
-            "a = exec {{\n  command = \"echo v1 > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo ok > {}\"\n  output = \"{}\"\n  inputs = []\n  depends_on = [a]\n}}\n",
+            "a = exec {{\n  command = \"echo v1 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  depends_on = [a]\n}}\n",
         ),
         out_a.display(),
         out_a.display(),
@@ -398,8 +398,8 @@ fn dependency_change_propagates_to_plan() {
     // Change a's command (simulating a source change)
     let input_v2 = format!(
         concat!(
-            "a = exec {{\n  command = \"echo v2 > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo ok > {}\"\n  output = \"{}\"\n  inputs = []\n  depends_on = [a]\n}}\n",
+            "a = exec {{\n  command = \"echo v2 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  depends_on = [a]\n}}\n",
         ),
         out_a.display(),
         out_a.display(),
@@ -422,7 +422,7 @@ fn dependency_change_propagates_to_plan() {
 
     // Apply a only, then plan should still show b as needing update (cross-run)
     let input_a_only = format!(
-        "a = exec {{\n  command = \"echo v2 > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        "a = exec {{\n  command = \"echo v2 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         out_a.display(),
         out_a.display(),
     );
@@ -451,8 +451,8 @@ fn after_does_not_propagate_changes() {
     // Apply both blocks — b runs after a but is not content-coupled
     let input_v1 = format!(
         concat!(
-            "a = exec {{\n  command = \"echo v1 > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo ok > {}\"\n  output = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
+            "a = exec {{\n  command = \"echo v1 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
         ),
         out_a.display(),
         out_a.display(),
@@ -465,8 +465,8 @@ fn after_does_not_propagate_changes() {
     // Change a's command
     let input_v2 = format!(
         concat!(
-            "a = exec {{\n  command = \"echo v2 > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo ok > {}\"\n  output = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
+            "a = exec {{\n  command = \"echo v2 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
         ),
         out_a.display(),
         out_a.display(),
@@ -492,7 +492,7 @@ fn after_does_not_propagate_changes() {
 fn doc_comments_preserved() {
     let input = concat!(
         "# The server\n",
-        "server = exec {\n  command = \"echo hi\"\n  output = \"out\"\n  inputs = []\n}\n",
+        "server = exec {\n  command = \"echo hi\"\n  outputs = \"out\"\n  inputs = []\n}\n",
         "# Build everything\n",
         "target build = [server]\n",
     );
@@ -511,7 +511,7 @@ fn dump_before_apply() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.txt");
     let input = format!(
-        "build = exec {{\n  command = \"echo hi > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        "build = exec {{\n  command = \"echo hi > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         out.display(),
         out.display(),
     );
@@ -525,7 +525,7 @@ fn dump_after_apply() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.txt");
     let input = format!(
-        "build = exec {{\n  command = \"echo hi > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+        "build = exec {{\n  command = \"echo hi > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
         out.display(),
         out.display(),
     );
@@ -542,8 +542,8 @@ fn dump_with_target() {
     let out_b = dir.path().join("b.txt");
     let input = format!(
         concat!(
-            "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            "b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             "target just_a = [a]\n",
         ),
         out_a.display(),
@@ -602,7 +602,7 @@ fn module_end_to_end() {
                 "param msg : string\n",
                 "inner = exec {{\n",
                 "  command = \"echo #{{msg}} > {}\"\n",
-                "  output = \"{}\"\n",
+                "  outputs = \"{}\"\n",
                 "  inputs = []\n",
                 "}}\n",
                 "output result = inner.path\n",
@@ -641,7 +641,7 @@ fn module_output_forwarding() {
                 "param msg : string\n",
                 "inner = exec {{\n",
                 "  command = \"echo #{{msg}} > {}\"\n",
-                "  output = \"{}\"\n",
+                "  outputs = \"{}\"\n",
                 "  inputs = []\n",
                 "}}\n",
                 "output result = inner.path\n",
@@ -658,7 +658,7 @@ fn module_output_forwarding() {
             "}}\n",
             "consumer = exec {{\n",
             "  command = \"cp #{{inst.result}} {}\"\n",
-            "  output = \"{}\"\n",
+            "  outputs = \"{}\"\n",
             "  inputs = []\n",
             "}}\n",
         ),
@@ -688,7 +688,7 @@ fn module_multiple_instances() {
         "mymod",
         "mymod",
         "param msg : string\nparam outfile : string\n\
-         inner = exec {\n  command = \"echo #{msg} > #{outfile}\"\n  output = outfile\n  inputs = []\n}\n\
+         inner = exec {\n  command = \"echo #{msg} > #{outfile}\"\n  outputs = outfile\n  inputs = []\n}\n\
          output result = inner.path\n",
     );
 
@@ -719,7 +719,7 @@ fn matrix_end_to_end() {
             "let arch = [\"amd64\", \"arm64\"]\n",
             "build[arch] = exec {{\n",
             "  command = \"echo #{{arch}} > {dir}/out-#{{arch}}.txt\"\n",
-            "  output = \"{dir}/out-#{{arch}}.txt\"\n",
+            "  outputs = \"{dir}/out-#{{arch}}.txt\"\n",
             "  inputs = []\n",
             "}}\n",
         ),
@@ -746,12 +746,12 @@ fn parameterized_matrix_slice_end_to_end() {
             "let arch = [\"amd64\", \"arm64\"]\n",
             "build[arch](tag : string) = exec {{\n",
             "  command = \"echo #{{tag}}-#{{arch}} > {dir}/out-#{{arch}}.txt\"\n",
-            "  output = \"{dir}/out-#{{arch}}.txt\"\n",
+            "  outputs = \"{dir}/out-#{{arch}}.txt\"\n",
             "  inputs = []\n",
             "}}\n",
             "chosen = exec {{\n",
             "  command = \"cat #{{build[\"arm64\"](tag = \"1.2.3\").path}} > {dir}/chosen.txt\"\n",
-            "  output = \"{dir}/chosen.txt\"\n",
+            "  outputs = \"{dir}/chosen.txt\"\n",
             "  inputs = []\n",
             "}}\n",
             "target default = [chosen]\n",

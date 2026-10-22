@@ -540,7 +540,7 @@ mod tests {
         let input = r#"
 server = exec {
   command = "go build"
-  output = "server"
+  outputs = "server"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -557,7 +557,7 @@ server = exec {
 let name = "hello"
 server = exec {
   command = name
-  output = "out"
+  outputs = "out"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -572,7 +572,7 @@ server = exec {
 param env : string
 server = exec {
   command = env
-  output = "out"
+  outputs = "out"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -643,7 +643,7 @@ let command = "#{prefix} echo"
 
 crate[package] = exec {
   command = "build #{package}"
-  output = "out-#{package}"
+  outputs = "out-#{package}"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -712,11 +712,11 @@ crate[package] = exec {
         let input = r#"
 a = exec {
   command = "build a"
-  output = "a"
+  outputs = "a"
 }
 b = exec {
   command = a.path
-  output = "b"
+  outputs = "b"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -732,9 +732,9 @@ b = exec {
         // Three independent blocks defined out of alphabetical order.
         // Stable order should be alphabetical regardless of input order.
         let input = r#"
-zebra = exec { command = "z" output = "z" }
-apple = exec { command = "a" output = "a" }
-mango = exec { command = "m" output = "m" }
+zebra = exec { command = "z" outputs = "z" }
+apple = exec { command = "a" outputs = "a" }
+mango = exec { command = "m" outputs = "m" }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
@@ -746,11 +746,11 @@ mango = exec { command = "m" output = "m" }
         // integration-test content-depends on debug and has a phase-edge
         // ordering-dep on fmt. Primary should be debug.
         let input = r#"
-pre fmt = exec { command = "fmt" output = "fmt" }
-debug = exec { command = "d" output = "d" }
+pre fmt = exec { command = "fmt" outputs = "fmt" }
+debug = exec { command = "d" outputs = "d" }
 integration-test = exec {
   command  = "t"
-  output   = "t"
+  outputs   = "t"
   depends_on = [debug]
 }
 "#;
@@ -766,7 +766,7 @@ integration-test = exec {
         let input = r#"
 server = exec {
   command = "build"
-  output = "out"
+  outputs = "out"
 }
 target build = [server]
 "#;
@@ -780,16 +780,16 @@ target build = [server]
     fn duplicate_declaration_names_are_rejected() {
         let cases = [
             (
-                "clippy = exec { command = \"lint\" output = \"out\" }\ntarget clippy = [clippy]\n",
+                "clippy = exec { command = \"lint\" outputs = \"out\" }\ntarget clippy = [clippy]\n",
                 "block",
             ),
             (
-                "target clippy = [clippy]\nclippy = exec { command = \"lint\" output = \"out\" }\n",
+                "target clippy = [clippy]\nclippy = exec { command = \"lint\" outputs = \"out\" }\n",
                 "target",
             ),
             ("target clippy = []\ntarget clippy = []\n", "target"),
             (
-                "clippy(value : string) = exec { command = value output = \"out\" }\ntarget clippy = []\n",
+                "clippy(value : string) = exec { command = value outputs = \"out\" }\ntarget clippy = []\n",
                 "block",
             ),
             ("param clippy : string\ntarget clippy = []\n", "param"),
@@ -814,7 +814,7 @@ target build = [server]
             dir.path(),
             "mymod",
             "mymod",
-            "clippy = exec { command = \"lint\" output = \"out\" }\ntarget clippy = [clippy]\n",
+            "clippy = exec { command = \"lint\" outputs = \"out\" }\ntarget clippy = [clippy]\n",
         );
         let module = parser::parse("inst = mymod {}\n", "<test>").unwrap();
         let error = match load(
@@ -839,7 +839,7 @@ target build = [server]
         let input = r#"
 image(tag : string) = exec {
   command = "build #{tag}"
-  output = "out"
+  outputs = "out"
 }
 target publish(tag : string) = [image(tag = tag)]
 "#;
@@ -868,7 +868,7 @@ target publish(tag : string) = [image(tag = tag)]
     #[test]
     fn parameterized_invocations_share_equal_arguments_and_separate_different_arguments() {
         let input = r#"
-job(value : string) = exec { command = value output = "out" }
+job(value : string) = exec { command = value outputs = "out" }
 target first(value : string) = [job(value = value)]
 target second(value : string) = [job(value = value)]
 "#;
@@ -901,16 +901,16 @@ target second(value : string) = [job(value = value)]
         let input = r#"
 prepare(package : string) = exec {
   command = "prepare #{package}"
-  output = "prepared"
+  outputs = "prepared"
 }
 compile(package : string) = exec {
   command = prepare(package = package).path
-  output = "compiled"
+  outputs = "compiled"
   depends_on = [prepare(package = package)]
 }
 release(package : string) = exec {
   command = compile(package = package).path
-  output = "released"
+  outputs = "released"
   after = [prepare(package = package)]
 }
 target publish(package : string) = [release(package = package)]
@@ -943,12 +943,12 @@ let arch = ["amd64", "arm64"]
 
 prepare(arch : string) = exec {
   command = "prepare #{arch}"
-  output = "prepared"
+  outputs = "prepared"
 }
 
 build[arch] = exec {
   command = "build #{arch}"
-  output = "built"
+  outputs = "built"
   depends_on = [prepare(arch = arch)]
 }
 "#;
@@ -970,11 +970,11 @@ let arch = ["amd64", "arm64"]
 
 prepare[arch](tag : string) = exec {
   command = "prepare #{arch} #{tag}"
-  output = "prepared"
+  outputs = "prepared"
 }
 build[arch](tag : string) = exec {
   command = prepare[arch](tag = tag).path
-  output = "built"
+  outputs = "built"
   depends_on = [prepare[arch](tag = tag)]
 }
 target release(tag : string) = [build(tag = tag)]
@@ -1023,7 +1023,7 @@ target arm(tag : string) = [build["arm64"](tag = tag)]
         let input = r#"
 work[arch](arch : [string], tag : string) = exec {
   command = "build #{arch} #{tag}"
-  output = "built"
+  outputs = "built"
 }
 target release = [work(arch = ["arm64"], tag = "1.2.3")]
 "#;
@@ -1043,7 +1043,7 @@ let module = ["a", "b"]
 
 test[module, package = split("#{module}/x,#{module}/#{suffix}", ",")](suffix : string) = exec {
   command = "test #{module} #{package}"
-  output = "tested"
+  outputs = "tested"
 }
 target all = [test(suffix = "y")]
 "##;
@@ -1074,11 +1074,11 @@ target all = [test(suffix = "y")]
         let input = r#"
 a = exec {
   command = b.path
-  output = "a"
+  outputs = "a"
 }
 b = exec {
   command = a.path
-  output = "b"
+  outputs = "b"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -1106,11 +1106,11 @@ server = go.binary {
         let input = r#"
 migrations = exec {
   command = "migrate"
-  output = "m"
+  outputs = "m"
 }
 deploy = exec {
   command = "deploy"
-  output = "d"
+  outputs = "d"
   depends_on = [migrations]
 }
 "#;
@@ -1135,7 +1135,7 @@ deploy = exec {
         let input = r#"
 server = exec {
   command = "build"
-  output = "out"
+  outputs = "out"
 }
 # Build the server
 target build = [server]
@@ -1174,7 +1174,7 @@ param cmd : string
 
 inner = exec {
   command = cmd
-  output = "out"
+  outputs = "out"
 }
 
 output result = inner.path
@@ -1219,7 +1219,7 @@ param greeting : string
 
 hello = exec {
   command = greeting
-  output = "out"
+  outputs = "out"
 }
 "#,
         );
@@ -1258,12 +1258,12 @@ inst = mymod {
             r#"
 a = exec {
   command = "build a"
-  output = "a"
+  outputs = "a"
 }
 
 b = exec {
   command = a.path
-  output = "b"
+  outputs = "b"
 }
 
 output result = b.path
@@ -1308,7 +1308,7 @@ inst = mymod {}
             r#"
 a = exec {
   command = "build"
-  output = "a"
+  outputs = "a"
 }
 
 target build = [a]
@@ -1346,7 +1346,7 @@ param required_val : string
 
 a = exec {
   command = required_val
-  output = "a"
+  outputs = "a"
 }
 "#,
         );
@@ -1377,7 +1377,7 @@ param cmd = "default_cmd"
 
 a = exec {
   command = cmd
-  output = "a"
+  outputs = "a"
 }
 "#,
         );
@@ -1417,7 +1417,7 @@ let full_cmd = "#{prefix} world"
 
 a = exec {
   command = full_cmd
-  output = "a"
+  outputs = "a"
 }
 "##,
         );
@@ -1458,7 +1458,7 @@ param cmd : string
 
 a = exec {
   command = cmd
-  output = "a"
+  outputs = "a"
 }
 "#,
         );
@@ -1500,7 +1500,7 @@ param dep_path : string
 
 a = exec {
   command = dep_path
-  output = "a"
+  outputs = "a"
 }
 
 output result = a.path
@@ -1511,7 +1511,7 @@ output result = a.path
         let input = r#"
 outer = exec {
   command = "build outer"
-  output = "outer"
+  outputs = "outer"
 }
 inst = mymod {
   dep_path = outer.path
@@ -1544,7 +1544,7 @@ inst = mymod {
             r#"
 a = exec {
   command = "build"
-  output = "a"
+  outputs = "a"
 }
 "#,
         );
@@ -1552,7 +1552,7 @@ a = exec {
         let input = r#"
 prepare(env : string) = exec {
   command = "prepare #{env}"
-  output = "prepared"
+  outputs = "prepared"
 }
 
 inst = mymod {
@@ -1586,12 +1586,12 @@ param package : string
 
 compile(package : string) = exec {
   command = "compile #{package}"
-  output = "compiled"
+  outputs = "compiled"
 }
 
 image = exec {
   command = compile(package = package).path
-  output = "image"
+  outputs = "image"
 }
 
 output path = image.path
@@ -1623,7 +1623,7 @@ output path = image.path
             r#"
 job(value : string) = exec {
   command = value
-  output = "out"
+  outputs = "out"
 }
 
 target run(value : string) = [job(value = value)]
@@ -1662,7 +1662,7 @@ target run(value : string) = [job(value = value)]
             r#"
 job[arch](arch : [string], tag : string) = exec {
   command = "build #{arch} #{tag}"
-  output = "out"
+  outputs = "out"
 }
 target run = [job["arm64"](arch = ["amd64", "arm64"], tag = "v1")]
 "#,
@@ -1696,7 +1696,7 @@ target run = [job["arm64"](arch = ["amd64", "arm64"], tag = "v1")]
             r#"
 a = exec {
   command = "build"
-  output = "a"
+  outputs = "a"
 }
 "#,
         );
@@ -1725,7 +1725,7 @@ let arch = ["amd64", "arm64"]
 
 build[arch] = exec {
   command = "build #{arch}"
-  output = "out-#{arch}"
+  outputs = "out-#{arch}"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -1743,7 +1743,7 @@ let package = ["app", "core"]
 
 crate[package] = exec {
   command = "build #{package}"
-  output = "out-#{package}"
+  outputs = "out-#{package}"
   depends_on = dependency.of(package)
 }
 "#;
@@ -1763,7 +1763,7 @@ let dependency = dependency.of("app")
 
 consumer[dependency] = exec {
   command = "consume"
-  output = "out"
+  outputs = "out"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -1777,12 +1777,12 @@ consumer[dependency] = exec {
         let input = r#"
 core = exec {
   command = "build core"
-  output = "out-core"
+  outputs = "out-core"
 }
 
 app = exec {
   command = "build app"
-  output = "out-app"
+  outputs = "out-app"
   depends_on = dependency.strings("app")
 }
 "#;
@@ -1805,7 +1805,7 @@ let arch = ["amd64", "arm64"]
 
 build[arch] = exec {
   command = arch
-  output = "out"
+  outputs = "out"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -1826,12 +1826,12 @@ let arch = ["amd64", "arm64"]
 
 build[arch] = exec {
   command = "build #{arch}"
-  output = "out-#{arch}"
+  outputs = "out-#{arch}"
 }
 
 deploy[arch] = exec {
   command = build.path
-  output = "deploy-#{arch}"
+  outputs = "deploy-#{arch}"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -1860,12 +1860,12 @@ let selected_arch = "amd64"
 
 build[arch] = exec {
   command = "build"
-  output = "out"
+  outputs = "out"
 }
 
 package = exec {
   command = build[selected_arch].path
-  output = "package"
+  outputs = "package"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -1885,7 +1885,7 @@ let os = ["linux", "darwin"]
 
 build[arch, os] = exec {
   command = "build #{os}-#{arch}"
-  output = "out"
+  outputs = "out"
 }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -1904,12 +1904,12 @@ let arch = ["amd64", "arm64"]
 
 build[arch] = exec {
   command = "build #{arch}"
-  output = "out-#{arch}"
+  outputs = "out-#{arch}"
 }
 
 package = exec {
   command = "package"
-  output = "pkg"
+  outputs = "pkg"
   depends_on = [build]
 }
 "#;
@@ -2125,10 +2125,10 @@ build = go.test { package = "./..." dir = pass.passed }
         let error = input_error(input, &go_registry(), &[]);
         assert!(error.ends_with("field 'dir': expected string, got bool"), "{error}");
 
-        // exec's outputs command declares no types, so its outputs pass
+        // exec's values command declares no types, so its outputs pass
         // until the block runs.
         let input = r#"
-version = exec { command = "true" outputs = "echo {}" }
+version = exec { command = "true" values = "echo {}" }
 build = go.test { package = version.package }
 "#;
         let module = parser::parse(input, "<test>").unwrap();
@@ -2141,7 +2141,7 @@ build = go.test { package = version.package }
 setup = exec { command = "true" }
 build = exec {
   command = "true"
-  output = "out"
+  outputs = "out"
   depends_on = [setup]
   after = [setup]
   concurrency = 1
@@ -2216,7 +2216,7 @@ target publish(tag : string) = [image(tag = tag)]
             dir.path(),
             "mymod",
             "mymod",
-            "param name : string\nbuild = exec { command = \"build #{name}\" output = \"out\" }\noutput path = build.path\n",
+            "param name : string\nbuild = exec { command = \"build #{name}\" outputs = \"out\" }\noutput path = build.path\n",
         );
         let module = parser::parse("inst = mymod { name = \"app\" }\n", "<test>").unwrap();
         load(

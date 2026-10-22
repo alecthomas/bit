@@ -357,13 +357,13 @@ fn force_rebuilds_implicit_and_specified_blocks_without_cache() {
         r#"
 implicit = exec {
   command = "printf x >> implicit.txt"
-  output = "implicit.txt"
+  outputs = "implicit.txt"
   inputs = []
 }
 
 explicit specified = exec {
   command = "printf x >> specified.txt"
-  output = "specified.txt"
+  outputs = "specified.txt"
   inputs = []
 }
 "#,

@@ -27,7 +27,7 @@ pub struct ExecInputs {
     /// Output file or list of output files
     #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
-    pub output: Vec<String>,
+    pub outputs: Vec<String>,
     /// Input file glob patterns
     #[serde(default)]
     pub inputs: Vec<String>,
@@ -41,9 +41,10 @@ pub struct ExecInputs {
     /// the resource exists and whether it has drifted.
     #[serde(default)]
     pub resolve: Option<String>,
-    /// Shell command whose stdout is parsed as JSON and exposed as block outputs.
+    /// Shell command whose stdout is parsed as a JSON object. Each key becomes
+    /// a block output.
     #[serde(default)]
-    pub outputs: Option<String>,
+    pub values: Option<String>,
 }
 
 #[derive(Debug, Serialize, bit_derive::Schema)]
@@ -54,27 +55,27 @@ pub struct ExecOutputs {
     /// Output paths (multi-output blocks)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
-    /// Dynamic key-value outputs from the `outputs` command.
+    /// Dynamic key-value outputs from the `values` command.
     #[serde(flatten)]
     pub extra: crate::value::Map,
 }
 
 impl ExecOutputs {
-    fn new(output: &[String], extra: crate::value::Map) -> Self {
-        match output.len() {
+    fn new(outputs: &[String], extra: crate::value::Map) -> Self {
+        match outputs.len() {
             0 => Self {
                 path: None,
                 paths: None,
                 extra,
             },
             1 => Self {
-                path: Some(output[0].clone()),
+                path: Some(outputs[0].clone()),
                 paths: None,
                 extra,
             },
             _ => Self {
                 path: None,
-                paths: Some(output.to_vec()),
+                paths: Some(outputs.to_vec()),
                 extra,
             },
         }
@@ -85,8 +86,10 @@ impl ExecOutputs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecState {
     pub command: String,
-    #[serde(default)]
-    pub output: Vec<String>,
+    /// The alias reads state written before the field was renamed, so
+    /// `bit --clean` still removes outputs those runs declared.
+    #[serde(default, alias = "output")]
+    pub outputs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,9 +99,9 @@ pub struct ExecState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve_output: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outputs: Option<String>,
+    pub values: Option<String>,
     #[serde(default, skip_serializing_if = "crate::value::Map::is_empty")]
-    pub outputs_values: crate::value::Map,
+    pub values_output: crate::value::Map,
 }
 
 /// Build a `bash -eo pipefail -c` command with piped stdout and stderr. `-e`
@@ -194,13 +197,13 @@ fn run_capture(command: &str, dir: Option<&str>) -> Result<String, BoxError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Run the outputs command and parse its stdout as a JSON object.
-fn run_outputs(command: &str, dir: Option<&str>) -> Result<crate::value::Map, BoxError> {
+/// Run the values command and parse its stdout as a JSON object.
+fn run_values(command: &str, dir: Option<&str>) -> Result<crate::value::Map, BoxError> {
     let stdout = run_capture(command, dir)?;
     let json: serde_json::Value =
-        serde_json::from_str(&stdout).map_err(|e| format!("outputs command produced invalid JSON: {e}"))?;
+        serde_json::from_str(&stdout).map_err(|e| format!("values command produced invalid JSON: {e}"))?;
     let map: crate::value::Map =
-        serde_json::from_value(json).map_err(|e| format!("outputs command must produce a JSON object: {e}"))?;
+        serde_json::from_value(json).map_err(|e| format!("values command must produce a JSON object: {e}"))?;
     Ok(map)
 }
 
@@ -325,7 +328,7 @@ impl Resource for ExecResource {
         changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
-        for output in &inputs.output {
+        for output in &inputs.outputs {
             let output_path = Path::new(output);
             if output.ends_with('/') {
                 fs::create_dir_all(output_path)?;
@@ -344,24 +347,24 @@ impl Resource for ExecResource {
             .map(|cmd| run_capture(cmd, inputs.dir.as_deref()))
             .transpose()?;
 
-        let outputs_values = inputs
-            .outputs
+        let values_output = inputs
+            .values
             .as_deref()
-            .map(|cmd| run_outputs(cmd, inputs.dir.as_deref()))
+            .map(|cmd| run_values(cmd, inputs.dir.as_deref()))
             .transpose()?
             .unwrap_or_default();
 
         Ok(ApplyResult {
-            outputs: ExecOutputs::new(&inputs.output, outputs_values.clone()),
+            outputs: ExecOutputs::new(&inputs.outputs, values_output.clone()),
             state: Some(ExecState {
                 command: inputs.command.clone(),
-                output: inputs.output.clone(),
+                outputs: inputs.outputs.clone(),
                 dir: inputs.dir.clone(),
                 clean: inputs.clean.clone(),
                 resolve: inputs.resolve.clone(),
                 resolve_output,
-                outputs: inputs.outputs.clone(),
-                outputs_values,
+                values: inputs.values.clone(),
+                values_output,
             }),
         })
     }
@@ -372,7 +375,7 @@ impl Resource for ExecResource {
             writer.event(Event::Starting, clean);
             return run_command(clean, prior_state.dir.as_deref(), &Changes::All, writer);
         }
-        for output in &prior_state.output {
+        for output in &prior_state.outputs {
             super::remove_path(Path::new(output), writer)?;
         }
         // When resolve is set without clean or outputs, destroy is a no-op
@@ -380,13 +383,13 @@ impl Resource for ExecResource {
         Ok(())
     }
 
-    /// `resolve` and `outputs` make a block a window onto something outside
+    /// `resolve` and `values` make a block a window onto something outside
     /// the worktree: `resolve` reports whether an external resource exists,
-    /// and `outputs` reads values back out of it. Neither is something a
+    /// and `values` reads values back out of it. Neither is something a
     /// receipt written elsewhere can vouch for, so those blocks stay local
     /// and the rest share the files they produce.
     fn cache_policy(&self, inputs: &ExecInputs) -> CachePolicy {
-        if inputs.resolve.is_some() || inputs.outputs.is_some() {
+        if inputs.resolve.is_some() || inputs.values.is_some() {
             CachePolicy::Local
         } else {
             CachePolicy::Shared { version: 1 }
@@ -395,7 +398,7 @@ impl Resource for ExecResource {
 
     fn output_keys(&self, inputs: &ExecInputs) -> Vec<String> {
         inputs
-            .output
+            .outputs
             .iter()
             .map(|o| o.trim_end_matches('/').to_owned())
             .collect()
@@ -414,7 +417,7 @@ pub struct ExecTestInputs {
     pub inputs: Vec<String>,
     /// Output files to track
     #[serde(default)]
-    pub output: Vec<String>,
+    pub outputs: Vec<String>,
     /// Working directory for the command
     #[serde(default)]
     pub dir: Option<String>,
@@ -616,7 +619,7 @@ impl Resource for ExecTestResource {
 
     fn output_keys(&self, inputs: &ExecTestInputs) -> Vec<String> {
         inputs
-            .output
+            .outputs
             .iter()
             .map(|o| o.trim_end_matches('/').to_owned())
             .collect()
@@ -645,12 +648,12 @@ mod tests {
 
         let inputs = ExecInputs {
             command: "echo".into(),
-            output: vec![out_file.to_string_lossy().into_owned()],
+            outputs: vec![out_file.to_string_lossy().into_owned()],
             inputs: vec![format!("{}/**/*.rs", dir.path().display())],
             dir: None,
             clean: None,
             resolve: None,
-            outputs: None,
+            values: None,
         };
 
         let tracker = test_tracker();
@@ -666,12 +669,12 @@ mod tests {
     fn plan_create_when_no_prior_state() {
         let inputs = ExecInputs {
             command: "echo hi".into(),
-            output: vec!["out".into()],
+            outputs: vec!["out".into()],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: None,
-            outputs: None,
+            values: None,
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -684,22 +687,22 @@ mod tests {
     fn plan_none_when_unchanged() {
         let inputs = ExecInputs {
             command: "echo hi".into(),
-            output: vec!["out".into()],
+            outputs: vec!["out".into()],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: None,
-            outputs: None,
+            values: None,
         };
         let prior = ExecState {
             command: "echo hi".into(),
-            output: vec!["out/".into()],
+            outputs: vec!["out/".into()],
             dir: None,
             clean: None,
             resolve: None,
             resolve_output: None,
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
+            values: None,
+            values_output: crate::value::Map::new(),
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -712,22 +715,22 @@ mod tests {
     fn plan_update_when_command_changed() {
         let inputs = ExecInputs {
             command: "echo bye".into(),
-            output: vec!["out".into()],
+            outputs: vec!["out".into()],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: None,
-            outputs: None,
+            values: None,
         };
         let prior = ExecState {
             command: "echo hi".into(),
-            output: vec!["out/".into()],
+            outputs: vec!["out/".into()],
             dir: None,
             clean: None,
             resolve: None,
             resolve_output: None,
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
+            values: None,
+            values_output: crate::value::Map::new(),
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -742,12 +745,12 @@ mod tests {
         let output = dir.path().join("result.txt");
         let inputs = ExecInputs {
             command: format!("echo hello > {}", output.display()),
-            output: vec![output.to_string_lossy().into_owned()],
+            outputs: vec![output.to_string_lossy().into_owned()],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: None,
-            outputs: None,
+            values: None,
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -764,12 +767,12 @@ mod tests {
     fn apply_fails_on_bad_command() {
         let inputs = ExecInputs {
             command: "false".into(),
-            output: vec!["/dev/null".into()],
+            outputs: vec!["/dev/null".into()],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: None,
-            outputs: None,
+            values: None,
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -802,13 +805,13 @@ mod tests {
 
         let state = ExecState {
             command: "echo hi".into(),
-            output: vec![output.to_string_lossy().into_owned()],
+            outputs: vec![output.to_string_lossy().into_owned()],
             dir: None,
             clean: None,
             resolve: None,
             resolve_output: None,
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
+            values: None,
+            values_output: crate::value::Map::new(),
         };
 
         let resource = ExecResource {
@@ -839,7 +842,7 @@ mod tests {
             "command".into(),
             Value::Str(format!("echo hello > {}", output.display())),
         );
-        inputs.insert("output".into(), Value::Str(output.to_string_lossy().into_owned()));
+        inputs.insert("outputs".into(), Value::Str(output.to_string_lossy().into_owned()));
 
         let resource: Box<dyn DynResource> = Box::new(ExecResource {
             tracker: test_tracker(),
@@ -898,7 +901,7 @@ mod tests {
         ExecTestInputs {
             command: command.into(),
             inputs: vec![],
-            output: vec![],
+            outputs: vec![],
             dir: None,
             clean: None,
             results: results.map(Into::into),
@@ -1015,15 +1018,15 @@ mod tests {
         assert_eq!(result.action, PlanAction::Update);
     }
 
-    fn exec_inputs(output: Vec<String>) -> ExecInputs {
+    fn exec_inputs(outputs: Vec<String>) -> ExecInputs {
         ExecInputs {
             command: "make".into(),
-            output,
+            outputs,
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: None,
-            outputs: None,
+            values: None,
         }
     }
 
@@ -1061,7 +1064,7 @@ mod tests {
         assert_eq!(Resource::cache_policy(&resource, &inputs), CachePolicy::Local);
 
         let mut inputs = exec_inputs(vec![]);
-        inputs.outputs = Some("echo '{}'".into());
+        inputs.values = Some("echo '{}'".into());
         assert_eq!(Resource::cache_policy(&resource, &inputs), CachePolicy::Local);
     }
 
@@ -1077,22 +1080,22 @@ mod tests {
     fn plan_update_when_dir_changed() {
         let inputs = ExecInputs {
             command: "echo hi".into(),
-            output: vec!["out".into()],
+            outputs: vec!["out".into()],
             inputs: vec![],
             dir: Some("/tmp".into()),
             clean: None,
             resolve: None,
-            outputs: None,
+            values: None,
         };
         let prior = ExecState {
             command: "echo hi".into(),
-            output: vec!["out".into()],
+            outputs: vec!["out".into()],
             dir: None,
             clean: None,
             resolve: None,
             resolve_output: None,
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
+            values: None,
+            values_output: crate::value::Map::new(),
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -1108,12 +1111,12 @@ mod tests {
         let output = canon.join("result.txt");
         let inputs = ExecInputs {
             command: format!("pwd > {}", output.display()),
-            output: vec![output.to_string_lossy().into_owned()],
+            outputs: vec![output.to_string_lossy().into_owned()],
             inputs: vec![],
             dir: Some(canon.to_string_lossy().into_owned()),
             clean: None,
             resolve: None,
-            outputs: None,
+            values: None,
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -1159,13 +1162,13 @@ mod tests {
 
         let state = ExecState {
             command: "echo hi".into(),
-            output: vec![output.to_string_lossy().into_owned()],
+            outputs: vec![output.to_string_lossy().into_owned()],
             dir: None,
             clean: Some(format!("touch {}", marker.display())),
             resolve: None,
             resolve_output: None,
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
+            values: None,
+            values_output: crate::value::Map::new(),
         };
 
         let resource = ExecResource {
@@ -1183,13 +1186,13 @@ mod tests {
     fn destroy_propagates_clean_failure() {
         let state = ExecState {
             command: "echo hi".into(),
-            output: vec![],
+            outputs: vec![],
             dir: None,
             clean: Some("false".into()),
             resolve: None,
             resolve_output: None,
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
+            values: None,
+            values_output: crate::value::Map::new(),
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -1203,22 +1206,22 @@ mod tests {
     fn plan_update_when_clean_changed() {
         let inputs = ExecInputs {
             command: "echo hi".into(),
-            output: vec!["out".into()],
+            outputs: vec!["out".into()],
             inputs: vec![],
             dir: None,
             clean: Some("rm -rf out".into()),
             resolve: None,
-            outputs: None,
+            values: None,
         };
         let prior = ExecState {
             command: "echo hi".into(),
-            output: vec!["out".into()],
+            outputs: vec!["out".into()],
             dir: None,
             clean: None,
             resolve: None,
             resolve_output: None,
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
+            values: None,
+            values_output: crate::value::Map::new(),
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -1285,22 +1288,22 @@ mod tests {
     fn plan_create_when_resolve_fails() {
         let inputs = ExecInputs {
             command: "echo create".into(),
-            output: vec![],
+            outputs: vec![],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: Some("false".into()),
-            outputs: None,
+            values: None,
         };
         let prior = ExecState {
             command: "echo create".into(),
-            output: vec![],
+            outputs: vec![],
             dir: None,
             clean: None,
             resolve: Some("false".into()),
             resolve_output: Some("old-state".into()),
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
+            values: None,
+            values_output: crate::value::Map::new(),
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -1313,22 +1316,22 @@ mod tests {
     fn plan_update_when_resolve_output_drifted() {
         let inputs = ExecInputs {
             command: "echo create".into(),
-            output: vec![],
+            outputs: vec![],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: Some("echo new-state".into()),
-            outputs: None,
+            values: None,
         };
         let prior = ExecState {
             command: "echo create".into(),
-            output: vec![],
+            outputs: vec![],
             dir: None,
             clean: None,
             resolve: Some("echo new-state".into()),
             resolve_output: Some("old-state\n".into()),
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
+            values: None,
+            values_output: crate::value::Map::new(),
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -1341,22 +1344,22 @@ mod tests {
     fn plan_none_when_resolve_output_matches() {
         let inputs = ExecInputs {
             command: "echo create".into(),
-            output: vec![],
+            outputs: vec![],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: Some("echo current-state".into()),
-            outputs: None,
+            values: None,
         };
         let prior = ExecState {
             command: "echo create".into(),
-            output: vec![],
+            outputs: vec![],
             dir: None,
             clean: None,
             resolve: Some("echo current-state".into()),
             resolve_output: Some("current-state\n".into()),
-            outputs: None,
-            outputs_values: crate::value::Map::new(),
+            values: None,
+            values_output: crate::value::Map::new(),
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -1369,12 +1372,12 @@ mod tests {
     fn apply_captures_resolve_output() {
         let inputs = ExecInputs {
             command: "true".into(),
-            output: vec![],
+            outputs: vec![],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: Some("echo captured".into()),
-            outputs: None,
+            values: None,
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -1392,12 +1395,12 @@ mod tests {
         let output = dir.path().join("result.txt");
         let inputs = ExecInputs {
             command: format!("echo hello > {}", output.display()),
-            output: vec![output.to_string_lossy().into_owned()],
+            outputs: vec![output.to_string_lossy().into_owned()],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: None,
-            outputs: None,
+            values: None,
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -1417,15 +1420,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_captures_json_outputs() {
+    fn apply_captures_json_values() {
         let inputs = ExecInputs {
             command: "true".into(),
-            output: vec![],
+            outputs: vec![],
             inputs: vec![],
             dir: None,
             clean: None,
             resolve: None,
-            outputs: Some("echo '{\"name\":\"test\",\"version\":\"1.0\"}'".into()),
+            values: Some("echo '{\"name\":\"test\",\"version\":\"1.0\"}'".into()),
         };
         let resource = ExecResource {
             tracker: test_tracker(),
@@ -1434,12 +1437,22 @@ mod tests {
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         let state = result.state.unwrap();
-        assert_eq!(state.outputs_values.get("name").and_then(|v| v.as_str()), Some("test"));
+        assert_eq!(state.values_output.get("name").and_then(|v| v.as_str()), Some("test"));
         assert_eq!(result.outputs.extra.get("name").and_then(|v| v.as_str()), Some("test"));
         assert_eq!(
             result.outputs.extra.get("version").and_then(|v| v.as_str()),
             Some("1.0")
         );
+    }
+
+    #[test]
+    fn state_reads_legacy_output_key() {
+        let state: ExecState = serde_json::from_value(serde_json::json!({
+            "command": "true",
+            "output": ["out"],
+        }))
+        .unwrap();
+        assert_eq!(state.outputs, vec!["out".to_owned()]);
     }
 
     #[test]

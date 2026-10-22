@@ -775,13 +775,13 @@ block = docker.network_attach {
 
 ```bit
 block = exec {
-  command = string               # Shell command to execute
-  output = (string | [string])?  # Output file or list of output files
-  inputs = [string]?             # Input file glob patterns
-  dir = string?                  # Working directory for the command
-  clean = string?                # Shell command to run on `bit --clean` (replaces the default removal of outputs)
-  resolve = string?              # Shell command whose stdout is captured as state. Used to detect whether the resource exists and whether it has drifted.
-  outputs = string?              # Shell command whose stdout is parsed as JSON and exposed as block outputs.
+  command = string                # Shell command to execute
+  outputs = (string | [string])?  # Output file or list of output files
+  inputs = [string]?              # Input file glob patterns
+  dir = string?                   # Working directory for the command
+  clean = string?                 # Shell command to run on `bit --clean` (replaces the default removal of outputs)
+  resolve = string?               # Shell command whose stdout is captured as state. Used to detect whether the resource exists and whether it has drifted.
+  values = string?                # Shell command whose stdout is parsed as a JSON object. Each key becomes a block output.
 }
 ```
 
@@ -798,7 +798,7 @@ block = exec {
 block = exec.test {
   command = string                      # Shell command to execute
   inputs = [string]?                    # Input file glob patterns
-  output = [string]?                    # Output files to track
+  outputs = [string]?                   # Output files to track
   dir = string?                         # Working directory for the command
   clean = string?                       # Shell command to run on `bit --clean`
   results = string?                     # jq filter mapping the command's JSON stdout to test results. Each JSON document or JSONL line is one filter input; other stdout lines are logs. Each filter output is `{suite?, name?, event?, status?, duration?, output?}`, about a test if it has a `name` and otherwise about its suite. `event` is `start` or `end`, and `status` (`pass`, `fail`, or `skip`) also ends the test or suite. `duration` is in seconds; without it, the time since `start` is used. A suite is summarized when it ends, or when the command exits.
@@ -951,12 +951,12 @@ block = pnpm.install {
 
 ```bit
 block = pnpm.run {
-  script = string                # Script name from `package.json` (e.g. "build")
-  package = string?              # Package name from its `package.json`. Omit to run at the workspace root.
-  args = [string]?               # Additional arguments passed to the script after `--`
-  output = (string | [string])?  # Output file or list of output files/directories produced by the script
-  inputs = [string]?             # Extra input file globs (added to auto-detected sources)
-  dir = string?                  # Workspace root directory (defaults to the current directory)
+  script = string                 # Script name from `package.json` (e.g. "build")
+  package = string?               # Package name from its `package.json`. Omit to run at the workspace root.
+  args = [string]?                # Additional arguments passed to the script after `--`
+  outputs = (string | [string])?  # Output file or list of output files/directories produced by the script
+  inputs = [string]?              # Extra input file globs (added to auto-detected sources)
+  dir = string?                   # Workspace root directory (defaults to the current directory)
 }
 ```
 
@@ -1254,12 +1254,12 @@ the worktree that produced them has been deleted:
   with `docker image load` instead of rebuilding it. Multi-platform builds are
   pushed directly to their registry and remain in worktree-local state because
   they cannot be restored through the local image store.
-- `exec` and `exec.test` store whatever they declare in `output`. A directory
+- `exec` and `exec.test` store whatever they declare in `outputs`. A directory
   is stored whole, as the set of files it contained, and is restored to
   exactly that — anything already at the path is replaced, not merged. An
-  `exec` block that sets `resolve` or `outputs` is never shared: those fields
+  `exec` block that sets `resolve` or `values` is never shared: those fields
   describe state outside the worktree, which a result recorded elsewhere
-  cannot speak for. If a file is both in `inputs` and `output`, its current
+  cannot speak for. If a file is both in `inputs` and `outputs`, its current
   contents participate in cache lookup. After the command runs, bit hashes
   the new contents before storing the result.
 
@@ -1273,7 +1273,7 @@ To keep a particular output out of the cache, name it in `uncached`:
 ```hcl
 build = exec {
   command  = "pnpm build"
-  output   = ["dist/", "node_modules/"]
+  outputs  = ["dist/", "node_modules/"]
   uncached = ["node_modules/"]
 }
 ```

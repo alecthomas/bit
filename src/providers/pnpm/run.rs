@@ -47,7 +47,7 @@ pub(super) fn describe(script: &str, package: Option<&str>, script_args: &[Strin
 pub(super) fn resolve_inputs(
     dir: &str,
     package: Option<&str>,
-    output: &[String],
+    outputs: &[String],
     extra_globs: &[String],
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -64,7 +64,7 @@ pub(super) fn resolve_inputs(
                     .package_dir(pkg)
                     .ok_or_else(|| format!("pnpm: package '{pkg}' not found in workspace"))?
                     .to_path_buf();
-                let exclude_outputs: Vec<PathBuf> = output.iter().map(PathBuf::from).collect();
+                let exclude_outputs: Vec<PathBuf> = outputs.iter().map(PathBuf::from).collect();
                 let sources = workspace::scan_sources(&pkg_dir, &exclude_outputs);
                 files.extend(tracker.hash_files(&sources)?);
             }
@@ -97,7 +97,7 @@ pub struct PnpmRunInputs {
     /// Output file or list of output files/directories produced by the script
     #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
-    pub output: Vec<String>,
+    pub outputs: Vec<String>,
     /// Extra input file globs (added to auto-detected sources)
     #[serde(default)]
     pub inputs: Vec<String>,
@@ -118,19 +118,19 @@ pub struct PnpmRunOutputs {
 }
 
 impl PnpmRunOutputs {
-    pub(super) fn from_paths(output: &[String]) -> Self {
-        match output.len() {
+    pub(super) fn from_paths(outputs: &[String]) -> Self {
+        match outputs.len() {
             0 => Self {
                 path: None,
                 paths: None,
             },
             1 => Self {
-                path: Some(output[0].clone()),
+                path: Some(outputs[0].clone()),
                 paths: None,
             },
             _ => Self {
                 path: None,
-                paths: Some(output.to_vec()),
+                paths: Some(outputs.to_vec()),
             },
         }
     }
@@ -142,7 +142,10 @@ pub struct PnpmRunState {
     pub script: String,
     pub package: Option<String>,
     pub args: Vec<String>,
-    pub output: Vec<String>,
+    /// The alias reads state written before the field was renamed, so
+    /// `bit --clean` still removes outputs those runs declared.
+    #[serde(alias = "output")]
+    pub outputs: Vec<String>,
     pub dir: String,
 }
 
@@ -172,7 +175,7 @@ impl Resource for PnpmRunResource {
         resolve_inputs(
             &inputs.dir,
             inputs.package.as_deref(),
-            &inputs.output,
+            &inputs.outputs,
             &inputs.inputs,
             tracker,
         )
@@ -190,7 +193,7 @@ impl Resource for PnpmRunResource {
         let action = if prior.script != inputs.script
             || prior.package != inputs.package
             || prior.args != inputs.args
-            || prior.output != inputs.output
+            || prior.outputs != inputs.outputs
             || prior.dir != inputs.dir
         {
             PlanAction::Update
@@ -211,7 +214,7 @@ impl Resource for PnpmRunResource {
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<PnpmRunState, PnpmRunOutputs>, BoxError> {
-        for output in &inputs.output {
+        for output in &inputs.outputs {
             let p = Path::new(output);
             if output.ends_with('/') {
                 fs::create_dir_all(p)?;
@@ -226,19 +229,19 @@ impl Resource for PnpmRunResource {
         run_pnpm(&args, Some(&inputs.dir), writer)?;
 
         Ok(ApplyResult {
-            outputs: PnpmRunOutputs::from_paths(&inputs.output),
+            outputs: PnpmRunOutputs::from_paths(&inputs.outputs),
             state: Some(PnpmRunState {
                 script: inputs.script.clone(),
                 package: inputs.package.clone(),
                 args: inputs.args.clone(),
-                output: inputs.output.clone(),
+                outputs: inputs.outputs.clone(),
                 dir: inputs.dir.clone(),
             }),
         })
     }
 
     fn destroy(&self, prior_state: &PnpmRunState, writer: &BlockWriter) -> Result<(), BoxError> {
-        for output in &prior_state.output {
+        for output in &prior_state.outputs {
             crate::providers::remove_path(Path::new(output), writer)?;
         }
         Ok(())
@@ -253,7 +256,7 @@ impl Resource for PnpmRunResource {
 
     fn output_keys(&self, inputs: &PnpmRunInputs) -> Vec<String> {
         inputs
-            .output
+            .outputs
             .iter()
             .map(|path| path.trim_end_matches('/').to_owned())
             .collect()
@@ -302,7 +305,7 @@ mod tests {
             script: "build".into(),
             package: Some("bff".into()),
             args: vec![],
-            output: vec![],
+            outputs: vec![],
             inputs: vec![],
             dir: ".".into(),
         };
@@ -316,7 +319,7 @@ mod tests {
             script: "test".into(),
             package: Some("bff".into()),
             args: vec![],
-            output: vec![],
+            outputs: vec![],
             inputs: vec![],
             dir: ".".into(),
         };
@@ -324,7 +327,7 @@ mod tests {
             script: "build".into(),
             package: Some("bff".into()),
             args: vec![],
-            output: vec![],
+            outputs: vec![],
             dir: ".".into(),
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
@@ -353,7 +356,7 @@ mod tests {
             script: "build".into(),
             package: None,
             args: vec![],
-            output: vec![
+            outputs: vec![
                 file.to_string_lossy().into_owned(),
                 output_dir.to_string_lossy().into_owned(),
             ],

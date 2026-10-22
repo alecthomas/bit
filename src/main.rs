@@ -1537,7 +1537,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|field| field["name"] == "output")
+                .find(|field| field["name"] == "outputs")
                 .unwrap();
             assert_eq!(output["type"], "(string | [string])?", "{name}");
         }

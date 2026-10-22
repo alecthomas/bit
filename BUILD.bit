@@ -59,7 +59,7 @@ protected sync-zed-rev = exec {
     sed -i.bak 's|^rev = ".*"|rev = "#{tree_sitter_rev}"|' integrations/zed/extension.toml
     rm integrations/zed/extension.toml.bak
   EOF
-  output = "integrations/zed/extension.toml"
+  outputs = "integrations/zed/extension.toml"
 }
 
 # Regenerate the Built-in Functions and Providers sections from `bit --schema --json`.
@@ -125,7 +125,7 @@ sync-readme = exec {
     ' README.md > README.md.tmp && mv README.md.tmp README.md
     dprint fmt README.md
   EOF
-  output = "README.md"
+  outputs = "README.md"
   resolve = '#{debug.path} --schema | sha256'
 }
 

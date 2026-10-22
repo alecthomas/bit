@@ -1863,7 +1863,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
-            "build = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "build = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             output.display(),
             output.display(),
         );
@@ -2181,10 +2181,10 @@ other-b = probe.run { label = "other-b" }
 
     #[test]
     fn upstream_outputs_are_checked_before_a_block_runs() {
-        // exec's outputs command declares no types, so the loader cannot
+        // exec's values command declares no types, so the loader cannot
         // check `version.dir`.
         let input = r#"
-version = exec { command = "true" outputs = 'echo "{\"dir\": [\"a\"]}"' }
+version = exec { command = "true" values = 'echo "{\"dir\": [\"a\"]}"' }
 build = exec { command = "true" dir = version.dir }
 "#;
         let error = load_and_apply(input).err().expect("a list dir should fail");
@@ -2239,8 +2239,8 @@ lint[module] = go.lint {
         let file_b = dir.path().join("b.txt");
         let input = format!(
             concat!(
-                "a = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "a = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),
@@ -2257,7 +2257,7 @@ lint[module] = go.lint {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
-            "build = exec {{\n  command = \"echo hi\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "build = exec {{\n  command = \"echo hi\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             output.display(),
         );
         let module = parser::parse(&input, "<test>").unwrap();
@@ -2275,7 +2275,7 @@ lint[module] = go.lint {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
-            "build = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "build = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             output.display(),
             output.display(),
         );
@@ -2300,7 +2300,7 @@ lint[module] = go.lint {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
-            "protected build = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "protected build = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             output.display(),
             output.display(),
         );
@@ -2323,7 +2323,7 @@ lint[module] = go.lint {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
-            "protected build = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\ntarget all = [build]\n",
+            "protected build = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\ntarget all = [build]\n",
             output.display(),
             output.display(),
         );
@@ -2350,7 +2350,7 @@ lint[module] = go.lint {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
-            "protected build = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "protected build = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             output.display(),
             output.display(),
         );
@@ -2374,8 +2374,8 @@ lint[module] = go.lint {
         let out_b = dir.path().join("b.txt");
         let input = format!(
             concat!(
-                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n  clean = \"false\"\n}}\n",
-                "b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n  clean = \"false\"\n}}\n",
+                "b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             ),
             out_a.display(),
             out_a.display(),
@@ -2411,8 +2411,8 @@ lint[module] = go.lint {
         let file_b = dir.path().join("b.txt");
         let input = format!(
             concat!(
-                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "explicit b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "explicit b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),
@@ -2556,8 +2556,8 @@ lint[module] = go.lint {
         // `b` depends on `a`; `a` is explicit. Selecting `b` must still pull in `a`.
         let input = format!(
             concat!(
-                "explicit a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "explicit a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),
@@ -2593,8 +2593,8 @@ lint[module] = go.lint {
         // be named to participate.
         let input = format!(
             concat!(
-                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "explicit b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "explicit b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),
@@ -2619,8 +2619,8 @@ lint[module] = go.lint {
         let file_b = dir.path().join("b.txt");
         let input = format!(
             concat!(
-                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "explicit b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "explicit b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),
@@ -2662,8 +2662,8 @@ lint[module] = go.lint {
         let file_b = dir.path().join("b.txt");
         let input = format!(
             concat!(
-                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "explicit b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "explicit b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),
@@ -2704,9 +2704,9 @@ lint[module] = go.lint {
         let file_c = dir.path().join("c.txt");
         let input = format!(
             concat!(
-                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "c = exec {{\n  command = \"cp #{{b.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "c = exec {{\n  command = \"cp #{{b.path}} {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),
@@ -2742,9 +2742,9 @@ lint[module] = go.lint {
         let file_c = dir.path().join("c.txt");
         let input = format!(
             concat!(
-                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "c = exec {{\n  command = \"cp #{{b.path}} {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "c = exec {{\n  command = \"cp #{{b.path}} {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             ),
             file_a.display(),
             file_a.display(),
@@ -2775,8 +2775,8 @@ lint[module] = go.lint {
         let out_b = dir.path().join("b.txt");
         let input = format!(
             concat!(
-                "a = exec {{\n  command = \"echo a > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
-                "b = exec {{\n  command = \"echo b > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+                "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+                "b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
                 "target just_a = [a]\n",
             ),
             out_a.display(),
@@ -2811,7 +2811,7 @@ lint[module] = go.lint {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
-            "build = exec {{\n  command = \"echo hello > {}\"\n  output = \"{}\"\n  inputs = []\n}}\n",
+            "build = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             output.display(),
             output.display(),
         );
@@ -2845,7 +2845,7 @@ lint[module] = go.lint {
         std::fs::write(&input_file, "v1").unwrap();
 
         let input = format!(
-            "build = exec {{\n  command = \"cp {} {}\"\n  output = \"{}\"\n  inputs = [\"{}\"]\n}}\n",
+            "build = exec {{\n  command = \"cp {} {}\"\n  outputs = \"{}\"\n  inputs = [\"{}\"]\n}}\n",
             input_file.display(),
             output_file.display(),
             output_file.display(),
@@ -2878,7 +2878,7 @@ lint[module] = go.lint {
         let store = MemoryStore::new();
         let output = Output::new(&[]);
         let input = format!(
-            "fmt_build = exec {{\n  command = \"tr a-z A-Z < '{}' > '{}.tmp' && mv '{}.tmp' '{}'\"\n  inputs = [\"{}\"]\n  output = \"{}\"\n}}\n",
+            "fmt_build = exec {{\n  command = \"tr a-z A-Z < '{}' > '{}.tmp' && mv '{}.tmp' '{}'\"\n  inputs = [\"{}\"]\n  outputs = \"{}\"\n}}\n",
             file.display(),
             file.display(),
             file.display(),
@@ -2910,7 +2910,7 @@ lint[module] = go.lint {
         let store = MemoryStore::new();
         let output = Output::new(&[]);
         let input = format!(
-            "build = exec {{\n  command = \"printf ok > '{}'\"\n  output = \"{}\"\n}}\n",
+            "build = exec {{\n  command = \"printf ok > '{}'\"\n  outputs = \"{}\"\n}}\n",
             file.display(),
             file.display(),
         );
@@ -2936,7 +2936,7 @@ lint[module] = go.lint {
         let store = MemoryStore::new();
         let output = Output::new(&[]);
         let input = format!(
-            "build = exec {{\n  command = \"mkdir -p '{}' && printf ok > '{}'\"\n  output = \"{}/\"\n}}\n",
+            "build = exec {{\n  command = \"mkdir -p '{}' && printf ok > '{}'\"\n  outputs = \"{}/\"\n}}\n",
             file.parent().unwrap().display(),
             file.display(),
             out.display(),

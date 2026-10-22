@@ -417,23 +417,23 @@ The runtime calls `refresh` with the prior state. The provider queries the real 
 
 `exec` is a built-in provider implemented by the runtime. It follows the same lifecycle as any other provider — resolve, plan, apply — but requires no separate implementation. It is a convenience for wrapping CLI tools.
 
-Three fields: `command`, `inputs`, and `output`.
+Three fields: `command`, `inputs`, and `outputs`.
 
 ```
 docs = exec {
-  command = "mdbook build docs/ -d ${output}"
+  command = "mdbook build docs/ -d ${outputs}"
   inputs  = ["docs/**/*.md", "book.toml"]
-  output  = "book/"
+  outputs = "book/"
 }
 ```
 
-`inputs` is a list of globs, expanded to concrete files by the provider's `resolve()`. `command` is the shell command to run. `output` is the output file or directory — it can be a single string or a list for blocks that produce multiple artifacts:
+`inputs` is a list of globs, expanded to concrete files by the provider's `resolve()`. `command` is the shell command to run. `outputs` is the output file or directory — it can be a single string or a list for blocks that produce multiple artifacts:
 
 ```
 build = exec {
   command = "make all"
   inputs  = ["src/**/*.c", "Makefile"]
-  output  = ["bin/server", "bin/cli"]
+  outputs = ["bin/server", "bin/cli"]
 }
 ```
 
@@ -441,10 +441,10 @@ Dynamic input discovery uses `exec()` in the expression language:
 
 ```
 server = exec {
-  command = "go build -o ${output}/server ./cmd/server"
+  command = "go build -o ${outputs}/server ./cmd/server"
   inputs  = ["go.mod", "go.sum"]
             + exec("go list -deps -f '{{.Dir}}/*.go' ./cmd/server/...") | lines
-  output  = "server"
+  outputs = "server"
 }
 ```
 

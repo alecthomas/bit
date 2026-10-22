@@ -16,7 +16,7 @@ node_modules = pnpm.install {}
 frontend = pnpm.run {
   package    = "frontend"
   script     = "build"
-  output     = "frontend/dist"
+  outputs    = "frontend/dist"
   depends_on = [node_modules]
 }
 
@@ -24,7 +24,7 @@ frontend = pnpm.run {
 bff = pnpm.run {
   package    = "bff"
   script     = "build"
-  output     = "bff/dist"
+  outputs    = "bff/dist"
   depends_on = [node_modules]
 }
 
