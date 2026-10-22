@@ -337,8 +337,8 @@ pub struct RustTestResource {
     pub tracker: Arc<FileTracker>,
 }
 
-fn test_command(inputs: &RustTestInputs) -> CargoCommand {
-    let mut cargo = inputs.env.cargo("test");
+fn test_command(inputs: &Block<RustTestInputs>) -> CargoCommand {
+    let mut cargo = inputs.env.cargo("test", inputs.dir.as_deref());
     if let Some(pkg) = &inputs.package {
         cargo.arg2("-p", pkg);
     }
@@ -360,12 +360,12 @@ impl Resource for RustTestResource {
     }
 
     fn ambient(&self, inputs: &Block<RustTestInputs>) -> Vec<Ambient> {
-        super::build_ambient(&inputs.env, &[])
+        super::build_ambient(&inputs.env, inputs.dir.as_deref(), &[])
     }
 
     fn resolve(&self, inputs: &Block<RustTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        super::resolve_rust_inputs(inputs.package.as_deref(), tracker)
+        super::resolve_rust_inputs(inputs.dir.as_deref(), inputs.package.as_deref(), tracker)
     }
 
     fn plan(

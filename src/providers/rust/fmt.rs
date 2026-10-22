@@ -46,14 +46,14 @@ pub struct RustFmtCheckOutputs {
 }
 
 /// Build a cargo fmt CargoCommand. `cargo fmt` only respects toolchain, not --target/--profile.
-fn base_fmt_command(inputs: &RustFmtInputs) -> CargoCommand {
+fn base_fmt_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
     let program = if let Some(tc) = &inputs.env.toolchain {
         format!("cargo+{tc}")
     } else {
         "cargo".into()
     };
     let mut cargo = CargoCommand::new(program);
-    cargo.arg("fmt");
+    cargo.arg("fmt").in_dir(inputs.dir.as_deref());
     if let Some(pkg) = &inputs.package {
         cargo.arg2("-p", pkg);
     }
@@ -61,27 +61,27 @@ fn base_fmt_command(inputs: &RustFmtInputs) -> CargoCommand {
     cargo
 }
 
-fn fmt_command(inputs: &RustFmtInputs) -> CargoCommand {
+fn fmt_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
     base_fmt_command(inputs)
 }
 
-fn fmt_check_command(inputs: &RustFmtInputs) -> CargoCommand {
+fn fmt_check_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
     let mut cargo = base_fmt_command(inputs);
     cargo.arg("--check");
     cargo
 }
 
-fn resolve(inputs: &RustFmtInputs, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let mut files = super::resolve_rust_inputs(inputs.package.as_deref(), tracker)?;
-    let name = ".rustfmt.toml";
-    let path = std::path::Path::new(name);
+fn resolve(inputs: &Block<RustFmtInputs>, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let mut files = super::resolve_rust_inputs(inputs.dir.as_deref(), inputs.package.as_deref(), tracker)?;
+    let name = inputs.path(".rustfmt.toml");
+    let path = std::path::Path::new(&name);
     if path.is_file() {
-        files.insert(name.to_owned(), tracker.hash_file(path)?);
+        files.insert(name.clone(), tracker.hash_file(path)?);
     }
     Ok(files)
 }
 
-fn plan_action(inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> PlanAction {
+fn plan_action(inputs: &Block<RustFmtInputs>, prior_state: Option<&RustFmtState>) -> PlanAction {
     let Some(prior) = prior_state else {
         return PlanAction::Create;
     };
@@ -92,7 +92,7 @@ fn plan_action(inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Pl
     }
 }
 
-fn save_state(inputs: &RustFmtInputs) -> RustFmtState {
+fn save_state(inputs: &Block<RustFmtInputs>) -> RustFmtState {
     RustFmtState {
         package: inputs.package.clone(),
         flags: inputs.flags.clone(),
@@ -120,7 +120,7 @@ impl Resource for RustFmtResource {
     }
 
     fn ambient(&self, inputs: &Block<RustFmtInputs>) -> Vec<Ambient> {
-        super::toolchain(&inputs.env, &[&["rustfmt", "--version"]])
+        super::toolchain(&inputs.env, inputs.dir.as_deref(), &[&["rustfmt", "--version"]])
     }
 
     fn resolve(&self, inputs: &Block<RustFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -179,7 +179,7 @@ impl Resource for RustFmtCheckResource {
     }
 
     fn ambient(&self, inputs: &Block<RustFmtInputs>) -> Vec<Ambient> {
-        super::toolchain(&inputs.env, &[&["rustfmt", "--version"]])
+        super::toolchain(&inputs.env, inputs.dir.as_deref(), &[&["rustfmt", "--version"]])
     }
 
     fn resolve(&self, inputs: &Block<RustFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {

@@ -49,8 +49,8 @@ pub struct RustClippyResource {
     pub tracker: Arc<FileTracker>,
 }
 
-fn clippy_command(inputs: &RustClippyInputs) -> CargoCommand {
-    let mut cargo = inputs.env.cargo("clippy");
+fn clippy_command(inputs: &Block<RustClippyInputs>) -> CargoCommand {
+    let mut cargo = inputs.env.cargo("clippy", inputs.dir.as_deref());
     if let Some(pkg) = &inputs.package {
         cargo.arg2("-p", pkg);
     }
@@ -72,12 +72,12 @@ impl Resource for RustClippyResource {
     }
 
     fn ambient(&self, inputs: &Block<RustClippyInputs>) -> Vec<Ambient> {
-        super::build_ambient(&inputs.env, &[&["cargo", "clippy", "--version"]])
+        super::build_ambient(&inputs.env, inputs.dir.as_deref(), &[&["cargo", "clippy", "--version"]])
     }
 
     fn resolve(&self, inputs: &Block<RustClippyInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        super::resolve_rust_inputs(inputs.package.as_deref(), tracker)
+        super::resolve_rust_inputs(inputs.dir.as_deref(), inputs.package.as_deref(), tracker)
     }
 
     fn plan(

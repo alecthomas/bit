@@ -75,7 +75,7 @@ fn exe_destination(target_dir: &Path, target_rel: &str) -> Result<PathBuf, BoxEr
     Ok(target_dir.join(target_rel))
 }
 
-fn state_for(inputs: &RustExeInputs, path: String, target_rel: String) -> RustExeState {
+fn state_for(inputs: &Block<RustExeInputs>, path: String, target_rel: String) -> RustExeState {
     RustExeState {
         bin: inputs.bin.clone(),
         package: inputs.package.clone(),
@@ -87,8 +87,8 @@ fn state_for(inputs: &RustExeInputs, path: String, target_rel: String) -> RustEx
     }
 }
 
-fn exe_command(inputs: &RustExeInputs) -> CargoCommand {
-    let mut cargo = inputs.env.cargo("build");
+fn exe_command(inputs: &Block<RustExeInputs>) -> CargoCommand {
+    let mut cargo = inputs.env.cargo("build", inputs.dir.as_deref());
     if let Some(bin) = &inputs.bin {
         cargo.arg2("--bin", bin);
     }
@@ -147,12 +147,12 @@ impl Resource for RustExeResource {
     }
 
     fn ambient(&self, inputs: &Block<RustExeInputs>) -> Vec<Ambient> {
-        super::build_ambient(&inputs.env, &[])
+        super::build_ambient(&inputs.env, inputs.dir.as_deref(), &[])
     }
 
     fn resolve(&self, inputs: &Block<RustExeInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        super::resolve_rust_inputs(inputs.package.as_deref(), tracker)
+        super::resolve_rust_inputs(inputs.dir.as_deref(), inputs.package.as_deref(), tracker)
     }
 
     fn plan(&self, inputs: &Block<RustExeInputs>, prior_state: Option<&RustExeState>) -> Result<PlanResult, BoxError> {
@@ -222,7 +222,7 @@ impl Resource for RustExeResource {
 
         let path = built_binary.ok_or("cargo build succeeded but no binary was produced")?;
         let target_rel = Path::new(&path)
-            .strip_prefix(super::target_directory()?)
+            .strip_prefix(super::target_directory(inputs.dir.as_deref())?)
             .map(|rel| rel.to_string_lossy().into_owned())
             .unwrap_or_default();
 
@@ -258,7 +258,7 @@ impl Resource for RustExeResource {
 
     fn check_receipt(
         &self,
-        _inputs: &Block<RustExeInputs>,
+        inputs: &Block<RustExeInputs>,
         state: &RustExeState,
         _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
@@ -267,7 +267,7 @@ impl Resource for RustExeResource {
         let Some(exe) = artifacts.get(EXE_ROLE) else {
             return Ok(ReceiptCheck::Unusable);
         };
-        let Ok(dest) = exe_destination(&super::target_directory()?, &state.target_rel) else {
+        let Ok(dest) = exe_destination(&super::target_directory(inputs.dir.as_deref())?, &state.target_rel) else {
             return Ok(ReceiptCheck::Unusable);
         };
         Ok(if cas.matches(exe, &dest) {
@@ -289,7 +289,7 @@ impl Resource for RustExeResource {
         writer: &BlockWriter,
     ) -> MaterializeResult<RustExeState, RustExeOutputs> {
         let exe = artifacts.get(EXE_ROLE).ok_or("receipt has no exe artifact")?;
-        let dest = exe_destination(&super::target_directory()?, &state.target_rel)?;
+        let dest = exe_destination(&super::target_directory(inputs.dir.as_deref())?, &state.target_rel)?;
         if !cas.matches(exe, &dest) {
             writer.line(&format!("restore {}", dest.display()));
             cas.materialize(exe, &dest)?;

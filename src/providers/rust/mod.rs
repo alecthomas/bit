@@ -32,21 +32,22 @@ pub struct RustEnv {
 }
 
 impl RustEnv {
-    /// Start building a cargo command for the given subcommand.
-    pub fn cargo(&self, subcommand: &str) -> CargoCommand {
+    /// Start building a cargo command for the given subcommand, run in `dir`.
+    pub fn cargo(&self, subcommand: &str, dir: Option<&str>) -> CargoCommand {
         let program = if let Some(tc) = &self.toolchain {
             format!("cargo+{tc}")
         } else {
             "cargo".into()
         };
-        let mut args = vec![subcommand.to_owned()];
+        let mut cargo = CargoCommand::new(program);
+        cargo.arg(subcommand).in_dir(dir);
         if let Some(t) = &self.target {
-            args.extend(["--target".into(), t.clone()]);
+            cargo.arg2("--target", t);
         }
         if let Some(p) = &self.profile {
-            args.extend(["--profile".into(), p.clone()]);
+            cargo.arg2("--profile", p);
         }
-        CargoCommand { program, args }
+        cargo
     }
 }
 
@@ -65,6 +66,7 @@ pub struct RustFeatures {
 pub struct CargoCommand {
     program: String,
     args: Vec<String>,
+    dir: Option<String>,
 }
 
 impl CargoCommand {
@@ -73,7 +75,14 @@ impl CargoCommand {
         Self {
             program: program.into(),
             args: Vec::new(),
+            dir: None,
         }
+    }
+
+    /// Run the command in `dir` rather than bit's working directory.
+    pub fn in_dir(&mut self, dir: Option<&str>) -> &mut Self {
+        self.dir = dir.map(str::to_owned);
+        self
     }
 
     /// Append a single argument.
@@ -117,6 +126,9 @@ impl CargoCommand {
     pub fn command(&self) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
+        if let Some(dir) = &self.dir {
+            cmd.current_dir(dir);
+        }
         if let Some(wrapper) = remap_wrapper()
             && std::env::var_os("RUSTC_WORKSPACE_WRAPPER").is_none()
         {
@@ -210,12 +222,12 @@ fn remap_wrapper() -> Option<&'static Path> {
     WRAPPER.as_deref()
 }
 
-/// `rustc -vV` and `extra` version commands for the selected toolchain.
-/// Through rustup, they report the toolchain that `toolchain` or
-/// `rust-toolchain.toml` selects.
-pub fn toolchain(env: &RustEnv, extra: &[&[&str]]) -> Vec<Ambient> {
+/// `rustc -vV` and `extra` version commands for the selected toolchain, run
+/// in `dir`. Through rustup, they report the toolchain that `toolchain` or
+/// the `rust-toolchain.toml` cargo would find there selects.
+pub fn toolchain(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec<Ambient> {
     let version = |command: &[&str]| {
-        let mut command = VersionCommand::new(command[0], &command[1..]);
+        let mut command = VersionCommand::new(command[0], &command[1..]).dir(dir);
         if let Some(tc) = &env.toolchain {
             command = command.env("RUSTUP_TOOLCHAIN", tc);
         }
@@ -230,14 +242,14 @@ pub fn toolchain(env: &RustEnv, extra: &[&[&str]]) -> Vec<Ambient> {
 /// output, for the resources that compile. No version command reports
 /// them, and without them a binary built with different flags in another
 /// worktree could be restored from the shared cache.
-pub fn build_ambient(env: &RustEnv, extra: &[&[&str]]) -> Vec<Ambient> {
+pub fn build_ambient(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec<Ambient> {
     const BUILD_VARIABLES: [&str; 4] = [
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
         "CARGO_BUILD_RUSTFLAGS",
         "CARGO_BUILD_TARGET",
     ];
-    let mut ambient = toolchain(env, extra);
+    let mut ambient = toolchain(env, dir, extra);
     ambient.extend(BUILD_VARIABLES.iter().map(|var| Ambient::Variable((*var).to_owned())));
     ambient
 }
@@ -258,33 +270,47 @@ struct DiscoveredPaths {
     target_dir: PathBuf,
 }
 
-static DISCOVERED_CACHE: Mutex<Option<DiscoveredPaths>> = Mutex::new(None);
-static CARGO_METADATA_CACHE: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+/// Discovered paths and `cargo metadata` output, by the `dir` cargo runs in.
+/// Blocks in different directories can belong to different workspaces.
+static DISCOVERED_CACHE: LazyLock<Mutex<HashMap<String, DiscoveredPaths>>> = LazyLock::new(Default::default);
+static CARGO_METADATA_CACHE: LazyLock<Mutex<HashMap<String, serde_json::Value>>> = LazyLock::new(Default::default);
 
-/// Discover once per process and return a copy so the lock is released
-/// before any hashing.
-fn discovered() -> Result<DiscoveredPaths, BoxError> {
-    let mut guard = DISCOVERED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.is_none() {
-        *guard = Some(discover_paths()?);
-    }
-    Ok(guard.clone().expect("just populated"))
+/// The cache key for `dir`, where `None` is bit's working directory.
+fn dir_key(dir: Option<&str>) -> String {
+    dir.unwrap_or(".").to_owned()
 }
 
-/// Cargo's target directory for the current project, honouring
+/// Discover once per process and `dir`, and return a copy so the lock is
+/// released before any hashing.
+fn discovered(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
+    let mut guard = DISCOVERED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(paths) = guard.get(&dir_key(dir)) {
+        return Ok(paths.clone());
+    }
+    let paths = discover_paths(dir)?;
+    guard.insert(dir_key(dir), paths.clone());
+    Ok(paths)
+}
+
+/// Cargo's target directory for the workspace in `dir`, honouring
 /// `CARGO_TARGET_DIR` and config.
-pub fn target_directory() -> Result<PathBuf, BoxError> {
-    Ok(discovered()?.target_dir)
+pub fn target_directory(dir: Option<&str>) -> Result<PathBuf, BoxError> {
+    Ok(discovered(dir)?.target_dir)
 }
 
 /// Resolve Rust source files for change detection.
 ///
-/// Uses `cargo metadata` to discover local package source directories, then
-/// hashes `.rs` files within them via the tracker. When `package` is set, only
-/// that package and its transitive local workspace dependencies are included.
-/// The metadata discovery is cached so the call only happens once per run.
-pub fn resolve_rust_inputs(package: Option<&str>, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let discovered = discovered()?;
+/// Uses `cargo metadata` in `dir` to discover local package source
+/// directories, then hashes `.rs` files within them via the tracker. When
+/// `package` is set, only that package and its transitive local workspace
+/// dependencies are included. The metadata discovery is cached so the call
+/// only happens once per run and `dir`.
+pub fn resolve_rust_inputs(
+    dir: Option<&str>,
+    package: Option<&str>,
+    tracker: &FileTracker,
+) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let discovered = discovered(dir)?;
     let paths = match package {
         Some(package) => discovered
             .packages
@@ -307,10 +333,10 @@ pub fn resolve_rust_inputs(package: Option<&str>, tracker: &FileTracker) -> Resu
 }
 
 /// Discover source globs, individual files, and the target directory from
-/// `cargo metadata`.
-fn discover_paths() -> Result<DiscoveredPaths, BoxError> {
-    let cwd = std::env::current_dir()?;
-    let meta = cargo_metadata()?;
+/// `cargo metadata` in `dir`. The paths are as bit's process sees them.
+fn discover_paths(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
+    let cwd = std::env::current_dir()?.join(dir.unwrap_or(""));
+    let meta = cargo_metadata(dir)?;
     let target_dir = meta
         .get("target_directory")
         .and_then(|t| t.as_str())
@@ -318,7 +344,7 @@ fn discover_paths() -> Result<DiscoveredPaths, BoxError> {
         .ok_or("`cargo metadata` output has no target_directory")?;
     let workspace_packages = workspace_packages_by_name(&meta)?;
     let workspace_values: Vec<_> = workspace_packages.values().copied().collect();
-    let workspace = discover_input_paths(&workspace_values, &cwd);
+    let workspace = discover_input_paths(&workspace_values, &cwd, dir);
     let mut packages = HashMap::new();
     for name in workspace_packages.keys() {
         let closure = workspace_package_closure(&meta, name)?;
@@ -326,7 +352,7 @@ fn discover_paths() -> Result<DiscoveredPaths, BoxError> {
             .iter()
             .filter_map(|dependency| workspace_packages.get(dependency).copied())
             .collect();
-        packages.insert(name.clone(), discover_input_paths(&values, &cwd));
+        packages.insert(name.clone(), discover_input_paths(&values, &cwd, dir));
     }
 
     Ok(DiscoveredPaths {
@@ -336,29 +362,32 @@ fn discover_paths() -> Result<DiscoveredPaths, BoxError> {
     })
 }
 
-fn discover_input_paths(packages: &[&serde_json::Value], cwd: &Path) -> InputPaths {
+/// The input paths of `packages`, found relative to `cwd`, where cargo runs,
+/// and returned as bit's process sees them: prefixed by `dir`.
+fn discover_input_paths(packages: &[&serde_json::Value], cwd: &Path, dir: Option<&str>) -> InputPaths {
     let source_dirs = discover_source_dirs(packages, cwd);
+    let in_dir = |path: &Path| PathBuf::from(crate::provider::in_dir(dir, &path.to_string_lossy()));
 
     let mut globs = Vec::new();
-    for dir in &source_dirs {
-        let rel = dir.strip_prefix(cwd).unwrap_or(dir);
+    for source_dir in &source_dirs {
+        let rel = source_dir.strip_prefix(cwd).unwrap_or(source_dir);
         if rel.as_os_str().is_empty() {
             continue;
         }
-        globs.push(format!("{}/**/*.rs", rel.display()));
+        let rel = crate::provider::glob_in_dir(dir, &glob::Pattern::escape(&rel.to_string_lossy()));
+        globs.push(format!("{rel}/**/*.rs"));
     }
 
     let mut files: Vec<PathBuf> = packages
         .iter()
         .filter_map(|package| package.get("manifest_path").and_then(serde_json::Value::as_str))
         .map(PathBuf::from)
-        .map(|manifest| manifest.strip_prefix(cwd).unwrap_or(&manifest).to_path_buf())
+        .map(|manifest| in_dir(manifest.strip_prefix(cwd).unwrap_or(&manifest)))
         .collect();
 
     for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
-        let path = PathBuf::from(path);
-        if cwd.join(&path).is_file() {
-            files.push(path);
+        if cwd.join(path).is_file() {
+            files.push(in_dir(Path::new(path)));
         }
     }
 
@@ -369,14 +398,18 @@ fn discover_input_paths(packages: &[&serde_json::Value], cwd: &Path) -> InputPat
     InputPaths { globs, files }
 }
 
-/// Run `cargo metadata --no-deps` once for the current directory.
-fn cargo_metadata() -> Result<serde_json::Value, BoxError> {
+/// Run `cargo metadata --no-deps` once per process for `dir`.
+fn cargo_metadata(dir: Option<&str>) -> Result<serde_json::Value, BoxError> {
     let mut guard = CARGO_METADATA_CACHE.lock().unwrap_or_else(|error| error.into_inner());
-    if let Some(metadata) = guard.as_ref() {
+    if let Some(metadata) = guard.get(&dir_key(dir)) {
         return Ok(metadata.clone());
     }
 
-    let output = Command::new("cargo")
+    let mut command = Command::new("cargo");
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let output = command
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -389,14 +422,14 @@ fn cargo_metadata() -> Result<serde_json::Value, BoxError> {
     }
     let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("failed to parse `cargo metadata` output: {error}"))?;
-    *guard = Some(metadata.clone());
+    guard.insert(dir_key(dir), metadata.clone());
     Ok(metadata)
 }
 
 /// List Cargo workspace packages.
 #[bit_derive::provider_function]
 fn packages() -> Result<Vec<String>, BoxError> {
-    workspace_package_names(&cargo_metadata()?)
+    workspace_package_names(&cargo_metadata(None)?)
 }
 
 /// List a Cargo workspace package's immediate local non-development dependencies.
@@ -409,7 +442,7 @@ fn packages() -> Result<Vec<String>, BoxError> {
 #[bit_derive::provider_function]
 fn dependencies(package: String, template: Option<String>) -> Result<Vec<BlockRef>, BoxError> {
     Ok(
-        workspace_package_dependencies(&cargo_metadata()?, &package, template.as_deref())?
+        workspace_package_dependencies(&cargo_metadata(None)?, &package, template.as_deref())?
             .into_iter()
             .map(BlockRef::new)
             .collect(),
@@ -690,10 +723,16 @@ mod tests {
             std::fs::write(dir.path().join(path), "").unwrap();
         }
 
-        let paths = discover_input_paths(&[], dir.path());
-
+        let paths = discover_input_paths(&[], dir.path(), None);
         for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
             assert!(paths.files.contains(&PathBuf::from(path)), "missing {path}");
+        }
+
+        // A block's `dir` prefixes every path, as bit's process sees it.
+        let paths = discover_input_paths(&[], dir.path(), Some("crates/app"));
+        for path in ["Cargo.toml", "Cargo.lock", "rustfmt.toml", ".cargo/config.toml"] {
+            let path = Path::new("crates/app").join(path);
+            assert!(paths.files.contains(&path), "missing {}", path.display());
         }
     }
 
@@ -823,7 +862,14 @@ mod tests {
     #[test]
     fn cargo_plain() {
         let env = RustEnv::default();
-        assert_eq!(env.cargo("build").display(), "cargo build");
+        assert_eq!(env.cargo("build", None).display(), "cargo build");
+        assert_eq!(env.cargo("build", None).command().get_current_dir(), None);
+    }
+
+    #[test]
+    fn cargo_runs_in_dir() {
+        let cargo = RustEnv::default().cargo("build", Some("crates/app"));
+        assert_eq!(cargo.command().get_current_dir(), Some(Path::new("crates/app")));
     }
 
     #[test]
@@ -832,7 +878,7 @@ mod tests {
             toolchain: Some("nightly".into()),
             ..Default::default()
         };
-        assert_eq!(env.cargo("build").display(), "cargo+nightly build");
+        assert_eq!(env.cargo("build", None).display(), "cargo+nightly build");
     }
 
     #[test]
@@ -843,7 +889,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            env.cargo("build").display(),
+            env.cargo("build", None).display(),
             "cargo build --target x86_64-unknown-linux-musl --profile release"
         );
     }
@@ -855,7 +901,7 @@ mod tests {
             features: vec!["serde".into(), "async".into()],
             all_features: false,
         };
-        let mut cargo = env.cargo("build");
+        let mut cargo = env.cargo("build", None);
         cargo.features(&features);
         assert_eq!(cargo.display(), "cargo build --features serde,async");
     }
@@ -867,7 +913,7 @@ mod tests {
             features: vec![],
             all_features: true,
         };
-        let mut cargo = env.cargo("build");
+        let mut cargo = env.cargo("build", None);
         cargo.features(&features);
         assert_eq!(cargo.display(), "cargo build --all-features");
     }
@@ -876,7 +922,7 @@ mod tests {
     fn cargo_no_features() {
         let env = RustEnv::default();
         let features = RustFeatures::default();
-        let mut cargo = env.cargo("build");
+        let mut cargo = env.cargo("build", None);
         cargo.features(&features);
         assert_eq!(cargo.display(), "cargo build");
     }
