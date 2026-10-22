@@ -223,6 +223,9 @@ pub enum Ambient {
     /// for variables no [`Ambient::Version`] output already reports: `go
     /// env`, for example, prints `GOFLAGS` itself.
     Variable(String),
+    /// Every environment variable whose name starts with this prefix, for a
+    /// family the tool reads by pattern, such as cargo's `CARGO_PROFILE_*`.
+    Variables(String),
 }
 
 /// A version command for [`Ambient::Version`].

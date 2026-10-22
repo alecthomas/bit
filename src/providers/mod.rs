@@ -277,6 +277,13 @@ pub fn hash_ambient(ambient: &[Ambient], tracker: &FileTracker) -> Result<BTreeM
                     hashes.insert(format!("env:{name}"), SHA256::digest(value.as_encoded_bytes()));
                 }
             }
+            Ambient::Variables(prefix) => {
+                for (name, value) in std::env::vars_os() {
+                    if let Some(name) = name.to_str().filter(|name| name.starts_with(prefix.as_str())) {
+                        hashes.insert(format!("env:{name}"), SHA256::digest(value.as_encoded_bytes()));
+                    }
+                }
+            }
         }
     }
     Ok(hashes)
@@ -471,6 +478,20 @@ mod tests {
         let tool = tool.to_string_lossy().into_owned();
         assert_eq!(find_executable(&tool), Some(PathBuf::from(&tool)));
         assert_eq!(find_executable(&format!("{tool}-missing")), None);
+    }
+
+    #[test]
+    fn variables_fingerprint_every_variable_with_the_prefix() {
+        let hashes = hash_ambient(&[Ambient::Variables("PATH".into())], &FileTracker::default()).unwrap();
+        let expected: BTreeMap<String, SHA256> = std::env::vars_os()
+            .filter_map(|(name, value)| {
+                let name = name.into_string().ok()?;
+                name.starts_with("PATH")
+                    .then(|| (format!("env:{name}"), SHA256::digest(value.as_encoded_bytes())))
+            })
+            .collect();
+        assert!(expected.contains_key("env:PATH"));
+        assert_eq!(hashes, expected);
     }
 
     #[test]

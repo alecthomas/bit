@@ -1157,7 +1157,7 @@ in one of three ways:
 | `exec`   | `bash --version`; name any program a command depends on in `inputs`                                                                                         |
 | `docker` | `docker --version` for `docker.image` and `docker.push`. Containers and networks track none, so a CLI upgrade never recreates them                          |
 | `go`     | `go env GOVERSION GOOS GOARCH …` with the block's target; `golangci-lint version` for `go.lint`                                                             |
-| `rust`   | `rustc -vV`; `CARGO_HOME`; `RUSTFLAGS`-style variables for building, testing, and linting; `cargo clippy --version` for `rust.clippy`; `rustfmt --version` for formatting |
+| `rust`   | `rustc -vV`; `CARGO_HOME`; for building, testing, and linting, `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTC` and wrapper variables, and every `CARGO_PROFILE_*` and `CARGO_TARGET_*` variable; `cargo clippy --version` for `rust.clippy`; `rustfmt --version` for formatting |
 | `pnpm`   | `pnpm --version` and `node --version` in the workspace                                                                                                      |
 | `buf`    | `buf --version`; the content of local plugins in `buf.gen.yaml` and check plugins in `buf.yaml`                                                             |
 | `protoc` | `protoc --version`; the content of each `protoc-gen-*` plugin and `--plugin` path                                                                           |

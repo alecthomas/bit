@@ -245,14 +245,33 @@ pub fn toolchain(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec<Amb
 /// them, and without them a binary built with different flags in another
 /// worktree could be restored from the shared cache.
 pub fn build_ambient(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec<Ambient> {
-    const BUILD_VARIABLES: [&str; 4] = [
+    const BUILD_VARIABLES: [&str; 13] = [
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
         "CARGO_BUILD_RUSTFLAGS",
         "CARGO_BUILD_TARGET",
+        // Doctests, which `rust.test` runs, are compiled by rustdoc.
+        "RUSTDOCFLAGS",
+        "CARGO_ENCODED_RUSTDOCFLAGS",
+        "CARGO_BUILD_RUSTDOCFLAGS",
+        // A different compiler than the `rustc -vV` fingerprinted.
+        "RUSTC",
+        "CARGO_BUILD_RUSTC",
+        "RUSTC_WRAPPER",
+        "CARGO_BUILD_RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
     ];
+    // Cargo reads every config key from a variable too: profiles such as
+    // `CARGO_PROFILE_RELEASE_LTO`, and per-target rustflags and linkers.
+    const BUILD_VARIABLE_PREFIXES: [&str; 2] = ["CARGO_PROFILE_", "CARGO_TARGET_"];
     let mut ambient = toolchain(env, dir, extra);
     ambient.extend(BUILD_VARIABLES.iter().map(|var| Ambient::Variable((*var).to_owned())));
+    ambient.extend(
+        BUILD_VARIABLE_PREFIXES
+            .iter()
+            .map(|prefix| Ambient::Variables((*prefix).to_owned())),
+    );
     ambient
 }
 
