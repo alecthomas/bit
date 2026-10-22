@@ -2066,7 +2066,7 @@ go-test[module] = go.test {
         assert_eq!(
             input_error(input, &go_registry(), &[]),
             "<test>:4:1: block 'go-test[\".\"]': unknown field 'module'; valid fields: package, flags, inputs, \
-             report, dir, goos, goarch, cgo, depends_on, after, concurrency, uncached"
+             report, goos, goarch, cgo, depends_on, after, concurrency, uncached, dir"
         );
     }
 

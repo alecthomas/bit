@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -35,9 +35,6 @@ pub struct GoTestInputs {
     /// (`verbose`). Outside `verbose`, go's output is shown only on failure.
     #[serde(default)]
     pub report: ReportMode,
-    /// Working directory for the command
-    #[serde(default)]
-    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -56,8 +53,6 @@ pub struct GoTestState {
     #[serde(deserialize_with = "crate::providers::string_or_vec")]
     pub package: Vec<String>,
     pub flags: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -243,7 +238,7 @@ struct Affected {
 
 /// The packages whose tests depend on a changed path, or `None` to test the
 /// whole pattern.
-fn affected_packages(inputs: &GoTestInputs, changes: &Changes) -> Result<Option<Affected>, BoxError> {
+fn affected_packages(inputs: &Block<GoTestInputs>, changes: &Changes) -> Result<Option<Affected>, BoxError> {
     let tags = tag_flags(&inputs.flags);
     let affected = super::affected_packages(&inputs.package, inputs.dir.as_deref(), &tags, &inputs.env, changes)?;
     // The listing uses the test's own tags and environment, so `go test` on
@@ -302,17 +297,17 @@ impl Resource for GoTestResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &GoTestInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<GoTestInputs>) -> Vec<Ambient> {
         vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
     }
 
-    fn resolve(&self, inputs: &GoTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<GoTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
         super::resolve_go_inputs(&inputs.package, dir, Tests::SourcesAndTestdata, &inputs.inputs, tracker)
     }
 
-    fn plan(&self, inputs: &GoTestInputs, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<GoTestInputs>, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
         let description = super::display_command("go", &test_args(inputs, &inputs.package), inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
@@ -338,7 +333,7 @@ impl Resource for GoTestResource {
 
     fn apply(
         &self,
-        inputs: &GoTestInputs,
+        inputs: &Block<GoTestInputs>,
         _prior_state: Option<&GoTestState>,
         changes: &Changes,
         writer: &BlockWriter,
@@ -346,7 +341,6 @@ impl Resource for GoTestResource {
         let state = GoTestState {
             package: inputs.package.clone(),
             flags: inputs.flags.clone(),
-            dir: inputs.dir.clone(),
             env: inputs.env.clone(),
         };
         let affected = affected_packages(inputs, changes)?;
@@ -435,7 +429,7 @@ impl Resource for GoTestResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &GoTestState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<GoTestState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
@@ -444,7 +438,7 @@ impl Resource for GoTestResource {
         true
     }
 
-    fn cache_policy(&self, _inputs: &GoTestInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<GoTestInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -473,14 +467,16 @@ mod tests {
         std::fs::create_dir_all(root.join("testdata")).unwrap();
         std::fs::write(root.join("testdata/golden.txt"), "golden\n").unwrap();
         std::fs::write(root.join("schema.json"), "{}\n").unwrap();
-        let inputs = GoTestInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![root.join("*.json").to_string_lossy().into_owned()],
-            report: ReportMode::default(),
-            dir: Some(root.to_string_lossy().into_owned()),
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            GoTestInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![root.join("*.json").to_string_lossy().into_owned()],
+                report: ReportMode::default(),
+                env: GoEnv::default(),
+            },
+        );
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
         assert!(
             resolved.keys().any(|p| p.ends_with("testdata/golden.txt")),
@@ -507,14 +503,16 @@ mod tests {
             "package main\nimport \"example.com/m/lib\"\n",
         )
         .unwrap();
-        let inputs = GoTestInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            report: ReportMode::default(),
-            dir: Some(root.to_string_lossy().into_owned()),
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            GoTestInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+                report: ReportMode::default(),
+                env: GoEnv::default(),
+            },
+        );
         let affected = |names: &[&str]| {
             let changes = Changes::Paths(names.iter().map(|name| root.join(name)).collect());
             affected_packages(&inputs, &changes).unwrap().map(|affected| {
@@ -546,14 +544,16 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = GoTestInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            report: ReportMode::default(),
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoTestInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+                report: ReportMode::default(),
+                env: GoEnv::default(),
+            },
+        );
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -584,7 +584,7 @@ mod tests {
     fn package_accepts_a_list() {
         let inputs: GoTestInputs = serde_json::from_str(r#"{"package": ["./a/...", "./b"]}"#).unwrap();
         assert_eq!(inputs.package, ["./a/...", "./b"]);
-        let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
+        let result = Resource::plan(&test_resource(), &Block::new(None, inputs), None).unwrap();
         assert_eq!(result.description, "go test -json ./a/... ./b");
 
         assert!(serde_json::from_str::<GoTestInputs>(r#"{"package": []}"#).is_err());
@@ -598,18 +598,19 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = GoTestInputs {
-            package: vec!["./...".into()],
-            flags: vec!["-v".into()],
-            inputs: vec![],
-            report: ReportMode::default(),
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoTestInputs {
+                package: vec!["./...".into()],
+                flags: vec!["-v".into()],
+                inputs: vec![],
+                report: ReportMode::default(),
+                env: GoEnv::default(),
+            },
+        );
         let prior = GoTestState {
             package: vec!["./...".into()],
             flags: vec![],
-            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();

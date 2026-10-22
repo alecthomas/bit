@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -71,16 +71,20 @@ impl Resource for RustClippyResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &RustClippyInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<RustClippyInputs>) -> Vec<Ambient> {
         super::build_ambient(&inputs.env, &[&["cargo", "clippy", "--version"]])
     }
 
-    fn resolve(&self, inputs: &RustClippyInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<RustClippyInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         super::resolve_rust_inputs(inputs.package.as_deref(), tracker)
     }
 
-    fn plan(&self, inputs: &RustClippyInputs, prior_state: Option<&RustClippyState>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<RustClippyInputs>,
+        prior_state: Option<&RustClippyState>,
+    ) -> Result<PlanResult, BoxError> {
         let description = clippy_command(inputs).display();
 
         let Some(prior) = prior_state else {
@@ -110,7 +114,7 @@ impl Resource for RustClippyResource {
 
     fn apply(
         &self,
-        inputs: &RustClippyInputs,
+        inputs: &Block<RustClippyInputs>,
         _prior_state: Option<&RustClippyState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -128,11 +132,11 @@ impl Resource for RustClippyResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &RustClippyState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<RustClippyState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &RustClippyInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<RustClippyInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -154,12 +158,15 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = RustClippyInputs {
-            package: None,
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustClippyInputs {
+                package: None,
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo clippy");
@@ -167,24 +174,30 @@ mod tests {
 
     #[test]
     fn plan_create_with_package() {
-        let inputs = RustClippyInputs {
-            package: Some("my-crate".into()),
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustClippyInputs {
+                package: Some("my-crate".into()),
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.description, "cargo clippy -p my-crate");
     }
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = RustClippyInputs {
-            package: None,
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustClippyInputs {
+                package: None,
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let prior = RustClippyState {
             package: None,
             flags: vec![],
@@ -197,12 +210,15 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = RustClippyInputs {
-            package: None,
-            flags: vec!["--".into(), "-D".into(), "warnings".into()],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustClippyInputs {
+                package: None,
+                flags: vec!["--".into(), "-D".into(), "warnings".into()],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let prior = RustClippyState {
             package: None,
             flags: vec![],

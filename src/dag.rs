@@ -19,10 +19,19 @@ pub const AFTER_FIELD: &str = "after";
 pub const CONCURRENCY_FIELD: &str = "concurrency";
 /// Outputs the shared cache must not store.
 pub const UNCACHED_FIELD: &str = "uncached";
+/// The directory a block's command runs in, which its relative paths are
+/// relative to. See [`crate::provider::Block`].
+pub const DIR_FIELD: &str = "dir";
 
 /// Block fields the engine reads itself. They are valid on every resource
 /// block even though no resource schema declares them.
-pub const ENGINE_FIELDS: [&str; 4] = [DEPENDS_ON_FIELD, AFTER_FIELD, CONCURRENCY_FIELD, UNCACHED_FIELD];
+pub const ENGINE_FIELDS: [&str; 5] = [
+    DEPENDS_ON_FIELD,
+    AFTER_FIELD,
+    CONCURRENCY_FIELD,
+    UNCACHED_FIELD,
+    DIR_FIELD,
+];
 
 /// The type of edge between two blocks.
 #[derive(Debug, Clone, Copy, PartialEq)]

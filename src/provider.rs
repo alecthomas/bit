@@ -327,6 +327,65 @@ pub trait Provider: Send + Sync {
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError>;
 }
 
+/// A resource's inputs or state together with the block's `dir`, which the
+/// engine manages for every block rather than each resource declaring its
+/// own.
+///
+/// The command runs in `dir`, and every relative path in the block's fields
+/// is relative to it. `dir` itself is relative to the project root, which
+/// is bit's working directory. Dereferences to the wrapped value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Block<T> {
+    pub dir: Option<String>,
+    pub value: T,
+}
+
+impl<T> Block<T> {
+    pub fn new(dir: Option<String>, value: T) -> Self {
+        Self { dir, value }
+    }
+
+    /// `path` as bit's process sees it: a relative path is joined onto
+    /// `dir`. The text is kept as written otherwise, trailing `/` included.
+    pub fn path(&self, path: &str) -> String {
+        in_dir(self.dir.as_deref(), path)
+    }
+
+    /// The glob `pattern` as bit's process matches it: a relative pattern
+    /// is joined onto `dir`. `dir` is literal text, so its glob
+    /// metacharacters are escaped.
+    pub fn glob(&self, pattern: &str) -> String {
+        match &self.dir {
+            Some(dir) if Path::new(pattern).is_relative() => {
+                format!("{}/{pattern}", glob::Pattern::escape(dir.trim_end_matches('/')))
+            }
+            _ => pattern.to_owned(),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Block<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for Block<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+/// `path` joined onto `dir` when it is relative. See [`Block::path`].
+pub fn in_dir(dir: Option<&str>, path: &str) -> String {
+    match dir {
+        Some(dir) if Path::new(path).is_relative() => Path::new(dir).join(path).to_string_lossy().into_owned(),
+        _ => path.to_owned(),
+    }
+}
+
 /// A resource with concrete, type-safe state, inputs, and outputs.
 ///
 /// Providers implement this. The `DynResource` trait (automatically implemented
@@ -348,26 +407,27 @@ pub trait Resource {
     /// Derive tracked source inputs from the seed inputs and return their
     /// path -> SHA256 hashes. An output that is also an input belongs here;
     /// the engine hashes declared outputs separately for local change detection.
-    fn resolve(&self, inputs: &Self::Inputs) -> Result<BTreeMap<String, SHA256>, BoxError>;
+    fn resolve(&self, inputs: &Block<Self::Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError>;
 
     /// The ambient state the result depends on: the tools the resource runs
     /// and the environment variables it reads. Each is fingerprinted as a
     /// source alongside [`Resource::resolve`], so a tool upgrade or changed
     /// variable reruns the block and changes its shared action key. See
     /// [`Ambient`].
-    fn ambient(&self, _inputs: &Self::Inputs) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Block<Self::Inputs>) -> Vec<Ambient> {
         vec![]
     }
 
-    fn plan(&self, inputs: &Self::Inputs, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
+    fn plan(&self, inputs: &Block<Self::Inputs>, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
-        inputs: &Self::Inputs,
+        inputs: &Block<Self::Inputs>,
         prior_state: Option<&Self::State>,
         changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
-    fn destroy(&self, prior_state: &Self::State, writer: &BlockWriter) -> Result<(), BoxError>;
+    /// `prior_state.dir` is the `dir` the block had when it last ran.
+    fn destroy(&self, prior_state: &Block<Self::State>, writer: &BlockWriter) -> Result<(), BoxError>;
 
     /// Whether `apply` prints its own start line through
     /// [`BlockWriter::starting`] rather than the engine printing the plan
@@ -400,7 +460,7 @@ pub trait Resource {
     /// The answer may depend on the inputs. A resource that usually produces
     /// files but can also be pointed at external state returns `Local` for
     /// the latter, rather than publishing receipts nothing can use.
-    fn cache_policy(&self, inputs: &Self::Inputs) -> CachePolicy;
+    fn cache_policy(&self, inputs: &Block<Self::Inputs>) -> CachePolicy;
 
     /// Paths of produced outputs. The engine hashes existing files for local
     /// change detection, so a deleted output triggers a rebuild. Output hashes
@@ -414,16 +474,8 @@ pub trait Resource {
     /// omitted output is not a missed optimisation: the receipt is published
     /// as if complete, so another worktree restores a partial result and the
     /// block reports success over it.
-    fn output_keys(&self, _inputs: &Self::Inputs) -> Vec<String> {
+    fn output_keys(&self, _inputs: &Block<Self::Inputs>) -> Vec<String> {
         vec![]
-    }
-
-    /// The [`Resource::output_keys`] entry for an output path written as the
-    /// block's own fields write it. The engine resolves `uncached` entries
-    /// through this, so they match the outputs they name. Override it with
-    /// any resolution `output_keys` applies, such as against `dir`.
-    fn output_key(&self, _inputs: &Self::Inputs, path: &str) -> String {
-        path.to_owned()
     }
 
     /// Capture durable artifacts produced by a successful apply into the CAS,
@@ -434,7 +486,7 @@ pub trait Resource {
     /// artifacts that do not live on disk, such as a container image.
     fn capture_artifacts(
         &self,
-        _inputs: &Self::Inputs,
+        _inputs: &Block<Self::Inputs>,
         _state: &Self::State,
         outputs: &[OutputFile],
         cas: &Cas,
@@ -448,7 +500,7 @@ pub trait Resource {
     /// declares none, which is correct for validation-only resources.
     fn check_receipt(
         &self,
-        _inputs: &Self::Inputs,
+        _inputs: &Block<Self::Inputs>,
         _state: &Self::State,
         outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
@@ -468,7 +520,7 @@ pub trait Resource {
     /// override to recreate the files.
     fn materialize(
         &self,
-        _inputs: &Self::Inputs,
+        _inputs: &Block<Self::Inputs>,
         _state: &Self::State,
         outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
@@ -498,7 +550,8 @@ pub trait DynResource: Send + Sync {
         changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
-    fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError>;
+    fn destroy(&self, dir: Option<&str>, prior_state: &serde_json::Value, writer: &BlockWriter)
+    -> Result<(), BoxError>;
     fn announces_start(&self) -> bool {
         false
     }
@@ -515,9 +568,6 @@ pub trait DynResource: Send + Sync {
     // through the blanket impl below instead.
     fn output_keys(&self, _inputs: &Map) -> Result<Vec<String>, BoxError> {
         Ok(vec![])
-    }
-    fn output_key(&self, _inputs: &Map, path: &str) -> Result<String, BoxError> {
-        Ok(path.to_owned())
     }
     fn capture_artifacts(
         &self,
@@ -553,10 +603,15 @@ pub trait DynResource: Send + Sync {
     }
 }
 
-/// Deserialize a `Map` into a typed struct via serde.
-fn deserialize_inputs<T: DeserializeOwned>(map: &Map) -> Result<T, BoxError> {
+/// Deserialize a block's evaluated fields into its `dir` and the resource's
+/// typed inputs. The inputs ignore `dir` and the engine's other fields.
+fn deserialize_inputs<T: DeserializeOwned>(map: &Map) -> Result<Block<T>, BoxError> {
+    let dir = map
+        .get(crate::dag::DIR_FIELD)
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let json = serde_json::to_value(map)?;
-    Ok(serde_json::from_value(json)?)
+    Ok(Block::new(dir, serde_json::from_value(json)?))
 }
 
 /// Serialize a typed struct back into a `Map`.
@@ -581,17 +636,17 @@ impl<R: Resource + Send + Sync> DynResource for R {
     }
 
     fn resolve(&self, inputs: &Map) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
         Resource::resolve(self, &typed)
     }
 
     fn ambient(&self, inputs: &Map) -> Result<Vec<Ambient>, BoxError> {
-        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
         Ok(Resource::ambient(self, &typed))
     }
 
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError> {
-        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
         // Discard prior state if it can't be deserialized (e.g. resource type changed).
         let state = prior_state.and_then(|v| serde_json::from_value(v.clone()).ok());
         Resource::plan(self, &typed, state.as_ref())
@@ -604,7 +659,7 @@ impl<R: Resource + Send + Sync> DynResource for R {
         changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
-        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
         // Discard prior state if it can't be deserialized (e.g. resource type changed).
         let state = prior_state.and_then(|v| serde_json::from_value(v.clone()).ok());
         let result = Resource::apply(self, &typed, state.as_ref(), changes, writer)?;
@@ -614,9 +669,14 @@ impl<R: Resource + Send + Sync> DynResource for R {
         })
     }
 
-    fn destroy(&self, prior_state: &serde_json::Value, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(
+        &self,
+        dir: Option<&str>,
+        prior_state: &serde_json::Value,
+        writer: &BlockWriter,
+    ) -> Result<(), BoxError> {
         let state: R::State = serde_json::from_value(prior_state.clone())?;
-        Resource::destroy(self, &state, writer)
+        Resource::destroy(self, &Block::new(dir.map(str::to_owned), state), writer)
     }
 
     fn announces_start(&self) -> bool {
@@ -635,13 +695,8 @@ impl<R: Resource + Send + Sync> DynResource for R {
     }
 
     fn output_keys(&self, inputs: &Map) -> Result<Vec<String>, BoxError> {
-        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
         Ok(Resource::output_keys(self, &typed))
-    }
-
-    fn output_key(&self, inputs: &Map, path: &str) -> Result<String, BoxError> {
-        let typed: R::Inputs = deserialize_inputs(inputs)?;
-        Ok(Resource::output_key(self, &typed, path))
     }
 
     fn capture_artifacts(
@@ -651,7 +706,7 @@ impl<R: Resource + Send + Sync> DynResource for R {
         outputs: &[OutputFile],
         cas: &Cas,
     ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
-        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
         let state: R::State = serde_json::from_value(state.clone())?;
         Resource::capture_artifacts(self, &typed, &state, outputs, cas)
     }
@@ -664,7 +719,7 @@ impl<R: Resource + Send + Sync> DynResource for R {
         artifacts: &BTreeMap<String, ArtifactRef>,
         cas: &Cas,
     ) -> Result<ReceiptCheck, BoxError> {
-        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
         let Ok(state) = serde_json::from_value::<R::State>(state.clone()) else {
             return Ok(ReceiptCheck::Unusable);
         };
@@ -680,7 +735,7 @@ impl<R: Resource + Send + Sync> DynResource for R {
         cas: &Cas,
         writer: &BlockWriter,
     ) -> MaterializeResult<serde_json::Value, Map> {
-        let typed: R::Inputs = deserialize_inputs(inputs)?;
+        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
         let state: R::State = serde_json::from_value(state.clone())?;
         let Some(result) = Resource::materialize(self, &typed, &state, outputs, artifacts, cas, writer)? else {
             return Ok(None);
@@ -812,11 +867,11 @@ mod tests {
             ResourceKind::Build
         }
 
-        fn resolve(&self, _inputs: &StubInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        fn resolve(&self, _inputs: &Block<StubInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
             Ok(BTreeMap::new())
         }
 
-        fn plan(&self, _inputs: &StubInputs, prior_state: Option<&StubState>) -> Result<PlanResult, BoxError> {
+        fn plan(&self, _inputs: &Block<StubInputs>, prior_state: Option<&StubState>) -> Result<PlanResult, BoxError> {
             let action = if prior_state.is_some() {
                 PlanAction::Update
             } else {
@@ -831,7 +886,7 @@ mod tests {
 
         fn apply(
             &self,
-            _inputs: &StubInputs,
+            _inputs: &Block<StubInputs>,
             _prior_state: Option<&StubState>,
             _changes: &Changes,
             _writer: &BlockWriter,
@@ -842,11 +897,11 @@ mod tests {
             })
         }
 
-        fn destroy(&self, _prior_state: &StubState, _writer: &BlockWriter) -> Result<(), BoxError> {
+        fn destroy(&self, _prior_state: &Block<StubState>, _writer: &BlockWriter) -> Result<(), BoxError> {
             Ok(())
         }
 
-        fn cache_policy(&self, _inputs: &StubInputs) -> CachePolicy {
+        fn cache_policy(&self, _inputs: &Block<StubInputs>) -> CachePolicy {
             CachePolicy::Local
         }
     }
@@ -913,7 +968,7 @@ mod tests {
     #[test]
     fn resource_plan_create() {
         let resource = StubResource;
-        let result = Resource::plan(&resource, &StubInputs {}, None).unwrap();
+        let result = Resource::plan(&resource, &Block::new(None, StubInputs {}), None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
@@ -921,7 +976,7 @@ mod tests {
     fn resource_plan_update() {
         let resource = StubResource;
         let state = StubState { version: 1 };
-        let result = Resource::plan(&resource, &StubInputs {}, Some(&state)).unwrap();
+        let result = Resource::plan(&resource, &Block::new(None, StubInputs {}), Some(&state)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 
@@ -930,7 +985,14 @@ mod tests {
         let resource = StubResource;
         let output = crate::output::Output::new(&[]);
         let writer = output.writer("test");
-        let result = Resource::apply(&resource, &StubInputs {}, None, &Changes::All, &writer).unwrap();
+        let result = Resource::apply(
+            &resource,
+            &Block::new(None, StubInputs {}),
+            None,
+            &Changes::All,
+            &writer,
+        )
+        .unwrap();
         assert_eq!(result.state, Some(StubState { version: 1 }));
     }
 

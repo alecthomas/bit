@@ -6,16 +6,12 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
 use super::run::{describe, pnpm_args, resolve_inputs};
-use super::run_pnpm;
-
-fn default_dir() -> String {
-    ".".to_owned()
-}
+use super::{run_pnpm, workspace_dir};
 
 fn default_script() -> String {
     "test".to_owned()
@@ -36,9 +32,6 @@ pub struct PnpmTestInputs {
     /// Extra input file globs (added to auto-detected sources)
     #[serde(default)]
     pub inputs: Vec<String>,
-    /// Workspace root directory (defaults to the current directory)
-    #[serde(default = "default_dir")]
-    pub dir: String,
 }
 
 /// Outputs from a `pnpm.test` block.
@@ -54,7 +47,6 @@ pub struct PnpmTestState {
     pub script: String,
     pub package: Option<String>,
     pub args: Vec<String>,
-    pub dir: String,
 }
 
 pub struct PnpmTestResource {
@@ -74,16 +66,26 @@ impl Resource for PnpmTestResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &PnpmTestInputs) -> Vec<Ambient> {
-        super::ambient(&inputs.dir)
+    fn ambient(&self, inputs: &Block<PnpmTestInputs>) -> Vec<Ambient> {
+        super::ambient(workspace_dir(inputs))
     }
 
-    fn resolve(&self, inputs: &PnpmTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<PnpmTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        resolve_inputs(&inputs.dir, inputs.package.as_deref(), &[], &inputs.inputs, tracker)
+        resolve_inputs(
+            workspace_dir(inputs),
+            inputs.package.as_deref(),
+            &[],
+            &inputs.inputs,
+            tracker,
+        )
     }
 
-    fn plan(&self, inputs: &PnpmTestInputs, prior_state: Option<&PnpmTestState>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<PnpmTestInputs>,
+        prior_state: Option<&PnpmTestState>,
+    ) -> Result<PlanResult, BoxError> {
         let description = describe(&inputs.script, inputs.package.as_deref(), &inputs.args);
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -92,11 +94,7 @@ impl Resource for PnpmTestResource {
                 reason: None,
             });
         };
-        let action = if prior.script != inputs.script
-            || prior.package != inputs.package
-            || prior.args != inputs.args
-            || prior.dir != inputs.dir
-        {
+        let action = if prior.script != inputs.script || prior.package != inputs.package || prior.args != inputs.args {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -110,13 +108,13 @@ impl Resource for PnpmTestResource {
 
     fn apply(
         &self,
-        inputs: &PnpmTestInputs,
+        inputs: &Block<PnpmTestInputs>,
         _prior_state: Option<&PnpmTestState>,
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<PnpmTestState, PnpmTestOutputs>, BoxError> {
         let args = pnpm_args(&inputs.script, inputs.package.as_deref(), &inputs.args);
-        let passed = run_pnpm(&args, Some(&inputs.dir), writer).is_ok();
+        let passed = run_pnpm(&args, Some(workspace_dir(inputs)), writer).is_ok();
 
         Ok(ApplyResult {
             outputs: PnpmTestOutputs { passed },
@@ -124,18 +122,17 @@ impl Resource for PnpmTestResource {
                 script: inputs.script.clone(),
                 package: inputs.package.clone(),
                 args: inputs.args.clone(),
-                dir: inputs.dir.clone(),
             }),
         })
     }
 
-    fn destroy(&self, _prior_state: &PnpmTestState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<PnpmTestState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
     /// Local for the same reason as `pnpm.run`: nothing in the action key
     /// describes the tools the test script runs.
-    fn cache_policy(&self, _inputs: &PnpmTestInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<PnpmTestInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 }
@@ -157,13 +154,15 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = PnpmTestInputs {
-            script: "test".into(),
-            package: Some("bff".into()),
-            args: vec![],
-            inputs: vec![],
-            dir: ".".into(),
-        };
+        let inputs = Block::new(
+            None,
+            PnpmTestInputs {
+                script: "test".into(),
+                package: Some("bff".into()),
+                args: vec![],
+                inputs: vec![],
+            },
+        );
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "pnpm --filter bff run test");
@@ -171,18 +170,19 @@ mod tests {
 
     #[test]
     fn plan_update_when_args_changed() {
-        let inputs = PnpmTestInputs {
-            script: "test".into(),
-            package: None,
-            args: vec!["--reporter=verbose".into()],
-            inputs: vec![],
-            dir: ".".into(),
-        };
+        let inputs = Block::new(
+            None,
+            PnpmTestInputs {
+                script: "test".into(),
+                package: None,
+                args: vec!["--reporter=verbose".into()],
+                inputs: vec![],
+            },
+        );
         let prior = PnpmTestState {
             script: "test".into(),
             package: None,
             args: vec![],
-            dir: ".".into(),
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);

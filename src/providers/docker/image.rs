@@ -12,7 +12,7 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
     ReceiptCheck, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
@@ -332,7 +332,7 @@ impl Resource for ImageResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, _inputs: &ImageInputs) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Block<ImageInputs>) -> Vec<Ambient> {
         vec![crate::providers::version(
             &self.docker.to_string_lossy(),
             &["--version"],
@@ -340,7 +340,7 @@ impl Resource for ImageResource {
         )]
     }
 
-    fn resolve(&self, inputs: &ImageInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<ImageInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let context = Path::new(&inputs.context);
         let dockerfile = context.join(&inputs.dockerfile);
         let dockerignore = parse::DockerIgnore::load(context);
@@ -363,7 +363,7 @@ impl Resource for ImageResource {
         Ok(files)
     }
 
-    fn plan(&self, inputs: &ImageInputs, prior_state: Option<&ImageState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<ImageInputs>, prior_state: Option<&ImageState>) -> Result<PlanResult, BoxError> {
         if inputs.platform.len() > 1 && !inputs.tag.contains('/') {
             return Err(format!(
                 "multi-platform builds require a registry-qualified tag (e.g. \"registry.example.com/app:latest\"), got \"{}\"",
@@ -427,7 +427,7 @@ impl Resource for ImageResource {
 
     fn apply(
         &self,
-        inputs: &ImageInputs,
+        inputs: &Block<ImageInputs>,
         _prior_state: Option<&ImageState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -490,7 +490,7 @@ impl Resource for ImageResource {
         })
     }
 
-    fn destroy(&self, prior_state: &ImageState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<ImageState>, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         // Multi-platform builds never enter the local image store, and this
         // build resource does not own deletion from an external registry.
@@ -505,7 +505,7 @@ impl Resource for ImageResource {
         self.remove_image(&prior_state.image_id)
     }
 
-    fn cache_policy(&self, inputs: &ImageInputs) -> CachePolicy {
+    fn cache_policy(&self, inputs: &Block<ImageInputs>) -> CachePolicy {
         // A registry push cannot be reconstructed from Bit's local CAS or
         // vouched for by another worktree's receipt.
         if inputs.platform.len() > 1 {
@@ -517,7 +517,7 @@ impl Resource for ImageResource {
 
     fn capture_artifacts(
         &self,
-        inputs: &ImageInputs,
+        inputs: &Block<ImageInputs>,
         state: &ImageState,
         _outputs: &[OutputFile],
         cas: &Cas,
@@ -551,7 +551,7 @@ impl Resource for ImageResource {
 
     fn check_receipt(
         &self,
-        inputs: &ImageInputs,
+        inputs: &Block<ImageInputs>,
         state: &ImageState,
         _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
@@ -572,7 +572,7 @@ impl Resource for ImageResource {
 
     fn materialize(
         &self,
-        inputs: &ImageInputs,
+        inputs: &Block<ImageInputs>,
         state: &ImageState,
         _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
@@ -660,14 +660,17 @@ mod tests {
             .collect()
     }
 
-    fn test_inputs() -> ImageInputs {
-        ImageInputs {
-            tag: "myapp:latest".into(),
-            context: ".".into(),
-            dockerfile: "Dockerfile".into(),
-            build_args: HashMap::new(),
-            platform: vec![],
-        }
+    fn test_inputs() -> Block<ImageInputs> {
+        Block::new(
+            None,
+            ImageInputs {
+                tag: "myapp:latest".into(),
+                context: ".".into(),
+                dockerfile: "Dockerfile".into(),
+                build_args: HashMap::new(),
+                platform: vec![],
+            },
+        )
     }
 
     fn test_state() -> ImageState {
@@ -679,14 +682,17 @@ mod tests {
         }
     }
 
-    fn multi_platform_inputs() -> ImageInputs {
-        ImageInputs {
-            tag: "registry.example.com:5000/team/myapp:v1".into(),
-            context: ".".into(),
-            dockerfile: "Dockerfile".into(),
-            build_args: HashMap::new(),
-            platform: vec!["linux/amd64".into(), "linux/arm64".into()],
-        }
+    fn multi_platform_inputs() -> Block<ImageInputs> {
+        Block::new(
+            None,
+            ImageInputs {
+                tag: "registry.example.com:5000/team/myapp:v1".into(),
+                context: ".".into(),
+                dockerfile: "Dockerfile".into(),
+                build_args: HashMap::new(),
+                platform: vec!["linux/amd64".into(), "linux/arm64".into()],
+            },
+        )
     }
 
     #[test]
@@ -716,7 +722,7 @@ exit 0
         };
         let output = crate::output::Output::new(&[]);
 
-        Resource::destroy(&resource, &test_state(), &output.writer("image")).unwrap();
+        Resource::destroy(&resource, &Block::new(None, test_state()), &output.writer("image")).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(dir.path().join("docker.log")).unwrap(),
@@ -744,13 +750,16 @@ exit 0
 
     #[test]
     fn plan_update_when_tag_changed() {
-        let inputs = ImageInputs {
-            tag: "myapp:v2".into(),
-            context: ".".into(),
-            dockerfile: "Dockerfile".into(),
-            build_args: HashMap::new(),
-            platform: vec![],
-        };
+        let inputs = Block::new(
+            None,
+            ImageInputs {
+                tag: "myapp:v2".into(),
+                context: ".".into(),
+                dockerfile: "Dockerfile".into(),
+                build_args: HashMap::new(),
+                platform: vec![],
+            },
+        );
         let prior = ImageState {
             tag: "myapp:v1".into(),
             image_id: "abc".into(),
@@ -768,13 +777,16 @@ exit 0
 
     #[test]
     fn plan_update_when_platform_changed() {
-        let inputs = ImageInputs {
-            tag: "myapp:latest".into(),
-            context: ".".into(),
-            dockerfile: "Dockerfile".into(),
-            build_args: HashMap::new(),
-            platform: vec!["linux/arm64".into()],
-        };
+        let inputs = Block::new(
+            None,
+            ImageInputs {
+                tag: "myapp:latest".into(),
+                context: ".".into(),
+                dockerfile: "Dockerfile".into(),
+                build_args: HashMap::new(),
+                platform: vec!["linux/arm64".into()],
+            },
+        );
         let prior = ImageState {
             tag: "myapp:latest".into(),
             image_id: "abc".into(),
@@ -798,13 +810,16 @@ exit 0
         std::fs::write(&dockerfile, "FROM alpine\nCOPY app.txt /app/\n").unwrap();
         std::fs::write(&src_file, "hello").unwrap();
 
-        let inputs = ImageInputs {
-            tag: "myapp:latest".into(),
-            context: dir.path().to_string_lossy().into_owned(),
-            dockerfile: "Dockerfile".into(),
-            build_args: HashMap::new(),
-            platform: vec![],
-        };
+        let inputs = Block::new(
+            None,
+            ImageInputs {
+                tag: "myapp:latest".into(),
+                context: dir.path().to_string_lossy().into_owned(),
+                dockerfile: "Dockerfile".into(),
+                build_args: HashMap::new(),
+                platform: vec![],
+            },
+        );
         let resolved = Resource::resolve(&ImageResource::new(Arc::new(FileTracker::default())), &inputs).unwrap();
         assert_eq!(resolved.len(), 2);
         assert!(resolved.contains_key(&dockerfile.to_string_lossy().into_owned()));
@@ -821,13 +836,16 @@ exit 0
         std::fs::write(src_dir.join("main.rs"), "fn main() {}").unwrap();
         std::fs::write(src_dir.join("test.log"), "log output").unwrap();
 
-        let inputs = ImageInputs {
-            tag: "myapp:latest".into(),
-            context: dir.path().to_string_lossy().into_owned(),
-            dockerfile: "Dockerfile".into(),
-            build_args: HashMap::new(),
-            platform: vec![],
-        };
+        let inputs = Block::new(
+            None,
+            ImageInputs {
+                tag: "myapp:latest".into(),
+                context: dir.path().to_string_lossy().into_owned(),
+                dockerfile: "Dockerfile".into(),
+                build_args: HashMap::new(),
+                platform: vec![],
+            },
+        );
         let resolved = Resource::resolve(&ImageResource::new(Arc::new(FileTracker::default())), &inputs).unwrap();
         assert_eq!(resolved.len(), 3); // Dockerfile + main.rs + test.log
 
@@ -1009,7 +1027,7 @@ printf '%s\n' "$*" > "$(dirname "$0")/docker.log"
         };
         let output = crate::output::Output::new(&[]);
 
-        Resource::destroy(&resource, &state, &output.writer("image")).unwrap();
+        Resource::destroy(&resource, &Block::new(None, state), &output.writer("image")).unwrap();
     }
 
     #[test]

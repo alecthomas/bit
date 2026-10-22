@@ -8,15 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
-use super::{run_pnpm, workspace};
-
-fn default_dir() -> String {
-    ".".to_owned()
-}
+use super::{run_pnpm, workspace, workspace_dir};
 
 /// Build a list of pnpm command arguments from resource inputs.
 pub(super) fn pnpm_args(script: &str, package: Option<&str>, script_args: &[String]) -> Vec<String> {
@@ -101,9 +97,6 @@ pub struct PnpmRunInputs {
     /// Extra input file globs (added to auto-detected sources)
     #[serde(default)]
     pub inputs: Vec<String>,
-    /// Workspace root directory (defaults to the current directory)
-    #[serde(default = "default_dir")]
-    pub dir: String,
 }
 
 /// Outputs from a `pnpm.run` block.
@@ -146,7 +139,6 @@ pub struct PnpmRunState {
     /// `bit --clean` still removes outputs those runs declared.
     #[serde(alias = "output")]
     pub outputs: Vec<String>,
-    pub dir: String,
 }
 
 pub struct PnpmRunResource {
@@ -166,14 +158,14 @@ impl Resource for PnpmRunResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &PnpmRunInputs) -> Vec<Ambient> {
-        super::ambient(&inputs.dir)
+    fn ambient(&self, inputs: &Block<PnpmRunInputs>) -> Vec<Ambient> {
+        super::ambient(workspace_dir(inputs))
     }
 
-    fn resolve(&self, inputs: &PnpmRunInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<PnpmRunInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         resolve_inputs(
-            &inputs.dir,
+            workspace_dir(inputs),
             inputs.package.as_deref(),
             &inputs.outputs,
             &inputs.inputs,
@@ -181,7 +173,7 @@ impl Resource for PnpmRunResource {
         )
     }
 
-    fn plan(&self, inputs: &PnpmRunInputs, prior_state: Option<&PnpmRunState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<PnpmRunInputs>, prior_state: Option<&PnpmRunState>) -> Result<PlanResult, BoxError> {
         let description = describe(&inputs.script, inputs.package.as_deref(), &inputs.args);
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -194,7 +186,6 @@ impl Resource for PnpmRunResource {
             || prior.package != inputs.package
             || prior.args != inputs.args
             || prior.outputs != inputs.outputs
-            || prior.dir != inputs.dir
         {
             PlanAction::Update
         } else {
@@ -209,7 +200,7 @@ impl Resource for PnpmRunResource {
 
     fn apply(
         &self,
-        inputs: &PnpmRunInputs,
+        inputs: &Block<PnpmRunInputs>,
         _prior_state: Option<&PnpmRunState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -226,7 +217,7 @@ impl Resource for PnpmRunResource {
         }
 
         let args = pnpm_args(&inputs.script, inputs.package.as_deref(), &inputs.args);
-        run_pnpm(&args, Some(&inputs.dir), writer)?;
+        run_pnpm(&args, Some(workspace_dir(inputs)), writer)?;
 
         Ok(ApplyResult {
             outputs: PnpmRunOutputs::from_paths(&inputs.outputs),
@@ -235,12 +226,11 @@ impl Resource for PnpmRunResource {
                 package: inputs.package.clone(),
                 args: inputs.args.clone(),
                 outputs: inputs.outputs.clone(),
-                dir: inputs.dir.clone(),
             }),
         })
     }
 
-    fn destroy(&self, prior_state: &PnpmRunState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<PnpmRunState>, writer: &BlockWriter) -> Result<(), BoxError> {
         for output in &prior_state.outputs {
             crate::providers::remove_path(Path::new(output), writer)?;
         }
@@ -250,11 +240,11 @@ impl Resource for PnpmRunResource {
     /// A package script is an arbitrary command, like `exec`: the action key
     /// names the script but nothing it invokes. Its declared outputs are also
     /// commonly directories, which the CAS cannot store.
-    fn cache_policy(&self, _inputs: &PnpmRunInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<PnpmRunInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 
-    fn output_keys(&self, inputs: &PnpmRunInputs) -> Vec<String> {
+    fn output_keys(&self, inputs: &Block<PnpmRunInputs>) -> Vec<String> {
         inputs
             .outputs
             .iter()
@@ -301,34 +291,37 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = PnpmRunInputs {
-            script: "build".into(),
-            package: Some("bff".into()),
-            args: vec![],
-            outputs: vec![],
-            inputs: vec![],
-            dir: ".".into(),
-        };
+        let inputs = Block::new(
+            None,
+            PnpmRunInputs {
+                script: "build".into(),
+                package: Some("bff".into()),
+                args: vec![],
+                outputs: vec![],
+                inputs: vec![],
+            },
+        );
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
     #[test]
     fn plan_update_when_script_changed() {
-        let inputs = PnpmRunInputs {
-            script: "test".into(),
-            package: Some("bff".into()),
-            args: vec![],
-            outputs: vec![],
-            inputs: vec![],
-            dir: ".".into(),
-        };
+        let inputs = Block::new(
+            None,
+            PnpmRunInputs {
+                script: "test".into(),
+                package: Some("bff".into()),
+                args: vec![],
+                outputs: vec![],
+                inputs: vec![],
+            },
+        );
         let prior = PnpmRunState {
             script: "build".into(),
             package: Some("bff".into()),
             args: vec![],
             outputs: vec![],
-            dir: ".".into(),
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
@@ -360,11 +353,10 @@ mod tests {
                 file.to_string_lossy().into_owned(),
                 output_dir.to_string_lossy().into_owned(),
             ],
-            dir: ".".into(),
         };
         let output = crate::output::Output::new(&[]);
 
-        Resource::destroy(&test_resource(), &state, &output.writer("build")).unwrap();
+        Resource::destroy(&test_resource(), &Block::new(None, state), &output.writer("build")).unwrap();
 
         assert!(!file.exists());
         assert!(!output_dir.exists());

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -28,9 +28,6 @@ pub struct GoBuildInputs {
     /// Input file glob patterns (in addition to Go sources)
     #[serde(default)]
     pub inputs: Vec<String>,
-    /// Working directory for the command
-    #[serde(default)]
-    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -46,8 +43,6 @@ pub struct GoBuildState {
     #[serde(deserialize_with = "crate::providers::string_or_vec")]
     pub package: Vec<String>,
     pub flags: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -83,17 +78,17 @@ impl Resource for GoBuildResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &GoBuildInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<GoBuildInputs>) -> Vec<Ambient> {
         vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
     }
 
-    fn resolve(&self, inputs: &GoBuildInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<GoBuildInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
         super::resolve_go_inputs(&inputs.package, dir, Tests::Excluded, &inputs.inputs, tracker)
     }
 
-    fn plan(&self, inputs: &GoBuildInputs, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<GoBuildInputs>, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
         let description = super::display_command("go", &build_args(inputs), inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
@@ -119,7 +114,7 @@ impl Resource for GoBuildResource {
 
     fn apply(
         &self,
-        inputs: &GoBuildInputs,
+        inputs: &Block<GoBuildInputs>,
         _prior_state: Option<&GoBuildState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -158,17 +153,16 @@ impl Resource for GoBuildResource {
             state: Some(GoBuildState {
                 package: inputs.package.clone(),
                 flags: inputs.flags.clone(),
-                dir: inputs.dir.clone(),
                 env: inputs.env.clone(),
             }),
         })
     }
 
-    fn destroy(&self, _prior_state: &GoBuildState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<GoBuildState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &GoBuildInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<GoBuildInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -189,13 +183,15 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = GoBuildInputs {
-            package: vec!["./...".into()],
-            flags: vec!["-race".into()],
-            inputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoBuildInputs {
+                package: vec!["./...".into()],
+                flags: vec!["-race".into()],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -204,17 +200,18 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = GoBuildInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoBuildInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         let prior = GoBuildState {
             package: vec!["./...".into()],
             flags: vec![],
-            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();

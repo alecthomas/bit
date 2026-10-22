@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -26,9 +26,6 @@ pub struct GoFmtInputs {
     #[serde(default = "default_package", deserialize_with = "super::package_patterns")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub package: Vec<String>,
-    /// Working directory for the command
-    #[serde(default)]
-    pub dir: Option<String>,
 }
 
 /// Outputs from a `go.fmt` block.
@@ -48,8 +45,6 @@ pub struct GoFmtState {
     /// A string in state written before `package` took a list.
     #[serde(deserialize_with = "crate::providers::string_or_vec")]
     pub package: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
 }
 
 /// Collect `.go` file paths, including `_test.go` files, for the given package patterns.
@@ -78,7 +73,7 @@ fn gofmt_command(mode: &str, targets: &[String], dir: Option<&str>) -> String {
 
 /// The block's `.go` files that changed since its last success, or all of
 /// them when anything may have changed.
-fn changed_go_files(inputs: &GoFmtInputs, changes: &Changes) -> Result<Vec<String>, BoxError> {
+fn changed_go_files(inputs: &Block<GoFmtInputs>, changes: &Changes) -> Result<Vec<String>, BoxError> {
     let files = go_source_files(&inputs.package, inputs.dir.as_deref().map(Path::new))?;
     Ok(match changes {
         Changes::All => files,
@@ -115,17 +110,17 @@ impl Resource for GoFmtResource {
     }
 
     /// gofmt ships with the Go toolchain, which the go command reports.
-    fn ambient(&self, inputs: &GoFmtInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<GoFmtInputs>) -> Vec<Ambient> {
         vec![super::toolchain(&super::GoEnv::default(), inputs.dir.as_deref())]
     }
 
-    fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
         super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &[], tracker)
     }
 
-    fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<GoFmtInputs>, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
         let description = gofmt_command("-w", &inputs.package, inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
@@ -151,7 +146,7 @@ impl Resource for GoFmtResource {
 
     fn apply(
         &self,
-        inputs: &GoFmtInputs,
+        inputs: &Block<GoFmtInputs>,
         _prior_state: Option<&GoFmtState>,
         changes: &Changes,
         writer: &BlockWriter,
@@ -163,7 +158,6 @@ impl Resource for GoFmtResource {
                 outputs: GoFmtOutputs {},
                 state: Some(GoFmtState {
                     package: inputs.package.clone(),
-                    dir: inputs.dir.clone(),
                 }),
             });
         }
@@ -200,12 +194,11 @@ impl Resource for GoFmtResource {
             outputs: GoFmtOutputs {},
             state: Some(GoFmtState {
                 package: inputs.package.clone(),
-                dir: inputs.dir.clone(),
             }),
         })
     }
 
-    fn destroy(&self, _prior_state: &GoFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<GoFmtState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
@@ -214,7 +207,7 @@ impl Resource for GoFmtResource {
         true
     }
 
-    fn cache_policy(&self, _inputs: &GoFmtInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<GoFmtInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -245,17 +238,17 @@ impl Resource for GoFmtCheckResource {
     }
 
     /// gofmt ships with the Go toolchain, which the go command reports.
-    fn ambient(&self, inputs: &GoFmtInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<GoFmtInputs>) -> Vec<Ambient> {
         vec![super::toolchain(&super::GoEnv::default(), inputs.dir.as_deref())]
     }
 
-    fn resolve(&self, inputs: &GoFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
         super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &[], tracker)
     }
 
-    fn plan(&self, inputs: &GoFmtInputs, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<GoFmtInputs>, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
         let description = gofmt_command("-l", &inputs.package, inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
@@ -281,7 +274,7 @@ impl Resource for GoFmtCheckResource {
 
     fn apply(
         &self,
-        inputs: &GoFmtInputs,
+        inputs: &Block<GoFmtInputs>,
         _prior_state: Option<&GoFmtState>,
         changes: &Changes,
         writer: &BlockWriter,
@@ -293,7 +286,6 @@ impl Resource for GoFmtCheckResource {
                 outputs: GoFmtCheckOutputs { passed: true },
                 state: Some(GoFmtState {
                     package: inputs.package.clone(),
-                    dir: inputs.dir.clone(),
                 }),
             });
         }
@@ -324,12 +316,11 @@ impl Resource for GoFmtCheckResource {
             outputs: GoFmtCheckOutputs { passed },
             state: Some(GoFmtState {
                 package: inputs.package.clone(),
-                dir: inputs.dir.clone(),
             }),
         })
     }
 
-    fn destroy(&self, _prior_state: &GoFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<GoFmtState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
@@ -338,7 +329,7 @@ impl Resource for GoFmtCheckResource {
         true
     }
 
-    fn cache_policy(&self, _inputs: &GoFmtInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<GoFmtInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -359,17 +350,19 @@ mod tests {
     const FORMATTED_TEST: &str = "package pkg\n\nfunc helper() {}\n";
 
     /// Create a module whose only unformatted file is `pkg/lib_test.go`.
-    fn module_with_unformatted_test_file() -> (tempfile::TempDir, GoFmtInputs) {
+    fn module_with_unformatted_test_file() -> (tempfile::TempDir, Block<GoFmtInputs>) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         std::fs::write(root.join("pkg/lib.go"), "package pkg\n").unwrap();
         std::fs::write(root.join("pkg/lib_test.go"), UNFORMATTED_TEST).unwrap();
-        let inputs = GoFmtInputs {
-            package: vec!["./...".into()],
-            dir: Some(root.to_string_lossy().into_owned()),
-        };
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            GoFmtInputs {
+                package: vec!["./...".into()],
+            },
+        );
         (dir, inputs)
     }
 
@@ -385,10 +378,12 @@ mod tests {
 
     #[test]
     fn fmt_plan_create_when_no_prior_state() {
-        let inputs = GoFmtInputs {
-            package: vec!["./...".into()],
-            dir: None,
-        };
+        let inputs = Block::new(
+            None,
+            GoFmtInputs {
+                package: vec!["./...".into()],
+            },
+        );
         let result = Resource::plan(&test_fmt_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "gofmt -w ./...");
@@ -396,10 +391,12 @@ mod tests {
 
     #[test]
     fn fmt_check_plan_create_when_no_prior_state() {
-        let inputs = GoFmtInputs {
-            package: vec!["./...".into()],
-            dir: None,
-        };
+        let inputs = Block::new(
+            None,
+            GoFmtInputs {
+                package: vec!["./...".into()],
+            },
+        );
         let result = Resource::plan(&test_fmt_check_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "gofmt -l ./...");
@@ -407,13 +404,14 @@ mod tests {
 
     #[test]
     fn fmt_plan_none_when_unchanged() {
-        let inputs = GoFmtInputs {
-            package: vec!["./...".into()],
-            dir: None,
-        };
+        let inputs = Block::new(
+            None,
+            GoFmtInputs {
+                package: vec!["./...".into()],
+            },
+        );
         let prior = GoFmtState {
             package: vec!["./...".into()],
-            dir: None,
         };
         let result = Resource::plan(&test_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -421,13 +419,14 @@ mod tests {
 
     #[test]
     fn fmt_plan_update_when_package_changed() {
-        let inputs = GoFmtInputs {
-            package: vec!["./cmd/...".into()],
-            dir: None,
-        };
+        let inputs = Block::new(
+            None,
+            GoFmtInputs {
+                package: vec!["./cmd/...".into()],
+            },
+        );
         let prior = GoFmtState {
             package: vec!["./...".into()],
-            dir: None,
         };
         let result = Resource::plan(&test_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);

@@ -10,7 +10,7 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
     ReceiptCheck, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
@@ -146,16 +146,16 @@ impl Resource for RustExeResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &RustExeInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<RustExeInputs>) -> Vec<Ambient> {
         super::build_ambient(&inputs.env, &[])
     }
 
-    fn resolve(&self, inputs: &RustExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<RustExeInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         super::resolve_rust_inputs(inputs.package.as_deref(), tracker)
     }
 
-    fn plan(&self, inputs: &RustExeInputs, prior_state: Option<&RustExeState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<RustExeInputs>, prior_state: Option<&RustExeState>) -> Result<PlanResult, BoxError> {
         let description = exe_command(inputs).display();
 
         let Some(prior) = prior_state else {
@@ -186,7 +186,7 @@ impl Resource for RustExeResource {
 
     fn apply(
         &self,
-        inputs: &RustExeInputs,
+        inputs: &Block<RustExeInputs>,
         _prior_state: Option<&RustExeState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -232,17 +232,17 @@ impl Resource for RustExeResource {
         })
     }
 
-    fn destroy(&self, prior_state: &RustExeState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<RustExeState>, writer: &BlockWriter) -> Result<(), BoxError> {
         crate::providers::remove_path(Path::new(&prior_state.path), writer)
     }
 
-    fn cache_policy(&self, _inputs: &RustExeInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<RustExeInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 
     fn capture_artifacts(
         &self,
-        _inputs: &RustExeInputs,
+        _inputs: &Block<RustExeInputs>,
         state: &RustExeState,
         _outputs: &[OutputFile],
         cas: &Cas,
@@ -258,7 +258,7 @@ impl Resource for RustExeResource {
 
     fn check_receipt(
         &self,
-        _inputs: &RustExeInputs,
+        _inputs: &Block<RustExeInputs>,
         state: &RustExeState,
         _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
@@ -281,7 +281,7 @@ impl Resource for RustExeResource {
     /// this worktree's target directory plus the portable relative path.
     fn materialize(
         &self,
-        inputs: &RustExeInputs,
+        inputs: &Block<RustExeInputs>,
         state: &RustExeState,
         _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
@@ -331,13 +331,16 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = RustExeInputs {
-            bin: Some("myapp".into()),
-            package: None,
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustExeInputs {
+                bin: Some("myapp".into()),
+                package: None,
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo build --bin myapp --message-format json");
@@ -345,13 +348,16 @@ mod tests {
 
     #[test]
     fn plan_create_no_bin() {
-        let inputs = RustExeInputs {
-            bin: None,
-            package: None,
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustExeInputs {
+                bin: None,
+                package: None,
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo build --message-format json");
@@ -359,26 +365,32 @@ mod tests {
 
     #[test]
     fn plan_create_with_package() {
-        let inputs = RustExeInputs {
-            bin: None,
-            package: Some("my-crate".into()),
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustExeInputs {
+                bin: None,
+                package: Some("my-crate".into()),
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.description, "cargo build -p my-crate --message-format json");
     }
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = RustExeInputs {
-            bin: Some("myapp".into()),
-            package: None,
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustExeInputs {
+                bin: Some("myapp".into()),
+                package: None,
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let prior = RustExeState {
             bin: Some("myapp".into()),
             package: None,
@@ -394,13 +406,16 @@ mod tests {
 
     #[test]
     fn plan_update_when_bin_changed() {
-        let inputs = RustExeInputs {
-            bin: Some("other".into()),
-            package: None,
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustExeInputs {
+                bin: Some("other".into()),
+                package: None,
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let prior = RustExeState {
             bin: Some("myapp".into()),
             package: None,
@@ -430,7 +445,7 @@ mod tests {
         };
 
         let out = Output::new(&[]);
-        Resource::destroy(&make_resource(), &state, &out.writer("test")).unwrap();
+        Resource::destroy(&make_resource(), &Block::new(None, state), &out.writer("test")).unwrap();
 
         assert!(!path.exists());
     }

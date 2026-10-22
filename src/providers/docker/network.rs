@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
-use crate::provider::{ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 /// Create a Docker network (Terraform-style: tracked state, drift detection)
@@ -81,17 +83,17 @@ impl Resource for NetworkResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, _inputs: &NetworkInputs) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, _inputs: &Block<NetworkInputs>) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
         Ok(std::collections::BTreeMap::new())
     }
 
     /// None: the network is daemon state that the docker CLI only requests,
     /// so a CLI upgrade must not recreate it under its attached containers.
-    fn ambient(&self, _inputs: &NetworkInputs) -> Vec<crate::provider::Ambient> {
+    fn ambient(&self, _inputs: &Block<NetworkInputs>) -> Vec<crate::provider::Ambient> {
         vec![]
     }
 
-    fn plan(&self, inputs: &NetworkInputs, prior_state: Option<&NetworkState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<NetworkInputs>, prior_state: Option<&NetworkState>) -> Result<PlanResult, BoxError> {
         let desc = crate::providers::display_command("docker", &create_args(inputs));
 
         let Some(prior) = prior_state else {
@@ -127,7 +129,7 @@ impl Resource for NetworkResource {
 
     fn apply(
         &self,
-        inputs: &NetworkInputs,
+        inputs: &Block<NetworkInputs>,
         prior_state: Option<&NetworkState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -180,14 +182,14 @@ impl Resource for NetworkResource {
         })
     }
 
-    fn destroy(&self, prior_state: &NetworkState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<NetworkState>, writer: &BlockWriter) -> Result<(), BoxError> {
         writer.event(Event::Starting, &format!("docker network rm {}", prior_state.name));
         remove_network(&prior_state.name)
     }
 
     /// A network is named, mutable state in the local Docker daemon; see
     /// `docker.container`.
-    fn cache_policy(&self, _inputs: &NetworkInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<NetworkInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 }
@@ -211,30 +213,39 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_state() {
-        let inputs = NetworkInputs {
-            name: "test-net".into(),
-            driver: None,
-        };
+        let inputs = Block::new(
+            None,
+            NetworkInputs {
+                name: "test-net".into(),
+                driver: None,
+            },
+        );
         let result = Resource::plan(&NetworkResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
     #[test]
     fn description_includes_driver() {
-        let inputs = NetworkInputs {
-            name: "test-net".into(),
-            driver: Some("bridge".into()),
-        };
+        let inputs = Block::new(
+            None,
+            NetworkInputs {
+                name: "test-net".into(),
+                driver: Some("bridge".into()),
+            },
+        );
         let result = Resource::plan(&NetworkResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
         assert_eq!(result.description, "docker network create --driver bridge test-net");
     }
 
     #[test]
     fn plan_create_when_network_missing() {
-        let inputs = NetworkInputs {
-            name: "bit-nonexistent-network-test".into(),
-            driver: None,
-        };
+        let inputs = Block::new(
+            None,
+            NetworkInputs {
+                name: "bit-nonexistent-network-test".into(),
+                driver: None,
+            },
+        );
         let prior = NetworkState {
             name: "bit-nonexistent-network-test".into(),
             id: "abc".into(),

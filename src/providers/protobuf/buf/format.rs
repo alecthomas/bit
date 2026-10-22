@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 use super::BufTarget;
@@ -70,15 +72,19 @@ impl Resource for BufFormatResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &BufFormatInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        inputs.target.sources()?.hash(&self.tracker)
+    fn resolve(&self, inputs: &Block<BufFormatInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        inputs.target.sources(inputs.dir.as_deref())?.hash(&self.tracker)
     }
 
-    fn ambient(&self, inputs: &BufFormatInputs) -> Vec<Ambient> {
-        vec![inputs.target.buf()]
+    fn ambient(&self, inputs: &Block<BufFormatInputs>) -> Vec<Ambient> {
+        vec![super::buf(inputs.dir.as_deref())]
     }
 
-    fn plan(&self, inputs: &BufFormatInputs, prior_state: Option<&BufFormatInputs>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<BufFormatInputs>,
+        prior_state: Option<&BufFormatInputs>,
+    ) -> Result<PlanResult, BoxError> {
         Ok(super::super::plan(
             inputs.target.describe(&inputs.args(&WRITE)),
             prior_state,
@@ -88,28 +94,28 @@ impl Resource for BufFormatResource {
 
     fn apply(
         &self,
-        inputs: &BufFormatInputs,
+        inputs: &Block<BufFormatInputs>,
         _prior_state: Option<&BufFormatInputs>,
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufFormatInputs, BufFormatOutputs>, BoxError> {
-        let status = inputs.target.run(&inputs.args(&WRITE), writer)?;
+        let status = inputs.target.run(inputs.dir.as_deref(), &inputs.args(&WRITE), writer)?;
         if !status.success() {
             return Err(format!("`buf format` exited with {status}").into());
         }
         Ok(ApplyResult {
             outputs: BufFormatOutputs {},
-            state: Some(inputs.clone()),
+            state: Some(inputs.value.clone()),
         })
     }
 
-    fn destroy(&self, _prior_state: &BufFormatInputs, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<BufFormatInputs>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
     /// The buf executable is a tool, so the action key already describes
     /// the toolchain.
-    fn cache_policy(&self, _inputs: &BufFormatInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<BufFormatInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -139,15 +145,19 @@ impl Resource for BufFormatCheckResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &BufFormatInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        inputs.target.sources()?.hash(&self.tracker)
+    fn resolve(&self, inputs: &Block<BufFormatInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        inputs.target.sources(inputs.dir.as_deref())?.hash(&self.tracker)
     }
 
-    fn ambient(&self, inputs: &BufFormatInputs) -> Vec<Ambient> {
-        vec![inputs.target.buf()]
+    fn ambient(&self, inputs: &Block<BufFormatInputs>) -> Vec<Ambient> {
+        vec![super::buf(inputs.dir.as_deref())]
     }
 
-    fn plan(&self, inputs: &BufFormatInputs, prior_state: Option<&BufFormatInputs>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<BufFormatInputs>,
+        prior_state: Option<&BufFormatInputs>,
+    ) -> Result<PlanResult, BoxError> {
         Ok(super::super::plan(
             inputs.target.describe(&inputs.args(&CHECK)),
             prior_state,
@@ -157,25 +167,25 @@ impl Resource for BufFormatCheckResource {
 
     fn apply(
         &self,
-        inputs: &BufFormatInputs,
+        inputs: &Block<BufFormatInputs>,
         _prior_state: Option<&BufFormatInputs>,
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufFormatInputs, BufFormatCheckOutputs>, BoxError> {
-        let status = inputs.target.run(&inputs.args(&CHECK), writer)?;
+        let status = inputs.target.run(inputs.dir.as_deref(), &inputs.args(&CHECK), writer)?;
         Ok(ApplyResult {
             outputs: BufFormatCheckOutputs {
                 passed: status.success(),
             },
-            state: Some(inputs.clone()),
+            state: Some(inputs.value.clone()),
         })
     }
 
-    fn destroy(&self, _prior_state: &BufFormatInputs, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<BufFormatInputs>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &BufFormatInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<BufFormatInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -200,6 +210,7 @@ mod tests {
     #[test]
     fn plan_descriptions() {
         let inputs: BufFormatInputs = serde_json::from_str(r#"{"input": "proto"}"#).unwrap();
+        let inputs = Block::new(None, inputs);
         let format = Resource::plan(&BufFormatResource::new(tracker()), &inputs, None).unwrap();
         assert_eq!(format.description, "buf format --write proto");
         let check = Resource::plan(&BufFormatCheckResource::new(tracker()), &inputs, None).unwrap();

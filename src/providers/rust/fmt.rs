@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -119,16 +119,16 @@ impl Resource for RustFmtResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &RustFmtInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<RustFmtInputs>) -> Vec<Ambient> {
         super::toolchain(&inputs.env, &[&["rustfmt", "--version"]])
     }
 
-    fn resolve(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<RustFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         resolve(inputs, tracker)
     }
 
-    fn plan(&self, inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<RustFmtInputs>, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
         Ok(PlanResult {
             action: plan_action(inputs, prior_state),
             description: fmt_command(inputs).display(),
@@ -138,7 +138,7 @@ impl Resource for RustFmtResource {
 
     fn apply(
         &self,
-        inputs: &RustFmtInputs,
+        inputs: &Block<RustFmtInputs>,
         _prior_state: Option<&RustFmtState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -150,11 +150,11 @@ impl Resource for RustFmtResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &RustFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<RustFmtState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &RustFmtInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<RustFmtInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -178,16 +178,16 @@ impl Resource for RustFmtCheckResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &RustFmtInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<RustFmtInputs>) -> Vec<Ambient> {
         super::toolchain(&inputs.env, &[&["rustfmt", "--version"]])
     }
 
-    fn resolve(&self, inputs: &RustFmtInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<RustFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         resolve(inputs, tracker)
     }
 
-    fn plan(&self, inputs: &RustFmtInputs, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<RustFmtInputs>, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
         Ok(PlanResult {
             action: plan_action(inputs, prior_state),
             description: fmt_check_command(inputs).display(),
@@ -197,7 +197,7 @@ impl Resource for RustFmtCheckResource {
 
     fn apply(
         &self,
-        inputs: &RustFmtInputs,
+        inputs: &Block<RustFmtInputs>,
         _prior_state: Option<&RustFmtState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -209,11 +209,11 @@ impl Resource for RustFmtCheckResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &RustFmtState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<RustFmtState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &RustFmtInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<RustFmtInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -246,11 +246,14 @@ mod tests {
 
     #[test]
     fn fmt_plan_create() {
-        let inputs = RustFmtInputs {
-            package: None,
-            flags: vec![],
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustFmtInputs {
+                package: None,
+                flags: vec![],
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_fmt_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo fmt");
@@ -258,11 +261,14 @@ mod tests {
 
     #[test]
     fn fmt_check_plan_create() {
-        let inputs = RustFmtInputs {
-            package: None,
-            flags: vec![],
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustFmtInputs {
+                package: None,
+                flags: vec![],
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_fmt_check_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo fmt --check");
@@ -270,36 +276,45 @@ mod tests {
 
     #[test]
     fn fmt_plan_with_package() {
-        let inputs = RustFmtInputs {
-            package: Some("my-crate".into()),
-            flags: vec![],
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustFmtInputs {
+                package: Some("my-crate".into()),
+                flags: vec![],
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_fmt_resource(), &inputs, None).unwrap();
         assert_eq!(result.description, "cargo fmt -p my-crate");
     }
 
     #[test]
     fn fmt_check_plan_with_toolchain() {
-        let inputs = RustFmtInputs {
-            package: None,
-            flags: vec![],
-            env: RustEnv {
-                toolchain: Some("nightly".into()),
-                ..Default::default()
+        let inputs = Block::new(
+            None,
+            RustFmtInputs {
+                package: None,
+                flags: vec![],
+                env: RustEnv {
+                    toolchain: Some("nightly".into()),
+                    ..Default::default()
+                },
             },
-        };
+        );
         let result = Resource::plan(&make_fmt_check_resource(), &inputs, None).unwrap();
         assert_eq!(result.description, "cargo+nightly fmt --check");
     }
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = RustFmtInputs {
-            package: None,
-            flags: vec![],
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustFmtInputs {
+                package: None,
+                flags: vec![],
+                env: RustEnv::default(),
+            },
+        );
         let prior = RustFmtState {
             package: None,
             flags: vec![],
@@ -311,11 +326,14 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = RustFmtInputs {
-            package: None,
-            flags: vec!["--config-path".into(), "custom.toml".into()],
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustFmtInputs {
+                package: None,
+                flags: vec!["--config-path".into(), "custom.toml".into()],
+                env: RustEnv::default(),
+            },
+        );
         let prior = RustFmtState {
             package: None,
             flags: vec![],

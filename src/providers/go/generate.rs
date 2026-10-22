@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -32,9 +32,6 @@ pub struct GoGenerateInputs {
     /// Output file paths produced by generate commands
     #[serde(default)]
     pub outputs: Vec<String>,
-    /// Working directory for the command
-    #[serde(default)]
-    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -52,8 +49,6 @@ pub struct GoGenerateState {
     pub flags: Vec<String>,
     #[serde(default)]
     pub outputs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -90,18 +85,22 @@ impl Resource for GoGenerateResource {
     }
 
     /// Only the go command: the generators its directives run are unknown.
-    fn ambient(&self, inputs: &GoGenerateInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<GoGenerateInputs>) -> Vec<Ambient> {
         vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
     }
 
-    fn resolve(&self, inputs: &GoGenerateInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<GoGenerateInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(Path::new);
         // `go generate` also runs directives in `_test.go` files.
         super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &inputs.inputs, tracker)
     }
 
-    fn plan(&self, inputs: &GoGenerateInputs, prior_state: Option<&GoGenerateState>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<GoGenerateInputs>,
+        prior_state: Option<&GoGenerateState>,
+    ) -> Result<PlanResult, BoxError> {
         let description = super::display_command("go", &generate_args(inputs), inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
@@ -127,7 +126,7 @@ impl Resource for GoGenerateResource {
 
     fn apply(
         &self,
-        inputs: &GoGenerateInputs,
+        inputs: &Block<GoGenerateInputs>,
         _prior_state: Option<&GoGenerateState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -169,13 +168,12 @@ impl Resource for GoGenerateResource {
                 package: inputs.package.clone(),
                 flags: inputs.flags.clone(),
                 outputs: inputs.outputs.clone(),
-                dir: inputs.dir.clone(),
                 env: inputs.env.clone(),
             }),
         })
     }
 
-    fn destroy(&self, prior_state: &GoGenerateState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<GoGenerateState>, writer: &BlockWriter) -> Result<(), BoxError> {
         for output in &prior_state.outputs {
             crate::providers::remove_path(Path::new(output), writer)?;
         }
@@ -186,11 +184,11 @@ impl Resource for GoGenerateResource {
     /// sources name. Those tools are not part of the Go toolchain
     /// fingerprint, so the action key cannot describe what produced the
     /// generated files.
-    fn cache_policy(&self, _inputs: &GoGenerateInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<GoGenerateInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 
-    fn output_keys(&self, inputs: &GoGenerateInputs) -> Vec<String> {
+    fn output_keys(&self, inputs: &Block<GoGenerateInputs>) -> Vec<String> {
         inputs.outputs.clone()
     }
 }
@@ -210,14 +208,16 @@ mod tests {
         std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
         std::fs::write(root.join("lib.go"), "package lib\n").unwrap();
         std::fs::write(root.join("lib_test.go"), "package lib\n\n//go:generate echo test\n").unwrap();
-        let inputs = GoGenerateInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            outputs: vec![],
-            dir: Some(root.to_string_lossy().into_owned()),
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            GoGenerateInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+                outputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
         assert!(resolved.keys().any(|p| p.ends_with("lib_test.go")), "{resolved:?}");
     }
@@ -229,33 +229,36 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = GoGenerateInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            outputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoGenerateInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+                outputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = GoGenerateInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            outputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoGenerateInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+                outputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         let prior = GoGenerateState {
             package: vec!["./...".into()],
             flags: vec![],
             outputs: vec![],
-            dir: None,
             env: GoEnv::default(),
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
@@ -264,19 +267,20 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = GoGenerateInputs {
-            package: vec!["./...".into()],
-            flags: vec!["-v".into()],
-            inputs: vec![],
-            outputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoGenerateInputs {
+                package: vec!["./...".into()],
+                flags: vec!["-v".into()],
+                inputs: vec![],
+                outputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         let prior = GoGenerateState {
             package: vec!["./...".into()],
             flags: vec![],
             outputs: vec![],
-            dir: None,
             env: GoEnv::default(),
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
@@ -298,12 +302,11 @@ mod tests {
                 file.to_string_lossy().into_owned(),
                 output_dir.to_string_lossy().into_owned(),
             ],
-            dir: None,
             env: GoEnv::default(),
         };
 
         let output = crate::output::Output::new(&[]);
-        Resource::destroy(&test_resource(), &state, &output.writer("generate")).unwrap();
+        Resource::destroy(&test_resource(), &Block::new(None, state), &output.writer("generate")).unwrap();
 
         assert!(!file.exists());
         assert!(!output_dir.exists());

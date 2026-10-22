@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
-use crate::provider::{ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 
 /// Attach a container to a Docker network (equivalent of `docker network connect`).
@@ -256,19 +258,19 @@ impl Resource for NetworkAttachResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, _inputs: &NetworkAttachInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, _inputs: &Block<NetworkAttachInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         Ok(BTreeMap::new())
     }
 
     /// None: the attachment is daemon state that the docker CLI only
     /// requests, so a CLI upgrade must not detach and reattach a container.
-    fn ambient(&self, _inputs: &NetworkAttachInputs) -> Vec<crate::provider::Ambient> {
+    fn ambient(&self, _inputs: &Block<NetworkAttachInputs>) -> Vec<crate::provider::Ambient> {
         vec![]
     }
 
     fn plan(
         &self,
-        inputs: &NetworkAttachInputs,
+        inputs: &Block<NetworkAttachInputs>,
         prior_state: Option<&NetworkAttachState>,
     ) -> Result<PlanResult, BoxError> {
         let desc = crate::providers::display_command("docker", &build_connect_args(inputs));
@@ -306,7 +308,7 @@ impl Resource for NetworkAttachResource {
 
     fn apply(
         &self,
-        inputs: &NetworkAttachInputs,
+        inputs: &Block<NetworkAttachInputs>,
         prior_state: Option<&NetworkAttachState>,
         _changes: &Changes,
         _writer: &BlockWriter,
@@ -338,7 +340,7 @@ impl Resource for NetworkAttachResource {
         })
     }
 
-    fn destroy(&self, prior_state: &NetworkAttachState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<NetworkAttachState>, writer: &BlockWriter) -> Result<(), BoxError> {
         writer.event(
             Event::Starting,
             &format!(
@@ -351,7 +353,7 @@ impl Resource for NetworkAttachResource {
 
     /// An attachment is a live edge between two daemon objects; see
     /// `docker.container`.
-    fn cache_policy(&self, _inputs: &NetworkAttachInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<NetworkAttachInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 }
@@ -361,18 +363,21 @@ mod tests {
     use super::*;
     use crate::provider::PlanAction;
 
-    fn base_inputs() -> NetworkAttachInputs {
-        NetworkAttachInputs {
-            network: "bit-test-net".into(),
-            container: "bit-test-container".into(),
-            aliases: vec![],
-            driver_opts: HashMap::new(),
-            gw_priority: None,
-            ip: None,
-            ip6: None,
-            links: vec![],
-            link_local_ips: vec![],
-        }
+    fn base_inputs() -> Block<NetworkAttachInputs> {
+        Block::new(
+            None,
+            NetworkAttachInputs {
+                network: "bit-test-net".into(),
+                container: "bit-test-container".into(),
+                aliases: vec![],
+                driver_opts: HashMap::new(),
+                gw_priority: None,
+                ip: None,
+                ip6: None,
+                links: vec![],
+                link_local_ips: vec![],
+            },
+        )
     }
 
     #[test]
@@ -440,11 +445,14 @@ mod tests {
         // Using clearly non-existent names so `docker inspect` fails (or, if
         // docker is unavailable on the test host, the error path also
         // yields `is_attached == false`).
-        let inputs = NetworkAttachInputs {
-            network: "bit-nonexistent-net-zzz".into(),
-            container: "bit-nonexistent-container-zzz".into(),
-            ..base_inputs()
-        };
+        let inputs = Block::new(
+            None,
+            NetworkAttachInputs {
+                network: "bit-nonexistent-net-zzz".into(),
+                container: "bit-nonexistent-container-zzz".into(),
+                ..base_inputs().value
+            },
+        );
         let prior = NetworkAttachState::from_inputs(&inputs);
         let plan = Resource::plan(&fresh_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(plan.action, PlanAction::Create);

@@ -76,7 +76,12 @@ impl DynResource for ModuleResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &serde_json::Value, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(
+        &self,
+        _dir: Option<&str>,
+        _prior_state: &serde_json::Value,
+        _writer: &BlockWriter,
+    ) -> Result<(), BoxError> {
         Ok(())
     }
 

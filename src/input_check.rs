@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{Expr, Field, StringPart};
-use crate::dag::{CONCURRENCY_FIELD, Dag, ENGINE_FIELDS, UNCACHED_FIELD};
+use crate::dag::{CONCURRENCY_FIELD, DIR_FIELD, Dag, ENGINE_FIELDS, UNCACHED_FIELD};
 use crate::expr::{self, Scope, SymbolKind};
 use crate::loader::LoadError;
 use crate::value::{Map, StructType, Type, parse_duration_literal};
@@ -99,6 +99,7 @@ fn engine_field_type(name: &str) -> Type {
     match name {
         CONCURRENCY_FIELD => Type::Number,
         UNCACHED_FIELD => Type::Union(vec![Type::String, Type::List(Box::new(Type::String))]),
+        DIR_FIELD => Type::String,
         // The loader resolves, and so checks, dependency lists itself.
         _ => Type::Any,
     }

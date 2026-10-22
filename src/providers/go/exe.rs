@@ -11,7 +11,7 @@ use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
     Resource, ResourceKind, restore_output_files,
 };
 use crate::sha256::SHA256;
@@ -33,9 +33,6 @@ pub struct GoExeInputs {
     /// Input file glob patterns (in addition to Go sources)
     #[serde(default)]
     pub inputs: Vec<String>,
-    /// Working directory for the command
-    #[serde(default)]
-    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -53,8 +50,6 @@ pub struct GoExeState {
     pub package: String,
     pub output: String,
     pub flags: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
     #[serde(flatten)]
     pub env: GoEnv,
 }
@@ -72,7 +67,7 @@ impl GoExeResource {
     /// of the package's import path. A relative pattern such as `.` names a
     /// directory, so taking its text instead would make the output the
     /// directory itself.
-    fn output_path(inputs: &GoExeInputs) -> String {
+    fn output_path(inputs: &Block<GoExeInputs>) -> String {
         inputs.output.clone().unwrap_or_else(|| {
             let package = &inputs.package;
             let import_path = if package.starts_with('.') {
@@ -124,7 +119,6 @@ impl GoExeResource {
             package: inputs.package.clone(),
             output,
             flags: inputs.flags.clone(),
-            dir: inputs.dir.clone(),
             env: inputs.env.clone(),
         }
     }
@@ -159,11 +153,11 @@ impl Resource for GoExeResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &GoExeInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<GoExeInputs>) -> Vec<Ambient> {
         vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
     }
 
-    fn resolve(&self, inputs: &GoExeInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<GoExeInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(Path::new);
         super::resolve_go_inputs(
@@ -175,7 +169,7 @@ impl Resource for GoExeResource {
         )
     }
 
-    fn plan(&self, inputs: &GoExeInputs, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<GoExeInputs>, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {
         let output = GoExeResource::output_path(inputs);
         let description =
             super::display_command("go", &GoExeResource::build_args(inputs, &output), inputs.dir.as_deref());
@@ -207,7 +201,7 @@ impl Resource for GoExeResource {
 
     fn apply(
         &self,
-        inputs: &GoExeInputs,
+        inputs: &Block<GoExeInputs>,
         _prior_state: Option<&GoExeState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -257,18 +251,18 @@ impl Resource for GoExeResource {
         })
     }
 
-    fn destroy(&self, prior_state: &GoExeState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<GoExeState>, writer: &BlockWriter) -> Result<(), BoxError> {
         crate::providers::remove_path(Path::new(&prior_state.output), writer)
     }
 
     /// Version 2 records the built binary under its project-relative path
     /// rather than a provider-defined role, so version 1 receipts are not
     /// readable.
-    fn cache_policy(&self, _inputs: &GoExeInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<GoExeInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 2 }
     }
 
-    fn output_keys(&self, inputs: &GoExeInputs) -> Vec<String> {
+    fn output_keys(&self, inputs: &Block<GoExeInputs>) -> Vec<String> {
         vec![GoExeResource::output_path(inputs)]
     }
 
@@ -277,7 +271,7 @@ impl Resource for GoExeResource {
     /// re-derived from the current inputs.
     fn materialize(
         &self,
-        inputs: &GoExeInputs,
+        inputs: &Block<GoExeInputs>,
         _state: &GoExeState,
         outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
@@ -314,14 +308,16 @@ mod tests {
         std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
         std::fs::write(root.join("main.go"), "package main\n").unwrap();
         std::fs::write(root.join("main.c"), "int f(void) { return 0; }\n").unwrap();
-        let inputs = GoExeInputs {
-            package: ".".into(),
-            output: None,
-            flags: vec![],
-            inputs: vec![root.join("*.c").to_string_lossy().into_owned()],
-            dir: Some(root.to_string_lossy().into_owned()),
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            GoExeInputs {
+                package: ".".into(),
+                output: None,
+                flags: vec![],
+                inputs: vec![root.join("*.c").to_string_lossy().into_owned()],
+                env: GoEnv::default(),
+            },
+        );
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
         assert!(resolved.keys().any(|p| p.ends_with("main.c")), "{resolved:?}");
     }
@@ -330,14 +326,16 @@ mod tests {
     /// forced to bump the version rather than collide with older receipts.
     #[test]
     fn cache_version_is_pinned() {
-        let inputs = GoExeInputs {
-            package: "./cmd/app".into(),
-            output: Some("bin/app".into()),
-            flags: vec![],
-            inputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoExeInputs {
+                package: "./cmd/app".into(),
+                output: Some("bin/app".into()),
+                flags: vec![],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         assert_eq!(
             Resource::cache_policy(&test_resource(), &inputs),
             CachePolicy::Shared { version: 2 }
@@ -346,14 +344,16 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = GoExeInputs {
-            package: "./cmd/app".into(),
-            output: Some("bin/app".into()),
-            flags: vec!["-trimpath".into()],
-            inputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoExeInputs {
+                package: "./cmd/app".into(),
+                output: Some("bin/app".into()),
+                flags: vec!["-trimpath".into()],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
@@ -362,19 +362,20 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = GoExeInputs {
-            package: "./cmd/app".into(),
-            output: Some("bin/app".into()),
-            flags: vec![],
-            inputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoExeInputs {
+                package: "./cmd/app".into(),
+                output: Some("bin/app".into()),
+                flags: vec![],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         let prior = GoExeState {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
-            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -384,19 +385,20 @@ mod tests {
 
     #[test]
     fn plan_update_when_package_changed() {
-        let inputs = GoExeInputs {
-            package: "./cmd/other".into(),
-            output: Some("bin/app".into()),
-            flags: vec![],
-            inputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoExeInputs {
+                package: "./cmd/other".into(),
+                output: Some("bin/app".into()),
+                flags: vec![],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         let prior = GoExeState {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
-            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -406,19 +408,20 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = GoExeInputs {
-            package: "./cmd/app".into(),
-            output: Some("bin/app".into()),
-            flags: vec!["-ldflags=-s".into()],
-            inputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoExeInputs {
+                package: "./cmd/app".into(),
+                output: Some("bin/app".into()),
+                flags: vec!["-ldflags=-s".into()],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         let prior = GoExeState {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
-            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -428,23 +431,24 @@ mod tests {
 
     #[test]
     fn plan_update_when_env_changed() {
-        let inputs = GoExeInputs {
-            package: "./cmd/app".into(),
-            output: Some("bin/app".into()),
-            flags: vec![],
-            inputs: vec![],
-            dir: None,
-            env: GoEnv {
-                goos: Some("linux".into()),
-                goarch: Some("arm64".into()),
-                cgo: Some(false),
+        let inputs = Block::new(
+            None,
+            GoExeInputs {
+                package: "./cmd/app".into(),
+                output: Some("bin/app".into()),
+                flags: vec![],
+                inputs: vec![],
+                env: GoEnv {
+                    goos: Some("linux".into()),
+                    goarch: Some("arm64".into()),
+                    cgo: Some(false),
+                },
             },
-        };
+        );
         let prior = GoExeState {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
-            dir: None,
             env: GoEnv::default(),
         };
         let resource = test_resource();
@@ -454,14 +458,16 @@ mod tests {
 
     #[test]
     fn output_path_default() {
-        let inputs = GoExeInputs {
-            package: "./cmd/foo".into(),
-            output: None,
-            flags: vec![],
-            inputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoExeInputs {
+                package: "./cmd/foo".into(),
+                output: None,
+                flags: vec![],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         assert_eq!(GoExeResource::output_path(&inputs), "foo");
     }
 
@@ -470,13 +476,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example.com/app/v2\n").unwrap();
         std::fs::create_dir_all(dir.path().join("cmd/tool")).unwrap();
-        let inputs = |package: &str| GoExeInputs {
-            package: package.into(),
-            output: None,
-            flags: vec![],
-            inputs: vec![],
-            dir: Some(dir.path().to_string_lossy().into_owned()),
-            env: GoEnv::default(),
+        let inputs = |package: &str| {
+            Block::new(
+                Some(dir.path().to_string_lossy().into_owned()),
+                GoExeInputs {
+                    package: package.into(),
+                    output: None,
+                    flags: vec![],
+                    inputs: vec![],
+                    env: GoEnv::default(),
+                },
+            )
         };
         assert_eq!(GoExeResource::output_path(&inputs(".")), "app");
         assert_eq!(GoExeResource::output_path(&inputs("./")), "app");
@@ -497,14 +507,16 @@ mod tests {
 
     #[test]
     fn output_path_explicit() {
-        let inputs = GoExeInputs {
-            package: "./cmd/foo".into(),
-            output: Some("bin/foo".into()),
-            flags: vec![],
-            inputs: vec![],
-            dir: None,
-            env: GoEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            GoExeInputs {
+                package: "./cmd/foo".into(),
+                output: Some("bin/foo".into()),
+                flags: vec![],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
         assert_eq!(GoExeResource::output_path(&inputs), "bin/foo");
     }
 
@@ -541,14 +553,13 @@ mod tests {
             package: "./cmd/app".into(),
             output: output.to_string_lossy().into_owned(),
             flags: vec![],
-            dir: None,
             env: GoEnv::default(),
         };
 
         let resource = test_resource();
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        Resource::destroy(&resource, &state, &writer).unwrap();
+        Resource::destroy(&resource, &Block::new(None, state), &writer).unwrap();
         assert!(!output.exists());
     }
 }

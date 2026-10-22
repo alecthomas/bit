@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -70,15 +70,15 @@ impl Resource for PushResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, _inputs: &PushInputs) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Block<PushInputs>) -> Vec<Ambient> {
         vec![crate::providers::version("docker", &["--version"], None)]
     }
 
-    fn resolve(&self, _inputs: &PushInputs) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, _inputs: &Block<PushInputs>) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
         Ok(std::collections::BTreeMap::new())
     }
 
-    fn plan(&self, inputs: &PushInputs, prior_state: Option<&PushState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<PushInputs>, prior_state: Option<&PushState>) -> Result<PlanResult, BoxError> {
         let desc = format!(
             "docker tag {} {} && docker push {}",
             inputs.image, inputs.tag, inputs.tag
@@ -118,7 +118,7 @@ impl Resource for PushResource {
 
     fn apply(
         &self,
-        inputs: &PushInputs,
+        inputs: &Block<PushInputs>,
         _prior_state: Option<&PushState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -172,7 +172,7 @@ impl Resource for PushResource {
         })
     }
 
-    fn destroy(&self, prior_state: &PushState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<PushState>, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         writer.event(Event::Starting, &format!("docker rmi {}", prior_state.tag));
         let output = Command::new("docker")
@@ -184,7 +184,7 @@ impl Resource for PushResource {
 
     /// A push mutates a remote registry. Another worktree's receipt says
     /// nothing about whether this tag is still there.
-    fn cache_policy(&self, _inputs: &PushInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<PushInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 }
@@ -195,10 +195,13 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_state() {
-        let inputs = PushInputs {
-            image: "myapp:latest".into(),
-            tag: "localhost:5000/myapp:abc123".into(),
-        };
+        let inputs = Block::new(
+            None,
+            PushInputs {
+                image: "myapp:latest".into(),
+                tag: "localhost:5000/myapp:abc123".into(),
+            },
+        );
         let result = Resource::plan(&PushResource::new(Arc::new(FileTracker::default())), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(
@@ -209,10 +212,13 @@ mod tests {
 
     #[test]
     fn plan_update_when_tag_changed() {
-        let inputs = PushInputs {
-            image: "myapp:latest".into(),
-            tag: "localhost:5000/myapp:def456".into(),
-        };
+        let inputs = Block::new(
+            None,
+            PushInputs {
+                image: "myapp:latest".into(),
+                tag: "localhost:5000/myapp:def456".into(),
+            },
+        );
         let prior = PushState {
             image: "myapp:latest".into(),
             tag: "localhost:5000/myapp:abc123".into(),

@@ -63,6 +63,11 @@ impl Provider for PnpmProvider {
     }
 }
 
+/// The workspace root pnpm runs in: the block's `dir`, or the project root.
+fn workspace_dir<T>(block: &crate::provider::Block<T>) -> &str {
+    block.dir.as_deref().unwrap_or(".")
+}
+
 /// pnpm and node versions, run in the workspace: corepack and Node version
 /// managers select them per directory. Shared by all three pnpm resources.
 fn ambient(dir: &str) -> Vec<Ambient> {

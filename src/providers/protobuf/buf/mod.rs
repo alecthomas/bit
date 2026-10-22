@@ -16,22 +16,19 @@ use crate::value::Value;
 
 use workspace::Sources;
 
-/// What a buf command operates on and where it runs. Shared by all buf
-/// resources.
+/// What a buf command operates on. Shared by all buf resources, which run
+/// buf in the block's `dir`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
 pub struct BufTarget {
     /// Buf input, relative to `dir` (defaults to the workspace in `dir`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<String>,
-    /// Working directory for the command
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
 }
 
 impl BufTarget {
-    /// Run `buf <args...> [input]`.
-    fn run(&self, args: &[String], writer: &BlockWriter) -> Result<ExitStatus, BoxError> {
-        super::run("buf", &self.args(args), self.dir.as_deref(), writer)
+    /// Run `buf <args...> [input]` in `dir`.
+    fn run(&self, dir: Option<&str>, args: &[String], writer: &BlockWriter) -> Result<ExitStatus, BoxError> {
+        super::run("buf", &self.args(args), dir, writer)
     }
 
     /// Plan description for `buf <args...> [input]`.
@@ -47,20 +44,15 @@ impl BufTarget {
 
     /// The `.proto` sources and buf configuration the command reads for its
     /// input, which defaults to the workspace in `dir`.
-    fn sources(&self) -> Result<Sources, BoxError> {
+    fn sources(&self, dir: Option<&str>) -> Result<Sources, BoxError> {
         let mut sources = Sources::default();
-        sources.add_input(self.dir.as_deref(), self.input.as_deref().unwrap_or("."))?;
+        sources.add_input(dir, self.input.as_deref().unwrap_or("."))?;
         Ok(sources)
-    }
-
-    /// The buf CLI's version, as run in `dir`.
-    fn buf(&self) -> Ambient {
-        super::version("buf", self.dir.as_deref())
     }
 
     /// buf and the check plugins the input's `buf.yaml` names, which lint
     /// and breaking change checks run.
-    fn check_ambient(&self) -> Vec<Ambient> {
+    fn check_ambient(&self, dir: Option<&str>) -> Vec<Ambient> {
         #[derive(Deserialize)]
         struct Config {
             #[serde(default)]
@@ -71,11 +63,10 @@ impl BufTarget {
             plugin: PluginCommand,
         }
 
-        let dir = self.dir.as_deref();
-        let mut tools = vec![self.buf()];
+        let mut tools = vec![buf(dir)];
         // An input or configuration that cannot be read fails the buf
         // command itself.
-        let Ok(sources) = self.sources() else {
+        let Ok(sources) = self.sources(dir) else {
             return tools;
         };
         for path in sources.buf_yamls() {
@@ -89,6 +80,11 @@ impl BufTarget {
         }
         tools
     }
+}
+
+/// The buf CLI's version, as run in `dir`.
+fn buf(dir: Option<&str>) -> Ambient {
+    super::version("buf", dir)
 }
 
 /// A plugin command in buf configuration: a program, alone or followed by
@@ -161,7 +157,6 @@ mod tests {
     fn describe_appends_input() {
         let target = BufTarget {
             input: Some("proto".into()),
-            dir: None,
         };
         assert_eq!(target.describe(&["lint".into()]), "buf lint proto");
         assert_eq!(BufTarget::default().describe(&["lint".into()]), "buf lint");
@@ -178,9 +173,12 @@ mod tests {
         std::fs::write(root.join("other/b.proto"), "").unwrap();
         let target = BufTarget {
             input: Some("proto/acme".into()),
-            dir: Some(root.to_string_lossy().into_owned()),
         };
-        let resolved = target.sources().unwrap().hash(&FileTracker::default()).unwrap();
+        let resolved = target
+            .sources(Some(&root.to_string_lossy()))
+            .unwrap()
+            .hash(&FileTracker::default())
+            .unwrap();
         let mut names: Vec<_> = resolved
             .keys()
             .map(|path| path.strip_prefix(&*root.to_string_lossy()).unwrap().to_owned())
@@ -200,12 +198,8 @@ mod tests {
         )
         .unwrap();
         let proto = root.join("proto").to_string_lossy().into_owned();
-        let target = BufTarget {
-            input: None,
-            dir: Some(proto.clone()),
-        };
         assert_eq!(
-            target.check_ambient(),
+            BufTarget::default().check_ambient(Some(&proto)),
             [
                 crate::providers::version("buf", &["--version"], Some(&proto)),
                 Ambient::Executable("buf-plugin-a".into()),
@@ -223,12 +217,8 @@ mod tests {
         )
         .unwrap();
         let root = root.to_string_lossy().into_owned();
-        let target = BufTarget {
-            input: None,
-            dir: Some(root.clone()),
-        };
         assert_eq!(
-            target.check_ambient(),
+            BufTarget::default().check_ambient(Some(&root)),
             [
                 crate::providers::version("buf", &["--version"], Some(&root)),
                 Ambient::Executable("buf-plugin-a".into()),
@@ -243,11 +233,11 @@ mod tests {
         let root = dir.path();
         std::fs::create_dir_all(root.join("other")).unwrap();
         std::fs::write(root.join("other/b.proto"), "").unwrap();
-        let target = BufTarget {
-            input: None,
-            dir: Some(root.to_string_lossy().into_owned()),
-        };
-        let resolved = target.sources().unwrap().hash(&FileTracker::default()).unwrap();
+        let resolved = BufTarget::default()
+            .sources(Some(&root.to_string_lossy()))
+            .unwrap()
+            .hash(&FileTracker::default())
+            .unwrap();
         assert!(
             resolved.keys().any(|path| path.ends_with("other/b.proto")),
             "{resolved:?}"

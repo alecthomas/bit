@@ -13,8 +13,8 @@ use super::ReportMode;
 use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Message};
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanAction, PlanResult, Provider,
-    Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanAction, PlanResult,
+    Provider, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 use crate::value::Value;
@@ -31,9 +31,6 @@ pub struct ExecInputs {
     /// Input file glob patterns, relative to `dir`. A directory names every file beneath it
     #[serde(default)]
     pub inputs: Vec<String>,
-    /// Working directory for the command
-    #[serde(default)]
-    pub dir: Option<String>,
     /// Shell command to run on `bit --clean` (replaces the default removal of outputs)
     #[serde(default)]
     pub clean: Option<String>,
@@ -90,8 +87,6 @@ pub struct ExecState {
     /// `bit --clean` still removes outputs those runs declared.
     #[serde(default, alias = "output")]
     pub outputs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,46 +209,28 @@ fn run_values(command: &str, dir: Option<&str>) -> Result<crate::value::Map, Box
 /// An invalid pattern is an error rather than an empty match. A valid one
 /// may match nothing, as an input a dependency has yet to generate does:
 /// files appearing there later change the hash all the same.
-///
-/// A relative pattern is relative to `dir`, where the command runs.
-fn hash_inputs(
+fn hash_inputs<T>(
     tracker: &FileTracker,
-    dir: Option<&str>,
+    block: &Block<T>,
     patterns: &[String],
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let mut files = BTreeMap::new();
     for pattern in patterns {
         glob::Pattern::new(pattern).map_err(|e| format!("invalid input pattern `{pattern}`: {e}"))?;
-        let path = in_dir(dir, pattern);
+        let path = block.path(pattern);
         if Path::new(&path).is_dir() {
             let path = glob::Pattern::escape(path.trim_end_matches('/'));
             files.extend(tracker.hash_glob(&format!("{path}/**/*"))?);
         } else {
-            // `dir` is literal text, so only the pattern part is a glob.
-            let glob = match dir {
-                Some(dir) if Path::new(pattern).is_relative() => {
-                    format!("{}/{pattern}", glob::Pattern::escape(dir.trim_end_matches('/')))
-                }
-                _ => pattern.clone(),
-            };
-            files.extend(tracker.hash_glob(&glob)?);
+            files.extend(tracker.hash_glob(&block.glob(pattern))?);
         }
     }
     Ok(files)
 }
 
-/// `path` as bit's process sees it: a relative path is relative to `dir`,
-/// where the command runs. A trailing `/` is kept.
-fn in_dir(dir: Option<&str>, path: &str) -> String {
-    match dir {
-        Some(dir) if Path::new(path).is_relative() => Path::new(dir).join(path).to_string_lossy().into_owned(),
-        _ => path.to_owned(),
-    }
-}
-
 /// The block's `outputs`, as bit's process sees them.
-fn output_paths(dir: Option<&str>, outputs: &[String]) -> Vec<String> {
-    outputs.iter().map(|output| in_dir(dir, output)).collect()
+fn output_paths<T>(block: &Block<T>, outputs: &[String]) -> Vec<String> {
+    outputs.iter().map(|output| block.path(output)).collect()
 }
 
 /// Provider for running arbitrary shell commands.
@@ -312,15 +289,15 @@ impl Resource for ExecResource {
 
     /// The shell that runs the command. The programs the command itself
     /// runs are unknown, so `inputs` must name any that matter.
-    fn ambient(&self, _inputs: &ExecInputs) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Block<ExecInputs>) -> Vec<Ambient> {
         vec![crate::providers::version("bash", &["--version"], None)]
     }
 
-    fn resolve(&self, inputs: &ExecInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        hash_inputs(&self.tracker, inputs.dir.as_deref(), &inputs.inputs)
+    fn resolve(&self, inputs: &Block<ExecInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        hash_inputs(&self.tracker, inputs, &inputs.inputs)
     }
 
-    fn plan(&self, inputs: &ExecInputs, prior_state: Option<&ExecState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<ExecInputs>, prior_state: Option<&ExecState>) -> Result<PlanResult, BoxError> {
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
                 action: PlanAction::Create,
@@ -329,7 +306,7 @@ impl Resource for ExecResource {
             });
         };
 
-        if prior.command != inputs.command || prior.dir != inputs.dir || prior.clean != inputs.clean {
+        if prior.command != inputs.command || prior.clean != inputs.clean {
             return Ok(PlanResult {
                 action: PlanAction::Update,
                 description: inputs.command.clone(),
@@ -367,12 +344,12 @@ impl Resource for ExecResource {
 
     fn apply(
         &self,
-        inputs: &ExecInputs,
+        inputs: &Block<ExecInputs>,
         _prior_state: Option<&ExecState>,
         changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
-        let outputs = output_paths(inputs.dir.as_deref(), &inputs.outputs);
+        let outputs = output_paths(inputs, &inputs.outputs);
         for output in &outputs {
             let output_path = Path::new(output);
             if output.ends_with('/') {
@@ -404,7 +381,6 @@ impl Resource for ExecResource {
             state: Some(ExecState {
                 command: inputs.command.clone(),
                 outputs,
-                dir: inputs.dir.clone(),
                 clean: inputs.clean.clone(),
                 resolve: inputs.resolve.clone(),
                 resolve_output,
@@ -414,7 +390,7 @@ impl Resource for ExecResource {
         })
     }
 
-    fn destroy(&self, prior_state: &ExecState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<ExecState>, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         if let Some(clean) = &prior_state.clean {
             writer.event(Event::Starting, clean);
@@ -437,7 +413,7 @@ impl Resource for ExecResource {
     /// A block with no `outputs` produces nothing a receipt could restore,
     /// so it runs for its side effects, such as a deploy. Another worktree
     /// skipping it on a shared hit would never perform them.
-    fn cache_policy(&self, inputs: &ExecInputs) -> CachePolicy {
+    fn cache_policy(&self, inputs: &Block<ExecInputs>) -> CachePolicy {
         if inputs.resolve.is_some() || inputs.values.is_some() || inputs.outputs.is_empty() {
             CachePolicy::Local
         } else {
@@ -445,15 +421,11 @@ impl Resource for ExecResource {
         }
     }
 
-    fn output_keys(&self, inputs: &ExecInputs) -> Vec<String> {
-        output_paths(inputs.dir.as_deref(), &inputs.outputs)
+    fn output_keys(&self, inputs: &Block<ExecInputs>) -> Vec<String> {
+        output_paths(inputs, &inputs.outputs)
             .iter()
             .map(|o| o.trim_end_matches('/').to_owned())
             .collect()
-    }
-
-    fn output_key(&self, inputs: &ExecInputs, path: &str) -> String {
-        in_dir(inputs.dir.as_deref(), path)
     }
 }
 
@@ -470,9 +442,6 @@ pub struct ExecTestInputs {
     /// Output files to track, relative to `dir`
     #[serde(default)]
     pub outputs: Vec<String>,
-    /// Working directory for the command
-    #[serde(default)]
-    pub dir: Option<String>,
     /// Shell command to run on `bit --clean`
     #[serde(default)]
     pub clean: Option<String>,
@@ -504,8 +473,6 @@ pub struct ExecTestOutputs {
 pub struct ExecTestState {
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub results: Option<String>,
@@ -517,7 +484,7 @@ pub struct ExecTestState {
 /// test and suite passed.
 fn run_with_results(
     filter: &results::ResultsFilter,
-    inputs: &ExecTestInputs,
+    inputs: &Block<ExecTestInputs>,
     changes: &Changes,
     writer: &BlockWriter,
 ) -> Result<bool, BoxError> {
@@ -589,15 +556,19 @@ impl Resource for ExecTestResource {
 
     /// The shell that runs the command. The programs the command itself
     /// runs are unknown, so `inputs` must name any that matter.
-    fn ambient(&self, _inputs: &ExecTestInputs) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Block<ExecTestInputs>) -> Vec<Ambient> {
         vec![crate::providers::version("bash", &["--version"], None)]
     }
 
-    fn resolve(&self, inputs: &ExecTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        hash_inputs(&self.tracker, inputs.dir.as_deref(), &inputs.inputs)
+    fn resolve(&self, inputs: &Block<ExecTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        hash_inputs(&self.tracker, inputs, &inputs.inputs)
     }
 
-    fn plan(&self, inputs: &ExecTestInputs, prior_state: Option<&ExecTestState>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<ExecTestInputs>,
+        prior_state: Option<&ExecTestState>,
+    ) -> Result<PlanResult, BoxError> {
         // Surface filter syntax errors at plan time rather than after the tests run.
         if let Some(code) = &inputs.results {
             results::ResultsFilter::compile(code)?;
@@ -611,15 +582,12 @@ impl Resource for ExecTestResource {
             });
         };
 
-        let action = if prior.command != inputs.command
-            || prior.dir != inputs.dir
-            || prior.clean != inputs.clean
-            || prior.results != inputs.results
-        {
-            PlanAction::Update
-        } else {
-            PlanAction::None
-        };
+        let action =
+            if prior.command != inputs.command || prior.clean != inputs.clean || prior.results != inputs.results {
+                PlanAction::Update
+            } else {
+                PlanAction::None
+            };
 
         Ok(PlanResult {
             action,
@@ -630,7 +598,7 @@ impl Resource for ExecTestResource {
 
     fn apply(
         &self,
-        inputs: &ExecTestInputs,
+        inputs: &Block<ExecTestInputs>,
         _prior_state: Option<&ExecTestState>,
         changes: &Changes,
         writer: &BlockWriter,
@@ -644,14 +612,13 @@ impl Resource for ExecTestResource {
             outputs: ExecTestOutputs { passed },
             state: Some(ExecTestState {
                 command: inputs.command.clone(),
-                dir: inputs.dir.clone(),
                 clean: inputs.clean.clone(),
                 results: inputs.results.clone(),
             }),
         })
     }
 
-    fn destroy(&self, prior_state: &ExecTestState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<ExecTestState>, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         if let Some(clean) = &prior_state.clean {
             writer.event(Event::Starting, clean);
@@ -660,19 +627,15 @@ impl Resource for ExecTestResource {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &ExecTestInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<ExecTestInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 
-    fn output_keys(&self, inputs: &ExecTestInputs) -> Vec<String> {
-        output_paths(inputs.dir.as_deref(), &inputs.outputs)
+    fn output_keys(&self, inputs: &Block<ExecTestInputs>) -> Vec<String> {
+        output_paths(inputs, &inputs.outputs)
             .iter()
             .map(|o| o.trim_end_matches('/').to_owned())
             .collect()
-    }
-
-    fn output_key(&self, inputs: &ExecTestInputs, path: &str) -> String {
-        in_dir(inputs.dir.as_deref(), path)
     }
 }
 
@@ -696,15 +659,17 @@ mod tests {
         let out_file = dir.path().join("out");
         fs::write(&out_file, "output").unwrap();
 
-        let inputs = ExecInputs {
-            command: "echo".into(),
-            outputs: vec![out_file.to_string_lossy().into_owned()],
-            inputs: vec![format!("{}/**/*.rs", dir.path().display())],
-            dir: None,
-            clean: None,
-            resolve: None,
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "echo".into(),
+                outputs: vec![out_file.to_string_lossy().into_owned()],
+                inputs: vec![format!("{}/**/*.rs", dir.path().display())],
+                clean: None,
+                resolve: None,
+                values: None,
+            },
+        );
 
         let tracker = test_tracker();
         let resource = ExecResource {
@@ -717,15 +682,17 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = ExecInputs {
-            command: "echo hi".into(),
-            outputs: vec!["out".into()],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: None,
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "echo hi".into(),
+                outputs: vec!["out".into()],
+                inputs: vec![],
+                clean: None,
+                resolve: None,
+                values: None,
+            },
+        );
         let resource = ExecResource {
             tracker: test_tracker(),
         };
@@ -735,19 +702,20 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = ExecInputs {
-            command: "echo hi".into(),
-            outputs: vec!["out".into()],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: None,
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "echo hi".into(),
+                outputs: vec!["out".into()],
+                inputs: vec![],
+                clean: None,
+                resolve: None,
+                values: None,
+            },
+        );
         let prior = ExecState {
             command: "echo hi".into(),
             outputs: vec!["out/".into()],
-            dir: None,
             clean: None,
             resolve: None,
             resolve_output: None,
@@ -763,19 +731,20 @@ mod tests {
 
     #[test]
     fn plan_update_when_command_changed() {
-        let inputs = ExecInputs {
-            command: "echo bye".into(),
-            outputs: vec!["out".into()],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: None,
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "echo bye".into(),
+                outputs: vec!["out".into()],
+                inputs: vec![],
+                clean: None,
+                resolve: None,
+                values: None,
+            },
+        );
         let prior = ExecState {
             command: "echo hi".into(),
             outputs: vec!["out/".into()],
-            dir: None,
             clean: None,
             resolve: None,
             resolve_output: None,
@@ -793,15 +762,17 @@ mod tests {
     fn apply_runs_command() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("result.txt");
-        let inputs = ExecInputs {
-            command: format!("echo hello > {}", output.display()),
-            outputs: vec![output.to_string_lossy().into_owned()],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: None,
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: format!("echo hello > {}", output.display()),
+                outputs: vec![output.to_string_lossy().into_owned()],
+                inputs: vec![],
+                clean: None,
+                resolve: None,
+                values: None,
+            },
+        );
         let resource = ExecResource {
             tracker: test_tracker(),
         };
@@ -815,15 +786,17 @@ mod tests {
 
     #[test]
     fn apply_fails_on_bad_command() {
-        let inputs = ExecInputs {
-            command: "false".into(),
-            outputs: vec!["/dev/null".into()],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: None,
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "false".into(),
+                outputs: vec!["/dev/null".into()],
+                inputs: vec![],
+                clean: None,
+                resolve: None,
+                values: None,
+            },
+        );
         let resource = ExecResource {
             tracker: test_tracker(),
         };
@@ -834,10 +807,13 @@ mod tests {
 
     #[test]
     fn apply_fails_when_an_earlier_line_fails() {
-        let inputs = ExecInputs {
-            command: "false\necho \"::success::done\"".into(),
-            ..exec_inputs(vec![])
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "false\necho \"::success::done\"".into(),
+                ..exec_inputs(vec![]).value
+            },
+        );
         let resource = ExecResource {
             tracker: test_tracker(),
         };
@@ -856,7 +832,6 @@ mod tests {
         let state = ExecState {
             command: "echo hi".into(),
             outputs: vec![output.to_string_lossy().into_owned()],
-            dir: None,
             clean: None,
             resolve: None,
             resolve_output: None,
@@ -869,7 +844,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        Resource::destroy(&resource, &state, &writer).unwrap();
+        Resource::destroy(&resource, &Block::new(None, state), &writer).unwrap();
         assert!(!output.exists());
     }
 
@@ -947,19 +922,21 @@ mod tests {
         assert!(!apply_test(&test_inputs(command, Some(JSONL_RESULTS))).unwrap());
     }
 
-    fn test_inputs(command: &str, results: Option<&str>) -> ExecTestInputs {
-        ExecTestInputs {
-            command: command.into(),
-            inputs: vec![],
-            outputs: vec![],
-            dir: None,
-            clean: None,
-            results: results.map(Into::into),
-            report: ReportMode::default(),
-        }
+    fn test_inputs(command: &str, results: Option<&str>) -> Block<ExecTestInputs> {
+        Block::new(
+            None,
+            ExecTestInputs {
+                command: command.into(),
+                inputs: vec![],
+                outputs: vec![],
+                clean: None,
+                results: results.map(Into::into),
+                report: ReportMode::default(),
+            },
+        )
     }
 
-    fn apply_test(inputs: &ExecTestInputs) -> Result<bool, BoxError> {
+    fn apply_test(inputs: &Block<ExecTestInputs>) -> Result<bool, BoxError> {
         let resource = ExecTestResource {
             tracker: test_tracker(),
         };
@@ -1057,7 +1034,6 @@ mod tests {
     fn test_plan_update_when_results_changed() {
         let prior = ExecTestState {
             command: "true".into(),
-            dir: None,
             clean: None,
             results: None,
         };
@@ -1068,16 +1044,18 @@ mod tests {
         assert_eq!(result.action, PlanAction::Update);
     }
 
-    fn exec_inputs(outputs: Vec<String>) -> ExecInputs {
-        ExecInputs {
-            command: "make".into(),
-            outputs,
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: None,
-            values: None,
-        }
+    fn exec_inputs(outputs: Vec<String>) -> Block<ExecInputs> {
+        Block::new(
+            None,
+            ExecInputs {
+                command: "make".into(),
+                outputs,
+                inputs: vec![],
+                clean: None,
+                resolve: None,
+                values: None,
+            },
+        )
     }
 
     #[test]
@@ -1149,10 +1127,6 @@ mod tests {
             Resource::output_keys(&resource, &inputs),
             [web.join("dist").to_string_lossy().into_owned(), "/abs/out".to_owned()]
         );
-        assert_eq!(
-            Resource::output_key(&resource, &inputs, "dist/"),
-            web.join("dist/").to_string_lossy()
-        );
     }
 
     #[test]
@@ -1203,47 +1177,21 @@ mod tests {
     }
 
     #[test]
-    fn plan_update_when_dir_changed() {
-        let inputs = ExecInputs {
-            command: "echo hi".into(),
-            outputs: vec!["out".into()],
-            inputs: vec![],
-            dir: Some("/tmp".into()),
-            clean: None,
-            resolve: None,
-            values: None,
-        };
-        let prior = ExecState {
-            command: "echo hi".into(),
-            outputs: vec!["out".into()],
-            dir: None,
-            clean: None,
-            resolve: None,
-            resolve_output: None,
-            values: None,
-            values_output: crate::value::Map::new(),
-        };
-        let resource = ExecResource {
-            tracker: test_tracker(),
-        };
-        let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
-        assert_eq!(result.action, PlanAction::Update);
-    }
-
-    #[test]
     fn apply_uses_working_dir() {
         let dir = tempfile::tempdir().unwrap();
         let canon = dir.path().canonicalize().unwrap();
         let output = canon.join("result.txt");
-        let inputs = ExecInputs {
-            command: format!("pwd > {}", output.display()),
-            outputs: vec![output.to_string_lossy().into_owned()],
-            inputs: vec![],
-            dir: Some(canon.to_string_lossy().into_owned()),
-            clean: None,
-            resolve: None,
-            values: None,
-        };
+        let inputs = Block::new(
+            Some(canon.to_string_lossy().into_owned()),
+            ExecInputs {
+                command: format!("pwd > {}", output.display()),
+                outputs: vec![output.to_string_lossy().into_owned()],
+                inputs: vec![],
+                clean: None,
+                resolve: None,
+                values: None,
+            },
+        );
         let resource = ExecResource {
             tracker: test_tracker(),
         };
@@ -1251,8 +1199,6 @@ mod tests {
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         assert!(result.state.is_some());
-        let state = result.state.unwrap();
-        assert_eq!(state.dir.as_deref(), Some(canon.to_str().unwrap()));
         let content = fs::read_to_string(&output).unwrap();
         assert_eq!(content.trim(), canon.to_str().unwrap());
     }
@@ -1261,10 +1207,8 @@ mod tests {
     fn test_resource_uses_working_dir() {
         let dir = tempfile::tempdir().unwrap();
         let canon = dir.path().canonicalize().unwrap();
-        let inputs = ExecTestInputs {
-            dir: Some(canon.to_string_lossy().into_owned()),
-            ..test_inputs(&format!("test \"$(pwd)\" = \"{}\"", canon.display()), None)
-        };
+        let mut inputs = test_inputs(&format!("test \"$(pwd)\" = \"{}\"", canon.display()), None);
+        inputs.dir = Some(canon.to_string_lossy().into_owned());
         let resource = ExecTestResource {
             tracker: test_tracker(),
         };
@@ -1272,10 +1216,6 @@ mod tests {
         let writer = out.writer("test");
         let result = Resource::apply(&resource, &inputs, None, &Changes::All, &writer).unwrap();
         assert!(result.outputs.passed);
-        assert_eq!(
-            result.state.as_ref().unwrap().dir.as_deref(),
-            Some(canon.to_str().unwrap())
-        );
     }
 
     #[test]
@@ -1289,7 +1229,6 @@ mod tests {
         let state = ExecState {
             command: "echo hi".into(),
             outputs: vec![output.to_string_lossy().into_owned()],
-            dir: None,
             clean: Some(format!("touch {}", marker.display())),
             resolve: None,
             resolve_output: None,
@@ -1302,7 +1241,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        Resource::destroy(&resource, &state, &writer).unwrap();
+        Resource::destroy(&resource, &Block::new(None, state), &writer).unwrap();
 
         assert!(marker.exists(), "clean command must have run");
         assert!(output.exists(), "outputs should NOT be removed when clean is set");
@@ -1313,7 +1252,6 @@ mod tests {
         let state = ExecState {
             command: "echo hi".into(),
             outputs: vec![],
-            dir: None,
             clean: Some("false".into()),
             resolve: None,
             resolve_output: None,
@@ -1325,24 +1263,25 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        assert!(Resource::destroy(&resource, &state, &writer).is_err());
+        assert!(Resource::destroy(&resource, &Block::new(None, state), &writer).is_err());
     }
 
     #[test]
     fn plan_update_when_clean_changed() {
-        let inputs = ExecInputs {
-            command: "echo hi".into(),
-            outputs: vec!["out".into()],
-            inputs: vec![],
-            dir: None,
-            clean: Some("rm -rf out".into()),
-            resolve: None,
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "echo hi".into(),
+                outputs: vec!["out".into()],
+                inputs: vec![],
+                clean: Some("rm -rf out".into()),
+                resolve: None,
+                values: None,
+            },
+        );
         let prior = ExecState {
             command: "echo hi".into(),
             outputs: vec!["out".into()],
-            dir: None,
             clean: None,
             resolve: None,
             resolve_output: None,
@@ -1362,7 +1301,6 @@ mod tests {
         let marker = dir.path().join("cleaned.txt");
         let state = ExecTestState {
             command: "true".into(),
-            dir: None,
             clean: Some(format!("touch {}", marker.display())),
             results: None,
         };
@@ -1371,7 +1309,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        Resource::destroy(&resource, &state, &writer).unwrap();
+        Resource::destroy(&resource, &Block::new(None, state), &writer).unwrap();
         assert!(marker.exists());
     }
 
@@ -1379,7 +1317,6 @@ mod tests {
     fn test_destroy_is_noop_without_clean() {
         let state = ExecTestState {
             command: "true".into(),
-            dir: None,
             clean: None,
             results: None,
         };
@@ -1388,43 +1325,25 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        Resource::destroy(&resource, &state, &writer).unwrap();
-    }
-
-    #[test]
-    fn test_plan_update_when_dir_changed() {
-        let inputs = ExecTestInputs {
-            dir: Some("/tmp".into()),
-            ..test_inputs("true", None)
-        };
-        let prior = ExecTestState {
-            command: "true".into(),
-            dir: None,
-            clean: None,
-            results: None,
-        };
-        let resource = ExecTestResource {
-            tracker: test_tracker(),
-        };
-        let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
-        assert_eq!(result.action, PlanAction::Update);
+        Resource::destroy(&resource, &Block::new(None, state), &writer).unwrap();
     }
 
     #[test]
     fn plan_create_when_resolve_fails() {
-        let inputs = ExecInputs {
-            command: "echo create".into(),
-            outputs: vec![],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: Some("false".into()),
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "echo create".into(),
+                outputs: vec![],
+                inputs: vec![],
+                clean: None,
+                resolve: Some("false".into()),
+                values: None,
+            },
+        );
         let prior = ExecState {
             command: "echo create".into(),
             outputs: vec![],
-            dir: None,
             clean: None,
             resolve: Some("false".into()),
             resolve_output: Some("old-state".into()),
@@ -1440,19 +1359,20 @@ mod tests {
 
     #[test]
     fn plan_update_when_resolve_output_drifted() {
-        let inputs = ExecInputs {
-            command: "echo create".into(),
-            outputs: vec![],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: Some("echo new-state".into()),
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "echo create".into(),
+                outputs: vec![],
+                inputs: vec![],
+                clean: None,
+                resolve: Some("echo new-state".into()),
+                values: None,
+            },
+        );
         let prior = ExecState {
             command: "echo create".into(),
             outputs: vec![],
-            dir: None,
             clean: None,
             resolve: Some("echo new-state".into()),
             resolve_output: Some("old-state\n".into()),
@@ -1468,19 +1388,20 @@ mod tests {
 
     #[test]
     fn plan_none_when_resolve_output_matches() {
-        let inputs = ExecInputs {
-            command: "echo create".into(),
-            outputs: vec![],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: Some("echo current-state".into()),
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "echo create".into(),
+                outputs: vec![],
+                inputs: vec![],
+                clean: None,
+                resolve: Some("echo current-state".into()),
+                values: None,
+            },
+        );
         let prior = ExecState {
             command: "echo create".into(),
             outputs: vec![],
-            dir: None,
             clean: None,
             resolve: Some("echo current-state".into()),
             resolve_output: Some("current-state\n".into()),
@@ -1496,15 +1417,17 @@ mod tests {
 
     #[test]
     fn apply_captures_resolve_output() {
-        let inputs = ExecInputs {
-            command: "true".into(),
-            outputs: vec![],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: Some("echo captured".into()),
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "true".into(),
+                outputs: vec![],
+                inputs: vec![],
+                clean: None,
+                resolve: Some("echo captured".into()),
+                values: None,
+            },
+        );
         let resource = ExecResource {
             tracker: test_tracker(),
         };
@@ -1519,15 +1442,17 @@ mod tests {
     fn apply_no_resolve_output_without_resolve() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("result.txt");
-        let inputs = ExecInputs {
-            command: format!("echo hello > {}", output.display()),
-            outputs: vec![output.to_string_lossy().into_owned()],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: None,
-            values: None,
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: format!("echo hello > {}", output.display()),
+                outputs: vec![output.to_string_lossy().into_owned()],
+                inputs: vec![],
+                clean: None,
+                resolve: None,
+                values: None,
+            },
+        );
         let resource = ExecResource {
             tracker: test_tracker(),
         };
@@ -1547,15 +1472,17 @@ mod tests {
 
     #[test]
     fn apply_captures_json_values() {
-        let inputs = ExecInputs {
-            command: "true".into(),
-            outputs: vec![],
-            inputs: vec![],
-            dir: None,
-            clean: None,
-            resolve: None,
-            values: Some("echo '{\"name\":\"test\",\"version\":\"1.0\"}'".into()),
-        };
+        let inputs = Block::new(
+            None,
+            ExecInputs {
+                command: "true".into(),
+                outputs: vec![],
+                inputs: vec![],
+                clean: None,
+                resolve: None,
+                values: Some("echo '{\"name\":\"test\",\"version\":\"1.0\"}'".into()),
+            },
+        );
         let resource = ExecResource {
             tracker: test_tracker(),
         };

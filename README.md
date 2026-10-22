@@ -233,6 +233,7 @@ Special fields:
 - `after = [block, ...]` — ordering-only dependency
 - `concurrency = N` — maximum number of this block's matrix slices that may run at once (`go.lint` defaults to 1)
 - `uncached = [output, ...]` — outputs to keep out of the [shared build cache](#shared-build-cache)
+- `dir = path` — directory the block's commands run in, relative to the project root (defaults to the project root). `bit --clean` runs in the `dir` the block last ran in
 
 Every other field must be an input of the block's resource, as listed under [Providers](#providers) or by `bit --schema`. bit checks fields when it loads `BUILD.bit` and rejects unknown fields, missing required fields, and values of the wrong type. A value taken from another block's outputs is checked against that output's declared type, and checked again just before the block runs.
 
@@ -599,7 +600,6 @@ output version = app.version
 ```bit
 block = buf.generate {
   input = string?     # Buf input, relative to `dir` (defaults to the workspace in `dir`)
-  dir = string?       # Working directory for the command
   template = string?  # Generation template path relative to `dir`, or inline YAML or JSON (defaults to "buf.gen.yaml")
   flags = [string]?   # Extra flags passed to buf generate
 }
@@ -616,7 +616,6 @@ block = buf.generate {
 ```bit
 block = buf.lint {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
-  dir = string?      # Working directory for the command
   flags = [string]?  # Extra flags passed to buf lint
 }
 ```
@@ -632,7 +631,6 @@ block = buf.lint {
 ```bit
 block = buf.format {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
-  dir = string?      # Working directory for the command
   flags = [string]?  # Extra flags passed to buf format
 }
 ```
@@ -642,7 +640,6 @@ block = buf.format {
 ```bit
 block = buf.format-check {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
-  dir = string?      # Working directory for the command
   flags = [string]?  # Extra flags passed to buf format
 }
 ```
@@ -658,7 +655,6 @@ block = buf.format-check {
 ```bit
 block = buf.breaking {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
-  dir = string?      # Working directory for the command
   against = string   # Baseline input to compare against (e.g. ".git#branch=main")
   flags = [string]?  # Extra flags passed to buf breaking
 }
@@ -780,7 +776,6 @@ block = exec {
   command = string                # Shell command to execute
   outputs = (string | [string])?  # Output file or list of output files, relative to `dir`
   inputs = [string]?              # Input file glob patterns, relative to `dir`. A directory names every file beneath it
-  dir = string?                   # Working directory for the command
   clean = string?                 # Shell command to run on `bit --clean` (replaces the default removal of outputs)
   resolve = string?               # Shell command whose stdout is captured as state. Used to detect whether the resource exists and whether it has drifted.
   values = string?                # Shell command whose stdout is parsed as a JSON object. Each key becomes a block output.
@@ -801,7 +796,6 @@ block = exec.test {
   command = string                      # Shell command to execute
   inputs = [string]?                    # Input file glob patterns, relative to `dir`. A directory names every file beneath it
   outputs = [string]?                   # Output files to track, relative to `dir`
-  dir = string?                         # Working directory for the command
   clean = string?                       # Shell command to run on `bit --clean`
   results = string?                     # jq filter mapping the command's JSON stdout to test results. Each JSON document or JSONL line is one filter input; other stdout lines are logs. Each filter output is `{suite?, name?, event?, status?, duration?, output?}`, about a test if it has a `name` and otherwise about its suite. `event` is `start` or `end`, and `status` (`pass`, `fail`, or `skip`) also ends the test or suite. `duration` is in seconds; without it, the time since `start` is used. A suite is summarized when it ends, or when the command exits.
   report = ("suites" | "tests" | "verbose")?  # What to show from `results`: a line per suite (`suites`), a line per test (`tests`), or a line per test plus logs as they arrive (`verbose`). Outside `verbose`, logs are shown only if the test fails.
@@ -824,7 +818,6 @@ block = go.exe {
   output = string?    # Output binary path (defaults to the name `go build` gives it: the last element of the package's import path)
   flags = [string]?   # Extra flags passed to go build
   inputs = [string]?  # Input file glob patterns (in addition to Go sources)
-  dir = string?       # Working directory for the command
   goos = string?      # Target OS
   goarch = string?    # Target architecture
   cgo = bool?         # Enable cgo
@@ -844,7 +837,6 @@ block = go.build {
   package = string | [string]  # Go package pattern or list of patterns (e.g. "./...")
   flags = [string]?            # Extra flags passed to go build
   inputs = [string]?           # Input file glob patterns (in addition to Go sources)
-  dir = string?                # Working directory for the command
   goos = string?               # Target OS
   goarch = string?             # Target architecture
   cgo = bool?                  # Enable cgo
@@ -859,7 +851,6 @@ block = go.generate {
   flags = [string]?            # Extra flags passed to go generate
   inputs = [string]?           # Input file glob patterns (in addition to Go sources)
   outputs = [string]?          # Output file paths produced by generate commands
-  dir = string?                # Working directory for the command
   goos = string?               # Target OS
   goarch = string?             # Target architecture
   cgo = bool?                  # Enable cgo
@@ -874,7 +865,6 @@ block = go.test {
   flags = [string]?                     # Extra flags passed to go test
   inputs = [string]?                    # Input file glob patterns (in addition to Go sources and `testdata/`)
   report = ("suites" | "tests" | "verbose")?  # What to show: a line per package (`suites`), a line per test (`tests`), or a line per test plus go's output as it arrives (`verbose`). Outside `verbose`, go's output is shown only on failure.
-  dir = string?                         # Working directory for the command
   goos = string?                        # Target OS
   goarch = string?                      # Target architecture
   cgo = bool?                           # Enable cgo
@@ -894,7 +884,6 @@ block = go.lint {
   package = (string | [string])?  # Go package pattern or list of patterns
   flags = [string]?               # Extra flags passed to golangci-lint run
   inputs = [string]?              # Input file glob patterns (in addition to Go sources)
-  dir = string?                   # Working directory for the command
 }
 ```
 
@@ -909,7 +898,6 @@ block = go.lint {
 ```bit
 block = go.fmt {
   package = (string | [string])?  # Go package pattern or list of patterns
-  dir = string?                   # Working directory for the command
 }
 ```
 
@@ -918,7 +906,6 @@ block = go.fmt {
 ```bit
 block = go.fmt-l {
   package = (string | [string])?  # Go package pattern or list of patterns
-  dir = string?                   # Working directory for the command
 }
 ```
 
@@ -934,11 +921,10 @@ block = go.fmt-l {
 
 ### pnpm
 
-**`pnpm.install`** (build) — Install pnpm workspace dependencies.
+**`pnpm.install`** (build) — Install the dependencies of the pnpm workspace in `dir`.
 
 ```bit
 block = pnpm.install {
-  dir = string?   # Workspace root directory (defaults to the current directory)
   frozen = bool?  # Pass `--frozen-lockfile` (reproducible installs, default `true`)
 }
 ```
@@ -958,7 +944,6 @@ block = pnpm.run {
   args = [string]?                # Additional arguments passed to the script after `--`
   outputs = (string | [string])?  # Output file or list of output files/directories produced by the script
   inputs = [string]?              # Extra input file globs (added to auto-detected sources)
-  dir = string?                   # Workspace root directory (defaults to the current directory)
 }
 ```
 
@@ -977,7 +962,6 @@ block = pnpm.test {
   package = string?   # Package name from its `package.json`. Omit to run at the workspace root.
   args = [string]?    # Additional arguments passed to the script after `--`
   inputs = [string]?  # Extra input file globs (added to auto-detected sources)
-  dir = string?       # Workspace root directory (defaults to the current directory)
 }
 ```
 
@@ -1001,7 +985,6 @@ block = protoc.generate {
   opt = {string = string}?  # Options for each generator (e.g. `{ go = "paths=source_relative" }` passes `--go_opt=paths=source_relative`)
   flags = [string]?         # Extra flags passed to protoc
   incremental = bool?       # Compile only the sources that changed or import a changed file. Every generator must write each output from a single source; descriptor sets, documentation, and merged API specs need full runs.
-  dir = string?             # Working directory for the command
 }
 ```
 

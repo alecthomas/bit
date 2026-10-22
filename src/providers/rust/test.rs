@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -359,16 +359,20 @@ impl Resource for RustTestResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &RustTestInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<RustTestInputs>) -> Vec<Ambient> {
         super::build_ambient(&inputs.env, &[])
     }
 
-    fn resolve(&self, inputs: &RustTestInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<RustTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         super::resolve_rust_inputs(inputs.package.as_deref(), tracker)
     }
 
-    fn plan(&self, inputs: &RustTestInputs, prior_state: Option<&RustTestState>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<RustTestInputs>,
+        prior_state: Option<&RustTestState>,
+    ) -> Result<PlanResult, BoxError> {
         let description = test_command(inputs).display();
 
         let Some(prior) = prior_state else {
@@ -398,7 +402,7 @@ impl Resource for RustTestResource {
 
     fn apply(
         &self,
-        inputs: &RustTestInputs,
+        inputs: &Block<RustTestInputs>,
         _prior_state: Option<&RustTestState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -464,11 +468,11 @@ impl Resource for RustTestResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &RustTestState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<RustTestState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &RustTestInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<RustTestInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -491,13 +495,16 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = RustTestInputs {
-            package: None,
-            flags: vec![],
-            report: ReportMode::default(),
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustTestInputs {
+                package: None,
+                flags: vec![],
+                report: ReportMode::default(),
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo test");
@@ -505,26 +512,32 @@ mod tests {
 
     #[test]
     fn plan_create_with_package() {
-        let inputs = RustTestInputs {
-            package: Some("my-crate".into()),
-            flags: vec![],
-            report: ReportMode::default(),
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustTestInputs {
+                package: Some("my-crate".into()),
+                flags: vec![],
+                report: ReportMode::default(),
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.description, "cargo test -p my-crate");
     }
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = RustTestInputs {
-            package: None,
-            flags: vec![],
-            report: ReportMode::default(),
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustTestInputs {
+                package: None,
+                flags: vec![],
+                report: ReportMode::default(),
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let prior = RustTestState {
             package: None,
             flags: vec![],
@@ -537,13 +550,16 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = RustTestInputs {
-            package: None,
-            flags: vec!["--no-fail-fast".into()],
-            report: ReportMode::default(),
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustTestInputs {
+                package: None,
+                flags: vec!["--no-fail-fast".into()],
+                report: ReportMode::default(),
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let prior = RustTestState {
             package: None,
             flags: vec![],

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -111,17 +111,22 @@ impl Resource for BufBreakingResource {
 
     /// A local baseline is tracked like the input. A Git baseline is
     /// tracked by the commit it names, in `plan`.
-    fn resolve(&self, inputs: &BufBreakingInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let mut sources = inputs.target.sources()?;
-        sources.add_input(inputs.target.dir.as_deref(), &inputs.against)?;
+    fn resolve(&self, inputs: &Block<BufBreakingInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        let dir = inputs.dir.as_deref();
+        let mut sources = inputs.target.sources(dir)?;
+        sources.add_input(dir, &inputs.against)?;
         sources.hash(&self.tracker)
     }
 
-    fn ambient(&self, inputs: &BufBreakingInputs) -> Vec<Ambient> {
-        inputs.target.check_ambient()
+    fn ambient(&self, inputs: &Block<BufBreakingInputs>) -> Vec<Ambient> {
+        inputs.target.check_ambient(inputs.dir.as_deref())
     }
 
-    fn plan(&self, inputs: &BufBreakingInputs, prior_state: Option<&BufBreakingState>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<BufBreakingInputs>,
+        prior_state: Option<&BufBreakingState>,
+    ) -> Result<PlanResult, BoxError> {
         let mut result = super::super::plan(
             inputs.target.describe(&inputs.args()),
             prior_state.map(|prior| &prior.inputs),
@@ -129,7 +134,7 @@ impl Resource for BufBreakingResource {
         );
         if let Some(prior) = prior_state
             && result.action == PlanAction::None
-            && git_baseline_commit(&inputs.against, inputs.target.dir.as_deref())? != prior.against_commit
+            && git_baseline_commit(&inputs.against, inputs.dir.as_deref())? != prior.against_commit
         {
             result.action = PlanAction::Update;
             result.reason = Some("baseline moved".to_owned());
@@ -139,31 +144,31 @@ impl Resource for BufBreakingResource {
 
     fn apply(
         &self,
-        inputs: &BufBreakingInputs,
+        inputs: &Block<BufBreakingInputs>,
         _prior_state: Option<&BufBreakingState>,
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufBreakingState, BufBreakingOutputs>, BoxError> {
-        let against_commit = git_baseline_commit(&inputs.against, inputs.target.dir.as_deref())?;
-        let status = inputs.target.run(&inputs.args(), writer)?;
+        let against_commit = git_baseline_commit(&inputs.against, inputs.dir.as_deref())?;
+        let status = inputs.target.run(inputs.dir.as_deref(), &inputs.args(), writer)?;
         Ok(ApplyResult {
             outputs: BufBreakingOutputs {
                 passed: status.success(),
             },
             state: Some(BufBreakingState {
-                inputs: inputs.clone(),
+                inputs: inputs.value.clone(),
                 against_commit,
             }),
         })
     }
 
-    fn destroy(&self, _prior_state: &BufBreakingState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<BufBreakingState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
     /// The baseline usually lives outside the tracked sources, as a Git ref
     /// or a remote module, so the action key cannot describe it.
-    fn cache_policy(&self, _inputs: &BufBreakingInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<BufBreakingInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 }
@@ -243,14 +248,16 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("baseline/proto/a.proto"), "").unwrap();
-        let inputs = BufBreakingInputs {
-            target: BufTarget {
-                input: Some("current".into()),
-                dir: Some(root.to_string_lossy().into_owned()),
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            BufBreakingInputs {
+                target: BufTarget {
+                    input: Some("current".into()),
+                },
+                against: "baseline/proto".into(),
+                flags: vec![],
             },
-            against: "baseline/proto".into(),
-            flags: vec![],
-        };
+        );
         let mut names: Vec<_> = Resource::resolve(&test_resource(), &inputs)
             .unwrap()
             .into_keys()
@@ -266,17 +273,17 @@ mod tests {
     #[test]
     fn plan_updates_when_baseline_moves() {
         let dir = repo();
-        let inputs = BufBreakingInputs {
-            target: BufTarget {
-                input: None,
-                dir: Some(dir.path().to_string_lossy().into_owned()),
+        let inputs = Block::new(
+            Some(dir.path().to_string_lossy().into_owned()),
+            BufBreakingInputs {
+                target: BufTarget { input: None },
+                against: ".git#branch=main".into(),
+                flags: vec![],
             },
-            against: ".git#branch=main".into(),
-            flags: vec![],
-        };
+        );
         let head = git(dir.path(), &["rev-parse", "HEAD"]);
         let prior = BufBreakingState {
-            inputs: inputs.clone(),
+            inputs: inputs.value.clone(),
             against_commit: Some(head),
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();

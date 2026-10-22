@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanResult, Provider, Resource,
-    ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanResult, Provider,
+    Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 use crate::value::Value;
@@ -43,9 +43,6 @@ pub struct ProtocGenerateInputs {
     /// Compile only the sources that changed or import a changed file. Every generator must write each output from a single source; descriptor sets, documentation, and merged API specs need full runs.
     #[serde(default)]
     pub incremental: bool,
-    /// Working directory for the command
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
 }
 
 impl ProtocGenerateInputs {
@@ -67,7 +64,9 @@ impl ProtocGenerateInputs {
         args.extend(self.flags.iter().cloned());
         args
     }
+}
 
+impl Block<ProtocGenerateInputs> {
     /// Source files matching `sources`, relative to `dir` as protoc expects.
     fn source_files(&self) -> Result<Vec<String>, BoxError> {
         let dir = self.dir.as_deref().unwrap_or("");
@@ -206,13 +205,13 @@ struct Batches {
 /// What an incremental run must compile, or `None` when only a full run
 /// is correct.
 fn incremental_batches(
-    inputs: &ProtocGenerateInputs,
+    inputs: &Block<ProtocGenerateInputs>,
     prior: &ProtocGenerateState,
     compilation: &Compilation,
     hashes: &Hashes,
 ) -> Option<Batches> {
     if !inputs.incremental
-        || prior.inputs != *inputs
+        || prior.inputs != inputs.value
         || prior.tools != hashes.tools
         || inputs.out.values().any(|out| is_archive(out))
     {
@@ -294,7 +293,7 @@ impl Staged {
 
 /// Run protoc on `files` with every generator writing into a staging
 /// directory.
-fn stage(inputs: &ProtocGenerateInputs, files: &[String], writer: &BlockWriter) -> Result<Staged, BoxError> {
+fn stage(inputs: &Block<ProtocGenerateInputs>, files: &[String], writer: &BlockWriter) -> Result<Staged, BoxError> {
     let dir = inputs.dir.as_deref();
     // Staging inside `dir` keeps the final moves on one filesystem, and the
     // hidden name keeps it out of `.proto` globs.
@@ -436,7 +435,7 @@ fn command_line(inputs: &ProtocGenerateInputs, sources: &[String]) -> String {
 /// Compile only `batches`. Returns every generated file, or `None` when the
 /// run showed that a full run is needed.
 fn run_incremental(
-    inputs: &ProtocGenerateInputs,
+    inputs: &Block<ProtocGenerateInputs>,
     prior: &ProtocGenerateState,
     batches: &Batches,
     total: usize,
@@ -469,7 +468,7 @@ fn run_incremental(
 /// Compile every source and remove generated files the run no longer
 /// writes.
 fn run_full(
-    inputs: &ProtocGenerateInputs,
+    inputs: &Block<ProtocGenerateInputs>,
     prior: Option<&ProtocGenerateState>,
     files: &[String],
     writer: &BlockWriter,
@@ -483,7 +482,10 @@ fn run_full(
             .filter(|file| !current.contains(file))
             .cloned()
             .collect();
-        remove_generated(&stale, &prior.inputs.outputs(), writer)?;
+        // The prior run's `dir` is not known here, so outputs it left after
+        // `dir` changed are removed but their emptied directories remain.
+        let prior_inputs = Block::new(inputs.dir.clone(), prior.inputs.clone());
+        remove_generated(&stale, &prior_inputs.outputs(), writer)?;
     }
     Ok(generated)
 }
@@ -502,18 +504,18 @@ impl Resource for ProtocGenerateResource {
     }
 
     /// Tracks the sources and the files they transitively import.
-    fn resolve(&self, inputs: &ProtocGenerateInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<ProtocGenerateInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let files = inputs.compilation()?.graph.files();
         self.tracker.hash_files(&files)
     }
 
-    fn ambient(&self, inputs: &ProtocGenerateInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<ProtocGenerateInputs>) -> Vec<Ambient> {
         inputs.ambient()
     }
 
     fn plan(
         &self,
-        inputs: &ProtocGenerateInputs,
+        inputs: &Block<ProtocGenerateInputs>,
         prior_state: Option<&ProtocGenerateState>,
     ) -> Result<PlanResult, BoxError> {
         Ok(super::plan(
@@ -525,9 +527,9 @@ impl Resource for ProtocGenerateResource {
 
     fn apply(
         &self,
-        inputs: &ProtocGenerateInputs,
+        inputs: &Block<ProtocGenerateInputs>,
         prior_state: Option<&ProtocGenerateState>,
-        _changes: &Changes,
+        changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<ProtocGenerateState, ProtocGenerateOutputs>, BoxError> {
         if inputs.out.is_empty() {
@@ -539,8 +541,12 @@ impl Resource for ProtocGenerateResource {
             inputs.hashes(&compilation, tracker)?
         };
 
-        let batches =
-            prior_state.and_then(|prior| Some((prior, incremental_batches(inputs, prior, &compilation, &hashes)?)));
+        // The engine reports every change when a field changed, including
+        // `dir`, which the prior state does not record. Sources and outputs
+        // resolve against `dir`, so the prior run says nothing about them.
+        let batches = prior_state
+            .filter(|_| !matches!(changes, Changes::All))
+            .and_then(|prior| Some((prior, incremental_batches(inputs, prior, &compilation, &hashes)?)));
         let incremental = match batches {
             Some((prior, batches)) => run_incremental(inputs, prior, &batches, compilation.files.len(), writer)?,
             None => {
@@ -565,7 +571,7 @@ impl Resource for ProtocGenerateResource {
                 paths: outputs.iter().map(|path| path.to_string_lossy().into_owned()).collect(),
             },
             state: Some(ProtocGenerateState {
-                inputs: inputs.clone(),
+                inputs: inputs.value.clone(),
                 compiled: compilation.files,
                 protos: hashes.protos,
                 tools: hashes.tools,
@@ -574,8 +580,9 @@ impl Resource for ProtocGenerateResource {
         })
     }
 
-    fn destroy(&self, prior_state: &ProtocGenerateState, writer: &BlockWriter) -> Result<(), BoxError> {
-        remove_generated(&prior_state.generated, &prior_state.inputs.outputs(), writer)
+    fn destroy(&self, prior_state: &Block<ProtocGenerateState>, writer: &BlockWriter) -> Result<(), BoxError> {
+        let inputs = Block::new(prior_state.dir.clone(), prior_state.inputs.clone());
+        remove_generated(&prior_state.generated, &inputs.outputs(), writer)
     }
 
     /// Incremental runs compile only the sources that changed.
@@ -586,11 +593,11 @@ impl Resource for ProtocGenerateResource {
     /// Generators other than protoc's built-in ones are `protoc-gen-*`
     /// executables, and incremental runs depend on the prior local state, so
     /// results stay in this worktree.
-    fn cache_policy(&self, _inputs: &ProtocGenerateInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<ProtocGenerateInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 
-    fn output_keys(&self, inputs: &ProtocGenerateInputs) -> Vec<String> {
+    fn output_keys(&self, inputs: &Block<ProtocGenerateInputs>) -> Vec<String> {
         super::removable_outputs(&inputs.outputs()).unwrap_or_default()
     }
 }
@@ -635,7 +642,7 @@ mod tests {
 
     /// A project where `proto/acme/v1/a.proto` imports `b.proto`, which
     /// imports `c.proto`, and `d.proto` stands alone.
-    fn project() -> (tempfile::TempDir, ProtocGenerateInputs) {
+    fn project() -> (tempfile::TempDir, Block<ProtocGenerateInputs>) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("proto/acme/v1")).unwrap();
@@ -643,28 +650,30 @@ mod tests {
         std::fs::write(root.join("proto/acme/v1/b.proto"), r#"import "acme/v1/c.proto";"#).unwrap();
         std::fs::write(root.join("proto/acme/v1/c.proto"), "").unwrap();
         std::fs::write(root.join("proto/acme/v1/d.proto"), "").unwrap();
-        let inputs = ProtocGenerateInputs {
-            sources: vec!["proto/acme/v1/a.proto".into()],
-            include: vec!["proto".into()],
-            out: HashMap::from([("go".into(), "gen/go".into()), ("cpp".into(), "gen/cpp".into())]),
-            opt: HashMap::from([("go".into(), "paths=source_relative".into())]),
-            flags: vec![],
-            incremental: false,
-            dir: Some(root.to_string_lossy().into_owned()),
-        };
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            ProtocGenerateInputs {
+                sources: vec!["proto/acme/v1/a.proto".into()],
+                include: vec!["proto".into()],
+                out: HashMap::from([("go".into(), "gen/go".into()), ("cpp".into(), "gen/cpp".into())]),
+                opt: HashMap::from([("go".into(), "paths=source_relative".into())]),
+                flags: vec![],
+                incremental: false,
+            },
+        );
         (dir, inputs)
     }
 
     /// `project()` compiling every file incrementally, with the state a
     /// successful full run would have recorded.
-    fn incremental_project() -> (tempfile::TempDir, ProtocGenerateInputs, ProtocGenerateState) {
+    fn incremental_project() -> (tempfile::TempDir, Block<ProtocGenerateInputs>, ProtocGenerateState) {
         let (dir, mut inputs) = project();
         inputs.sources = vec!["proto/**/*.proto".into()];
         inputs.incremental = true;
         let compilation = inputs.compilation().unwrap();
         let hashes = inputs.hashes(&compilation, &FileTracker::default()).unwrap();
         let prior = ProtocGenerateState {
-            inputs: inputs.clone(),
+            inputs: inputs.value.clone(),
             compiled: compilation.files,
             protos: hashes.protos,
             tools: hashes.tools,
@@ -673,7 +682,7 @@ mod tests {
         (dir, inputs, prior)
     }
 
-    fn batches(inputs: &ProtocGenerateInputs, prior: &ProtocGenerateState) -> Option<Batches> {
+    fn batches(inputs: &Block<ProtocGenerateInputs>, prior: &ProtocGenerateState) -> Option<Batches> {
         let compilation = inputs.compilation().unwrap();
         let hashes = inputs.hashes(&compilation, &FileTracker::default()).unwrap();
         incremental_batches(inputs, prior, &compilation, &hashes)
@@ -847,13 +856,14 @@ mod tests {
         std::fs::write(out.join("acme/v1/a.pb.go"), "package v1").unwrap();
         std::fs::write(out.join("go.mod"), "module example.com/gen").unwrap();
         let state = ProtocGenerateState {
-            inputs,
+            inputs: inputs.value.clone(),
             compiled: vec![],
             protos: BTreeMap::new(),
             tools: BTreeMap::new(),
             generated: vec![out.join("acme/v1/a.pb.go").to_string_lossy().into_owned()],
         };
         let output = crate::output::Output::new(&[]);
+        let state = Block::new(inputs.dir.clone(), state);
         Resource::destroy(&test_resource(), &state, &output.writer("generate")).unwrap();
         assert!(!out.join("acme").exists());
         assert!(out.join("go.mod").exists());

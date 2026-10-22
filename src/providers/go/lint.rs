@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -28,9 +28,6 @@ pub struct GoLintInputs {
     /// Input file glob patterns (in addition to Go sources)
     #[serde(default)]
     pub inputs: Vec<String>,
-    /// Working directory for the command
-    #[serde(default)]
-    pub dir: Option<String>,
 }
 
 fn default_package() -> Vec<String> {
@@ -51,8 +48,6 @@ pub struct GoLintState {
     #[serde(deserialize_with = "crate::providers::string_or_vec")]
     pub package: Vec<String>,
     pub flags: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dir: Option<String>,
 }
 
 const GOLANGCI_CONFIG_NAMES: [&str; 4] = [".golangci.yml", ".golangci.yaml", ".golangci.toml", ".golangci.json"];
@@ -93,7 +88,7 @@ struct Affected {
 
 /// The packages whose own or imported files include a changed path, or
 /// `None` to lint the whole pattern.
-fn affected_packages(inputs: &GoLintInputs, changes: &Changes) -> Result<Option<Affected>, BoxError> {
+fn affected_packages(inputs: &Block<GoLintInputs>, changes: &Changes) -> Result<Option<Affected>, BoxError> {
     let env = super::GoEnv::default();
     let Some(affected) = super::affected_packages(&inputs.package, inputs.dir.as_deref(), &[], &env, changes)? else {
         return Ok(None);
@@ -142,7 +137,7 @@ impl Resource for GoLintResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &GoLintInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<GoLintInputs>) -> Vec<Ambient> {
         let dir = inputs.dir.as_deref();
         vec![
             crate::providers::version("golangci-lint", &["version"], dir),
@@ -150,7 +145,7 @@ impl Resource for GoLintResource {
         ]
     }
 
-    fn resolve(&self, inputs: &GoLintInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<GoLintInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(Path::new);
         // golangci-lint lints tests by default; tracking them when disabled only costs a rerun.
@@ -165,7 +160,7 @@ impl Resource for GoLintResource {
         Ok(files)
     }
 
-    fn plan(&self, inputs: &GoLintInputs, prior_state: Option<&GoLintState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Block<GoLintInputs>, prior_state: Option<&GoLintState>) -> Result<PlanResult, BoxError> {
         let description = super::display_command(
             "golangci-lint",
             &lint_args(inputs, &inputs.package),
@@ -195,7 +190,7 @@ impl Resource for GoLintResource {
 
     fn apply(
         &self,
-        inputs: &GoLintInputs,
+        inputs: &Block<GoLintInputs>,
         _prior_state: Option<&GoLintState>,
         changes: &Changes,
         writer: &BlockWriter,
@@ -203,7 +198,6 @@ impl Resource for GoLintResource {
         let state = GoLintState {
             package: inputs.package.clone(),
             flags: inputs.flags.clone(),
-            dir: inputs.dir.clone(),
         };
         let affected = affected_packages(inputs, changes)?;
         if let Some(Affected { dirs, total }) = &affected
@@ -263,7 +257,7 @@ impl Resource for GoLintResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &GoLintState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<GoLintState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
@@ -277,7 +271,7 @@ impl Resource for GoLintResource {
         Some(1)
     }
 
-    fn cache_policy(&self, _inputs: &GoLintInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<GoLintInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -338,12 +332,14 @@ mod tests {
         std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
         std::fs::write(root.join("lib.go"), "package lib\n").unwrap();
         std::fs::write(root.join("lib_test.go"), "package lib\n").unwrap();
-        let inputs = GoLintInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            dir: Some(root.to_string_lossy().into_owned()),
-        };
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            GoLintInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+            },
+        );
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
         assert!(resolved.keys().any(|p| p.ends_with("lib_test.go")), "{resolved:?}");
     }
@@ -355,12 +351,14 @@ mod tests {
         std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
         std::fs::write(root.join("main.go"), "package main\n").unwrap();
         std::fs::write(root.join(".golangci.yml"), "version: \"2\"\n").unwrap();
-        let inputs = GoLintInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            dir: Some(root.to_string_lossy().into_owned()),
-        };
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            GoLintInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+            },
+        );
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
         assert!(
             resolved.contains_key(&root.join(".golangci.yml").to_string_lossy().into_owned()),
@@ -382,12 +380,14 @@ mod tests {
         // The default listing excludes this package, but build tags may not.
         std::fs::create_dir_all(root.join("tagged")).unwrap();
         std::fs::write(root.join("tagged/tagged.go"), "//go:build extra\n\npackage tagged\n").unwrap();
-        let inputs = GoLintInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            dir: Some(root.to_string_lossy().into_owned()),
-        };
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            GoLintInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+            },
+        );
         let affected = |names: &[&str]| {
             let changes = Changes::Paths(names.iter().map(|name| root.join(name)).collect());
             affected_packages(&inputs, &changes).unwrap().map(|affected| {
@@ -412,28 +412,31 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = GoLintInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            dir: None,
-        };
+        let inputs = Block::new(
+            None,
+            GoLintInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+            },
+        );
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = GoLintInputs {
-            package: vec!["./...".into()],
-            flags: vec![],
-            inputs: vec![],
-            dir: None,
-        };
+        let inputs = Block::new(
+            None,
+            GoLintInputs {
+                package: vec!["./...".into()],
+                flags: vec![],
+                inputs: vec![],
+            },
+        );
         let prior = GoLintState {
             package: vec!["./...".into()],
             flags: vec![],
-            dir: None,
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -441,16 +444,17 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = GoLintInputs {
-            package: vec!["./...".into()],
-            flags: vec!["--fast".into()],
-            inputs: vec![],
-            dir: None,
-        };
+        let inputs = Block::new(
+            None,
+            GoLintInputs {
+                package: vec!["./...".into()],
+                flags: vec!["--fast".into()],
+                inputs: vec![],
+            },
+        );
         let prior = GoLintState {
             package: vec!["./...".into()],
             flags: vec![],
-            dir: None,
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);

@@ -3,7 +3,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::cache::{ActionKey, ActionKeyInput, BuildCache, PublishOutcome, RECEIPT_VERSION, Receipt};
-use crate::dag::{self, AFTER_FIELD, CONCURRENCY_FIELD, DEPENDS_ON_FIELD, Dag, DagError, DagNode, UNCACHED_FIELD};
+use crate::dag::{
+    self, AFTER_FIELD, CONCURRENCY_FIELD, DEPENDS_ON_FIELD, DIR_FIELD, Dag, DagError, DagNode, UNCACHED_FIELD,
+};
 use crate::expr::{self, EvalError, Scope};
 use crate::file_tracker::FileTracker;
 use crate::loader::BaseScope;
@@ -82,6 +84,10 @@ fn short_hash(h: &SHA256) -> String {
 struct WrappedState {
     state: serde_json::Value,
     outputs: Map,
+    /// The block's `dir` when it last ran, which `--clean` runs in after the
+    /// block definition has gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dir: Option<String>,
     content_hash: SHA256,
     #[serde(default)]
     input_hash: SHA256,
@@ -95,6 +101,7 @@ struct WrappedState {
 struct PriorState {
     provider_state: Option<serde_json::Value>,
     outputs: Map,
+    dir: Option<String>,
     content_hash: SHA256,
     input_hash: SHA256,
     resolve_map: BTreeMap<String, SHA256>,
@@ -104,9 +111,16 @@ struct PriorState {
 fn unwrap_state(stored: &serde_json::Value) -> PriorState {
     let wrapped: WrappedState =
         serde_json::from_value(stored.clone()).expect("corrupted state: not a valid WrappedState");
+    // Resources recorded `dir` in their own state before the engine
+    // managed it, so state written then still names it there.
+    let dir = wrapped.dir.or_else(|| {
+        let dir = wrapped.state.get(DIR_FIELD).and_then(serde_json::Value::as_str);
+        dir.map(str::to_owned)
+    });
     PriorState {
         provider_state: Some(wrapped.state),
         outputs: wrapped.outputs,
+        dir,
         content_hash: wrapped.content_hash,
         input_hash: wrapped.input_hash,
         resolve_map: wrapped.resolve_map,
@@ -132,6 +146,7 @@ fn default_prior() -> PriorState {
     PriorState {
         provider_state: None,
         outputs: Map::new(),
+        dir: None,
         content_hash: SHA256::ZERO,
         input_hash: SHA256::ZERO,
         resolve_map: BTreeMap::new(),
@@ -601,21 +616,24 @@ fn files_under(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     Ok(files)
 }
 
-/// The entries of `uncached`, resolved as the resource resolves its outputs.
+/// The block's `dir` field.
+fn block_dir(inputs: &Map) -> Option<&str> {
+    inputs.get(DIR_FIELD).and_then(Value::as_str)
+}
+
+/// The entries of `uncached`, relative to `dir` like the outputs they name.
 /// A trailing slash marks a directory in `outputs`, so it is optional here
 /// too and matching ignores it.
-fn uncached_outputs(node: &DagNode, inputs: &Map) -> Result<HashSet<String>, BoxError> {
+fn uncached_outputs(inputs: &Map) -> HashSet<String> {
     let entries: Vec<&str> = match inputs.get(UNCACHED_FIELD) {
         Some(Value::List(_, items)) => items.iter().filter_map(|v| v.as_str()).collect(),
         Some(Value::Str(one)) => vec![one.as_str()],
         _ => vec![],
     };
+    let dir = block_dir(inputs);
     entries
         .into_iter()
-        .map(|entry| {
-            let key = node.resource.output_key(inputs, entry)?;
-            Ok(key.trim_end_matches('/').to_owned())
-        })
+        .map(|entry| crate::provider::in_dir(dir, entry).trim_end_matches('/').to_owned())
         .collect()
 }
 
@@ -788,7 +806,7 @@ fn prepare_block(
     {
         return Ok(prepared);
     }
-    let uncached = uncached_outputs(node, &prepared.inputs).map_err(provider_error(node, name, "resolve"))?;
+    let uncached = uncached_outputs(&prepared.inputs);
     prepared.cached_outputs = prepared
         .outputs
         .iter()
@@ -1506,6 +1524,7 @@ fn execute_block(
         let wrapped = WrappedState {
             state: new_state.clone(),
             outputs: apply_result.outputs.clone(),
+            dir: block_dir(&prepared.inputs).map(str::to_owned),
             content_hash: post_hash,
             input_hash,
             resolve_map,
@@ -1619,7 +1638,7 @@ pub fn destroy(
             continue;
         };
 
-        if let Err(e) = node.resource.destroy(&provider_state, &writer) {
+        if let Err(e) = node.resource.destroy(prior.dir.as_deref(), &provider_state, &writer) {
             let err = EngineError::Provider {
                 pos: node.pos.clone(),
                 block: name.clone(),
@@ -1822,7 +1841,7 @@ mod tests {
     use crate::file_tracker::FileTracker;
     use crate::loader;
     use crate::parser;
-    use crate::provider::{DynResource, FuncSignature, Provider, ProviderRegistry, Resource};
+    use crate::provider::{Block, DynResource, FuncSignature, Provider, ProviderRegistry, Resource};
     use crate::providers::exec::ExecProvider;
     use crate::state::StateStore;
 
@@ -1900,9 +1919,7 @@ mod tests {
         use std::sync::Mutex;
 
         #[derive(Debug, serde::Deserialize, bit_derive::Schema)]
-        struct Inputs {
-            dir: String,
-        }
+        struct Inputs {}
 
         #[derive(Debug, serde::Serialize, bit_derive::Schema)]
         struct Outputs {
@@ -1947,15 +1964,15 @@ mod tests {
             fn kind(&self) -> ResourceKind {
                 ResourceKind::Test
             }
-            fn resolve(&self, inputs: &Inputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+            fn resolve(&self, inputs: &Block<Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
                 let mut map = BTreeMap::new();
                 for name in ["a.txt", "b.txt"] {
-                    let path = Path::new(&inputs.dir).join(name);
+                    let path = PathBuf::from(inputs.path(name));
                     map.insert(path.to_string_lossy().into_owned(), crate::providers::hash_file(&path)?);
                 }
                 Ok(map)
             }
-            fn plan(&self, _inputs: &Inputs, prior_state: Option<&()>) -> Result<PlanResult, BoxError> {
+            fn plan(&self, _inputs: &Block<Inputs>, prior_state: Option<&()>) -> Result<PlanResult, BoxError> {
                 Ok(PlanResult {
                     action: if prior_state.is_some() {
                         PlanAction::None
@@ -1968,7 +1985,7 @@ mod tests {
             }
             fn apply(
                 &self,
-                inputs: &Inputs,
+                inputs: &Block<Inputs>,
                 _prior_state: Option<&()>,
                 changes: &Changes,
                 _writer: &BlockWriter,
@@ -1976,15 +1993,15 @@ mod tests {
                 self.seen.lock().unwrap().push(changes.clone());
                 Ok(ApplyResult {
                     outputs: Outputs {
-                        passed: !Path::new(&inputs.dir).join("fail").exists(),
+                        passed: !Path::new(&inputs.path("fail")).exists(),
                     },
                     state: Some(()),
                 })
             }
-            fn destroy(&self, _prior_state: &(), _writer: &BlockWriter) -> Result<(), BoxError> {
+            fn destroy(&self, _prior_state: &Block<()>, _writer: &BlockWriter) -> Result<(), BoxError> {
                 Ok(())
             }
-            fn cache_policy(&self, _inputs: &Inputs) -> CachePolicy {
+            fn cache_policy(&self, _inputs: &Block<Inputs>) -> CachePolicy {
                 CachePolicy::Local
             }
         }
@@ -2102,11 +2119,11 @@ mod tests {
                 ResourceKind::Build
             }
 
-            fn resolve(&self, _inputs: &Inputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+            fn resolve(&self, _inputs: &Block<Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
                 Ok(BTreeMap::new())
             }
 
-            fn plan(&self, _inputs: &Inputs, _prior_state: Option<&()>) -> Result<PlanResult, BoxError> {
+            fn plan(&self, _inputs: &Block<Inputs>, _prior_state: Option<&()>) -> Result<PlanResult, BoxError> {
                 Ok(PlanResult {
                     action: PlanAction::Create,
                     description: "probe concurrency".into(),
@@ -2116,7 +2133,7 @@ mod tests {
 
             fn apply(
                 &self,
-                inputs: &Inputs,
+                inputs: &Block<Inputs>,
                 _prior_state: Option<&()>,
                 _changes: &Changes,
                 _writer: &BlockWriter,
@@ -2144,11 +2161,11 @@ mod tests {
                 })
             }
 
-            fn destroy(&self, _prior_state: &(), _writer: &BlockWriter) -> Result<(), BoxError> {
+            fn destroy(&self, _prior_state: &Block<()>, _writer: &BlockWriter) -> Result<(), BoxError> {
                 Ok(())
             }
 
-            fn cache_policy(&self, _inputs: &Inputs) -> CachePolicy {
+            fn cache_policy(&self, _inputs: &Block<Inputs>) -> CachePolicy {
                 CachePolicy::Local
             }
         }
@@ -3013,6 +3030,67 @@ lint[module] = go.lint {
     }
 
     #[test]
+    fn changing_dir_reruns_the_block_and_clean_uses_the_dir_it_ran_in() {
+        let root = tempfile::tempdir().unwrap();
+        let (a, b) = (root.path().join("a"), root.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let tracker = test_tracker();
+        let store = MemoryStore::new();
+        let output = Output::new(&[]);
+        let block = |dir: &Path| {
+            let input = format!(
+                "build = exec {{\n  command = \"touch out\"\n  dir = \"{}\"\n  outputs = \"out\"\n}}\n",
+                dir.display()
+            );
+            parser::parse(&input, "<test>").unwrap()
+        };
+        let run = |dir: &Path| {
+            let (mut dag, base) =
+                loader::load(&block(dir), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+            apply(&mut dag, &base, &store, &test_cache(), &output, &[], 1, &tracker).unwrap()
+        };
+
+        assert_eq!(run(&a)[0].plan.action, PlanAction::Create);
+        assert_eq!(run(&a)[0].plan.action, PlanAction::None);
+        assert_eq!(run(&b)[0].plan.action, PlanAction::Update);
+        assert!(b.join("out").is_file(), "the command runs in `dir`");
+
+        // A block that no longer exists is destroyed in the `dir` it ran in.
+        let (mut dag, _) = loader::load(&block(&b), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        destroy(&mut dag, &store, &output, &[], false).unwrap();
+        assert!(!b.join("out").exists());
+    }
+
+    #[test]
+    fn destroy_uses_dir_recorded_by_the_resource_before_the_engine_managed_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("cleaned");
+        let state = serde_json::json!({
+            "command": "true",
+            "clean": "touch cleaned",
+            "dir": dir.path(),
+        });
+        let prior = unwrap_state(&serde_json::json!({
+            "state": state,
+            "outputs": {},
+            "content_hash": SHA256::ZERO,
+        }));
+        assert_eq!(prior.dir.as_deref(), dir.path().to_str());
+        let registry = test_registry(&test_tracker());
+        let resource = registry.get_resource("exec", "exec").unwrap();
+        let output = Output::new(&[]);
+        resource
+            .destroy(
+                prior.dir.as_deref(),
+                &prior.provider_state.unwrap(),
+                &output.writer("build"),
+            )
+            .unwrap();
+        assert!(marker.exists());
+    }
+
+    #[test]
     fn declared_output_directory_drift_triggers_local_update() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("gen");
@@ -3050,7 +3128,7 @@ lint[module] = go.lint {
         //! through the CAS. `check` is the same resource as a test kind whose
         //! `passed` output is controlled by an input.
         use std::collections::BTreeMap;
-        use std::path::{Path, PathBuf};
+        use std::path::PathBuf;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3059,7 +3137,7 @@ lint[module] = go.lint {
         use crate::cache::{ArtifactRef, Cas};
         use crate::output::BlockWriter;
         use crate::provider::{
-            Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, MaterializeResult,
+            Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, DynResource, FuncSignature, MaterializeResult,
             OutputFile, PlanAction, PlanResult, Provider, Resource, ResourceKind,
         };
         use crate::sha256::SHA256;
@@ -3067,7 +3145,6 @@ lint[module] = go.lint {
 
         #[derive(Debug, Deserialize, bit_derive::Schema)]
         pub struct Inputs {
-            pub dir: String,
             #[serde(default)]
             pub content: Option<String>,
             #[serde(default)]
@@ -3123,8 +3200,8 @@ lint[module] = go.lint {
             name: &'static str,
         }
 
-        fn out_path(inputs: &Inputs) -> PathBuf {
-            Path::new(&inputs.dir).join("out.txt")
+        fn out_path(inputs: &Block<Inputs>) -> PathBuf {
+            PathBuf::from(inputs.path("out.txt"))
         }
 
         impl Resource for FileResource {
@@ -3138,18 +3215,18 @@ lint[module] = go.lint {
             fn kind(&self) -> ResourceKind {
                 self.kind.clone()
             }
-            fn resolve(&self, inputs: &Inputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+            fn resolve(&self, inputs: &Block<Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
                 let mut map = BTreeMap::new();
-                let path = Path::new(&inputs.dir).join("src.txt");
+                let path = PathBuf::from(inputs.path("src.txt"));
                 if path.is_file() {
                     map.insert(path.to_string_lossy().into_owned(), crate::providers::hash_file(&path)?);
                 }
                 Ok(map)
             }
-            fn ambient(&self, inputs: &Inputs) -> Vec<Ambient> {
+            fn ambient(&self, inputs: &Block<Inputs>) -> Vec<Ambient> {
                 inputs.tool.iter().cloned().map(Ambient::Executable).collect()
             }
-            fn plan(&self, _inputs: &Inputs, prior: Option<&State>) -> Result<PlanResult, BoxError> {
+            fn plan(&self, _inputs: &Block<Inputs>, prior: Option<&State>) -> Result<PlanResult, BoxError> {
                 Ok(PlanResult {
                     action: if prior.is_some() {
                         PlanAction::None
@@ -3162,7 +3239,7 @@ lint[module] = go.lint {
             }
             fn apply(
                 &self,
-                inputs: &Inputs,
+                inputs: &Block<Inputs>,
                 _prior: Option<&State>,
                 _changes: &Changes,
                 _writer: &BlockWriter,
@@ -3171,7 +3248,7 @@ lint[module] = go.lint {
                 let out = out_path(inputs);
                 let content = match &inputs.content {
                     Some(c) => c.clone(),
-                    None => std::fs::read_to_string(Path::new(&inputs.dir).join("src.txt"))?,
+                    None => std::fs::read_to_string(inputs.path("src.txt"))?,
                 };
                 std::fs::write(&out, content)?;
                 std::fs::set_permissions(&out, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
@@ -3185,14 +3262,14 @@ lint[module] = go.lint {
                     }),
                 })
             }
-            fn destroy(&self, state: &State, _writer: &BlockWriter) -> Result<(), BoxError> {
+            fn destroy(&self, state: &Block<State>, _writer: &BlockWriter) -> Result<(), BoxError> {
                 let _ = std::fs::remove_file(&state.path);
                 Ok(())
             }
-            fn cache_policy(&self, _inputs: &Inputs) -> CachePolicy {
+            fn cache_policy(&self, _inputs: &Block<Inputs>) -> CachePolicy {
                 CachePolicy::Shared { version: 1 }
             }
-            fn output_keys(&self, inputs: &Inputs) -> Vec<String> {
+            fn output_keys(&self, inputs: &Block<Inputs>) -> Vec<String> {
                 vec![out_path(inputs).to_string_lossy().into_owned()]
             }
             /// Capture and check come from the default implementations. Only
@@ -3200,7 +3277,7 @@ lint[module] = go.lint {
             /// worktree's absolute output path.
             fn materialize(
                 &self,
-                inputs: &Inputs,
+                inputs: &Block<Inputs>,
                 _state: &State,
                 outputs: &[OutputFile],
                 artifacts: &BTreeMap<String, ArtifactRef>,

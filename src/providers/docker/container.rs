@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind};
+use crate::provider::{
+    ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+};
 use crate::sha256::SHA256;
 use crate::value::Duration;
 
@@ -300,17 +302,24 @@ impl Resource for ContainerResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, _inputs: &ContainerInputs) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(
+        &self,
+        _inputs: &Block<ContainerInputs>,
+    ) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
         Ok(std::collections::BTreeMap::new())
     }
 
     /// None: the container is daemon state that the docker CLI only
     /// requests, so a CLI upgrade must not recreate a running container.
-    fn ambient(&self, _inputs: &ContainerInputs) -> Vec<crate::provider::Ambient> {
+    fn ambient(&self, _inputs: &Block<ContainerInputs>) -> Vec<crate::provider::Ambient> {
         vec![]
     }
 
-    fn plan(&self, inputs: &ContainerInputs, prior_state: Option<&ContainerState>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<ContainerInputs>,
+        prior_state: Option<&ContainerState>,
+    ) -> Result<PlanResult, BoxError> {
         let desc = crate::providers::display_command("docker", &run_args(inputs, EnvValues::Masked));
 
         let Some(prior) = prior_state else {
@@ -341,7 +350,7 @@ impl Resource for ContainerResource {
 
     fn apply(
         &self,
-        inputs: &ContainerInputs,
+        inputs: &Block<ContainerInputs>,
         _prior_state: Option<&ContainerState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -402,7 +411,7 @@ impl Resource for ContainerResource {
         })
     }
 
-    fn destroy(&self, prior_state: &ContainerState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<ContainerState>, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         writer.event(Event::Starting, &format!("docker rm -f {}", prior_state.name));
         remove_container(&prior_state.name)
@@ -411,7 +420,7 @@ impl Resource for ContainerResource {
     /// A container is named, mutable state in the local Docker daemon.
     /// Whether it is running is a fact about the daemon now, not about the
     /// inputs that created it.
-    fn cache_policy(&self, _inputs: &ContainerInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<ContainerInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 }
@@ -421,21 +430,24 @@ mod tests {
     use super::*;
     use crate::provider::PlanAction;
 
-    fn test_inputs() -> ContainerInputs {
-        ContainerInputs {
-            image: "nginx:latest".into(),
-            name: "test-nginx".into(),
-            ports: vec!["8080:80".into()],
-            volumes: vec![],
-            environment: HashMap::new(),
-            command: None,
-            entrypoint: None,
-            restart: "no".into(),
-            network: None,
-            working_dir: None,
-            healthcheck: None,
-            extra_hosts: HashMap::new(),
-        }
+    fn test_inputs() -> Block<ContainerInputs> {
+        Block::new(
+            None,
+            ContainerInputs {
+                image: "nginx:latest".into(),
+                name: "test-nginx".into(),
+                ports: vec!["8080:80".into()],
+                volumes: vec![],
+                environment: HashMap::new(),
+                command: None,
+                entrypoint: None,
+                restart: "no".into(),
+                network: None,
+                working_dir: None,
+                healthcheck: None,
+                extra_hosts: HashMap::new(),
+            },
+        )
     }
 
     #[test]

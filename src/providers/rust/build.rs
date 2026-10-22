@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
@@ -67,16 +67,20 @@ impl Resource for RustBuildResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &RustBuildInputs) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Block<RustBuildInputs>) -> Vec<Ambient> {
         super::build_ambient(&inputs.env, &[])
     }
 
-    fn resolve(&self, inputs: &RustBuildInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<RustBuildInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         super::resolve_rust_inputs(inputs.package.as_deref(), tracker)
     }
 
-    fn plan(&self, inputs: &RustBuildInputs, prior_state: Option<&RustBuildState>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<RustBuildInputs>,
+        prior_state: Option<&RustBuildState>,
+    ) -> Result<PlanResult, BoxError> {
         let description = build_command(inputs).display();
 
         let Some(prior) = prior_state else {
@@ -106,7 +110,7 @@ impl Resource for RustBuildResource {
 
     fn apply(
         &self,
-        inputs: &RustBuildInputs,
+        inputs: &Block<RustBuildInputs>,
         _prior_state: Option<&RustBuildState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -124,11 +128,11 @@ impl Resource for RustBuildResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &RustBuildState, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Block<RustBuildState>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &RustBuildInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<RustBuildInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -172,12 +176,15 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = RustBuildInputs {
-            package: None,
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustBuildInputs {
+                package: None,
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo build");
@@ -185,12 +192,15 @@ mod tests {
 
     #[test]
     fn plan_create_with_package() {
-        let inputs = RustBuildInputs {
-            package: Some("my-crate".into()),
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustBuildInputs {
+                package: Some("my-crate".into()),
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "cargo build -p my-crate");
@@ -198,12 +208,15 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = RustBuildInputs {
-            package: None,
-            flags: vec![],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustBuildInputs {
+                package: None,
+                flags: vec![],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let prior = RustBuildState {
             package: None,
             flags: vec![],
@@ -216,12 +229,15 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = RustBuildInputs {
-            package: None,
-            flags: vec!["--release".into()],
-            features: RustFeatures::default(),
-            env: RustEnv::default(),
-        };
+        let inputs = Block::new(
+            None,
+            RustBuildInputs {
+                package: None,
+                flags: vec!["--release".into()],
+                features: RustFeatures::default(),
+                env: RustEnv::default(),
+            },
+        );
         let prior = RustBuildState {
             package: None,
             flags: vec![],
@@ -234,15 +250,18 @@ mod tests {
 
     #[test]
     fn plan_update_when_features_changed() {
-        let inputs = RustBuildInputs {
-            package: None,
-            flags: vec![],
-            features: RustFeatures {
-                features: vec!["serde".into()],
-                all_features: false,
+        let inputs = Block::new(
+            None,
+            RustBuildInputs {
+                package: None,
+                flags: vec![],
+                features: RustFeatures {
+                    features: vec!["serde".into()],
+                    all_features: false,
+                },
+                env: RustEnv::default(),
             },
-            env: RustEnv::default(),
-        };
+        );
         let prior = RustBuildState {
             package: None,
             flags: vec![],

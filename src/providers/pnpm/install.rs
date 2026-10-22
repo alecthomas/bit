@@ -7,26 +7,19 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 
-use super::{run_pnpm, workspace};
-
-fn default_dir() -> String {
-    ".".to_owned()
-}
+use super::{run_pnpm, workspace, workspace_dir};
 
 fn default_frozen() -> bool {
     true
 }
 
-/// Install pnpm workspace dependencies.
+/// Install the dependencies of the pnpm workspace in `dir`.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct PnpmInstallInputs {
-    /// Workspace root directory (defaults to the current directory)
-    #[serde(default = "default_dir")]
-    pub dir: String,
     /// Pass `--frozen-lockfile` (reproducible installs, default `true`)
     #[serde(default = "default_frozen")]
     pub frozen: bool,
@@ -42,7 +35,6 @@ pub struct PnpmInstallOutputs {
 /// Persisted state for a `pnpm.install` block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PnpmInstallState {
-    pub dir: String,
     pub frozen: bool,
     /// Absolute paths of every directory that contains a `node_modules/`.
     /// Used by `destroy` to remove them all.
@@ -66,13 +58,13 @@ impl Resource for PnpmInstallResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &PnpmInstallInputs) -> Vec<Ambient> {
-        super::ambient(&inputs.dir)
+    fn ambient(&self, inputs: &Block<PnpmInstallInputs>) -> Vec<Ambient> {
+        super::ambient(workspace_dir(inputs))
     }
 
-    fn resolve(&self, inputs: &PnpmInstallInputs) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Block<PnpmInstallInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        workspace::with_workspace(Path::new(&inputs.dir), |ws| {
+        workspace::with_workspace(Path::new(workspace_dir(inputs)), |ws| {
             let mut files = BTreeMap::new();
             files.insert(
                 ws.root_package_json.to_string_lossy().into_owned(),
@@ -94,7 +86,11 @@ impl Resource for PnpmInstallResource {
         })
     }
 
-    fn plan(&self, inputs: &PnpmInstallInputs, prior_state: Option<&PnpmInstallState>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Block<PnpmInstallInputs>,
+        prior_state: Option<&PnpmInstallState>,
+    ) -> Result<PlanResult, BoxError> {
         let description = if inputs.frozen {
             "pnpm install --frozen-lockfile".to_owned()
         } else {
@@ -108,7 +104,7 @@ impl Resource for PnpmInstallResource {
                 reason: None,
             });
         };
-        let action = if prior.dir != inputs.dir || prior.frozen != inputs.frozen {
+        let action = if prior.frozen != inputs.frozen {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -122,7 +118,7 @@ impl Resource for PnpmInstallResource {
 
     fn apply(
         &self,
-        inputs: &PnpmInstallInputs,
+        inputs: &Block<PnpmInstallInputs>,
         _prior_state: Option<&PnpmInstallState>,
         _changes: &Changes,
         writer: &BlockWriter,
@@ -131,32 +127,32 @@ impl Resource for PnpmInstallResource {
         if inputs.frozen {
             args.push("--frozen-lockfile".to_owned());
         }
-        run_pnpm(&args, Some(&inputs.dir), writer)?;
+        run_pnpm(&args, Some(workspace_dir(inputs)), writer)?;
 
-        let (node_modules_path, node_modules_dirs) = workspace::with_workspace(Path::new(&inputs.dir), |ws| {
-            let mut dirs: Vec<String> = vec![ws.root.to_string_lossy().into_owned()];
-            for pkg_dir in ws.packages.values() {
-                if pkg_dir != &ws.root {
-                    dirs.push(pkg_dir.to_string_lossy().into_owned());
+        let (node_modules_path, node_modules_dirs) =
+            workspace::with_workspace(Path::new(workspace_dir(inputs)), |ws| {
+                let mut dirs: Vec<String> = vec![ws.root.to_string_lossy().into_owned()];
+                for pkg_dir in ws.packages.values() {
+                    if pkg_dir != &ws.root {
+                        dirs.push(pkg_dir.to_string_lossy().into_owned());
+                    }
                 }
-            }
-            let nm = ws.root.join("node_modules").to_string_lossy().into_owned();
-            Ok((nm, dirs))
-        })?;
+                let nm = ws.root.join("node_modules").to_string_lossy().into_owned();
+                Ok((nm, dirs))
+            })?;
 
         Ok(ApplyResult {
             outputs: PnpmInstallOutputs {
                 path: node_modules_path,
             },
             state: Some(PnpmInstallState {
-                dir: inputs.dir.clone(),
                 frozen: inputs.frozen,
                 node_modules_dirs,
             }),
         })
     }
 
-    fn destroy(&self, prior_state: &PnpmInstallState, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Block<PnpmInstallState>, writer: &BlockWriter) -> Result<(), BoxError> {
         for dir in &prior_state.node_modules_dirs {
             let nm: PathBuf = Path::new(dir).join("node_modules");
             crate::providers::remove_path(&nm, writer)?;
@@ -166,13 +162,13 @@ impl Resource for PnpmInstallResource {
 
     /// The result of an install is a set of `node_modules` trees. The CAS
     /// stores single files, so there is nothing here it could capture.
-    fn cache_policy(&self, _inputs: &PnpmInstallInputs) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Block<PnpmInstallInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 
-    fn output_keys(&self, inputs: &PnpmInstallInputs) -> Vec<String> {
+    fn output_keys(&self, inputs: &Block<PnpmInstallInputs>) -> Vec<String> {
         vec![
-            Path::new(&inputs.dir)
+            Path::new(workspace_dir(inputs))
                 .join("node_modules/.modules.yaml")
                 .to_string_lossy()
                 .into_owned(),
@@ -197,10 +193,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = PnpmInstallInputs {
-            dir: ".".into(),
-            frozen: true,
-        };
+        let inputs = Block::new(None, PnpmInstallInputs { frozen: true });
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "pnpm install --frozen-lockfile");
@@ -208,12 +201,8 @@ mod tests {
 
     #[test]
     fn plan_update_when_frozen_changed() {
-        let inputs = PnpmInstallInputs {
-            dir: ".".into(),
-            frozen: false,
-        };
+        let inputs = Block::new(None, PnpmInstallInputs { frozen: false });
         let prior = PnpmInstallState {
-            dir: ".".into(),
             frozen: true,
             node_modules_dirs: vec![],
         };
@@ -229,7 +218,6 @@ mod tests {
         std::fs::create_dir_all(root.join("pkg/node_modules")).unwrap();
 
         let state = PnpmInstallState {
-            dir: root.to_string_lossy().into_owned(),
             frozen: true,
             node_modules_dirs: vec![
                 root.to_string_lossy().into_owned(),
@@ -238,6 +226,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
+        let state = Block::new(Some(root.to_string_lossy().into_owned()), state);
         Resource::destroy(&test_resource(), &state, &writer).unwrap();
         assert!(!root.join("node_modules").exists());
         assert!(!root.join("pkg/node_modules").exists());
