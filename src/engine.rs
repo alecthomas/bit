@@ -426,7 +426,17 @@ pub fn affected_order(
         }
 
         // A block with no source paths cannot be proven unaffected by Git.
-        if tracked.iter().all(|path| outputs.contains(*path)) {
+        // The prior map tracks a directory output file by file, so a path
+        // beneath a declared output is an output too.
+        let is_output = |path: &str| {
+            outputs.iter().any(|output| {
+                path == output
+                    || path
+                        .strip_prefix(output.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+        };
+        if tracked.iter().all(|path| is_output(path)) {
             direct = true;
         }
         if dag
@@ -2473,6 +2483,29 @@ lint[module] = go.lint {
         assert_eq!(
             affected_order(&dag, &base, &cache, &order, &changed_c, &tracker).unwrap(),
             vec!["a".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn affected_order_always_selects_blocks_with_only_a_directory_output() {
+        let tracker = test_tracker();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("gen");
+        let input = format!(
+            "build = exec {{ command = \"mkdir -p '{0}' && touch '{0}/a'\" outputs = \"{0}/\" }}\n",
+            out.display()
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let store = MemoryStore::new();
+        let cache = BuildCache::local_only(dir.path());
+        let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        apply(&mut dag, &base, &store, &cache, &Output::new(&[]), &[], 1, &tracker).unwrap();
+
+        let (dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        let order = resolve_order(&dag, &[]).unwrap();
+        assert_eq!(
+            affected_order(&dag, &base, &cache, &order, &crate::git::Changes::default(), &tracker).unwrap(),
+            ["build"]
         );
     }
 
