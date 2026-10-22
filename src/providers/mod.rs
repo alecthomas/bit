@@ -180,8 +180,29 @@ impl LinkChain {
         Ok(Self { targets, file })
     }
 
-    /// The [`hash_file`] digest: the link targets, then the file's content.
+    /// The [`hash_file`] digest: the link targets, then the file's content,
+    /// then whether it is executable.
+    ///
+    /// Copying a file into an image or archive keeps its mode, so `chmod +x`
+    /// changes what a build produces. Only the executable bit is hashed:
+    /// Git records no other mode bits, and the rest follow each checkout's
+    /// umask, which would split the shared cache between worktrees. A file
+    /// that is not executable keeps the digest it had before the bit was
+    /// hashed.
     pub fn hash(&self) -> Result<SHA256, BoxError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let content = self.content_hash()?;
+        if fs::metadata(&self.file)?.permissions().mode() & 0o111 == 0 {
+            return Ok(content);
+        }
+        let mut hasher = Hasher::new();
+        hasher.update(b"executable\0");
+        hasher.update(content.to_string().as_bytes());
+        Ok(hasher.finalize())
+    }
+
+    fn content_hash(&self) -> Result<SHA256, BoxError> {
         let mut hasher = Hasher::new();
         for target in &self.targets {
             hasher.update(target.as_os_str().as_encoded_bytes());
@@ -374,6 +395,25 @@ mod tests {
         let file = dir.path().join("file");
         fs::write(&file, "content").unwrap();
         assert_eq!(hash_file(&file).unwrap(), SHA256::digest(b"content"));
+    }
+
+    #[test]
+    fn hash_file_changes_with_the_executable_bit_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("entrypoint.sh");
+        fs::write(&file, "#!/bin/sh").unwrap();
+        let mode = |mode| fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+        mode(0o644);
+        let plain = hash_file(&file).unwrap();
+        mode(0o600);
+        assert_eq!(hash_file(&file).unwrap(), plain, "non-executable bits are ignored");
+        mode(0o755);
+        let executable = hash_file(&file).unwrap();
+        assert_ne!(executable, plain);
+        mode(0o700);
+        assert_eq!(hash_file(&file).unwrap(), executable);
     }
 
     #[test]
