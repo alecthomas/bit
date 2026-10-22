@@ -1123,9 +1123,10 @@ block = rust.fmt-check {
 Parallel execution with `-j N` (defaults to CPU count).
 
 Rust resources with a `package` select that package and its transitive local
-workspace dependencies for change detection. Without `package`, they track the
-whole workspace. All Rust resources also track `rustfmt.toml` and
-`.cargo/config.toml` at the workspace root.
+dependencies for change detection, as cargo resolves them. Local dependencies
+include path dependencies and `[patch]` paths outside the workspace. Without
+`package`, they track every local package. All Rust resources also track
+`rustfmt.toml` and `.cargo/config.toml` at the workspace root.
 
 Each resource also fingerprints the ambient state its result depends on:
 the tools it runs and the environment variables it reads. bit records it

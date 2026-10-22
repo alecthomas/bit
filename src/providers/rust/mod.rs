@@ -342,17 +342,13 @@ fn discover_paths(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
         .and_then(|t| t.as_str())
         .map(PathBuf::from)
         .ok_or("`cargo metadata` output has no target_directory")?;
-    let workspace_packages = workspace_packages_by_name(&meta)?;
-    let workspace_values: Vec<_> = workspace_packages.values().copied().collect();
+    let local = local_packages(&meta);
+    let workspace_values: Vec<_> = local.values().copied().collect();
     let workspace = discover_input_paths(&workspace_values, &cwd, dir);
     let mut packages = HashMap::new();
-    for name in workspace_packages.keys() {
-        let closure = workspace_package_closure(&meta, name)?;
-        let values: Vec<_> = closure
-            .iter()
-            .filter_map(|dependency| workspace_packages.get(dependency).copied())
-            .collect();
-        packages.insert(name.clone(), discover_input_paths(&values, &cwd, dir));
+    for (name, member) in workspace_packages_by_name(&meta)? {
+        let values = local_closure(&meta, &local, member)?;
+        packages.insert(name, discover_input_paths(&values, &cwd, dir));
     }
 
     Ok(DiscoveredPaths {
@@ -398,19 +394,35 @@ fn discover_input_paths(packages: &[&serde_json::Value], cwd: &Path, dir: Option
     InputPaths { globs, files }
 }
 
-/// Run `cargo metadata --no-deps` once per process for `dir`.
+/// Run `cargo metadata` once per process for `dir`.
+///
+/// The full form resolves the dependency graph, so it reports every local
+/// package cargo builds: workspace members, path dependencies outside the
+/// workspace, and `[patch]` and `[replace]` paths. It is run `--locked` so
+/// resolving never rewrites `Cargo.lock`, and `--offline` so it never hits
+/// the network. Until the lockfile and the registry crates exist, which the
+/// first build provides, only the workspace members can be reported.
 fn cargo_metadata(dir: Option<&str>) -> Result<serde_json::Value, BoxError> {
     let mut guard = CARGO_METADATA_CACHE.lock().unwrap_or_else(|error| error.into_inner());
     if let Some(metadata) = guard.get(&dir_key(dir)) {
         return Ok(metadata.clone());
     }
+    let metadata = match run_cargo_metadata(dir, &["--locked", "--offline"]) {
+        Ok(metadata) => metadata,
+        Err(_) => run_cargo_metadata(dir, &["--no-deps"])?,
+    };
+    guard.insert(dir_key(dir), metadata.clone());
+    Ok(metadata)
+}
 
+fn run_cargo_metadata(dir: Option<&str>, flags: &[&str]) -> Result<serde_json::Value, BoxError> {
     let mut command = Command::new("cargo");
     if let Some(dir) = dir {
         command.current_dir(dir);
     }
     let output = command
-        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .args(["metadata", "--format-version", "1"])
+        .args(flags)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -420,10 +432,66 @@ fn cargo_metadata(dir: Option<&str>) -> Result<serde_json::Value, BoxError> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("`cargo metadata` failed: {stderr}").into());
     }
-    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("failed to parse `cargo metadata` output: {error}"))?;
-    guard.insert(dir_key(dir), metadata.clone());
-    Ok(metadata)
+    Ok(serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("failed to parse `cargo metadata` output: {error}"))?)
+}
+
+/// The packages cargo builds from local sources, by package id: those with
+/// no registry or Git `source`.
+fn local_packages(metadata: &serde_json::Value) -> HashMap<&str, &serde_json::Value> {
+    metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|package| package.get("source").is_none_or(serde_json::Value::is_null))
+        .filter_map(|package| Some((package.get("id")?.as_str()?, package)))
+        .collect()
+}
+
+/// `member` and the local packages it depends on, transitively, following
+/// cargo's resolved graph. A registry crate can depend on a local package
+/// through `[patch]`, so the walk passes through every package. Without a
+/// resolved graph, it falls back to the workspace members `member` names.
+fn local_closure<'a>(
+    metadata: &'a serde_json::Value,
+    local: &HashMap<&str, &'a serde_json::Value>,
+    member: &'a serde_json::Value,
+) -> Result<Vec<&'a serde_json::Value>, BoxError> {
+    let Some(nodes) = metadata.pointer("/resolve/nodes").and_then(serde_json::Value::as_array) else {
+        let name = member
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let members = workspace_packages_by_name(metadata)?;
+        return Ok(workspace_package_closure(metadata, name)?
+            .iter()
+            .filter_map(|name| members.get(name).copied())
+            .collect());
+    };
+    let dependencies: HashMap<&str, Vec<&str>> = nodes
+        .iter()
+        .filter_map(|node| {
+            let id = node.get("id")?.as_str()?;
+            let deps = node.get("dependencies")?.as_array()?;
+            Some((id, deps.iter().filter_map(serde_json::Value::as_str).collect()))
+        })
+        .collect();
+    let start = member.get("id").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let mut seen = HashSet::new();
+    let mut pending = vec![start];
+    let mut closure = Vec::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(package) = local.get(id) {
+            closure.push(*package);
+        }
+        pending.extend(dependencies.get(id).into_iter().flatten());
+    }
+    Ok(closure)
 }
 
 /// List Cargo workspace packages.
@@ -677,6 +745,74 @@ impl Provider for RustProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write(root: &Path, files: &[(&str, &str)]) {
+        for (path, content) in files {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+    }
+
+    /// A workspace in `ws/` whose `app` depends on `lib` outside it, and on
+    /// `patched` through `[patch]`, with a lockfile so cargo can resolve.
+    fn workspace_with_path_dependencies() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            &[
+                (
+                    "ws/Cargo.toml",
+                    "[workspace]\nmembers = [\"app\", \"other\"]\nresolver = \"2\"\n\
+                     [patch.crates-io]\npatched = { path = \"../patched\" }\n",
+                ),
+                (
+                    "ws/app/Cargo.toml",
+                    "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                     [dependencies]\nlib = { path = \"../../lib\" }\npatched = \"0.1\"\n",
+                ),
+                ("ws/app/src/main.rs", "fn main() {}\n"),
+                (
+                    "ws/other/Cargo.toml",
+                    "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                ),
+                ("ws/other/src/lib.rs", ""),
+                (
+                    "lib/Cargo.toml",
+                    "[package]\nname = \"lib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                ),
+                ("lib/src/lib.rs", ""),
+                (
+                    "patched/Cargo.toml",
+                    "[package]\nname = \"patched\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                ),
+                ("patched/src/lib.rs", ""),
+            ],
+        );
+        let status = Command::new("cargo")
+            .args(["generate-lockfile", "--offline"])
+            .current_dir(dir.path().join("ws"))
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        dir
+    }
+
+    #[test]
+    fn discovery_follows_path_dependencies_and_patches_outside_the_workspace() {
+        let dir = workspace_with_path_dependencies();
+        let ws = dir.path().join("ws").to_string_lossy().into_owned();
+        let discovered = discover_paths(Some(&ws)).unwrap();
+        let has = |paths: &InputPaths, file: &str| paths.files.iter().any(|path| path.ends_with(file));
+
+        let app = &discovered.packages["app"];
+        assert!(has(app, "lib/Cargo.toml"), "{:?}", app.files);
+        assert!(has(app, "patched/Cargo.toml"), "{:?}", app.files);
+        assert!(!has(app, "other/Cargo.toml"), "{:?}", app.files);
+        assert!(has(&discovered.workspace, "other/Cargo.toml"));
+        assert!(has(&discovered.workspace, "lib/Cargo.toml"));
+    }
 
     #[test]
     fn provider_registration() {
