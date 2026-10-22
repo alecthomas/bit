@@ -996,7 +996,7 @@ block = protoc.generate {
 
 ### rust
 
-**`rust.build`** (build) — Compile Rust packages
+**`rust.build`** (build) — Compile Rust packages. A result shared from another worktree restores nothing into `target/`, so use `rust.exe` for a binary other blocks need.
 
 ```bit
 block = rust.build {
@@ -1152,15 +1152,15 @@ in one of three ways:
 - An environment variable that no version command reports, such as
   `RUSTFLAGS`.
 
-| Provider | Fingerprints                                                                                                                                                |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `exec`   | `bash --version`; name any program a command depends on in `inputs`                                                                                         |
-| `docker` | `docker --version` for `docker.image` and `docker.push`. Containers and networks track none, so a CLI upgrade never recreates them                          |
-| `go`     | `go env GOVERSION GOOS GOARCH …` with the block's target; `golangci-lint version` for `go.lint`                                                             |
+| Provider | Fingerprints                                                                                                                                                                                                                                                         |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `exec`   | `bash --version`; name any program a command depends on in `inputs`                                                                                                                                                                                                  |
+| `docker` | `docker --version` for `docker.image` and `docker.push`. Containers and networks track none, so a CLI upgrade never recreates them                                                                                                                                   |
+| `go`     | `go env GOVERSION GOOS GOARCH …` with the block's target; `golangci-lint version` for `go.lint`                                                                                                                                                                      |
 | `rust`   | `rustc -vV`; `CARGO_HOME`; for building, testing, and linting, `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTC` and wrapper variables, and every `CARGO_PROFILE_*` and `CARGO_TARGET_*` variable; `cargo clippy --version` for `rust.clippy`; `rustfmt --version` for formatting |
-| `pnpm`   | `pnpm --version` and `node --version` in the workspace                                                                                                      |
-| `buf`    | `buf --version`; the content of local plugins in `buf.gen.yaml` and check plugins in `buf.yaml`                                                             |
-| `protoc` | `protoc --version`; the content of each `protoc-gen-*` plugin and `--plugin` path                                                                           |
+| `pnpm`   | `pnpm --version` and `node --version` in the workspace                                                                                                                                                                                                               |
+| `buf`    | `buf --version`; the content of local plugins in `buf.gen.yaml` and check plugins in `buf.yaml`                                                                                                                                                                      |
+| `protoc` | `protoc --version`; the content of each `protoc-gen-*` plugin and `--plugin` path                                                                                                                                                                                    |
 
 A tool that cannot be found or run is recorded as missing, so installing it
 later reruns the blocks that use it.
@@ -1239,7 +1239,9 @@ the worktree that produced them has been deleted:
   `go.build`, `go.test`, `go.lint`, `go.fmt`, `go.fmt-l`, `buf.lint`,
   `buf.format`, and `buf.format-check` record that the
   action succeeded for a given set of sources, inputs, dependencies, and
-  toolchain. A worktree with identical sources skips the action.
+  toolchain. A worktree with identical sources skips the action. It gets no
+  build artifacts, so `rust.build` leaves `target/` as it was; a block that
+  needs a built binary should use `rust.exe`.
 - `go.exe` and `rust.exe` additionally store the built binary. A worktree
   with identical sources restores it to its own output path (for `rust.exe`,
   the same path under its own `target/` directory) instead of building.

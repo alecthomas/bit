@@ -12,7 +12,7 @@ use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv, RustFeatures};
 
-/// Compile Rust packages
+/// Compile Rust packages. A result shared from another worktree restores nothing into `target/`, so use `rust.exe` for a binary other blocks need.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct RustBuildInputs {
     /// Package to build (-p flag)
@@ -168,10 +168,8 @@ mod tests {
 
     #[test]
     fn schema_description() {
-        assert_eq!(
-            RustBuildInputs::schema().description,
-            Some("Compile Rust packages".into())
-        );
+        let description = RustBuildInputs::schema().description.unwrap();
+        assert!(description.starts_with("Compile Rust packages."), "{description}");
     }
 
     #[test]
