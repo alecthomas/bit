@@ -17,9 +17,7 @@ use crate::value::Value;
 #[bit_derive::provider_function]
 fn packages_with_script(script: String, dir: Option<String>) -> Result<Vec<String>, BoxError> {
     let dir = dir.as_deref().unwrap_or(".");
-    workspace::with_workspace(std::path::Path::new(dir), |workspace| {
-        workspace::packages_with_script(workspace, &script)
-    })
+    workspace::packages_with_script(&workspace::load(std::path::Path::new(dir))?, &script)
 }
 
 /// pnpm-aware provider with `install`, `run`, and `test` resources.

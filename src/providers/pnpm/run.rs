@@ -49,39 +49,38 @@ pub(super) fn resolve_inputs<T>(
     extra_globs: &[String],
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    workspace::with_workspace(Path::new(workspace_dir(block)), |ws| {
-        let mut files = BTreeMap::new();
+    let ws = workspace::workspace(tracker, Path::new(workspace_dir(block)))?;
+    let mut files = BTreeMap::new();
 
-        if let Some(lf) = &ws.lockfile {
-            files.insert(lf.to_string_lossy().into_owned(), tracker.hash_file(lf)?);
-        }
+    if let Some(lf) = &ws.lockfile {
+        files.insert(lf.to_string_lossy().into_owned(), tracker.hash_file(lf)?);
+    }
 
-        match package {
-            Some(pkg) => {
-                let pkg_dirs = ws.package_dirs(pkg);
-                if pkg_dirs.is_empty() {
-                    return Err(format!("pnpm: package '{pkg}' not found in workspace").into());
-                }
-                let exclude_outputs: Vec<PathBuf> = outputs.iter().map(|output| block.path(output).into()).collect();
-                // `--filter` selects every project with the name.
-                for pkg_dir in pkg_dirs {
-                    let sources = workspace::scan_sources(pkg_dir, &exclude_outputs);
-                    files.extend(tracker.hash_files(&sources)?);
-                }
+    match package {
+        Some(pkg) => {
+            let pkg_dirs = ws.package_dirs(pkg);
+            if pkg_dirs.is_empty() {
+                return Err(format!("pnpm: package '{pkg}' not found in workspace").into());
             }
-            None => {
-                files.insert(
-                    ws.root_package_json.to_string_lossy().into_owned(),
-                    tracker.hash_file(&ws.root_package_json)?,
-                );
+            let exclude_outputs: Vec<PathBuf> = outputs.iter().map(|output| block.path(output).into()).collect();
+            // `--filter` selects every project with the name.
+            for pkg_dir in pkg_dirs {
+                let sources = workspace::scan_sources(pkg_dir, &exclude_outputs);
+                files.extend(tracker.hash_files(&sources)?);
             }
         }
-
-        for glob in extra_globs {
-            files.extend(tracker.hash_glob(&block.glob(glob))?);
+        None => {
+            files.insert(
+                ws.root_package_json.to_string_lossy().into_owned(),
+                tracker.hash_file(&ws.root_package_json)?,
+            );
         }
-        Ok(files)
-    })
+    }
+
+    for glob in extra_globs {
+        files.extend(tracker.hash_glob(&block.glob(glob))?);
+    }
+    Ok(files)
 }
 
 /// Run a script defined in `package.json`.

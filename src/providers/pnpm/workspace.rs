@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::Arc;
 
+use dashmap::DashMap;
 use serde::Deserialize;
 
+use crate::file_tracker::FileTracker;
 use crate::process::CommandExt;
 use crate::provider::BoxError;
 
@@ -51,28 +53,39 @@ impl Workspace {
     }
 }
 
-static CACHE: Mutex<Option<Workspace>> = Mutex::new(None);
+/// Loaded workspaces by canonical root, shared by every pnpm block.
+///
+/// The file tracker owns it as a [`FileTracker::derived`] cache, which it
+/// drops whenever a block may have written files: `pnpm.install` rewrites
+/// the lockfile the dependency graph comes from, and a loaded workspace
+/// cannot tell it is stale.
+#[derive(Default)]
+pub struct Workspaces(DashMap<PathBuf, Arc<Workspace>>);
 
-/// Acquire the workspace pnpm uses when run in `dir`, loading it on first
-/// call and reusing the cached copy while the same root is used. Mirrors
-/// the go provider's per-module-root cache pattern.
-pub fn with_workspace<F, R>(dir: &Path, f: F) -> Result<R, BoxError>
-where
-    F: FnOnce(&Workspace) -> Result<R, BoxError>,
-{
+/// The workspace pnpm uses when run in `dir`, loaded once into `tracker`'s
+/// cache. The map is locked only to copy an entry in or out, so two blocks
+/// that miss on the same workspace may both load it.
+pub fn workspace(tracker: &FileTracker, dir: &Path) -> Result<Arc<Workspace>, BoxError> {
+    let root = root_of(dir)?;
+    let workspaces = tracker.derived::<Workspaces>();
+    if let Some(workspace) = workspaces.0.get(&root) {
+        return Ok(Arc::clone(&workspace));
+    }
+    let workspace = Arc::new(load_workspace(&root)?);
+    Ok(workspaces.0.entry(root).or_insert(workspace).value().clone())
+}
+
+/// The workspace pnpm uses when run in `dir`, loaded without a cache.
+pub fn load(dir: &Path) -> Result<Workspace, BoxError> {
+    load_workspace(&root_of(dir)?)
+}
+
+/// The canonical root of the workspace pnpm uses when run in `dir`.
+fn root_of(dir: &Path) -> Result<PathBuf, BoxError> {
     let dir = dir
         .canonicalize()
         .map_err(|e| format!("pnpm: canonicalizing {}: {e}", dir.display()))?;
-    let root = workspace_root(&dir, |name| std::env::var_os(name));
-    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let needs_init = match &*guard {
-        Some(ws) => ws.root != root,
-        None => true,
-    };
-    if needs_init {
-        *guard = Some(load_workspace(&root)?);
-    }
-    f(guard.as_ref().expect("workspace initialized above"))
+    Ok(workspace_root(&dir, |name| std::env::var_os(name)))
 }
 
 /// The root of the workspace pnpm uses when run in `dir`, as pnpm's
@@ -255,32 +268,37 @@ mod tests {
         fs::write(root.join("frontend/src/main.tsx"), "").unwrap();
     }
 
-    fn reset_cache() {
-        *CACHE.lock().unwrap() = None;
-    }
-
     #[test]
     fn loads_workspace_packages() {
-        reset_cache();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         setup_workspace(root);
 
-        with_workspace(root, |ws| {
-            assert!(ws.is_workspace());
-            assert!(ws.lockfile.is_some());
-            // pnpm-workspace.yaml lists bff + frontend, and pnpm always
-            // counts the root as a project.
-            let names: Vec<_> = ws.projects.iter().map(|p| p.name.as_deref()).collect();
-            assert_eq!(names, [Some("root"), Some("bff"), Some("frontend")]);
-            Ok(())
-        })
-        .unwrap();
+        let ws = load(root).unwrap();
+        assert!(ws.is_workspace());
+        assert!(ws.lockfile.is_some());
+        // pnpm-workspace.yaml lists bff + frontend, and pnpm always counts
+        // the root as a project.
+        let names: Vec<_> = ws.projects.iter().map(|p| p.name.as_deref()).collect();
+        assert_eq!(names, [Some("root"), Some("bff"), Some("frontend")]);
+    }
+
+    #[test]
+    fn the_tracker_cache_reloads_after_invalidation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        setup_workspace(root);
+        let tracker = FileTracker::new();
+
+        assert_eq!(workspace(&tracker, root).unwrap().projects.len(), 3);
+        fs::write(root.join("pnpm-workspace.yaml"), "packages:\n  - bff\n").unwrap();
+        assert_eq!(workspace(&tracker, root).unwrap().projects.len(), 3, "cached");
+        tracker.invalidate();
+        assert_eq!(workspace(&tracker, root).unwrap().projects.len(), 2);
     }
 
     #[test]
     fn unnamed_and_duplicate_projects_are_kept() {
-        reset_cache();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         setup_workspace(&root);
@@ -294,20 +312,17 @@ mod tests {
             fs::write(root.join(dir).join("package.json"), manifest).unwrap();
         }
 
-        with_workspace(&root, |ws| {
-            assert!(
-                ws.projects
-                    .iter()
-                    .any(|p| p.dir == root.join("packages/unnamed") && p.name.is_none())
-            );
-            assert_eq!(
-                ws.package_dirs("dup"),
-                [root.join("packages/a"), root.join("packages/b")]
-            );
-            assert_eq!(packages_with_script(ws, "test")?, ["dup"]);
-            Ok(())
-        })
-        .unwrap();
+        let ws = load(&root).unwrap();
+        assert!(
+            ws.projects
+                .iter()
+                .any(|p| p.dir == root.join("packages/unnamed") && p.name.is_none())
+        );
+        assert_eq!(
+            ws.package_dirs("dup"),
+            [root.join("packages/a"), root.join("packages/b")]
+        );
+        assert_eq!(packages_with_script(&ws, "test").unwrap(), ["dup"]);
     }
 
     #[test]
@@ -329,38 +344,29 @@ mod tests {
 
     #[test]
     fn subdirectory_uses_the_workspace_lockfile() {
-        reset_cache();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         setup_workspace(&root);
 
-        with_workspace(&root.join("bff"), |ws| {
-            assert_eq!(ws.root, root);
-            assert_eq!(ws.lockfile.as_deref(), Some(root.join("pnpm-lock.yaml").as_path()));
-            Ok(())
-        })
-        .unwrap();
+        let ws = load(&root.join("bff")).unwrap();
+        assert_eq!(ws.root, root);
+        assert_eq!(ws.lockfile.as_deref(), Some(root.join("pnpm-lock.yaml").as_path()));
     }
 
     #[test]
     fn standalone_package_without_workspace_yaml() {
-        reset_cache();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::write(root.join("package.json"), r#"{ "name": "solo" }"#).unwrap();
 
-        with_workspace(root, |ws| {
-            assert!(!ws.is_workspace());
-            assert!(ws.lockfile.is_none());
-            assert_eq!(ws.package_dirs("solo"), [root.canonicalize().unwrap()]);
-            Ok(())
-        })
-        .unwrap();
+        let ws = load(root).unwrap();
+        assert!(!ws.is_workspace());
+        assert!(ws.lockfile.is_none());
+        assert_eq!(ws.package_dirs("solo"), [root.canonicalize().unwrap()]);
     }
 
     #[test]
     fn packages_with_script_filters_and_sorts_packages() {
-        reset_cache();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         setup_workspace(root);
@@ -375,19 +381,13 @@ mod tests {
         )
         .unwrap();
 
-        with_workspace(root, |workspace| {
-            assert_eq!(packages_with_script(workspace, "test")?, vec!["bff"]);
-            Ok(())
-        })
-        .unwrap();
+        assert_eq!(packages_with_script(&load(root).unwrap(), "test").unwrap(), vec!["bff"]);
     }
 
     #[test]
     fn missing_package_json_errors() {
-        reset_cache();
         let dir = tempfile::tempdir().unwrap();
-        let err = with_workspace(dir.path(), |_| Ok(()));
-        assert!(err.is_err());
+        assert!(load(dir.path()).is_err());
     }
 
     #[test]
@@ -434,7 +434,6 @@ mod tests {
 
     #[test]
     fn workspace_glob_patterns() {
-        reset_cache();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::write(root.join("package.json"), r#"{ "name": "root" }"#).unwrap();
@@ -450,12 +449,9 @@ mod tests {
         fs::create_dir_all(root.join("packages/ignored")).unwrap();
         fs::write(root.join("packages/ignored/package.json"), r#"{ "name": "ignored" }"#).unwrap();
 
-        with_workspace(root, |ws| {
-            assert_eq!(ws.package_dirs("a").len(), 1);
-            assert_eq!(ws.package_dirs("b").len(), 1);
-            assert!(ws.package_dirs("ignored").is_empty());
-            Ok(())
-        })
-        .unwrap();
+        let ws = load(root).unwrap();
+        assert_eq!(ws.package_dirs("a").len(), 1);
+        assert_eq!(ws.package_dirs("b").len(), 1);
+        assert!(ws.package_dirs("ignored").is_empty());
     }
 }

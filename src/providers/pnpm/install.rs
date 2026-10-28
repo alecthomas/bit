@@ -64,22 +64,21 @@ impl Resource for PnpmInstallResource {
 
     fn resolve(&self, inputs: &Block<PnpmInstallInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        workspace::with_workspace(Path::new(workspace_dir(inputs)), |ws| {
-            let mut files = BTreeMap::new();
-            files.insert(
-                ws.root_package_json.to_string_lossy().into_owned(),
-                tracker.hash_file(&ws.root_package_json)?,
-            );
-            if let Some(lf) = &ws.lockfile {
-                files.insert(lf.to_string_lossy().into_owned(), tracker.hash_file(lf)?);
-            }
-            if let Some(y) = &ws.workspace_yaml {
-                files.insert(y.to_string_lossy().into_owned(), tracker.hash_file(y)?);
-            }
-            let manifests: Vec<PathBuf> = ws.projects.iter().map(|p| p.dir.join("package.json")).collect();
-            files.extend(tracker.hash_files(&manifests)?);
-            Ok(files)
-        })
+        let ws = workspace::workspace(tracker, Path::new(workspace_dir(inputs)))?;
+        let mut files = BTreeMap::new();
+        files.insert(
+            ws.root_package_json.to_string_lossy().into_owned(),
+            tracker.hash_file(&ws.root_package_json)?,
+        );
+        if let Some(lf) = &ws.lockfile {
+            files.insert(lf.to_string_lossy().into_owned(), tracker.hash_file(lf)?);
+        }
+        if let Some(y) = &ws.workspace_yaml {
+            files.insert(y.to_string_lossy().into_owned(), tracker.hash_file(y)?);
+        }
+        let manifests: Vec<PathBuf> = ws.projects.iter().map(|p| p.dir.join("package.json")).collect();
+        files.extend(tracker.hash_files(&manifests)?);
+        Ok(files)
     }
 
     fn plan(
@@ -125,17 +124,14 @@ impl Resource for PnpmInstallResource {
         }
         run_pnpm(&args, Some(workspace_dir(inputs)), writer)?;
 
-        let (node_modules_path, node_modules_dirs) =
-            workspace::with_workspace(Path::new(workspace_dir(inputs)), |ws| {
-                let mut dirs: Vec<String> = vec![ws.root.to_string_lossy().into_owned()];
-                for project in &ws.projects {
-                    if project.dir != ws.root {
-                        dirs.push(project.dir.to_string_lossy().into_owned());
-                    }
-                }
-                let nm = ws.root.join("node_modules").to_string_lossy().into_owned();
-                Ok((nm, dirs))
-            })?;
+        let ws = workspace::workspace(&self.tracker, Path::new(workspace_dir(inputs)))?;
+        let mut node_modules_dirs: Vec<String> = vec![ws.root.to_string_lossy().into_owned()];
+        for project in &ws.projects {
+            if project.dir != ws.root {
+                node_modules_dirs.push(project.dir.to_string_lossy().into_owned());
+            }
+        }
+        let node_modules_path = ws.root.join("node_modules").to_string_lossy().into_owned();
 
         Ok(ApplyResult {
             outputs: PnpmInstallOutputs {
