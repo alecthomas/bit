@@ -64,6 +64,13 @@ fn go_source_files(patterns: &[String], dir: Option<&std::path::Path>) -> Result
     Ok(paths)
 }
 
+/// The `gofmt` executable bit runs. It has no version output, and the go
+/// command's reported version may describe another toolchain: a `go.mod`
+/// `toolchain` line switches the go command, but not the `gofmt` on `PATH`.
+fn gofmt_ambient() -> Vec<Ambient> {
+    vec![Ambient::Executable("gofmt".to_owned())]
+}
+
 /// `gofmt` with `mode` (`-w` or `-l`) over `targets`, for display.
 fn gofmt_command(mode: &str, targets: &[String], dir: Option<&str>) -> String {
     let args: Vec<String> = std::iter::once(mode.to_owned())
@@ -110,9 +117,9 @@ impl Resource for GoFmtResource {
         ResourceKind::Build
     }
 
-    /// gofmt ships with the Go toolchain, which the go command reports.
-    fn ambient(&self, inputs: &Block<GoFmtInputs>) -> Vec<Ambient> {
-        vec![super::toolchain(&super::GoEnv::default(), inputs.dir.as_deref())]
+    /// The `gofmt` on `PATH`, which [`gofmt_ambient`] explains.
+    fn ambient(&self, _inputs: &Block<GoFmtInputs>) -> Vec<Ambient> {
+        gofmt_ambient()
     }
 
     fn resolve(&self, inputs: &Block<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -245,9 +252,9 @@ impl Resource for GoFmtCheckResource {
         ResourceKind::Test
     }
 
-    /// gofmt ships with the Go toolchain, which the go command reports.
-    fn ambient(&self, inputs: &Block<GoFmtInputs>) -> Vec<Ambient> {
-        vec![super::toolchain(&super::GoEnv::default(), inputs.dir.as_deref())]
+    /// The `gofmt` on `PATH`, which [`gofmt_ambient`] explains.
+    fn ambient(&self, _inputs: &Block<GoFmtInputs>) -> Vec<Ambient> {
+        gofmt_ambient()
     }
 
     fn resolve(&self, inputs: &Block<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -508,6 +515,19 @@ mod tests {
         for resolved in [fmt_inputs, check_inputs] {
             assert!(resolved.keys().any(|p| p.ends_with("pkg/lib_test.go")), "{resolved:?}");
         }
+    }
+
+    #[test]
+    fn ambient_is_the_gofmt_executable() {
+        let inputs = Block::new(
+            Some("svc".into()),
+            GoFmtInputs {
+                package: default_package(),
+            },
+        );
+        let expected = [Ambient::Executable("gofmt".into())];
+        assert_eq!(Resource::ambient(&test_fmt_resource(), &inputs), expected);
+        assert_eq!(Resource::ambient(&test_fmt_check_resource(), &inputs), expected);
     }
 
     #[test]
