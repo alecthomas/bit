@@ -13,7 +13,8 @@ use crate::provider::BoxError;
 /// What test files reference is kept apart from what sources reference, so a
 /// scan that excludes tests does not track test-only dependencies either.
 struct PackageScan {
-    /// .go source files in this directory (non-test).
+    /// Non-test files in this directory that the go command compiles: .go
+    /// sources and those in [`OTHER_SOURCE_EXTENSIONS`], and `default.pgo`.
     go_files: HashSet<PathBuf>,
     /// .go test files in this directory.
     test_files: HashSet<PathBuf>,
@@ -28,6 +29,14 @@ struct PackageScan {
     /// Non-standard-library import paths of test files.
     test_imports: HashSet<String>,
 }
+
+/// Suffixes of the non-Go files the go command compiles into a package:
+/// assembly, cgo C, C++, Objective-C and Fortran sources and headers, SWIG
+/// definitions and system objects, as `go/build` classifies them.
+const OTHER_SOURCE_EXTENSIONS: [&str; 19] = [
+    ".s", ".S", ".sx", ".c", ".cc", ".cpp", ".cxx", ".m", ".h", ".hh", ".hpp", ".hxx", ".f", ".F", ".for", ".f90",
+    ".swig", ".swigcxx", ".syso",
+];
 
 /// A module's identity and the scans of its package directories.
 struct Module {
@@ -98,6 +107,15 @@ fn scan_package_dir(module: &Module, pkg_dir: &Path, canonical: &Path) -> Result
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if !name_str.ends_with(".go") {
+            // `default.pgo` only applies to main packages, but which are main
+            // is not parsed here, so it is tracked in every package.
+            if name_str == "default.pgo"
+                || OTHER_SOURCE_EXTENSIONS
+                    .iter()
+                    .any(|extension| name_str.ends_with(extension))
+            {
+                scan.go_files.insert(entry.path());
+            }
             continue;
         }
 
@@ -1046,6 +1064,48 @@ func Hello() { fmt.Println("hello") }
         assert!(rel.contains(Path::new("go.mod")));
         assert!(rel.contains(Path::new("go.sum")));
         assert_eq!(rel.len(), 4);
+    }
+
+    #[test]
+    fn scan_tracks_non_go_files_the_go_command_compiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write_files(
+            &root,
+            &[
+                ("go.mod", "module example.com/test\n"),
+                ("main.go", "package main\n\nimport _ \"example.com/test/lib\"\n"),
+                ("default.pgo", ""),
+                ("lib/lib.go", "package lib\n"),
+                ("lib/add_amd64.s", ""),
+                ("lib/add_arm64.S", ""),
+                ("lib/native.c", ""),
+                ("lib/native.h", ""),
+                ("lib/native.cpp", ""),
+                ("lib/bridge.m", ""),
+                ("lib/legacy.f90", ""),
+                ("lib/wrap.swig", ""),
+                ("lib/rsrc_windows.syso", ""),
+                ("lib/README.md", ""),
+            ],
+        );
+
+        let files = scan(&[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        for expected in [
+            "default.pgo",
+            "lib/add_amd64.s",
+            "lib/add_arm64.S",
+            "lib/native.c",
+            "lib/native.h",
+            "lib/native.cpp",
+            "lib/bridge.m",
+            "lib/legacy.f90",
+            "lib/wrap.swig",
+            "lib/rsrc_windows.syso",
+        ] {
+            assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
+        }
+        assert!(!files.contains(&root.join("lib/README.md")), "{files:?}");
     }
 
     #[test]

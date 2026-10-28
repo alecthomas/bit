@@ -111,6 +111,10 @@ pattern when the golangci-lint config changed, or when a changed package is
 excluded by build constraints without extra build tags. `go.fmt` and
 `go.fmt-l` format or check only the changed `.go` files.
 
+Go blocks track the files the go command compiles in each package: `.go`
+files, assembly, cgo and SWIG sources and headers, `.syso` objects, and
+`default.pgo`. They also track the files `//go:embed` names.
+
 Go blocks follow local imports into every module the go command builds from
 local directories: the modules a `go.work` file uses, and the targets of
 `replace` directives that name a directory. They track each of those modules'
