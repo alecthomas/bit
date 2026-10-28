@@ -59,7 +59,8 @@ BUILD.bit example (illustrative):
   # pre blocks run before default-phase blocks.
   pre prepare = exec { command = "mkdir -p dist" }
 
-  binary[arch] = go.exe {                     # One block per arch; provider.resource form.
+  # large marks a long-running or resource-heavy block.
+  large binary[arch] = go.exe {               # One block per arch; provider.resource form.
     package = "./cmd/app"
     goarch = arch
     depends_on = [prepare]                    # Content dependency; block.output also adds one.

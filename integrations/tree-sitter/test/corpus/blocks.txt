@@ -183,6 +183,26 @@ explicit protected db2 = aws.aurora {}
     resource: (identifier)))
 
 ================================================================================
+large modifier with other modifiers
+================================================================================
+large build = exec {}
+pre explicit large protected image = docker.image {}
+--------------------------------------------------------------------------------
+(source_file
+  (block
+    large: (large_modifier)
+    name: (identifier)
+    provider: (identifier))
+  (block
+    phase: (phase_modifier)
+    explicit: (explicit_modifier)
+    large: (large_modifier)
+    protected: (protected_modifier)
+    name: (identifier)
+    provider: (identifier)
+    resource: (identifier)))
+
+================================================================================
 matrix expansion keys
 ================================================================================
 binary[arch] = go.binary {

@@ -24,6 +24,7 @@ Blocks may be prefixed with modifiers (in any order):
 protected name = provider.resource { ... }
 explicit name = provider.resource { ... }
 protected explicit name = provider.resource { ... }
+large name = provider.resource { ... }
 ```
 
 References create implicit dependency edges:
@@ -530,6 +531,16 @@ explicit migrate = exec {
 
 protected explicit prod_db = aws.aurora {
   cluster = "myapp-prod"
+}
+```
+
+### Large Blocks
+
+The `large` modifier marks a block as long-running or resource-heavy. Blocks without it are small. The engine records the size on each graph node. Matrix slices and parameterized instances take it from their declaration. Every block that a `large` module instance expands to is also `large`. The modifier does not change local execution and may be combined with `protected` and `explicit` in any order.
+
+```
+large image = docker.image {
+  context = "."
 }
 ```
 

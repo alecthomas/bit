@@ -162,6 +162,7 @@ pub fn expand_matrix(
             resource_name: block.resource.clone(),
             protected: block.protected,
             explicit: block.explicit,
+            large: block.large,
             concurrency_group: group.clone(),
             fields: rewritten_fields,
             resource,

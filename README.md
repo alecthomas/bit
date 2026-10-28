@@ -278,13 +278,16 @@ Special fields:
 
 Every other field must be an input of the block's resource, as listed under [Providers](#providers) or by `bit --schema`. bit checks fields when it loads `BUILD.bit` and rejects unknown fields, missing required fields, and values of the wrong type. A value taken from another block's outputs is checked against that output's declared type, and checked again just before the block runs.
 
-Prefix with `protected` to prevent destruction, `explicit` to exclude from `...`, or both (in either order):
+Prefix with `protected` to prevent destruction, `explicit` to exclude from `...`, `large` to mark a long-running or resource-heavy block, or any combination (in any order):
 
 ```hcl
 protected db = docker.container { ... }
 explicit migrate = exec { ... }
 protected explicit prod_db = aws.aurora { ... }
+large image = docker.image { ... }
 ```
+
+Blocks without `large` are small. Every block that a `large` module instance expands to is also `large`.
 
 `explicit` blocks are skipped by the `...` selector (and the no-target/no-`default` fallback) for every action, including `--clean ...`. They still run when named directly or pulled in as a dependency of another selected block.
 

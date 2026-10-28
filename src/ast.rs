@@ -53,12 +53,13 @@ pub enum Phase {
     Post,
 }
 
-/// `[pre|post] [protected] [explicit] name = provider.resource { fields... }`
+/// `[pre|post] [protected] [explicit] [large] name = provider.resource { fields... }`
 /// or `name[key1, key2 = expr] = provider.resource { fields... }` (matrix expansion).
 ///
-/// `protected` and `explicit` may appear in either order and are independent:
+/// `protected`, `explicit`, and `large` may appear in any order and are independent:
 /// `protected` blocks must be named directly to destroy; `explicit` blocks are
-/// excluded from the `...` selector and must be named to run.
+/// excluded from the `...` selector and must be named to run; `large` blocks
+/// are long-running or resource-heavy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub pos: Pos,
@@ -69,6 +70,7 @@ pub struct Block {
     pub phase: Phase,
     pub protected: bool,
     pub explicit: bool,
+    pub large: bool,
     /// Matrix expansion keys, in declaration order.
     pub matrix_keys: Vec<MatrixKey>,
     pub provider: String,
@@ -316,6 +318,7 @@ mod tests {
             phase: Phase::Default,
             protected: false,
             explicit: false,
+            large: false,
             matrix_keys: vec![],
             provider: "go".into(),
             resource: "binary".into(),

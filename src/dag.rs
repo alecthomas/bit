@@ -66,6 +66,9 @@ pub struct DagNode {
     /// When true, this block is excluded from the `...` selector and must be
     /// named explicitly to run. Independent of `protected`.
     pub explicit: bool,
+    /// When true, this block is long-running or resource-heavy.
+    /// Blocks inside a `large` module instance inherit it.
+    pub large: bool,
     /// Expanded nodes from the same source block share this identity so the
     /// scheduler can enforce that block's concurrency limit across all slices.
     pub concurrency_group: String,

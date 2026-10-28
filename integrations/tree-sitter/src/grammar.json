@@ -680,6 +680,14 @@
                   "type": "SYMBOL",
                   "name": "explicit_modifier"
                 }
+              },
+              {
+                "type": "FIELD",
+                "name": "large",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "large_modifier"
+                }
               }
             ]
           }
@@ -798,6 +806,10 @@
     "explicit_modifier": {
       "type": "STRING",
       "value": "explicit"
+    },
+    "large_modifier": {
+      "type": "STRING",
+      "value": "large"
     },
     "block_matrix_keys": {
       "type": "SEQ",

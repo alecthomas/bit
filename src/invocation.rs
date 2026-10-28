@@ -394,7 +394,7 @@ impl Instantiator<'_> {
                 dag: self.dag,
                 import_roots: self.import_roots,
             };
-            module::expand_module(&name, &path, &concrete.fields, &mut context)?;
+            module::expand_module(&name, &path, &concrete.fields, block.large, &mut context)?;
             let expanded: Vec<_> = self
                 .dag
                 .block_names()
@@ -438,6 +438,7 @@ impl Instantiator<'_> {
                 resource_name: block.resource.clone(),
                 protected: block.protected,
                 explicit: block.explicit,
+                large: block.large,
                 concurrency_group: block.name.clone(),
                 fields: concrete.fields.clone(),
                 resource,

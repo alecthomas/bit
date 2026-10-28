@@ -156,10 +156,14 @@ pub struct ExpandContext<'a> {
 /// 3. Creates namespaced inner blocks (`instance.inner_block`)
 /// 4. Creates a synthetic module instance node for output forwarding
 /// 5. Wires all dependency edges
+///
+/// When `large` is set, every block the instance expands to is `large`,
+/// because the size describes the instance as a whole.
 pub fn expand_module(
     instance_name: &str,
     module_path: &Path,
     outer_fields: &[Field],
+    large: bool,
     ctx: &mut ExpandContext<'_>,
 ) -> Result<(), LoadError> {
     let source = std::fs::read_to_string(module_path)
@@ -246,6 +250,7 @@ pub fn expand_module(
         if !block.params.is_empty() {
             let mut declaration = block.clone();
             declaration.name = qualified_name;
+            declaration.large |= large;
             declaration.fields = block
                 .fields
                 .iter()
@@ -274,7 +279,13 @@ pub fn expand_module(
                     value: rewrite_expr(&f.value, &inner_block_names, &substitutions, instance_name),
                 })
                 .collect();
-            expand_module(&qualified_name, &nested_path, &rewritten_fields, ctx)?;
+            expand_module(
+                &qualified_name,
+                &nested_path,
+                &rewritten_fields,
+                large || block.large,
+                ctx,
+            )?;
             continue;
         }
 
@@ -307,6 +318,7 @@ pub fn expand_module(
             resource_name: block.resource.clone(),
             protected: block.protected,
             explicit: block.explicit,
+            large: large || block.large,
             concurrency_group: qualified_name.clone(),
             fields: rewritten_fields,
             resource,
@@ -475,6 +487,7 @@ pub fn expand_module(
         resource_name: INSTANCE_PROVIDER.into(),
         protected: false,
         explicit: false,
+        large,
         concurrency_group: instance_name.to_owned(),
         fields: output_fields,
         resource: Box::new(ModuleResource { resource_schema }),

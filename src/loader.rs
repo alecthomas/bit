@@ -220,7 +220,7 @@ pub fn load_selected(
                         dag: &mut dag,
                         import_roots,
                     };
-                    module::expand_module(&b.name, &module_path, &b.fields, &mut ctx)?;
+                    module::expand_module(&b.name, &module_path, &b.fields, b.large, &mut ctx)?;
                 } else {
                     let resource =
                         registry
@@ -242,6 +242,7 @@ pub fn load_selected(
                         resource_name: b.resource.clone(),
                         protected: b.protected,
                         explicit: b.explicit,
+                        large: b.large,
                         concurrency_group: b.name.clone(),
                         fields: b.fields.clone(),
                         resource,
@@ -1614,6 +1615,49 @@ output path = image.path
     }
 
     #[test]
+    fn large_module_instance_marks_every_expanded_block_large() {
+        let dir = tempfile::tempdir().unwrap();
+        write_module(
+            dir.path(),
+            "mymod",
+            "mymod",
+            r#"
+compile(package : string) = exec {
+  command = "compile #{package}"
+  outputs = "compiled"
+}
+
+image = exec {
+  command = compile(package = "api").path
+  outputs = "image"
+}
+
+output path = image.path
+"#,
+        );
+
+        let module = parser::parse("large heavy = mymod {}\nlight = mymod {}\n", "<test>").unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &roots(dir.path(), "mymod"),
+        )
+        .unwrap();
+
+        for (prefix, large) in [("heavy", true), ("light", false)] {
+            for name in [
+                prefix.to_owned(),
+                format!("{prefix}.image"),
+                format!(r#"{prefix}.compile(package="api")"#),
+            ] {
+                assert_eq!(dag.get_node(&name).unwrap().large, large, "{name}");
+            }
+        }
+    }
+
+    #[test]
     fn imported_module_targets_can_declare_parameters() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
@@ -1734,6 +1778,35 @@ build[arch] = exec {
         assert!(dag.has_block(r#"build["amd64"]"#));
         assert!(dag.has_block(r#"build["arm64"]"#));
         assert!(!dag.has_block("build"));
+    }
+
+    #[test]
+    fn large_modifier_reaches_plain_matrix_and_parameterized_nodes() {
+        let input = r#"
+let arch = ["amd64", "arm64"]
+large plain = exec { command = "a" outputs = "a" }
+small = exec { command = "b" outputs = "b" }
+large build[arch] = exec { command = "build #{arch}" outputs = "out-#{arch}" }
+large image(tag : string) = exec { command = "image #{tag}" outputs = "image" }
+target publish = [image(tag = "v1")]
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let invocations = [crate::invocation::Invocation {
+            name: "publish".into(),
+            args: vec![],
+        }];
+        let (dag, _scope, _selected) =
+            load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
+
+        for (name, large) in [
+            ("plain", true),
+            ("small", false),
+            (r#"build["amd64"]"#, true),
+            (r#"build["arm64"]"#, true),
+            (r#"image(tag="v1")"#, true),
+        ] {
+            assert_eq!(dag.get_node(name).unwrap().large, large, "{name}");
+        }
     }
 
     #[test]

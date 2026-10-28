@@ -1373,11 +1373,12 @@ fn block_stmt<'i>(
     } else {
         Phase::Default
     };
-    // `protected` and `explicit` are independent modifiers that may appear in
-    // either order. Loop until neither matches; reject duplicates so we surface
-    // typos like `protected protected name = ...` as parse errors.
+    // `protected`, `explicit`, and `large` are independent modifiers that may
+    // appear in any order. Loop until none matches; reject duplicates so we
+    // surface typos like `protected protected name = ...` as parse errors.
     let mut protected = false;
     let mut explicit = false;
+    let mut large = false;
     loop {
         if opt(keyword("protected")).parse_next(input)?.is_some() {
             if protected {
@@ -1397,6 +1398,15 @@ fn block_stmt<'i>(
                 )));
             }
             explicit = true;
+        } else if opt(keyword("large")).parse_next(input)?.is_some() {
+            if large {
+                return Err(ErrMode::Cut(ContextError::new().add_context(
+                    input,
+                    &input.checkpoint(),
+                    StrContext::Label("duplicate 'large' modifier"),
+                )));
+            }
+            large = true;
         } else {
             break;
         }
@@ -1480,6 +1490,7 @@ fn block_stmt<'i>(
             phase,
             protected,
             explicit,
+            large,
             matrix_keys,
             provider,
             resource,
@@ -2156,9 +2167,35 @@ server = exec {
     }
 
     #[test]
+    fn parse_large_with_other_modifiers_in_any_order() {
+        for src in [
+            r#"large build = exec { command = "make" }"#,
+            r#"pre explicit large protected build = exec { command = "make" }"#,
+            r#"post large protected explicit build = exec { command = "make" }"#,
+        ] {
+            let result = parse(src, "<test>").unwrap();
+            match &result.statements[0] {
+                Statement::Block(b) => {
+                    assert!(b.large, "large for {src}");
+                    assert_eq!(b.name, "build");
+                }
+                _ => panic!("expected Block for {src}"),
+            }
+        }
+        match &parse(r#"build = exec { command = "make" }"#, "<test>")
+            .unwrap()
+            .statements[0]
+        {
+            Statement::Block(b) => assert!(!b.large),
+            _ => panic!("expected Block"),
+        }
+    }
+
+    #[test]
     fn parse_duplicate_modifier_is_error() {
         assert!(parse("protected protected db = aws.aurora {}", "<test>").is_err());
         assert!(parse("explicit explicit db = aws.aurora {}", "<test>").is_err());
+        assert!(parse("large large db = aws.aurora {}", "<test>").is_err());
     }
 
     #[test]
