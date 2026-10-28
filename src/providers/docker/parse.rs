@@ -5,25 +5,38 @@ use parse_dockerfile::Instruction;
 
 use crate::provider::BoxError;
 
-/// Return Docker's built-in platform ARGs based on the host architecture.
+/// Return Docker's built-in platform ARGs: `BUILD*` from the host, and
+/// `TARGET*` from `target`, an `os/arch[/variant]` platform, or the host's
+/// when the build names none.
 ///
 /// See https://docs.docker.com/build/building/variables/#pre-defined-build-arguments
-pub fn builtin_args() -> HashMap<String, String> {
+pub fn builtin_args(target: Option<&str>) -> HashMap<String, String> {
     let (os, arch, variant) = host_platform();
-    let platform = if variant.is_empty() {
-        format!("{os}/{arch}")
-    } else {
-        format!("{os}/{arch}/{variant}")
+    let mut target_parts = target.unwrap_or_default().splitn(3, '/');
+    let (target_os, target_arch, target_variant) = match (target_parts.next(), target_parts.next()) {
+        (Some(target_os), Some(target_arch)) => (
+            target_os.to_owned(),
+            target_arch.to_owned(),
+            target_parts.next().unwrap_or_default().to_owned(),
+        ),
+        _ => (os.clone(), arch.clone(), variant.clone()),
+    };
+    let platform = |os: &str, arch: &str, variant: &str| match variant {
+        "" => format!("{os}/{arch}"),
+        _ => format!("{os}/{arch}/{variant}"),
     };
     HashMap::from([
-        ("BUILDPLATFORM".into(), platform.clone()),
-        ("BUILDOS".into(), os.clone()),
-        ("BUILDARCH".into(), arch.clone()),
-        ("BUILDVARIANT".into(), variant.clone()),
-        ("TARGETPLATFORM".into(), platform),
-        ("TARGETOS".into(), os),
-        ("TARGETARCH".into(), arch),
-        ("TARGETVARIANT".into(), variant),
+        ("BUILDPLATFORM".into(), platform(&os, &arch, &variant)),
+        ("BUILDOS".into(), os),
+        ("BUILDARCH".into(), arch),
+        ("BUILDVARIANT".into(), variant),
+        (
+            "TARGETPLATFORM".into(),
+            platform(&target_os, &target_arch, &target_variant),
+        ),
+        ("TARGETOS".into(), target_os),
+        ("TARGETARCH".into(), target_arch),
+        ("TARGETVARIANT".into(), target_variant),
     ])
 }
 
@@ -55,15 +68,42 @@ type Vars = HashMap<String, String>;
 /// builds `FROM`. `build_args` override declared ARGs. ENVs override ARGs of
 /// the same name, and an unset variable expands to nothing, as in Docker.
 /// Skips multi-stage `COPY --from=...` and ADD with URLs.
+///
+/// A build for several `platforms` reads each platform's files, so the
+/// sources of every one are returned. With none, Docker builds for the
+/// host's platform.
 pub fn dockerfile_sources(
     dockerfile: &Path,
     context: &Path,
     build_args: &HashMap<String, String>,
+    platforms: &[String],
 ) -> Result<Vec<PathBuf>, BoxError> {
     let contents = std::fs::read_to_string(dockerfile).map_err(|e| format!("reading {}: {e}", dockerfile.display()))?;
     let parsed = parse_dockerfile::parse(&contents).map_err(|e| format!("parsing {}: {e}", dockerfile.display()))?;
 
-    let meta = builtin_args();
+    let targets: Vec<Option<&str>> = match platforms {
+        [] => vec![None],
+        platforms => platforms.iter().map(|platform| Some(platform.as_str())).collect(),
+    };
+    let mut paths = Vec::new();
+    for target in targets {
+        for path in platform_sources(&parsed, context, build_args, target)? {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// The sources [`dockerfile_sources`] returns for one `target` platform.
+fn platform_sources(
+    parsed: &parse_dockerfile::Dockerfile<'_>,
+    context: &Path,
+    build_args: &HashMap<String, String>,
+    target: Option<&str>,
+) -> Result<Vec<PathBuf>, BoxError> {
+    let meta = builtin_args(target);
     let mut global = meta.clone();
     for arg in parsed.global_args() {
         for (name, default) in arg_words(&arg.arguments.value, &global)? {
@@ -399,7 +439,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Dockerfile"), dockerfile).unwrap();
         let build_args = build_args.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect();
-        dockerfile_sources(&dir.path().join("Dockerfile"), Path::new(""), &build_args)
+        dockerfile_sources(&dir.path().join("Dockerfile"), Path::new(""), &build_args, &[])
             .unwrap()
             .into_iter()
             .map(|path| path.to_string_lossy().into_owned())
@@ -446,7 +486,7 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new()).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0], dir.path().join("dist/app-amd64"));
     }
@@ -462,7 +502,7 @@ mod tests {
         .unwrap();
 
         let args = HashMap::from([("TARGETARCH".into(), "arm64".into())]);
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &args).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &args, &[]).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0], dir.path().join("dist/app-arm64"));
     }
@@ -477,8 +517,29 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new()).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
         assert_eq!(sources, [dir.path().join("dist/app-")]);
+    }
+
+    #[test]
+    fn target_args_come_from_the_platforms_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let dockerfile = dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile,
+            "FROM alpine\nARG TARGETOS TARGETARCH TARGETVARIANT\nCOPY dist/$TARGETOS-$TARGETARCH$TARGETVARIANT /app\n",
+        )
+        .unwrap();
+
+        let platforms = ["linux/amd64".to_owned(), "linux/arm/v7".to_owned()];
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &platforms).unwrap();
+        assert_eq!(
+            sources,
+            [dir.path().join("dist/linux-amd64"), dir.path().join("dist/linux-armv7")]
+        );
+        let args = builtin_args(Some("windows/arm64"));
+        assert_eq!(args["TARGETPLATFORM"], "windows/arm64");
+        assert_eq!(args["BUILDPLATFORM"], builtin_args(None)["TARGETPLATFORM"]);
     }
 
     #[test]
@@ -491,7 +552,7 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new()).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
         assert_eq!(sources.len(), 1);
         let path_str = sources[0].to_string_lossy();
         assert!(!path_str.contains('$'));
@@ -508,7 +569,7 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new()).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0], dir.path().join("src/"));
         assert_eq!(sources[1], dir.path().join("config.toml"));
@@ -529,7 +590,7 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new()).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0], dir.path().join("src/"));
     }
@@ -544,7 +605,7 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new()).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0], dir.path().join("local.txt"));
     }

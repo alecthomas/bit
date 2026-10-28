@@ -368,7 +368,7 @@ impl Resource for ImageResource {
             files.insert(dockerfile.to_string_lossy().into_owned(), hash);
         }
 
-        for src in &parse::dockerfile_sources(&dockerfile, context, &inputs.build_args)? {
+        for src in &parse::dockerfile_sources(&dockerfile, context, &inputs.build_args, &inputs.platform)? {
             for path in parse::expand_path(src, &dockerignore) {
                 let hash = tracker.hash_file(&path)?;
                 files.insert(path.to_string_lossy().into_owned(), hash);
