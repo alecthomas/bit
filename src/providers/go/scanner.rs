@@ -555,33 +555,82 @@ fn extract_import_path(line: &str) -> Option<String> {
     Some(trimmed[start..end].to_owned())
 }
 
-/// Parse `//go:embed` directives from a `.go` file, returning glob patterns.
+/// Parse `//go:embed` directives from a `.go` file, returning glob patterns
+/// in the `glob` crate's syntax.
 fn parse_embeds(source: &str) -> Vec<String> {
     let mut patterns = Vec::new();
     for line in source.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("//go:embed") {
-            for pat in rest.split_whitespace() {
-                let pat = pat.strip_prefix("all:").unwrap_or(pat);
-                patterns.push(pat.to_owned());
-            }
+        let Some(rest) = line.trim().strip_prefix("//go:embed") else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+            continue;
+        }
+        for pat in embed_args(rest) {
+            let pat = pat.strip_prefix("all:").unwrap_or(&pat);
+            // `path.Match` negates a class with `^`, the `glob` crate with `!`.
+            patterns.push(pat.replace("[^", "[!"));
         }
     }
     patterns
 }
 
+/// The space-separated arguments of a `//go:embed` directive, each bare or
+/// quoted as a Go interpreted ("…") or raw (`…`) string literal.
+fn embed_args(rest: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut chars = rest.trim().chars().peekable();
+    while let Some(&first) = chars.peek() {
+        if first.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        let mut arg = String::new();
+        match first {
+            '"' => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => arg.extend(chars.next()),
+                        _ => arg.push(c),
+                    }
+                }
+            }
+            '`' => {
+                chars.next();
+                arg.extend(chars.by_ref().take_while(|&c| c != '`'));
+            }
+            _ => {
+                while let Some(&c) = chars.peek() {
+                    if c.is_whitespace() {
+                        break;
+                    }
+                    arg.push(c);
+                    chars.next();
+                }
+            }
+        }
+        args.push(arg);
+    }
+    args
+}
+
 /// Expand embed patterns relative to a package directory into file paths.
+/// As with `go:embed`, a pattern matching a directory embeds every file
+/// beneath it.
 fn expand_embeds(pkg_dir: &Path, patterns: &[String]) -> Vec<PathBuf> {
+    let pkg_dir = pkg_dir.to_string_lossy();
     let mut files = Vec::new();
     for pat in patterns {
-        let full = pkg_dir.join(pat);
-        if full.is_dir() {
-            files.extend(files_under(&full));
-        } else if let Ok(entries) = glob::glob(&full.to_string_lossy()) {
-            for entry in entries.flatten() {
-                if entry.is_file() {
-                    files.push(entry);
-                }
+        let Ok(entries) = glob::glob(&crate::provider::glob_in_dir(Some(&pkg_dir), pat)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.is_dir() {
+                files.extend(files_under(&entry));
+            } else if entry.is_file() {
+                files.push(entry);
             }
         }
     }
@@ -814,6 +863,39 @@ var content embed.FS
 var content embed.FS
 "#;
         assert_eq!(parse_embeds(source), vec!["templates"]);
+    }
+
+    #[test]
+    fn parse_embed_quoted_patterns_and_negated_classes() {
+        let source = "package main\n\n//go:embed \"my file.txt\" `raw dir` \"esc\\\"aped\" data/[^._]*\n//go:embedded nope\nvar content embed.FS\n";
+        assert_eq!(
+            parse_embeds(source),
+            vec!["my file.txt", "raw dir", "esc\"aped", "data/[!._]*"]
+        );
+    }
+
+    #[test]
+    fn embed_globs_matching_directories_embed_their_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write_files(
+            &root,
+            &[
+                ("go.mod", "module example.com/test\n"),
+                (
+                    "main.go",
+                    "package main\n\nimport \"embed\"\n\n//go:embed static/* \"my docs\"\nvar content embed.FS\n",
+                ),
+                ("static/css/site/main.css", ""),
+                ("static/index.html", ""),
+                ("my docs/guide.md", ""),
+            ],
+        );
+
+        let files = scan(&[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        for expected in ["static/css/site/main.css", "static/index.html", "my docs/guide.md"] {
+            assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
+        }
     }
 
     #[test]
