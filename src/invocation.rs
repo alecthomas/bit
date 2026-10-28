@@ -394,7 +394,13 @@ impl Instantiator<'_> {
                 dag: self.dag,
                 import_roots: self.import_roots,
             };
-            module::expand_module(&name, &path, &concrete.fields, block.large, &mut context)?;
+            module::expand_module(
+                &name,
+                &path,
+                &concrete.fields,
+                module::InstanceModifiers::of(block),
+                &mut context,
+            )?;
             let expanded: Vec<_> = self
                 .dag
                 .block_names()

@@ -1046,28 +1046,6 @@ fn apply_selected_with_mode(
     }
 }
 
-/// Apply only test blocks and their transitive dependencies.
-#[allow(clippy::too_many_arguments)]
-pub fn test(
-    dag: &mut Dag,
-    base: &BaseScope,
-    store: &dyn StateStore,
-    cache: &BuildCache,
-    output: &Output,
-    jobs: usize,
-    tracker: &Arc<FileTracker>,
-) -> Result<Vec<BlockPlan>, EngineError> {
-    let order = dag.test_order()?;
-    crate::debug!(
-        output,
-        "test: {} block(s), jobs={}, order: {}",
-        order.len(),
-        jobs,
-        order.join(", ")
-    );
-    apply_selected(dag, base, store, cache, output, &order, jobs, tracker)
-}
-
 /// Apply blocks sequentially in the given order.
 #[allow(clippy::too_many_arguments)]
 fn apply_order(
@@ -1791,10 +1769,18 @@ fn print_value(key: &str, value: &Value, indent: usize) {
     }
 }
 
+/// Fields left out of a block's evaluated inputs. `after` must stay out
+/// because the inputs feed the content hash, and evaluating `after = [a]`
+/// yields `a`'s outputs, which would couple the block to `a`'s content. The
+/// DAG takes `after` edges from the unevaluated fields instead.
+fn is_unhashed_field(name: &str) -> bool {
+    name == CONCURRENCY_FIELD || name == AFTER_FIELD
+}
+
 fn eval_fields(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalError> {
     let mut inputs = Map::new();
     for field in fields {
-        if field.name == CONCURRENCY_FIELD {
+        if is_unhashed_field(&field.name) {
             continue;
         }
         let value = expr::eval(&field.value, scope)?;
@@ -1806,7 +1792,7 @@ fn eval_fields(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalE
 fn eval_fields_lenient(fields: &[crate::ast::Field], scope: &Scope) -> Result<Map, EvalError> {
     let mut inputs = Map::new();
     for field in fields {
-        if field.name == CONCURRENCY_FIELD {
+        if is_unhashed_field(&field.name) {
             continue;
         }
         let value = expr::eval_lenient(&field.value, scope)?;

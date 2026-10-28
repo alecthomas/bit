@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::ast::{Block, Expr, Field, Module, Statement, StringPart};
+use crate::ast::{Block, Expr, Field, Module, Phase, Statement, StringPart};
 use crate::dag::{AFTER_FIELD, DEPENDS_ON_FIELD, Dag, DagNode, collect_block_refs, collect_dependency_refs};
 use crate::expr::{self, Scope};
 use crate::loader::LoadError;
@@ -15,6 +15,60 @@ use crate::value::{Map, Value, validate_type};
 
 /// Provider name of module instance nodes.
 const INSTANCE_PROVIDER: &str = "module";
+
+/// Modifiers written on a module instance. They describe the instance as a
+/// whole, so every block it expands to inherits them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InstanceModifiers {
+    pub phase: Phase,
+    pub protected: bool,
+    pub explicit: bool,
+    pub large: bool,
+}
+
+impl InstanceModifiers {
+    pub fn of(block: &Block) -> Self {
+        Self {
+            phase: block.phase,
+            protected: block.protected,
+            explicit: block.explicit,
+            large: block.large,
+        }
+    }
+
+    /// Combine with an inner block's own modifiers. A block keeps its own
+    /// phase inside a default-phase instance and takes the instance's phase
+    /// otherwise; a different explicit phase would contradict the instance.
+    fn merge(self, instance: &str, block: &Block) -> Result<Self, LoadError> {
+        let phase = match (self.phase, block.phase) {
+            (Phase::Default, phase) => phase,
+            (phase, Phase::Default) => phase,
+            (instance_phase, block_phase) if instance_phase == block_phase => instance_phase,
+            (instance_phase, block_phase) => {
+                return Err(LoadError::PhaseConflict {
+                    pos: block.pos.clone(),
+                    block: block.name.clone(),
+                    block_phase,
+                    instance: instance.to_owned(),
+                    instance_phase,
+                });
+            }
+        };
+        Ok(Self {
+            phase,
+            protected: self.protected || block.protected,
+            explicit: self.explicit || block.explicit,
+            large: self.large || block.large,
+        })
+    }
+
+    fn apply_to(self, block: &mut Block) {
+        block.phase = self.phase;
+        block.protected = self.protected;
+        block.explicit = self.explicit;
+        block.large = self.large;
+    }
+}
 
 /// Whether `node` is a module instance. Its fields are the module's output
 /// expressions, not inputs of a resource.
@@ -157,13 +211,12 @@ pub struct ExpandContext<'a> {
 /// 4. Creates a synthetic module instance node for output forwarding
 /// 5. Wires all dependency edges
 ///
-/// When `large` is set, every block the instance expands to is `large`,
-/// because the size describes the instance as a whole.
+/// Every block the instance expands to inherits `modifiers`.
 pub fn expand_module(
     instance_name: &str,
     module_path: &Path,
     outer_fields: &[Field],
-    large: bool,
+    modifiers: InstanceModifiers,
     ctx: &mut ExpandContext<'_>,
 ) -> Result<(), LoadError> {
     let source = std::fs::read_to_string(module_path)
@@ -246,11 +299,12 @@ pub fn expand_module(
     // Create inner block DagNodes
     for block in &iface.blocks {
         let qualified_name = format!("{instance_name}.{}", block.name);
+        let block_modifiers = modifiers.merge(instance_name, block)?;
 
         if !block.params.is_empty() {
             let mut declaration = block.clone();
             declaration.name = qualified_name;
-            declaration.large |= large;
+            block_modifiers.apply_to(&mut declaration);
             declaration.fields = block
                 .fields
                 .iter()
@@ -279,13 +333,7 @@ pub fn expand_module(
                     value: rewrite_expr(&f.value, &inner_block_names, &substitutions, instance_name),
                 })
                 .collect();
-            expand_module(
-                &qualified_name,
-                &nested_path,
-                &rewritten_fields,
-                large || block.large,
-                ctx,
-            )?;
+            expand_module(&qualified_name, &nested_path, &rewritten_fields, block_modifiers, ctx)?;
             continue;
         }
 
@@ -313,12 +361,12 @@ pub fn expand_module(
             pos: block.pos.clone(),
             name: qualified_name.clone(),
             doc: block.doc.clone(),
-            phase: block.phase,
+            phase: block_modifiers.phase,
             provider: block.provider.clone(),
             resource_name: block.resource.clone(),
-            protected: block.protected,
-            explicit: block.explicit,
-            large: large || block.large,
+            protected: block_modifiers.protected,
+            explicit: block_modifiers.explicit,
+            large: block_modifiers.large,
             concurrency_group: qualified_name.clone(),
             fields: rewritten_fields,
             resource,
@@ -482,12 +530,12 @@ pub fn expand_module(
         pos: crate::ast::Pos::default(),
         name: instance_name.to_owned(),
         doc: None,
-        phase: crate::ast::Phase::Default,
+        phase: modifiers.phase,
         provider: INSTANCE_PROVIDER.into(),
         resource_name: INSTANCE_PROVIDER.into(),
-        protected: false,
-        explicit: false,
-        large,
+        protected: modifiers.protected,
+        explicit: modifiers.explicit,
+        large: modifiers.large,
         concurrency_group: instance_name.to_owned(),
         fields: output_fields,
         resource: Box::new(ModuleResource { resource_schema }),

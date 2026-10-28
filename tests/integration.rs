@@ -489,6 +489,38 @@ fn after_does_not_propagate_changes() {
 }
 
 #[test]
+fn after_ignores_parent_output_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_a1 = dir.path().join("a1.txt");
+    let out_a2 = dir.path().join("a2.txt");
+    let out_b = dir.path().join("b.txt");
+    let block_a = |out: &std::path::Path| {
+        format!(
+            "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
+            out.display(),
+            out.display(),
+        )
+    };
+    let block_b = format!(
+        "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
+        out_b.display(),
+        out_b.display(),
+    );
+    let store = MemoryStore::new();
+    run_apply(&format!("{}{block_b}", block_a(&out_a1)), &store);
+
+    // Rebuild a alone so its stored `path` output changes.
+    run_apply(&block_a(&out_a2), &store);
+
+    let plans = run_plan(&format!("{}{block_b}", block_a(&out_a2)), &store);
+    assert_eq!(
+        plans[1].plan.action,
+        bit::provider::PlanAction::None,
+        "b should not see a's new output values (after is ordering-only)"
+    );
+}
+
+#[test]
 fn doc_comments_preserved() {
     let input = concat!(
         "# The server\n",
@@ -931,7 +963,7 @@ fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
         walk(dir, needle)
     }
     fn bit(root: &std::path::Path, cache: &std::path::Path, args: &[&str]) -> std::process::Output {
-        // When this suite itself runs under `bit --test`, cargo hands the
+        // When this suite itself runs under bit, cargo hands the
         // test binary the outer worktree's wrapper; the inner bit must see a
         // clean environment or it would defer to that wrapper.
         let out = Command::new(env!("CARGO_BIN_EXE_bit"))

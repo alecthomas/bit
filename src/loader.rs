@@ -62,6 +62,14 @@ pub enum LoadError {
         block: String,
         source: Box<crate::input_check::InputError>,
     },
+    #[error("{pos}: block '{block}' is {block_phase}, but its module instance '{instance}' is {instance_phase}")]
+    PhaseConflict {
+        pos: crate::ast::Pos,
+        block: String,
+        block_phase: crate::ast::Phase,
+        instance: String,
+        instance_phase: crate::ast::Phase,
+    },
     #[error("{pos}: invalid invocation of '{name}': {message}")]
     InvalidInvocation {
         pos: crate::ast::Pos,
@@ -220,7 +228,13 @@ pub fn load_selected(
                         dag: &mut dag,
                         import_roots,
                     };
-                    module::expand_module(&b.name, &module_path, &b.fields, b.large, &mut ctx)?;
+                    module::expand_module(
+                        &b.name,
+                        &module_path,
+                        &b.fields,
+                        module::InstanceModifiers::of(b),
+                        &mut ctx,
+                    )?;
                 } else {
                     let resource =
                         registry
@@ -1655,6 +1669,85 @@ output path = image.path
                 assert_eq!(dag.get_node(&name).unwrap().large, large, "{name}");
             }
         }
+    }
+
+    #[test]
+    fn module_instance_modifiers_reach_every_expanded_block() {
+        let dir = tempfile::tempdir().unwrap();
+        write_module(
+            dir.path(),
+            "mymod",
+            "mymod",
+            r#"
+compile(package : string) = exec {
+  command = "compile #{package}"
+  outputs = "compiled"
+}
+
+pre prepare = exec {
+  command = "prepare"
+  outputs = "prepared"
+}
+
+image = exec {
+  command = compile(package = "api").path
+  outputs = "image"
+}
+
+output path = image.path
+"#,
+        );
+
+        let module = parser::parse("pre protected explicit setup = mymod {}\nplain = mymod {}\n", "<test>").unwrap();
+        let (dag, _scope) = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &roots(dir.path(), "mymod"),
+        )
+        .unwrap();
+
+        for (prefix, modified) in [("setup", true), ("plain", false)] {
+            for name in [
+                prefix.to_owned(),
+                format!("{prefix}.image"),
+                format!("{prefix}.prepare"),
+                format!(r#"{prefix}.compile(package="api")"#),
+            ] {
+                let node = dag.get_node(&name).unwrap();
+                let phase = if modified || name.ends_with(".prepare") {
+                    crate::ast::Phase::Pre
+                } else {
+                    crate::ast::Phase::Default
+                };
+                assert_eq!(node.phase, phase, "{name}");
+                assert_eq!(node.protected, modified, "{name}");
+                assert_eq!(node.explicit, modified, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn module_block_phase_must_not_contradict_instance_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        write_module(
+            dir.path(),
+            "mymod",
+            "mymod",
+            "post report = exec {\n  command = \"report\"\n}\n",
+        );
+
+        let module = parser::parse("pre setup = mymod {}\n", "<test>").unwrap();
+        let result = load(
+            &module,
+            &Map::new(),
+            &test_registry(),
+            &EmptyStore,
+            &roots(dir.path(), "mymod"),
+        );
+
+        assert!(matches!(result, Err(LoadError::PhaseConflict { .. })));
     }
 
     #[test]

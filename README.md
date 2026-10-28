@@ -69,7 +69,6 @@ bit build        # apply a specific target or block
 bit publish tag=v1  # pass a named argument to a target
 bit --force      # rebuild selected blocks without change detection or cache
 bit --plan       # show what would change
-bit --test       # run test blocks
 bit --clean      # destroy targets and their dependents in reverse topological order
 bit --clean db   # explicitly destroy a protected block
 bit --list       # list explicitly defined targets
@@ -194,7 +193,7 @@ skip protected blocks.
 change detection and the shared cache. With `--clean`, it instead continues
 cleanup past errors.
 
-`--since <ref>` limits apply, plan, test, graph, dump, and block-list operations to
+`--since <ref>` limits apply, plan, graph, dump, and block-list operations to
 blocks affected by changes between `merge-base(<ref>, HEAD)` and the current
 worktree. Committed, staged, unstaged, and untracked changes are included. A
 block is affected when a changed path is one of its provider-resolved inputs,
@@ -287,7 +286,7 @@ protected explicit prod_db = aws.aurora { ... }
 large image = docker.image { ... }
 ```
 
-Blocks without `large` are small. Every block that a `large` module instance expands to is also `large`.
+Blocks without `large` are small. Modifiers on a module instance apply to every block it expands to: a `protected`, `explicit`, or `large` instance makes all of its blocks so, and a `pre` or `post` instance puts all of its blocks in that phase. A block inside a `pre` instance cannot be declared `post`, or vice versa.
 
 `explicit` blocks are skipped by the `...` selector (and the no-target/no-`default` fallback) for every action, including `--clean ...`. They still run when named directly or pulled in as a dependency of another selected block.
 
@@ -302,9 +301,7 @@ Targets can also declare parameters and pass them explicitly to blocks or
 other targets:
 
 ```hcl
-target publish(name : string, profile = "release") = [
-  package(name = name, profile = profile),
-]
+target publish(name : string, profile = "release") = [package(name = name, profile = profile)]
 ```
 
 Invoke a parameterized target with named `name=value` arguments immediately
@@ -603,7 +600,7 @@ import "git.sr.ht/~user/repo"                        # arbitrary host
 import "github.com/alecthomas/bit-modules" as bm     # override the auto-derived provider name
 ```
 
-For deep paths like `github.com/foo/bar/waz`, bit needs to know where the repo ends and the subpath begins. Hardcoded forges (`github.com`, `gitlab.com`, `bitbucket.org`) split at segment 3 (`host/owner/repo`). For other hosts bit probes via `git ls-remote` from the longest prefix down — the first one that responds is the repo, the rest is the subpath. The probe result is cached for the run but not persisted, so a fresh checkout against an unfamiliar host pays one probe per import.
+For deep paths like `github.com/foo/bar/waz`, bit needs to know where the repo ends and the subpath begins. Hardcoded forges (`github.com`, `gitlab.com`, `bitbucket.org`) split at segment 3 (`host/owner/repo`). For other hosts, an import under a repo already pinned in `BUILD.bit.lock` uses that repo without contacting the host. Otherwise bit probes via `git ls-remote` from the longest prefix down — the first one that responds is the repo, the rest is the subpath.
 
 Use `as <ident>` to override the auto-derived provider name — useful when two imports would otherwise collide on the last path segment.
 

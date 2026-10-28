@@ -143,12 +143,28 @@ pub fn parse_import_url(url: &str) -> Result<ParsedImport, ImportError> {
 struct ProbeCache(BTreeMap<String, ResolvedRepo>);
 
 /// Determine the repo boundary for a parsed URL. Hardcoded forges resolve
-/// statically; other hosts are probed via `git ls-remote` from the longest
-/// prefix down to the first that responds.
-fn resolve_repo_boundary(parsed: &ParsedImport, cache: &mut ProbeCache) -> Result<ResolvedRepo, ImportError> {
+/// statically. Other hosts use the longest repo in `lock` that the URL lies
+/// under, so pinned imports resolve offline; only unlocked imports are
+/// probed via `git ls-remote` from the longest prefix down to the first
+/// that responds.
+///
+/// Trusting the lock assumes no repo is nested at a path inside another
+/// locked repo. If one were, a new import of it would resolve to the outer
+/// repo, and loading would fail because the subpath doesn't exist there.
+fn resolve_repo_boundary(
+    parsed: &ParsedImport,
+    lock: &LockFile,
+    cache: &mut ProbeCache,
+) -> Result<ResolvedRepo, ImportError> {
     let host = parsed.segments.first().expect("validated URL has a host");
     if KNOWN_FORGES.contains(&host.as_str()) {
         return forge_boundary(parsed);
+    }
+    if let Some(locked) = (2..=parsed.segments.len())
+        .rev()
+        .find(|&i| lock.0.contains_key(&parsed.segments[..i].join("/")))
+    {
+        return Ok(boundary_at(parsed, locked));
     }
     if let Some(hit) = cache.0.get(&parsed.url) {
         return Ok(hit.clone());
@@ -166,17 +182,7 @@ fn forge_boundary(parsed: &ParsedImport) -> Result<ResolvedRepo, ImportError> {
             hint: "known forges require <host>/<owner>/<repo>",
         });
     }
-    let cache_key = parsed.segments[..3].join("/");
-    let subpath = if parsed.segments.len() > 3 {
-        Some(parsed.segments[3..].join("/"))
-    } else {
-        None
-    };
-    Ok(ResolvedRepo {
-        repo_url: format!("https://{cache_key}"),
-        cache_key,
-        subpath,
-    })
+    Ok(boundary_at(parsed, 3))
 }
 
 /// Probe `git ls-remote https://<prefix>` from longest to shortest. First
@@ -184,24 +190,30 @@ fn forge_boundary(parsed: &ParsedImport) -> Result<ResolvedRepo, ImportError> {
 fn probe_boundary(parsed: &ParsedImport) -> Result<ResolvedRepo, ImportError> {
     // Need at least host + one segment to have a candidate repo URL.
     for i in (2..=parsed.segments.len()).rev() {
-        let cache_key = parsed.segments[..i].join("/");
-        let repo_url = format!("https://{cache_key}");
-        if git_ls_remote(&repo_url) {
-            let subpath = if i < parsed.segments.len() {
-                Some(parsed.segments[i..].join("/"))
-            } else {
-                None
-            };
-            return Ok(ResolvedRepo {
-                cache_key,
-                repo_url,
-                subpath,
-            });
+        let boundary = boundary_at(parsed, i);
+        if git_ls_remote(&boundary.repo_url) {
+            return Ok(boundary);
         }
     }
     Err(ImportError::NoRepoFound {
         url: parsed.url.clone(),
     })
+}
+
+/// The repo made of the first `repo_segments` segments of `parsed`, with
+/// the rest as its subpath.
+fn boundary_at(parsed: &ParsedImport, repo_segments: usize) -> ResolvedRepo {
+    let cache_key = parsed.segments[..repo_segments].join("/");
+    let subpath = if repo_segments < parsed.segments.len() {
+        Some(parsed.segments[repo_segments..].join("/"))
+    } else {
+        None
+    };
+    ResolvedRepo {
+        repo_url: format!("https://{cache_key}"),
+        cache_key,
+        subpath,
+    }
 }
 
 /// Returns true if `git ls-remote` against `url` exits zero (= repo exists).
@@ -555,7 +567,7 @@ fn process_root_project(
             continue;
         }
         let parsed = parse_import_url(&imp.url)?;
-        let resolved = resolve_repo_boundary(&parsed, &mut ctx.probes)?;
+        let resolved = resolve_repo_boundary(&parsed, old_lock, &mut ctx.probes)?;
         let old_sha = old_lock.0.get(&resolved.cache_key).cloned();
         let target_sha = match (
             &old_sha,
@@ -615,7 +627,7 @@ fn process_child_project(
             continue;
         }
         let parsed = parse_import_url(&imp.url)?;
-        let resolved = resolve_repo_boundary(&parsed, &mut ctx.probes)?;
+        let resolved = resolve_repo_boundary(&parsed, &lock, &mut ctx.probes)?;
         let sha = lock
             .0
             .get(&resolved.cache_key)
@@ -917,6 +929,20 @@ mod tests {
         let parsed = parse_import_url("github.com/user/repo.git/").unwrap();
         assert_eq!(parsed.url, "github.com/user/repo");
         assert_eq!(parsed.segments, vec!["github.com", "user", "repo"]);
+    }
+
+    #[test]
+    fn locked_boundary_resolves_without_probing() {
+        // `.invalid` never resolves, so a probe would fail with NoRepoFound.
+        let parsed = parse_import_url("git.invalid/team/repo/sub/mod").unwrap();
+        let lock = LockFile(BTreeMap::from([
+            ("git.invalid/team".to_owned(), "a".repeat(40)),
+            ("git.invalid/team/repo".to_owned(), "b".repeat(40)),
+        ]));
+        let resolved = resolve_repo_boundary(&parsed, &lock, &mut ProbeCache::default()).unwrap();
+        assert_eq!(resolved.cache_key, "git.invalid/team/repo");
+        assert_eq!(resolved.repo_url, "https://git.invalid/team/repo");
+        assert_eq!(resolved.subpath.as_deref(), Some("sub/mod"));
     }
 
     #[test]

@@ -114,10 +114,6 @@ struct Cli {
     #[arg(short = 'f', long)]
     force: bool,
 
-    /// Run test blocks and their dependencies
-    #[arg(short = 't', long)]
-    test: bool,
-
     /// Dump evaluated inputs and stored outputs
     #[arg(short = 'd', long)]
     dump: bool,
@@ -447,7 +443,6 @@ fn plan_styles(
 enum SelectionMode {
     Targets,
     AllBlocks,
-    Tests,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -462,7 +457,6 @@ enum Operation {
     List,
     Plan,
     Schema,
-    Test,
     Update,
 }
 
@@ -477,7 +471,6 @@ impl Cli {
             self.graph.then_some(Operation::Graph),
             self.plan.then_some(Operation::Plan),
             self.clean.then_some(Operation::Clean),
-            self.test.then_some(Operation::Test),
             (self.list > 0).then_some(Operation::List),
             self.dump.then_some(Operation::Dump),
             self.fmt.then_some(Operation::Fmt),
@@ -502,10 +495,7 @@ impl Operation {
     }
 
     fn allows_since(self) -> bool {
-        matches!(
-            self,
-            Self::Apply | Self::Dump | Self::Graph | Self::List | Self::Plan | Self::Test
-        )
+        matches!(self, Self::Apply | Self::Dump | Self::Graph | Self::List | Self::Plan)
     }
 }
 
@@ -530,7 +520,6 @@ fn selected_order(
         SelectionMode::Targets => engine::resolve_order(dag, targets)?,
         SelectionMode::AllBlocks if targets.is_empty() => dag.topo_order().map_err(engine::EngineError::from)?,
         SelectionMode::AllBlocks => engine::resolve_order(dag, targets)?,
-        SelectionMode::Tests => dag.test_order().map_err(engine::EngineError::from)?,
     };
     let Some(since) = since else {
         return Ok(order);
@@ -748,26 +737,6 @@ fn main() {
         let (_module, mut dag, _base, store, targets) = load_module(&registry, &params, &invocations);
         let output = make_output(&dag, &targets, cli.debug, cli.long, cli.quiet);
         if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, &targets, cli.force) {
-            eprintln!("{} {e}", "error:".red().bold());
-            process::exit(1);
-        }
-    } else if matches!(operation, Operation::Test) {
-        let (_module, mut dag, base, store, targets) = load_module(&registry, &params, &invocations);
-        let Some(names) = selected_order_or_exit(
-            &dag,
-            &base,
-            &cache,
-            &targets,
-            cli.since.as_deref(),
-            SelectionMode::Tests,
-            &tracker,
-            cli.quiet,
-        ) else {
-            return;
-        };
-        let output = output_for_names(&names, cli.debug, cli.long, cli.quiet);
-        if let Err(e) = engine::apply_selected(&mut dag, &base, store.as_ref(), &cache, &output, &names, jobs, &tracker)
-        {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }

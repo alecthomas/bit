@@ -53,6 +53,16 @@ pub enum Phase {
     Post,
 }
 
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Phase::Pre => "pre",
+            Phase::Default => "default",
+            Phase::Post => "post",
+        })
+    }
+}
+
 /// `[pre|post] [protected] [explicit] [large] name = provider.resource { fields... }`
 /// or `name[key1, key2 = expr] = provider.resource { fields... }` (matrix expansion).
 ///
