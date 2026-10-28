@@ -34,6 +34,10 @@ pub struct Project {
     pub dir: PathBuf,
     /// The `name` its `package.json` gives, if any.
     pub name: Option<String>,
+    /// The directories and tarballs its `workspace:`, `link:` and `file:`
+    /// dependencies resolve to, directly or through other dependencies, as
+    /// the lockfile records them.
+    pub local_dependencies: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -50,6 +54,26 @@ impl Workspace {
             .filter(|project| project.name.as_deref() == Some(name))
             .map(|project| project.dir.as_path())
             .collect()
+    }
+
+    /// The directories and tarballs the projects in `dirs` build from: the
+    /// projects themselves, and transitively every local dependency, which
+    /// may be another project with local dependencies of its own.
+    pub fn local_sources(&self, dirs: &[&Path]) -> Vec<PathBuf> {
+        let mut sources: Vec<PathBuf> = Vec::new();
+        let mut pending: Vec<PathBuf> = dirs.iter().map(|dir| dir.to_path_buf()).collect();
+        while let Some(path) = pending.pop() {
+            let path = path.canonicalize().unwrap_or(path);
+            if sources.contains(&path) {
+                continue;
+            }
+            if let Some(project) = self.projects.iter().find(|project| project.dir == path) {
+                pending.extend(project.local_dependencies.iter().cloned());
+            }
+            sources.push(path);
+        }
+        sources.sort();
+        sources
     }
 }
 
@@ -126,17 +150,73 @@ fn load_workspace(root: &Path) -> Result<Workspace, BoxError> {
 
 /// A project as `pnpm ls --json` reports it.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListedProject {
     #[serde(default)]
     name: Option<String>,
     path: PathBuf,
+    #[serde(default)]
+    dependencies: HashMap<String, ListedDependency>,
+    #[serde(default)]
+    dev_dependencies: HashMap<String, ListedDependency>,
+    #[serde(default)]
+    optional_dependencies: HashMap<String, ListedDependency>,
+}
+
+/// A dependency as `pnpm ls --json` reports it, with its own dependencies.
+#[derive(Deserialize)]
+struct ListedDependency {
+    /// The resolved version: `link:<dir>` for a linked directory or
+    /// workspace project, `file:<path>` for a directory or tarball copied
+    /// from the filesystem, and otherwise a registry version.
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    path: Option<PathBuf>,
+    #[serde(default)]
+    dependencies: HashMap<String, ListedDependency>,
 }
 
 /// The workspace's projects, as pnpm finds them from its `packages`
-/// patterns, which follow fast-glob's rules rather than the glob crate's.
+/// patterns, which follow fast-glob's rules rather than the glob crate's,
+/// with the local dependencies its lockfile resolves.
 fn list_projects(root: &Path) -> Result<Vec<Project>, BoxError> {
+    // `--lockfile-only` reads the graph without an install, and only pnpm
+    // 10 and later accept it. Without it only the projects are listed.
+    let graph = ["ls", "--recursive", "--depth", "Infinity", "--json", "--lockfile-only"];
+    let listed = match root.join("pnpm-lock.yaml").is_file() {
+        true => pnpm_ls(root, &graph).or_else(|_| pnpm_ls(root, &["ls", "--recursive", "--depth", "-1", "--json"])),
+        false => pnpm_ls(root, &["ls", "--recursive", "--depth", "-1", "--json"]),
+    }?;
+    let mut projects: Vec<Project> = listed
+        .into_iter()
+        .map(|project| {
+            let mut local_dependencies = Vec::new();
+            for dependency in project
+                .dependencies
+                .values()
+                .chain(project.dev_dependencies.values())
+                .chain(project.optional_dependencies.values())
+            {
+                collect_local(root, dependency, &mut local_dependencies);
+            }
+            local_dependencies.sort();
+            local_dependencies.dedup();
+            Project {
+                dir: project.path.canonicalize().unwrap_or(project.path),
+                name: project.name,
+                local_dependencies,
+            }
+        })
+        .collect();
+    projects.sort_by(|a, b| a.dir.cmp(&b.dir));
+    Ok(projects)
+}
+
+/// The projects `pnpm <args>` lists in `root`.
+fn pnpm_ls(root: &Path, args: &[&str]) -> Result<Vec<ListedProject>, BoxError> {
     let output = std::process::Command::new("pnpm")
-        .args(["ls", "--recursive", "--depth", "-1", "--json"])
+        .args(args)
         .current_dir(root)
         .logged_output()
         .map_err(|e| format!("pnpm: failed to execute `pnpm ls`: {e}"))?;
@@ -148,17 +228,22 @@ fn list_projects(root: &Path) -> Result<Vec<Project>, BoxError> {
         )
         .into());
     }
-    let listed: Vec<ListedProject> =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("pnpm: parsing `pnpm ls` output: {e}"))?;
-    let mut projects: Vec<Project> = listed
-        .into_iter()
-        .map(|project| Project {
-            dir: project.path.canonicalize().unwrap_or(project.path),
-            name: project.name,
-        })
-        .collect();
-    projects.sort_by(|a, b| a.dir.cmp(&b.dir));
-    Ok(projects)
+    Ok(serde_json::from_slice(&output.stdout).map_err(|e| format!("pnpm: parsing `pnpm ls` output: {e}"))?)
+}
+
+/// Add the local paths `dependency` and its own dependencies resolve to.
+/// A `link:` dependency reports its directory as `path`. A `file:` one is
+/// copied into the virtual store, so its `path` is the copy, and its version
+/// names the original relative to the lockfile's directory, `root`.
+fn collect_local(root: &Path, dependency: &ListedDependency, paths: &mut Vec<PathBuf>) {
+    if dependency.version.starts_with("link:") {
+        paths.extend(dependency.path.clone().filter(|path| path.is_absolute()));
+    } else if let Some(file) = dependency.version.strip_prefix("file:") {
+        paths.push(root.join(file));
+    }
+    for nested in dependency.dependencies.values() {
+        collect_local(root, nested, paths);
+    }
 }
 
 #[derive(Deserialize)]
@@ -295,6 +380,48 @@ mod tests {
         assert_eq!(workspace(&tracker, root).unwrap().projects.len(), 3, "cached");
         tracker.invalidate();
         assert_eq!(workspace(&tracker, root).unwrap().projects.len(), 2);
+    }
+
+    #[test]
+    fn local_dependencies_are_followed_transitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("package.json"), r#"{ "name": "root" }"#).unwrap();
+        fs::write(root.join("pnpm-workspace.yaml"), "packages:\n  - 'packages/*'\n").unwrap();
+        for (dir, manifest) in [
+            (
+                "packages/app",
+                r#"{ "name": "app", "dependencies": { "lib": "workspace:*" } }"#,
+            ),
+            (
+                "packages/lib",
+                r#"{ "name": "lib", "devDependencies": { "ext": "file:../../ext", "linked": "link:../../linked" } }"#,
+            ),
+            ("packages/other", r#"{ "name": "other" }"#),
+            (
+                "ext",
+                r#"{ "name": "ext", "version": "1.0.0", "dependencies": { "deep": "file:../deep" } }"#,
+            ),
+            ("deep", r#"{ "name": "deep", "version": "1.0.0" }"#),
+            ("linked", r#"{ "name": "linked", "version": "1.0.0" }"#),
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            fs::write(root.join(dir).join("package.json"), manifest).unwrap();
+        }
+        let install = std::process::Command::new("pnpm")
+            .args(["install", "--lockfile-only", "--offline"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+
+        let ws = load(&root).unwrap();
+        let app = root.join("packages/app");
+        let expected: Vec<PathBuf> = ["deep", "ext", "linked", "packages/app", "packages/lib"]
+            .iter()
+            .map(|dir| root.join(dir))
+            .collect();
+        assert_eq!(ws.local_sources(&[&app]), expected);
     }
 
     #[test]

@@ -63,10 +63,15 @@ pub(super) fn resolve_inputs<T>(
                 return Err(format!("pnpm: package '{pkg}' not found in workspace").into());
             }
             let exclude_outputs: Vec<PathBuf> = outputs.iter().map(|output| block.path(output).into()).collect();
-            // `--filter` selects every project with the name.
-            for pkg_dir in pkg_dirs {
-                let sources = workspace::scan_sources(pkg_dir, &exclude_outputs);
-                files.extend(tracker.hash_files(&sources)?);
+            // `--filter` selects every project with the name, and each
+            // builds from its local dependencies too.
+            for source in ws.local_sources(&pkg_dirs) {
+                let files_in = match source.is_dir() {
+                    true => workspace::scan_sources(&source, &exclude_outputs),
+                    // A tarball, or a dependency that no longer exists.
+                    false => vec![source],
+                };
+                files.extend(tracker.hash_files(&files_in)?);
             }
         }
         None => {
@@ -98,7 +103,7 @@ pub struct PnpmRunInputs {
     #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub outputs: Vec<String>,
-    /// Extra input file globs, relative to `dir` (added to auto-detected sources)
+    /// Extra input file globs, relative to `dir` (added to the sources of the package and of its `workspace:`, `link:` and `file:` dependencies)
     #[serde(default)]
     pub inputs: Vec<String>,
 }
