@@ -358,9 +358,24 @@ fn local_modules(cwd: &Path, base: &Arc<Module>) -> Arc<LocalModules> {
     // `go.mod`, which `go work edit` and `go mod edit` parse.
     let mut files = HashSet::new();
     let mut replace_sources: Vec<(PathBuf, &str)> = vec![];
-    if let Some(gowork) = go_output(cwd, &["env", "GOWORK"]).filter(|path| !path.is_empty() && path != "off") {
+    let gowork = go_output(cwd, &["env", "GOWORK"]).filter(|path| !path.is_empty() && path != "off");
+    if let Some(gowork) = gowork {
         files.insert(PathBuf::from(format!("{gowork}.sum")));
         replace_sources.push((PathBuf::from(gowork), "work"));
+    }
+
+    // The go command builds dependencies from `vendor/` when it holds a
+    // `modules.txt`: the workspace's, beside `go.work`, or else the main
+    // module's. Whether `-mod` or the `go` version disables it is not
+    // checked, since tracking an unused tree only costs a rerun.
+    let vendor_roots: Vec<PathBuf> = match replace_sources.first() {
+        Some((gowork, _)) => gowork.parent().into_iter().map(Path::to_path_buf).collect(),
+        None => modules.iter().map(|(_, module)| module.root.clone()).collect(),
+    };
+    for vendor in vendor_roots.iter().map(|root| root.join("vendor")) {
+        if vendor.join("modules.txt").is_file() {
+            files.extend(files_under(&vendor));
+        }
     }
     for (_, module) in &modules {
         let go_mod = module.root.join("go.mod");
@@ -879,6 +894,44 @@ var content embed.FS
 
         let files = scan(&[".".into()], Tests::Excluded, Some(&root.join("app"))).unwrap();
         for expected in ["dep/dep.go", "dep/go.mod", "app/go.mod"] {
+            assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
+        }
+    }
+
+    #[test]
+    fn scan_tracks_vendor_only_when_go_uses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write_files(
+            &root,
+            &[
+                ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+                ("main.go", "package main\n\nimport _ \"example.com/dep\"\n"),
+                ("vendor/example.com/dep/dep.go", "package dep\n"),
+            ],
+        );
+        let files = scan(&[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        assert!(
+            !files.contains(&root.join("vendor/example.com/dep/dep.go")),
+            "{files:?}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write_files(
+            &root,
+            &[
+                ("go.mod", "module example.com/app\n\ngo 1.22\n"),
+                ("main.go", "package main\n\nimport _ \"example.com/dep\"\n"),
+                (
+                    "vendor/modules.txt",
+                    "# example.com/dep v1.0.0\n## explicit\nexample.com/dep\n",
+                ),
+                ("vendor/example.com/dep/dep.go", "package dep\n"),
+            ],
+        );
+        let files = scan(&[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        for expected in ["vendor/modules.txt", "vendor/example.com/dep/dep.go"] {
             assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
         }
     }

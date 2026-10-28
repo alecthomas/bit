@@ -114,7 +114,9 @@ excluded by build constraints without extra build tags. `go.fmt` and
 Go blocks follow local imports into every module the go command builds from
 local directories: the modules a `go.work` file uses, and the targets of
 `replace` directives that name a directory. They track each of those modules'
-`go.mod` and `go.sum`, and the `go.work` and `go.work.sum` in use.
+`go.mod` and `go.sum`, and the `go.work` and `go.work.sum` in use. When the
+workspace or main module has a `vendor/modules.txt`, they track every file in
+`vendor/`.
 
 `exec.test` can report individual tests from any runner with JSON or JSONL
 output. Its `results` field is a jq filter that maps each JSON value to test
