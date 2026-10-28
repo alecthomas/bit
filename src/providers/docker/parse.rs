@@ -45,10 +45,15 @@ fn host_platform() -> (String, String, String) {
     (os.into(), arch.into(), variant.into())
 }
 
+type Vars = HashMap<String, String>;
+
 /// Parse a Dockerfile and return local source paths from COPY/ADD instructions.
 ///
-/// Collects ARG/ENV defaults from the Dockerfile, merges with `build_args`,
-/// and expands `$VAR`/`${VAR}` references in COPY/ADD source paths.
+/// Variables follow Docker's scoping. ARGs before the first `FROM` are
+/// global, and a stage sees one only when it declares it again. Each stage
+/// has its own ARGs and ENVs, and inherits the ENVs of an earlier stage it
+/// builds `FROM`. `build_args` override declared ARGs. ENVs override ARGs of
+/// the same name, and an unset variable expands to nothing, as in Docker.
 /// Skips multi-stage `COPY --from=...` and ADD with URLs.
 pub fn dockerfile_sources(
     dockerfile: &Path,
@@ -58,73 +63,205 @@ pub fn dockerfile_sources(
     let contents = std::fs::read_to_string(dockerfile).map_err(|e| format!("reading {}: {e}", dockerfile.display()))?;
     let parsed = parse_dockerfile::parse(&contents).map_err(|e| format!("parsing {}: {e}", dockerfile.display()))?;
 
-    let mut vars = builtin_args();
-    for instruction in &parsed.instructions {
-        match instruction {
-            Instruction::Arg(arg) => {
-                let raw = &*arg.arguments.value;
-                if let Some((name, default)) = raw.split_once('=') {
-                    vars.insert(name.trim().to_owned(), default.trim().to_owned());
-                }
-            }
-            Instruction::Env(env) => {
-                for pair in env.arguments.value.split_whitespace() {
-                    if let Some((name, val)) = pair.split_once('=') {
-                        vars.insert(name.to_owned(), val.to_owned());
-                    }
-                }
-            }
-            _ => {}
+    let meta = builtin_args();
+    let mut global = meta.clone();
+    for arg in parsed.global_args() {
+        for (name, default) in arg_words(&arg.arguments.value, &global)? {
+            match build_args.get(&name).cloned().or(default) {
+                Some(value) => global.insert(name, value),
+                None => continue,
+            };
         }
     }
-    for (k, v) in build_args {
-        vars.insert(k.clone(), v.clone());
-    }
 
+    let mut stage_envs: HashMap<String, Vars> = HashMap::new();
     let mut paths = Vec::new();
-    for instruction in &parsed.instructions {
-        match instruction {
-            Instruction::Copy(copy) => {
-                let has_from = copy.options.iter().any(|f| &*f.name.value == "from");
-                if has_from {
-                    continue;
-                }
-                for src in &copy.src {
-                    if let parse_dockerfile::Source::Path(p) = src {
-                        let src_path = expand_vars(&p.value, &vars)?;
-                        paths.push(context.join(src_path));
-                    }
-                }
-            }
-            Instruction::Add(add) => {
-                for src in &add.src {
-                    if let parse_dockerfile::Source::Path(p) = src {
-                        let src_path = expand_vars(&p.value, &vars)?;
-                        if src_path.starts_with("http://") || src_path.starts_with("https://") {
-                            continue;
+    for stage in parsed.stages() {
+        let base = expand(&stage.from.image.value, &global)?.to_ascii_lowercase();
+        let mut env = stage_envs.get(&base).cloned().unwrap_or_default();
+        let mut args = Vars::new();
+        for instruction in stage.instructions {
+            // ENV overrides an ARG of the same name.
+            let mut vars = args.clone();
+            vars.extend(env.iter().map(|(name, value)| (name.clone(), value.clone())));
+            match instruction {
+                Instruction::Arg(arg) => {
+                    for (name, default) in arg_words(&arg.arguments.value, &vars)? {
+                        let value = build_args
+                            .get(&name)
+                            .cloned()
+                            .or(default)
+                            .or_else(|| global.get(&name).cloned());
+                        if let Some(value) = value {
+                            args.insert(name, value);
                         }
-                        paths.push(context.join(src_path));
                     }
                 }
+                Instruction::Env(instruction) => env.extend(env_pairs(&instruction.arguments.value, &vars)?),
+                Instruction::Copy(copy) => {
+                    let has_from = copy.options.iter().any(|f| &*f.name.value == "from");
+                    if has_from {
+                        continue;
+                    }
+                    for src in &copy.src {
+                        if let parse_dockerfile::Source::Path(p) = src {
+                            paths.push(context.join(expand(&p.value, &vars)?));
+                        }
+                    }
+                }
+                Instruction::Add(add) => {
+                    for src in &add.src {
+                        if let parse_dockerfile::Source::Path(p) = src {
+                            let src_path = expand(&p.value, &vars)?;
+                            if src_path.starts_with("http://") || src_path.starts_with("https://") {
+                                continue;
+                            }
+                            paths.push(context.join(src_path));
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
+        }
+        if let Some((_, name)) = &stage.from.as_ {
+            stage_envs.insert(name.value.to_ascii_lowercase(), env);
         }
     }
     Ok(paths)
 }
 
-/// Expand `$VAR`, `${VAR}`, `${VAR:-default}`, and `${VAR:+replacement}`
-/// references using the provided variable map.
-/// Returns an error if a variable is unresolved.
-pub fn expand_vars(path: &str, vars: &HashMap<String, String>) -> Result<String, BoxError> {
-    shellexpand::env_with_context(path, |name| -> Result<Option<std::borrow::Cow<'_, str>>, BoxError> {
-        match vars.get(name) {
-            Some(v) => Ok(Some(v.as_str().into())),
-            None => Err(format!("unresolved Dockerfile variable: ${name}").into()),
+/// The names an `ARG` instruction declares, each with its default, if it
+/// gives one, expanded with `vars`. One instruction may declare several.
+fn arg_words(raw: &str, vars: &Vars) -> Result<Vec<(String, Option<String>)>, BoxError> {
+    Ok(words(raw, vars)?
+        .into_iter()
+        .map(|word| match word.split_once('=') {
+            Some((name, default)) => (name.to_owned(), Some(default.to_owned())),
+            None => (word, None),
+        })
+        .collect())
+}
+
+/// The variables an `ENV` instruction sets, expanded with `vars`: any
+/// number of `name=value` words, or the legacy `ENV name value` form,
+/// whose value is the rest of the line.
+fn env_pairs(raw: &str, vars: &Vars) -> Result<Vec<(String, String)>, BoxError> {
+    let raw = raw.trim();
+    let legacy_name = raw.split_whitespace().next().filter(|name| !name.contains('='));
+    if let Some(name) = legacy_name {
+        let value = words(raw[name.len()..].trim(), vars)?.join(" ");
+        return Ok(vec![(name.to_owned(), value)]);
+    }
+    Ok(words(raw, vars)?
+        .into_iter()
+        .filter_map(|word| {
+            word.split_once('=')
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        })
+        .collect())
+}
+
+/// Split `raw` into words as Docker's shell lexer does, expanding variables
+/// with `vars`: single quotes keep their contents literally, double quotes
+/// keep spaces and still expand, and a backslash escapes the next character.
+fn words(raw: &str, vars: &Vars) -> Result<Vec<String>, BoxError> {
+    let mut words = Vec::new();
+    let mut chars = raw.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        if chars.peek().is_none() {
+            return Ok(words);
         }
-    })
-    .map(|s| s.into_owned())
-    .map_err(|e| e.cause)
+        let mut word = String::new();
+        // Text not yet expanded, which is expanded whole so `${…}` spans it.
+        let mut pending = String::new();
+        while let Some(c) = chars.next_if(|c| !c.is_whitespace()) {
+            match c {
+                '\'' => {
+                    word.push_str(&expand(&std::mem::take(&mut pending), vars)?);
+                    word.extend(chars.by_ref().take_while(|&c| c != '\''));
+                }
+                '"' => {
+                    word.push_str(&expand(&std::mem::take(&mut pending), vars)?);
+                    while let Some(c) = chars.next() {
+                        match c {
+                            '"' => break,
+                            '\\' if chars.peek().is_some_and(|next| matches!(next, '"' | '\\' | '$')) => {
+                                word.push_str(&expand(&std::mem::take(&mut pending), vars)?);
+                                word.extend(chars.next());
+                            }
+                            _ => pending.push(c),
+                        }
+                    }
+                    word.push_str(&expand(&std::mem::take(&mut pending), vars)?);
+                }
+                '\\' => {
+                    word.push_str(&expand(&std::mem::take(&mut pending), vars)?);
+                    word.extend(chars.next());
+                }
+                _ => pending.push(c),
+            }
+        }
+        word.push_str(&expand(&pending, vars)?);
+        words.push(word);
+    }
+}
+
+/// Expand `$VAR` and `${VAR}` references using `vars`, with BuildKit's
+/// `${VAR:-word}` and `${VAR-word}` defaults and `${VAR:+word}` and
+/// `${VAR+word}` alternatives; the forms with `:` treat an empty variable
+/// as unset. An unset variable expands to nothing, as in Docker.
+fn expand(text: &str, vars: &Vars) -> Result<String, BoxError> {
+    let is_name = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(dollar) = rest.find('$') {
+        out.push_str(&rest[..dollar]);
+        rest = &rest[dollar + 1..];
+        if let Some(braced) = rest.strip_prefix('{') {
+            let end = braced
+                .find('}')
+                .ok_or_else(|| format!("unterminated variable in {text:?}"))?;
+            let expr = &braced[..end];
+            rest = &braced[end + 1..];
+            let name_end = expr.find(|c| !is_name(c)).unwrap_or(expr.len());
+            let (name, op) = expr.split_at(name_end);
+            let value = vars.get(name);
+            let set = |empty_is_unset: bool| value.is_some_and(|v| !(empty_is_unset && v.is_empty()));
+            let expanded = if op.is_empty() {
+                value.cloned().unwrap_or_default()
+            } else if let Some(word) = op.strip_prefix(":-") {
+                if set(true) {
+                    value.cloned().unwrap_or_default()
+                } else {
+                    expand(word, vars)?
+                }
+            } else if let Some(word) = op.strip_prefix(":+") {
+                if set(true) { expand(word, vars)? } else { String::new() }
+            } else if let Some(word) = op.strip_prefix('-') {
+                if set(false) {
+                    value.cloned().unwrap_or_default()
+                } else {
+                    expand(word, vars)?
+                }
+            } else if let Some(word) = op.strip_prefix('+') {
+                if set(false) { expand(word, vars)? } else { String::new() }
+            } else {
+                return Err(format!("unsupported variable expression ${{{expr}}} in {text:?}").into());
+            };
+            out.push_str(&expanded);
+        } else {
+            let name_end = rest.find(|c| !is_name(c)).unwrap_or(rest.len());
+            if name_end == 0 {
+                out.push('$');
+                continue;
+            }
+            out.push_str(vars.get(&rest[..name_end]).map_or("", String::as_str));
+            rest = &rest[name_end..];
+        }
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// .dockerignore pattern matcher.
@@ -215,32 +352,88 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expand_vars_with_known_var() {
+    fn expand_with_known_var() {
         let vars = HashMap::from([("ARCH".into(), "arm64".into())]);
-        assert_eq!(expand_vars("dist/app-${ARCH}", &vars).unwrap(), "dist/app-arm64");
+        assert_eq!(expand("dist/app-${ARCH}", &vars).unwrap(), "dist/app-arm64");
     }
 
     #[test]
-    fn expand_vars_unbraced() {
+    fn expand_unbraced() {
         let vars = HashMap::from([("ARCH".into(), "amd64".into())]);
-        assert_eq!(expand_vars("dist/app-$ARCH", &vars).unwrap(), "dist/app-amd64");
+        assert_eq!(expand("dist/app-$ARCH", &vars).unwrap(), "dist/app-amd64");
     }
 
     #[test]
-    fn expand_vars_unknown_is_error() {
+    fn expand_unknown_is_empty() {
         let vars = HashMap::new();
-        assert!(expand_vars("dist/app-${TARGETARCH}", &vars).is_err());
+        assert_eq!(expand("dist/app-${TARGETARCH}", &vars).unwrap(), "dist/app-");
+        assert_eq!(expand("dist/${MODE:-release}", &vars).unwrap(), "dist/release");
+        let vars = HashMap::from([("EMPTY".into(), String::new()), ("SET".into(), "s".into())]);
+        assert_eq!(
+            expand("${EMPTY:-d}|${EMPTY-d}|${SET:+alt}|${EMPTY+alt}|$", &vars).unwrap(),
+            "d||alt|alt|$"
+        );
     }
 
     #[test]
-    fn expand_vars_no_vars() {
-        assert_eq!(expand_vars("dist/app", &HashMap::new()).unwrap(), "dist/app");
+    fn expand_no_vars() {
+        assert_eq!(expand("dist/app", &HashMap::new()).unwrap(), "dist/app");
     }
 
     #[test]
-    fn expand_vars_multiple() {
+    fn expand_multiple() {
         let vars = HashMap::from([("OS".into(), "linux".into()), ("ARCH".into(), "arm64".into())]);
-        assert_eq!(expand_vars("${OS}/${ARCH}/bin", &vars).unwrap(), "linux/arm64/bin");
+        assert_eq!(expand("${OS}/${ARCH}/bin", &vars).unwrap(), "linux/arm64/bin");
+    }
+
+    #[test]
+    fn words_follow_shell_quoting() {
+        let vars = HashMap::from([("V".into(), "x".into())]);
+        assert_eq!(
+            words(r#"A="a $V b" B='$V c' C=d\ e D=$V"#, &vars).unwrap(),
+            ["A=a x b", "B=$V c", "C=d e", "D=x"]
+        );
+    }
+
+    fn sources(dockerfile: &str, build_args: &[(&str, &str)]) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Dockerfile"), dockerfile).unwrap();
+        let build_args = build_args.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect();
+        dockerfile_sources(&dir.path().join("Dockerfile"), Path::new(""), &build_args)
+            .unwrap()
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn arg_and_env_take_several_quoted_pairs() {
+        let dockerfile = "FROM alpine\nARG A=\"one\" B=two\nENV C=\"$A dir\" D=${B}\nCOPY $C/x $D/y /app/\n";
+        assert_eq!(sources(dockerfile, &[]), ["one dir/x", "two/y"]);
+        assert_eq!(sources(dockerfile, &[("B", "three")]), ["one dir/x", "three/y"]);
+        assert_eq!(
+            sources("FROM alpine\nENV DIR some dir\nCOPY $DIR /app/\n", &[]),
+            ["some dir"]
+        );
+    }
+
+    #[test]
+    fn variables_are_scoped_to_their_stage() {
+        let dockerfile = concat!(
+            "ARG VERSION=1\n",
+            "FROM alpine AS base\n",
+            "ENV ROOT=base\n",
+            "ARG LOCAL=local\n",
+            "COPY v$VERSION /\n",
+            "FROM base\n",
+            "ARG VERSION\n",
+            "COPY $ROOT/$LOCAL/v$VERSION /\n",
+            "FROM alpine\n",
+            "COPY $ROOT/x /\n",
+        );
+        // A global ARG is unset in a stage until redeclared, ENV is inherited
+        // from the stage built on, and ARG is not.
+        assert_eq!(sources(dockerfile, &[]), ["v", "base//v1", "/x"]);
     }
 
     #[test]
@@ -275,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn dockerfile_unknown_var_is_error() {
+    fn dockerfile_unset_var_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         let dockerfile = dir.path().join("Dockerfile");
         std::fs::write(
@@ -284,7 +477,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(dockerfile_sources(&dockerfile, dir.path(), &HashMap::new()).is_err());
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new()).unwrap();
+        assert_eq!(sources, [dir.path().join("dist/app-")]);
     }
 
     #[test]
