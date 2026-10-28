@@ -50,6 +50,19 @@ fn network_id(name: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// Why the network `prior` recorded must be created again, given the ID of
+/// the network now named `prior.name`, if any. A network removed and
+/// created again under the same name has a new ID, and the containers
+/// attached to the old one are not attached to it, so blocks using the
+/// network's `id` must see the change.
+fn drift(prior: &NetworkState, current_id: Option<&str>) -> Option<&'static str> {
+    match current_id {
+        None => Some("network missing"),
+        Some(id) if id != prior.id => Some("network replaced"),
+        Some(_) => None,
+    }
+}
+
 /// The arguments to `docker` that create the block's network.
 fn create_args(inputs: &NetworkInputs) -> Vec<String> {
     let mut args = vec!["network".to_owned(), "create".to_owned()];
@@ -105,11 +118,11 @@ impl Resource for NetworkResource {
             });
         };
 
-        if network_id(&prior.name).is_none() {
+        if let Some(reason) = drift(prior, network_id(&prior.name).as_deref()) {
             return Ok(PlanResult {
                 action: PlanAction::Create,
                 description: desc,
-                reason: Some("network missing".into()),
+                reason: Some(reason.into()),
             });
         }
 
@@ -262,6 +275,18 @@ mod tests {
         .unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.reason.as_deref(), Some("network missing"));
+    }
+
+    #[test]
+    fn drift_compares_the_recorded_id() {
+        let prior = NetworkState {
+            name: "net".into(),
+            id: "n1".into(),
+            driver: None,
+        };
+        assert_eq!(drift(&prior, Some("n1")), None);
+        assert_eq!(drift(&prior, Some("n2")), Some("network replaced"));
+        assert_eq!(drift(&prior, None), Some("network missing"));
     }
 
     #[test]
