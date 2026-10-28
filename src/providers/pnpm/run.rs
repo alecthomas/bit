@@ -54,6 +54,9 @@ pub(super) fn resolve_inputs<T>(
     if let Some(lf) = &ws.lockfile {
         files.insert(lf.to_string_lossy().into_owned(), tracker.hash_file(lf)?);
     }
+    // Packages commonly extend or load configs at the workspace root, and
+    // which ones cannot be known without running their tools.
+    files.extend(tracker.hash_files(&workspace::top_level_files(&ws.root))?);
 
     let project_dirs = match package {
         // `--filter` selects every project with the name.
@@ -114,7 +117,7 @@ pub struct PnpmRunInputs {
     #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub outputs: Vec<String>,
-    /// Extra input file globs, relative to `dir` (added to the sources of the package and of its `workspace:`, `link:` and `file:` dependencies)
+    /// Extra input file globs, relative to `dir` (added to the files at the workspace root, and the sources of the package and of its `workspace:`, `link:` and `file:` dependencies)
     #[serde(default)]
     pub inputs: Vec<String>,
 }
@@ -385,6 +388,36 @@ mod tests {
         let in_a = resolve(&root.join("packages/a"));
         assert!(tracked(&in_a, "packages/a/src/index.ts"), "{in_a:?}");
         assert!(!tracked(&in_a, "packages/b/src/index.ts"), "{in_a:?}");
+    }
+
+    #[test]
+    fn a_package_script_reads_the_workspace_root_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("package.json"), r#"{ "name": "root" }"#).unwrap();
+        fs::write(root.join("pnpm-workspace.yaml"), "packages:\n  - 'packages/*'\n").unwrap();
+        fs::write(root.join("tsconfig.base.json"), "{}").unwrap();
+        fs::write(root.join(".env"), "").unwrap();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/guide.md"), "").unwrap();
+        fs::create_dir_all(root.join("packages/a")).unwrap();
+        fs::write(root.join("packages/a/package.json"), r#"{ "name": "a" }"#).unwrap();
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            PnpmRunInputs {
+                script: "build".into(),
+                package: Some("a".into()),
+                args: vec![],
+                outputs: vec![],
+                inputs: vec![],
+            },
+        );
+
+        let files = Resource::resolve(&test_resource(), &inputs).unwrap();
+        for config in ["tsconfig.base.json", ".env", "pnpm-workspace.yaml"] {
+            assert!(files.contains_key(&*root.join(config).to_string_lossy()), "{files:?}");
+        }
+        assert!(!files.keys().any(|p| p.ends_with("docs/guide.md")), "{files:?}");
     }
 
     #[test]

@@ -325,16 +325,30 @@ fn scan_dir(dir: &Path, exclude: &[PathBuf], out: &mut Vec<PathBuf>) {
                 continue;
             }
             scan_dir(&path, exclude, out);
-        } else if ft.is_file() {
-            if SKIP_FILE_SUFFIXES.iter().any(|s| name_str.ends_with(s)) {
-                continue;
-            }
-            if name_str == ".DS_Store" {
-                continue;
-            }
+        } else if ft.is_file() && is_source_file(&name_str) {
             out.push(path);
         }
     }
+}
+
+/// Whether a file named `name` may be a source input.
+fn is_source_file(name: &str) -> bool {
+    name != ".DS_Store" && !SKIP_FILE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
+}
+
+/// The files directly in `dir`, such as the configs at a workspace root
+/// that packages extend or load: `tsconfig.base.json`, `.env` files, and
+/// lint and test configs.
+pub fn top_level_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|ft| ft.is_file()))
+        .filter(|entry| is_source_file(&entry.file_name().to_string_lossy()))
+        .map(|entry| entry.path())
+        .collect()
 }
 
 #[cfg(test)]

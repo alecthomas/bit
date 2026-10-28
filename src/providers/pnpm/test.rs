@@ -29,7 +29,7 @@ pub struct PnpmTestInputs {
     /// Additional arguments passed to the script after `--`
     #[serde(default)]
     pub args: Vec<String>,
-    /// Extra input file globs, relative to `dir` (added to the sources of the package and of its `workspace:`, `link:` and `file:` dependencies)
+    /// Extra input file globs, relative to `dir` (added to the files at the workspace root, and the sources of the package and of its `workspace:`, `link:` and `file:` dependencies)
     #[serde(default)]
     pub inputs: Vec<String>,
 }
