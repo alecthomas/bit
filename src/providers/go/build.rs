@@ -23,7 +23,7 @@ pub struct GoBuildInputs {
     #[serde(deserialize_with = "super::package_patterns")]
     #[schema(typ = crate::schema::string_or_list())]
     pub package: Vec<String>,
-    /// Extra flags passed to go build
+    /// Extra flags passed to go build. The files `-o` writes are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. go runs in the directory `-C` names.
     #[serde(default)]
     pub flags: Vec<String>,
     /// Input file glob patterns, relative to `dir` (in addition to Go sources)
@@ -48,12 +48,18 @@ pub struct GoBuildState {
     pub env: GoEnv,
 }
 
-/// The arguments to `go` that compile the block's packages.
+/// The arguments to `go` that compile the block's packages, in
+/// [`super::run_dir`].
 fn build_args(inputs: &GoBuildInputs) -> Vec<String> {
     let mut args = vec!["build".to_owned()];
-    args.extend(inputs.flags.iter().cloned());
+    args.extend(super::run_flags(&inputs.flags));
     args.extend(inputs.package.iter().cloned());
     args
+}
+
+/// The directory `go build` runs in.
+fn go_dir(inputs: &Block<GoBuildInputs>) -> Option<String> {
+    super::run_dir(inputs.dir.as_deref(), &inputs.flags)
 }
 
 pub struct GoBuildResource {
@@ -80,17 +86,22 @@ impl Resource for GoBuildResource {
     }
 
     fn ambient(&self, inputs: &Block<GoBuildInputs>) -> Vec<Ambient> {
-        vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
+        vec![super::toolchain(&inputs.env, go_dir(inputs).as_deref())]
     }
 
     fn resolve(&self, inputs: &Block<GoBuildInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, Tests::Excluded, &inputs.inputs, tracker)
+        super::resolve_go_inputs(
+            &inputs.package,
+            inputs.dir.as_deref(),
+            &inputs.flags,
+            Tests::Excluded,
+            &inputs.inputs,
+            &self.tracker,
+        )
     }
 
     fn plan(&self, inputs: &Block<GoBuildInputs>, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
-        let description = super::display_command("go", &build_args(inputs), inputs.dir.as_deref());
+        let description = super::display_command("go", &build_args(inputs), go_dir(inputs).as_deref());
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -124,7 +135,7 @@ impl Resource for GoBuildResource {
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
-        if let Some(dir) = &inputs.dir {
+        if let Some(dir) = go_dir(inputs) {
             cmd.current_dir(dir);
         }
         inputs.env.apply_to(&mut cmd);
@@ -168,6 +179,10 @@ impl Resource for GoBuildResource {
     fn cache_policy(&self, _inputs: &Block<GoBuildInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
+
+    fn output_keys(&self, inputs: &Block<GoBuildInputs>) -> Vec<String> {
+        super::build_outputs(go_dir(inputs).as_deref(), &inputs.flags)
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +214,22 @@ mod tests {
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "go build -race ./...");
+    }
+
+    #[test]
+    fn output_flag_names_outputs_and_chdir_runs_go_elsewhere() {
+        let inputs = Block::new(
+            Some("svc".into()),
+            GoBuildInputs {
+                package: vec!["./...".into()],
+                flags: vec!["-C".into(), "mod".into(), "-o".into(), "bin/".into()],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
+        assert_eq!(Resource::output_keys(&test_resource(), &inputs), ["svc/mod/bin/"]);
+        assert_eq!(build_args(&inputs), ["build", "-o", "bin/", "./..."]);
+        assert_eq!(go_dir(&inputs).as_deref(), Some("svc/mod"));
     }
 
     #[test]

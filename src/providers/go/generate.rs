@@ -24,7 +24,7 @@ pub struct GoGenerateInputs {
     #[serde(deserialize_with = "super::package_patterns")]
     #[schema(typ = crate::schema::string_or_list())]
     pub package: Vec<String>,
-    /// Extra flags passed to go generate
+    /// Extra flags passed to go generate. The files `-modfile`, `-overlay` and `-pgo` name are tracked as inputs. go runs in the directory `-C` names.
     #[serde(default)]
     pub flags: Vec<String>,
     /// Input file glob patterns, relative to `dir` (in addition to Go sources)
@@ -54,12 +54,18 @@ pub struct GoGenerateState {
     pub env: GoEnv,
 }
 
-/// The arguments to `go` that run the block's generate directives.
+/// The arguments to `go` that run the block's generate directives, in
+/// [`go_dir`].
 fn generate_args(inputs: &GoGenerateInputs) -> Vec<String> {
     let mut args = vec!["generate".to_owned()];
-    args.extend(inputs.flags.iter().cloned());
+    args.extend(super::run_flags(&inputs.flags));
     args.extend(inputs.package.iter().cloned());
     args
+}
+
+/// The directory `go generate` runs in.
+fn go_dir(inputs: &Block<GoGenerateInputs>) -> Option<String> {
+    super::run_dir(inputs.dir.as_deref(), &inputs.flags)
 }
 
 pub struct GoGenerateResource {
@@ -87,14 +93,19 @@ impl Resource for GoGenerateResource {
 
     /// Only the go command: the generators its directives run are unknown.
     fn ambient(&self, inputs: &Block<GoGenerateInputs>) -> Vec<Ambient> {
-        vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
+        vec![super::toolchain(&inputs.env, go_dir(inputs).as_deref())]
     }
 
     fn resolve(&self, inputs: &Block<GoGenerateInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        let dir = inputs.dir.as_deref().map(Path::new);
         // `go generate` also runs directives in `_test.go` files.
-        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &inputs.inputs, tracker)
+        super::resolve_go_inputs(
+            &inputs.package,
+            inputs.dir.as_deref(),
+            &inputs.flags,
+            Tests::Sources,
+            &inputs.inputs,
+            &self.tracker,
+        )
     }
 
     fn plan(
@@ -102,7 +113,7 @@ impl Resource for GoGenerateResource {
         inputs: &Block<GoGenerateInputs>,
         prior_state: Option<&GoGenerateState>,
     ) -> Result<PlanResult, BoxError> {
-        let description = super::display_command("go", &generate_args(inputs), inputs.dir.as_deref());
+        let description = super::display_command("go", &generate_args(inputs), go_dir(inputs).as_deref());
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -136,7 +147,7 @@ impl Resource for GoGenerateResource {
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
-        if let Some(dir) = &inputs.dir {
+        if let Some(dir) = go_dir(inputs) {
             cmd.current_dir(dir);
         }
         inputs.env.apply_to(&mut cmd);

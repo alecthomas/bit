@@ -116,9 +116,14 @@ impl Resource for GoFmtResource {
     }
 
     fn resolve(&self, inputs: &Block<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &[], tracker)
+        super::resolve_go_inputs(
+            &inputs.package,
+            inputs.dir.as_deref(),
+            &[],
+            Tests::Sources,
+            &[],
+            &self.tracker,
+        )
     }
 
     fn plan(&self, inputs: &Block<GoFmtInputs>, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -246,9 +251,14 @@ impl Resource for GoFmtCheckResource {
     }
 
     fn resolve(&self, inputs: &Block<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &[], tracker)
+        super::resolve_go_inputs(
+            &inputs.package,
+            inputs.dir.as_deref(),
+            &[],
+            Tests::Sources,
+            &[],
+            &self.tracker,
+        )
     }
 
     fn plan(&self, inputs: &Block<GoFmtInputs>, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {

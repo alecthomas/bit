@@ -25,7 +25,7 @@ pub struct GoTestInputs {
     #[serde(deserialize_with = "super::package_patterns")]
     #[schema(typ = crate::schema::string_or_list())]
     pub package: Vec<String>,
-    /// Extra flags passed to go test
+    /// Extra flags passed to go test. The profiles `-coverprofile`, `-cpuprofile`, `-memprofile`, `-blockprofile`, `-mutexprofile` and `-trace` write, under `-outputdir`, are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. go runs in the directory `-C` names.
     #[serde(default)]
     pub flags: Vec<String>,
     /// Input file glob patterns, relative to `dir` (in addition to Go sources, and every file in each tested package's directory and its `testdata/`)
@@ -240,11 +240,16 @@ struct Affected {
 /// The packages whose tests depend on a changed path, or `None` to test the
 /// whole pattern.
 fn affected_packages(inputs: &Block<GoTestInputs>, changes: &Changes) -> Result<Option<Affected>, BoxError> {
+    // A profile covers only the packages a run tests, so a narrowed run
+    // would replace it with a partial one.
+    if !profile_outputs(None, &inputs.flags).is_empty() {
+        return Ok(None);
+    }
     let tags = tag_flags(&inputs.flags);
     let affected = super::affected_packages(
         &inputs.package,
         Tests::SourcesAndData,
-        inputs.dir.as_deref(),
+        go_dir(inputs).as_deref(),
         &tags,
         &inputs.env,
         changes,
@@ -257,12 +262,39 @@ fn affected_packages(inputs: &Block<GoTestInputs>, changes: &Changes) -> Result<
     }))
 }
 
-/// The arguments to `go` that test `packages`.
+/// The arguments to `go` that test `packages`, in [`go_dir`].
 fn test_args(inputs: &GoTestInputs, packages: &[String]) -> Vec<String> {
     let mut args = vec!["test".to_owned(), "-json".to_owned()];
-    args.extend(inputs.flags.iter().cloned());
+    args.extend(super::run_flags(&inputs.flags));
     args.extend(packages.iter().cloned());
     args
+}
+
+/// The directory `go test` runs in.
+fn go_dir(inputs: &Block<GoTestInputs>) -> Option<String> {
+    super::run_dir(inputs.dir.as_deref(), &inputs.flags)
+}
+
+/// The profiles `go test` writes because of `flags`, as bit's process sees
+/// them when `go test` runs in `go_dir`. A relative profile path is
+/// relative to `-outputdir`, which is itself relative to `go_dir`.
+fn profile_outputs(go_dir: Option<&str>, flags: &[String]) -> Vec<String> {
+    let output_dir = match super::flag_values(flags, &["outputdir"]).last() {
+        Some(flag) => Some(crate::provider::in_dir(go_dir, flag.value)),
+        None => go_dir.map(str::to_owned),
+    };
+    let profiles = [
+        "coverprofile",
+        "cpuprofile",
+        "memprofile",
+        "blockprofile",
+        "mutexprofile",
+        "trace",
+    ];
+    super::flag_values(flags, &profiles)
+        .into_iter()
+        .map(|flag| crate::provider::in_dir(output_dir.as_deref(), flag.value))
+        .collect()
 }
 
 /// The `-tags` flags among `go test` flags, which `go list` also accepts and
@@ -306,17 +338,22 @@ impl Resource for GoTestResource {
     }
 
     fn ambient(&self, inputs: &Block<GoTestInputs>) -> Vec<Ambient> {
-        vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
+        vec![super::toolchain(&inputs.env, go_dir(inputs).as_deref())]
     }
 
     fn resolve(&self, inputs: &Block<GoTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, Tests::SourcesAndData, &inputs.inputs, tracker)
+        super::resolve_go_inputs(
+            &inputs.package,
+            inputs.dir.as_deref(),
+            &inputs.flags,
+            Tests::SourcesAndData,
+            &inputs.inputs,
+            &self.tracker,
+        )
     }
 
     fn plan(&self, inputs: &Block<GoTestInputs>, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
-        let description = super::display_command("go", &test_args(inputs, &inputs.package), inputs.dir.as_deref());
+        let description = super::display_command("go", &test_args(inputs, &inputs.package), go_dir(inputs).as_deref());
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -363,14 +400,15 @@ impl Resource for GoTestResource {
         }
         let packages = affected.as_ref().map_or(&inputs.package, |affected| &affected.packages);
         let args = test_args(inputs, packages);
-        writer.starting(&super::display_command("go", &args, inputs.dir.as_deref()));
+        let go_dir = go_dir(inputs);
+        writer.starting(&super::display_command("go", &args, go_dir.as_deref()));
         if let Some(Affected { packages, total }) = &affected {
             writer.line(&format!("{} of {total} packages affected", packages.len()));
         }
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
-        if let Some(dir) = &inputs.dir {
+        if let Some(dir) = &go_dir {
             cmd.current_dir(dir);
         }
         inputs.env.apply_to(&mut cmd);
@@ -386,7 +424,7 @@ impl Resource for GoTestResource {
         let verbose = mode == ReportMode::Verbose;
         // Only shortens result lines, so full import paths are shown when the
         // module cannot be read.
-        let module = super::scanner::module_path(inputs.dir.as_deref().map(std::path::Path::new)).ok();
+        let module = super::scanner::module_path(go_dir.as_deref().map(std::path::Path::new)).ok();
         let module = module.as_deref();
         let mut result = TestJsonResult {
             passed: true,
@@ -450,6 +488,10 @@ impl Resource for GoTestResource {
 
     fn cache_policy(&self, _inputs: &Block<GoTestInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
+    }
+
+    fn output_keys(&self, inputs: &Block<GoTestInputs>) -> Vec<String> {
+        profile_outputs(go_dir(inputs).as_deref(), &inputs.flags)
     }
 }
 
@@ -544,6 +586,31 @@ mod tests {
         assert_eq!(affected(&["go.mod"]).unwrap().len(), 3);
         assert_eq!(affected(&["lib/removed.go"]), None);
         assert!(affected_packages(&inputs, &Changes::All).unwrap().is_none());
+    }
+
+    #[test]
+    fn profiles_are_outputs_under_the_output_dir() {
+        let flags: Vec<String> = ["-coverprofile=cover.out", "-cpuprofile", "/tmp/cpu.out"]
+            .map(String::from)
+            .into();
+        assert_eq!(profile_outputs(Some("svc"), &flags), ["svc/cover.out", "/tmp/cpu.out"]);
+        let flags: Vec<String> = ["-outputdir", "prof", "-trace=trace.out"].map(String::from).into();
+        assert_eq!(profile_outputs(Some("svc"), &flags), ["svc/prof/trace.out"]);
+
+        let inputs = Block::new(
+            Some("svc".into()),
+            GoTestInputs {
+                package: vec!["./...".into()],
+                flags: vec!["-C".into(), "mod".into(), "-coverprofile=cover.out".into()],
+                inputs: vec![],
+                report: ReportMode::default(),
+                env: GoEnv::default(),
+            },
+        );
+        assert_eq!(Resource::output_keys(&test_resource(), &inputs), ["svc/mod/cover.out"]);
+        // A narrowed run would write a profile of only the packages it tests.
+        let changes = Changes::Paths(["svc/mod/lib.go".into()].into());
+        assert!(affected_packages(&inputs, &changes).unwrap().is_none());
     }
 
     #[test]

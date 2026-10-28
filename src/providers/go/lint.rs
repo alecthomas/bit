@@ -156,10 +156,11 @@ impl Resource for GoLintResource {
 
     fn resolve(&self, inputs: &Block<GoLintInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
-        let dir = inputs.dir.as_deref().map(Path::new);
+        let dir = inputs.dir.as_deref();
         // golangci-lint lints tests by default; tracking them when disabled only costs a rerun.
-        let mut files = super::resolve_go_inputs(&inputs.package, dir, Tests::Sources, &inputs.inputs, tracker)?;
-        let lint_dir = std::env::current_dir()?.join(dir.unwrap_or(Path::new("")));
+        // Its flags are not the go command's, so none name files to track.
+        let mut files = super::resolve_go_inputs(&inputs.package, dir, &[], Tests::Sources, &inputs.inputs, tracker)?;
+        let lint_dir = std::env::current_dir()?.join(dir.unwrap_or(""));
         let home = dirs::home_dir();
         // golangci-lint searches for its config from the first package only.
         for path in golangci_config_files(&lint_dir, &inputs.package[0], home.as_deref()) {

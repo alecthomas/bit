@@ -28,7 +28,7 @@ pub struct GoExeInputs {
     /// Output binary path, relative to `dir` (defaults to the name `go build` gives it: the last element of the package's import path)
     #[serde(default)]
     pub output: Option<String>,
-    /// Extra flags passed to go build
+    /// Extra flags passed to go build, except `-o`, which `output` sets. The files `-modfile`, `-overlay` and `-pgo` name are tracked as inputs. go runs in the directory `-C` names.
     #[serde(default)]
     pub flags: Vec<String>,
     /// Input file glob patterns, relative to `dir` (in addition to Go sources)
@@ -77,11 +77,12 @@ impl GoExeResource {
         inputs.output.clone().unwrap_or_else(|| {
             let package = &inputs.package;
             let import_path = if package.starts_with('.') {
-                let dir = inputs.dir.as_deref().map(Path::new);
+                let go_dir = Self::go_dir(inputs);
+                let dir = go_dir.as_deref().map(Path::new);
                 // Without a module `go build` fails, so only the output key
                 // matters, and it must not name a directory such as `.`.
                 scanner::package_import_path(dir, package).unwrap_or_else(|_| {
-                    let pkg_dir = Path::new(inputs.dir.as_deref().unwrap_or(".")).join(package);
+                    let pkg_dir = dir.unwrap_or(Path::new(".")).join(package);
                     let pkg_dir = pkg_dir.canonicalize().unwrap_or(pkg_dir);
                     pkg_dir
                         .components()
@@ -99,12 +100,18 @@ impl GoExeResource {
         })
     }
 
-    /// The arguments to `go` that build the binary to `output`.
+    /// The arguments to `go` that build the binary to `output`, in
+    /// [`GoExeResource::go_dir`].
     fn build_args(inputs: &GoExeInputs, output: &str) -> Vec<String> {
         let mut args = vec!["build".to_owned(), "-o".to_owned(), output.to_owned()];
-        args.extend(inputs.flags.iter().cloned());
+        args.extend(super::run_flags(&inputs.flags));
         args.push(inputs.package.clone());
         args
+    }
+
+    /// The directory `go build` runs in.
+    fn go_dir(inputs: &Block<GoExeInputs>) -> Option<String> {
+        super::run_dir(inputs.dir.as_deref(), &inputs.flags)
     }
 
     fn state_for(inputs: &GoExeInputs, output: String) -> GoExeState {
@@ -147,25 +154,32 @@ impl Resource for GoExeResource {
     }
 
     fn ambient(&self, inputs: &Block<GoExeInputs>) -> Vec<Ambient> {
-        vec![super::toolchain(&inputs.env, inputs.dir.as_deref())]
+        vec![super::toolchain(&inputs.env, GoExeResource::go_dir(inputs).as_deref())]
     }
 
     fn resolve(&self, inputs: &Block<GoExeInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let tracker = &*self.tracker;
-        let dir = inputs.dir.as_deref().map(Path::new);
         super::resolve_go_inputs(
             std::slice::from_ref(&inputs.package),
-            dir,
+            inputs.dir.as_deref(),
+            &inputs.flags,
             Tests::Excluded,
             &inputs.inputs,
-            tracker,
+            &self.tracker,
         )
     }
 
     fn plan(&self, inputs: &Block<GoExeInputs>, prior_state: Option<&GoExeState>) -> Result<PlanResult, BoxError> {
+        // bit writes the binary where `output` says and tracks it there, so
+        // a second `-o` would move it out from under the block.
+        if !super::flag_values(&inputs.flags, &["o"]).is_empty() {
+            return Err("`flags` must not contain `-o`: set `output` instead".into());
+        }
         let output = GoExeResource::output_path(inputs);
-        let description =
-            super::display_command("go", &GoExeResource::build_args(inputs, &output), inputs.dir.as_deref());
+        let description = super::display_command(
+            "go",
+            &GoExeResource::build_args(inputs, &output),
+            GoExeResource::go_dir(inputs).as_deref(),
+        );
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -213,7 +227,7 @@ impl Resource for GoExeResource {
 
         let mut cmd = Command::new("go");
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
-        if let Some(dir) = &inputs.dir {
+        if let Some(dir) = GoExeResource::go_dir(inputs) {
             cmd.current_dir(dir);
         }
         inputs.env.apply_to(&mut cmd);
@@ -353,6 +367,22 @@ mod tests {
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "go build -o bin/app -trimpath ./cmd/app");
+    }
+
+    #[test]
+    fn plan_rejects_an_output_flag() {
+        let inputs = Block::new(
+            None,
+            GoExeInputs {
+                package: "./cmd/app".into(),
+                output: None,
+                flags: vec!["-o=bin/app".into()],
+                inputs: vec![],
+                env: GoEnv::default(),
+            },
+        );
+        let error = Resource::plan(&test_resource(), &inputs, None).unwrap_err();
+        assert!(error.to_string().contains("set `output` instead"), "{error}");
     }
 
     #[test]

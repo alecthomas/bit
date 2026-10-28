@@ -72,26 +72,148 @@ where
 }
 
 /// Scan Go source files for package patterns and return hashed inputs,
-/// together with the files matching the block's extra `inputs` globs.
+/// together with the files the go command `flags` name and the files
+/// matching the block's extra `inputs` globs.
 ///
-/// `dir`, when set, is the working directory where `go` would be invoked — the
-/// scanner walks up from there to locate `go.mod`. Required for blocks that
-/// build a separate Go module via the `dir` field; `None` starts from bit's CWD.
-/// The `inputs` globs are relative to `dir`, as in every other block.
+/// `dir` is the block's `dir`. The go command runs there, or where a `-C`
+/// flag moves it, and the scanner walks up from there to locate `go.mod`.
+/// `None` starts from bit's CWD. The `inputs` globs are relative to `dir`,
+/// as in every other block.
 pub fn resolve_go_inputs(
     patterns: &[String],
-    dir: Option<&Path>,
+    dir: Option<&str>,
+    flags: &[String],
     tests: Tests,
     inputs: &[String],
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let files: Vec<_> = scanner::scan(patterns, tests, dir)?.into_iter().collect();
+    let go_dir = run_dir(dir, flags);
+    let mut files: Vec<_> = scanner::scan(patterns, tests, go_dir.as_deref().map(Path::new))?
+        .into_iter()
+        .collect();
+    files.extend(flag_inputs(go_dir.as_deref(), flags));
     let mut hashes = tracker.hash_files(&files)?;
-    let dir = dir.map(|dir| dir.to_string_lossy());
     for pattern in inputs {
-        hashes.extend(tracker.hash_glob(&crate::provider::glob_in_dir(dir.as_deref(), pattern))?);
+        hashes.extend(tracker.hash_glob(&crate::provider::glob_in_dir(dir, pattern))?);
     }
     Ok(hashes)
+}
+
+/// A go command flag that takes a value, as a block's `flags` give it.
+struct FlagValue<'a> {
+    name: &'a str,
+    value: &'a str,
+    /// The indices of the arguments it spans: the flag, and its value when
+    /// that is a separate argument.
+    args: std::ops::Range<usize>,
+}
+
+/// The flags among `flags` named in `names`, each given as `-name value`
+/// or `-name=value`, with one or two dashes. Every name must be a flag that
+/// takes a value, so the argument after it is its value.
+fn flag_values<'a>(flags: &'a [String], names: &[&str]) -> Vec<FlagValue<'a>> {
+    let mut found = Vec::new();
+    let mut next = 0;
+    while next < flags.len() {
+        let start = next;
+        let arg = &flags[next];
+        next += 1;
+        let Some(flag) = arg.strip_prefix("--").or_else(|| arg.strip_prefix('-')) else {
+            continue;
+        };
+        let (name, inline) = match flag.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (flag, None),
+        };
+        if !names.contains(&name) {
+            continue;
+        }
+        let value = match inline {
+            Some(value) => value,
+            None => match flags.get(next) {
+                Some(value) => {
+                    next += 1;
+                    value.as_str()
+                }
+                None => break,
+            },
+        };
+        found.push(FlagValue {
+            name,
+            value,
+            args: start..next,
+        });
+    }
+    found
+}
+
+/// The directory the go command runs in: the block's `dir`, changed by a
+/// `-C` flag. bit applies `-C` itself, by running the go command there,
+/// because the go command accepts `-C` only as its first flag and bit
+/// places its own flags ahead of the block's.
+fn run_dir(dir: Option<&str>, flags: &[String]) -> Option<String> {
+    match flag_values(flags, &["C"]).last() {
+        Some(chdir) => Some(crate::provider::in_dir(dir, chdir.value)),
+        None => dir.map(str::to_owned),
+    }
+}
+
+/// `flags` without the `-C` flags [`run_dir`] applies.
+fn run_flags(flags: &[String]) -> Vec<String> {
+    let chdirs = flag_values(flags, &["C"]);
+    flags
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !chdirs.iter().any(|chdir| chdir.args.contains(index)))
+        .map(|(_, flag)| flag.clone())
+        .collect()
+}
+
+/// The files the go command reads because of `flags`, as bit's process
+/// sees them when the go command runs in `go_dir`: the `-modfile` and the
+/// `.sum` file beside it, the `-overlay` config and the files it
+/// substitutes, and the profile `-pgo` names.
+fn flag_inputs(go_dir: Option<&str>, flags: &[String]) -> Vec<PathBuf> {
+    let path = |value: &str| PathBuf::from(crate::provider::in_dir(go_dir, value));
+    let mut files = Vec::new();
+    for flag in flag_values(flags, &["modfile", "overlay", "pgo"]) {
+        match flag.name {
+            "modfile" => {
+                files.push(path(flag.value));
+                let stem = flag.value.strip_suffix(".mod").unwrap_or(flag.value);
+                files.push(path(&format!("{stem}.sum")));
+            }
+            "overlay" => {
+                files.push(path(flag.value));
+                let replacements = std::fs::read_to_string(path(flag.value))
+                    .ok()
+                    .and_then(|config| serde_json::from_str::<serde_json::Value>(&config).ok());
+                let replacements = replacements.as_ref().and_then(|config| config["Replace"].as_object());
+                // An empty replacement deletes the file rather than naming one.
+                files.extend(
+                    replacements
+                        .into_iter()
+                        .flat_map(|replace| replace.values())
+                        .filter_map(|target| target.as_str().filter(|target| !target.is_empty()))
+                        .map(path),
+                );
+            }
+            _ if flag.value != "auto" && flag.value != "off" => files.push(path(flag.value)),
+            _ => {}
+        }
+    }
+    files
+}
+
+/// The files and directories `go build` writes because of `-o` in `flags`,
+/// as bit's process sees them when the go command runs in `go_dir`. Writing
+/// to the null device discards the binary, so it names no output.
+fn build_outputs(go_dir: Option<&str>, flags: &[String]) -> Vec<String> {
+    flag_values(flags, &["o"])
+        .into_iter()
+        .filter(|flag| flag.value != "/dev/null" && !flag.value.eq_ignore_ascii_case("NUL"))
+        .map(|flag| crate::provider::in_dir(go_dir, flag.value))
+        .collect()
 }
 
 /// `paths` shortened for display in a start line: project-relative, as the
@@ -441,6 +563,66 @@ mod tests {
         let args = ["test", "-json", "example.com/m/lib", "example.com/other"].map(String::from);
         let line = display_command("go", &args, dir.path().to_str());
         assert_eq!(line, "go test -json ./lib example.com/other");
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    #[test]
+    fn flag_values_read_every_spelling() {
+        let flags = strings(&[
+            "-race",
+            "-C",
+            "svc",
+            "--modfile=alt.mod",
+            "-pgo",
+            "off",
+            "-ldflags=-o x",
+        ]);
+        let values: Vec<_> = flag_values(&flags, &["C", "modfile", "pgo", "o"])
+            .into_iter()
+            .map(|flag| (flag.name, flag.value, flag.args))
+            .collect();
+        assert_eq!(
+            values,
+            [("C", "svc", 1..3), ("modfile", "alt.mod", 3..4), ("pgo", "off", 4..6)]
+        );
+    }
+
+    #[test]
+    fn chdir_moves_the_go_command_and_leaves_the_flags() {
+        let flags = strings(&["-C", "svc", "-trimpath", "-C=cmd"]);
+        assert_eq!(run_dir(Some("app"), &flags).as_deref(), Some("app/cmd"));
+        assert_eq!(run_dir(None, &strings(&["-C", "svc"])).as_deref(), Some("svc"));
+        assert_eq!(run_dir(Some("app"), &[]).as_deref(), Some("app"));
+        assert_eq!(run_flags(&flags), ["-trimpath"]);
+    }
+
+    #[test]
+    fn flag_inputs_follow_the_files_flags_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        std::fs::write(
+            dir.path().join("overlay.json"),
+            r#"{"Replace": {"a.go": "gen/a.go", "b.go": ""}}"#,
+        )
+        .unwrap();
+        let flags = strings(&["-modfile=tools.mod", "-overlay", "overlay.json", "-pgo=cpu.pprof"]);
+        let files = flag_inputs(Some(&root), &flags);
+        let expected: Vec<PathBuf> = ["tools.mod", "tools.sum", "overlay.json", "gen/a.go", "cpu.pprof"]
+            .iter()
+            .map(|name| dir.path().join(name))
+            .collect();
+        assert_eq!(files, expected);
+        assert!(flag_inputs(None, &strings(&["-pgo=auto", "-pgo", "off"])).is_empty());
+    }
+
+    #[test]
+    fn build_outputs_are_relative_to_the_go_command() {
+        let flags = strings(&["-o", "bin/", "-o=/dev/null"]);
+        assert_eq!(build_outputs(Some("svc"), &flags), ["svc/bin/"]);
+        assert!(build_outputs(None, &[]).is_empty());
     }
 
     #[test]

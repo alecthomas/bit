@@ -831,7 +831,7 @@ block = exec.test {
 block = go.exe {
   package = string    # Go package to build (e.g. "./cmd/myapp")
   output = string?    # Output binary path, relative to `dir` (defaults to the name `go build` gives it: the last element of the package's import path)
-  flags = [string]?   # Extra flags passed to go build
+  flags = [string]?   # Extra flags passed to go build, except `-o`, which `output` sets. The files `-modfile`, `-overlay` and `-pgo` name are tracked as inputs. go runs in the directory `-C` names.
   inputs = [string]?  # Input file glob patterns, relative to `dir` (in addition to Go sources)
   goos = string?      # Target OS
   goarch = string?    # Target architecture
@@ -850,7 +850,7 @@ block = go.exe {
 ```bit
 block = go.build {
   package = string | [string]  # Go package pattern or list of patterns (e.g. "./...")
-  flags = [string]?            # Extra flags passed to go build
+  flags = [string]?            # Extra flags passed to go build. The files `-o` writes are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. go runs in the directory `-C` names.
   inputs = [string]?           # Input file glob patterns, relative to `dir` (in addition to Go sources)
   goos = string?               # Target OS
   goarch = string?             # Target architecture
@@ -863,7 +863,7 @@ block = go.build {
 ```bit
 block = go.generate {
   package = string | [string]  # Go package pattern or list of patterns (e.g. "./...")
-  flags = [string]?            # Extra flags passed to go generate
+  flags = [string]?            # Extra flags passed to go generate. The files `-modfile`, `-overlay` and `-pgo` name are tracked as inputs. go runs in the directory `-C` names.
   inputs = [string]?           # Input file glob patterns, relative to `dir` (in addition to Go sources)
   outputs = [string]?          # Output file paths produced by generate commands, relative to `dir`
   goos = string?               # Target OS
@@ -877,7 +877,7 @@ block = go.generate {
 ```bit
 block = go.test {
   package = string | [string]           # Go package pattern or list of patterns (e.g. "./...")
-  flags = [string]?                     # Extra flags passed to go test
+  flags = [string]?                     # Extra flags passed to go test. The profiles `-coverprofile`, `-cpuprofile`, `-memprofile`, `-blockprofile`, `-mutexprofile` and `-trace` write, under `-outputdir`, are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. go runs in the directory `-C` names.
   inputs = [string]?                    # Input file glob patterns, relative to `dir` (in addition to Go sources, and every file in each tested package's directory and its `testdata/`)
   report = ("suites" | "tests" | "verbose")?  # What to show: a line per package (`suites`), a line per test (`tests`), or a line per test plus go's output as it arrives (`verbose`). Outside `verbose`, go's output is shown only on failure.
   goos = string?                        # Target OS
