@@ -633,7 +633,7 @@ output version = app.version
 block = buf.generate {
   input = string?     # Buf input, relative to `dir` (defaults to the workspace in `dir`)
   template = string?  # Generation template path relative to `dir`, or inline YAML or JSON (defaults to "buf.gen.yaml")
-  flags = [string]?   # Extra flags passed to buf generate
+  flags = [string]?   # Extra flags passed to buf generate. A config file `--config` names is tracked as an input.
 }
 ```
 
@@ -648,7 +648,7 @@ block = buf.generate {
 ```bit
 block = buf.lint {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
-  flags = [string]?  # Extra flags passed to buf lint
+  flags = [string]?  # Extra flags passed to buf lint. A config file `--config` names is tracked as an input.
 }
 ```
 
@@ -663,7 +663,7 @@ block = buf.lint {
 ```bit
 block = buf.format {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
-  flags = [string]?  # Extra flags passed to buf format
+  flags = [string]?  # Extra flags passed to buf format. A config file `--config` names is tracked as an input.
 }
 ```
 
@@ -672,7 +672,7 @@ block = buf.format {
 ```bit
 block = buf.format-check {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
-  flags = [string]?  # Extra flags passed to buf format
+  flags = [string]?  # Extra flags passed to buf format. A config file `--config` names is tracked as an input.
 }
 ```
 
@@ -688,7 +688,7 @@ block = buf.format-check {
 block = buf.breaking {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
   against = string   # Baseline input to compare against (e.g. ".git#branch=main")
-  flags = [string]?  # Extra flags passed to buf breaking
+  flags = [string]?  # Extra flags passed to buf breaking. A config file `--config` names is tracked as an input.
 }
 ```
 

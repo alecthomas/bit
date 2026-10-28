@@ -17,7 +17,7 @@ use super::BufTarget;
 pub struct BufFormatInputs {
     #[serde(flatten)]
     pub target: BufTarget,
-    /// Extra flags passed to buf format
+    /// Extra flags passed to buf format. A config file `--config` names is tracked as an input.
     #[serde(default)]
     pub flags: Vec<String>,
 }
@@ -73,7 +73,10 @@ impl Resource for BufFormatResource {
     }
 
     fn resolve(&self, inputs: &Block<BufFormatInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        inputs.target.sources(inputs.dir.as_deref())?.hash(&self.tracker)
+        inputs
+            .target
+            .sources(inputs.dir.as_deref(), &inputs.flags)?
+            .hash(&self.tracker)
     }
 
     fn ambient(&self, inputs: &Block<BufFormatInputs>) -> Vec<Ambient> {
@@ -146,7 +149,10 @@ impl Resource for BufFormatCheckResource {
     }
 
     fn resolve(&self, inputs: &Block<BufFormatInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        inputs.target.sources(inputs.dir.as_deref())?.hash(&self.tracker)
+        inputs
+            .target
+            .sources(inputs.dir.as_deref(), &inputs.flags)?
+            .hash(&self.tracker)
     }
 
     fn ambient(&self, inputs: &Block<BufFormatInputs>) -> Vec<Ambient> {

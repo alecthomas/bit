@@ -20,7 +20,7 @@ pub struct BufBreakingInputs {
     pub target: BufTarget,
     /// Baseline input to compare against (e.g. ".git#branch=main")
     pub against: String,
-    /// Extra flags passed to buf breaking
+    /// Extra flags passed to buf breaking. A config file `--config` names is tracked as an input.
     #[serde(default)]
     pub flags: Vec<String>,
 }
@@ -114,13 +114,13 @@ impl Resource for BufBreakingResource {
     /// tracked by the commit it names, in `plan`.
     fn resolve(&self, inputs: &Block<BufBreakingInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let dir = inputs.dir.as_deref();
-        let mut sources = inputs.target.sources(dir)?;
+        let mut sources = inputs.target.sources(dir, &inputs.flags)?;
         sources.add_input(dir, &inputs.against)?;
         sources.hash(&self.tracker)
     }
 
     fn ambient(&self, inputs: &Block<BufBreakingInputs>) -> Vec<Ambient> {
-        inputs.target.check_ambient(inputs.dir.as_deref())
+        inputs.target.check_ambient(inputs.dir.as_deref(), &inputs.flags)
     }
 
     fn plan(

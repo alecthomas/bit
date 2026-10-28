@@ -43,16 +43,20 @@ impl BufTarget {
     }
 
     /// The `.proto` sources and buf configuration the command reads for its
-    /// input, which defaults to the workspace in `dir`.
-    fn sources(&self, dir: Option<&str>) -> Result<Sources, BoxError> {
+    /// input, which defaults to the workspace in `dir`, and the config file
+    /// `--config` in `flags` names.
+    fn sources(&self, dir: Option<&str>, flags: &[String]) -> Result<Sources, BoxError> {
         let mut sources = Sources::default();
         sources.add_input(dir, self.input.as_deref().unwrap_or("."))?;
+        if let Some(config) = config_file(dir, flags) {
+            sources.add_config(config);
+        }
         Ok(sources)
     }
 
-    /// buf and the check plugins the input's `buf.yaml` names, which lint
-    /// and breaking change checks run.
-    fn check_ambient(&self, dir: Option<&str>) -> Vec<Ambient> {
+    /// buf and the check plugins the input's `buf.yaml`, or the config
+    /// `--config` names, lists, which lint and breaking change checks run.
+    fn check_ambient(&self, dir: Option<&str>, flags: &[String]) -> Vec<Ambient> {
         #[derive(Deserialize)]
         struct Config {
             #[serde(default)]
@@ -66,7 +70,7 @@ impl BufTarget {
         let mut tools = vec![buf(dir)];
         // An input or configuration that cannot be read fails the buf
         // command itself.
-        let Ok(sources) = self.sources(dir) else {
+        let Ok(sources) = self.sources(dir, flags) else {
             return tools;
         };
         for path in sources.buf_yamls() {
@@ -80,6 +84,34 @@ impl BufTarget {
         }
         tools
     }
+}
+
+/// The last value given for `--long` or `-short` in `flags`, in any of the
+/// spellings the buf CLI accepts.
+fn flag_value<'a>(flags: &'a [String], long: &str, short: Option<&str>) -> Option<&'a str> {
+    let long = format!("--{long}");
+    let short = short.map(|short| format!("-{short}"));
+    let mut value = None;
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        if *flag == long || short.as_ref() == Some(flag) {
+            value = flags.next().map(String::as_str);
+        } else if let Some(rest) = flag.strip_prefix(&long).and_then(|rest| rest.strip_prefix('=')) {
+            value = Some(rest);
+        } else if let Some(rest) = short.as_deref().and_then(|short| flag.strip_prefix(short)) {
+            value = Some(rest.strip_prefix('=').unwrap_or(rest));
+        }
+    }
+    value
+}
+
+/// The config file `--config` in `flags` names, relative to `dir`. buf
+/// takes the value as a path when it ends in `.yaml`, `.yml` or `.json`,
+/// and as the configuration itself otherwise.
+fn config_file(dir: Option<&str>, flags: &[String]) -> Option<std::path::PathBuf> {
+    let config = flag_value(flags, "config", None)?;
+    let extension = std::path::Path::new(config).extension().and_then(|ext| ext.to_str());
+    matches!(extension, Some("yaml" | "yml" | "json")).then(|| super::in_dir(dir, config))
 }
 
 /// The buf CLI's version, as run in `dir`.
@@ -175,7 +207,7 @@ mod tests {
             input: Some("proto/acme".into()),
         };
         let resolved = target
-            .sources(Some(&root.to_string_lossy()))
+            .sources(Some(&root.to_string_lossy()), &[])
             .unwrap()
             .hash(&FileTracker::default())
             .unwrap();
@@ -199,7 +231,7 @@ mod tests {
         .unwrap();
         let proto = root.join("proto").to_string_lossy().into_owned();
         assert_eq!(
-            BufTarget::default().check_ambient(Some(&proto)),
+            BufTarget::default().check_ambient(Some(&proto), &[]),
             [
                 crate::providers::version("buf", &["--version"], Some(&proto)),
                 Ambient::Executable("buf-plugin-a".into()),
@@ -218,7 +250,7 @@ mod tests {
         .unwrap();
         let root = root.to_string_lossy().into_owned();
         assert_eq!(
-            BufTarget::default().check_ambient(Some(&root)),
+            BufTarget::default().check_ambient(Some(&root), &[]),
             [
                 crate::providers::version("buf", &["--version"], Some(&root)),
                 Ambient::Executable("buf-plugin-a".into()),
@@ -234,13 +266,47 @@ mod tests {
         std::fs::create_dir_all(root.join("other")).unwrap();
         std::fs::write(root.join("other/b.proto"), "").unwrap();
         let resolved = BufTarget::default()
-            .sources(Some(&root.to_string_lossy()))
+            .sources(Some(&root.to_string_lossy()), &[])
             .unwrap()
             .hash(&FileTracker::default())
             .unwrap();
         assert!(
             resolved.keys().any(|path| path.ends_with("other/b.proto")),
             "{resolved:?}"
+        );
+    }
+
+    #[test]
+    fn a_config_file_named_by_flag_is_tracked_and_read_for_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("ci")).unwrap();
+        std::fs::write(
+            root.join("ci/buf.lint.yaml"),
+            "version: v2\nplugins:\n  - plugin: buf-plugin-ci\n",
+        )
+        .unwrap();
+        let root = root.to_string_lossy().into_owned();
+        let flags = ["--config".to_owned(), "ci/buf.lint.yaml".to_owned()];
+
+        let resolved = BufTarget::default()
+            .sources(Some(&root), &flags)
+            .unwrap()
+            .hash(&FileTracker::default())
+            .unwrap();
+        assert!(
+            resolved.keys().any(|path| path.ends_with("ci/buf.lint.yaml")),
+            "{resolved:?}"
+        );
+        assert!(
+            BufTarget::default()
+                .check_ambient(Some(&root), &flags)
+                .contains(&Ambient::Executable("buf-plugin-ci".into()))
+        );
+        // Inline configuration names no file.
+        assert_eq!(
+            config_file(Some(&root), &["--config={\"version\":\"v2\"}".to_owned()]),
+            None
         );
     }
 }

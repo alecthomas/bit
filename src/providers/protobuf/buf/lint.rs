@@ -17,7 +17,7 @@ use super::BufTarget;
 pub struct BufLintInputs {
     #[serde(flatten)]
     pub target: BufTarget,
-    /// Extra flags passed to buf lint
+    /// Extra flags passed to buf lint. A config file `--config` names is tracked as an input.
     #[serde(default)]
     pub flags: Vec<String>,
 }
@@ -59,11 +59,14 @@ impl Resource for BufLintResource {
     }
 
     fn resolve(&self, inputs: &Block<BufLintInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        inputs.target.sources(inputs.dir.as_deref())?.hash(&self.tracker)
+        inputs
+            .target
+            .sources(inputs.dir.as_deref(), &inputs.flags)?
+            .hash(&self.tracker)
     }
 
     fn ambient(&self, inputs: &Block<BufLintInputs>) -> Vec<Ambient> {
-        inputs.target.check_ambient(inputs.dir.as_deref())
+        inputs.target.check_ambient(inputs.dir.as_deref(), &inputs.flags)
     }
 
     fn plan(&self, inputs: &Block<BufLintInputs>, prior_state: Option<&BufLintInputs>) -> Result<PlanResult, BoxError> {

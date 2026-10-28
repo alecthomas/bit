@@ -24,7 +24,7 @@ pub struct BufGenerateInputs {
     /// Generation template path relative to `dir`, or inline YAML or JSON (defaults to "buf.gen.yaml")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-    /// Extra flags passed to buf generate
+    /// Extra flags passed to buf generate. A config file `--config` names is tracked as an input.
     #[serde(default)]
     pub flags: Vec<String>,
 }
@@ -77,9 +77,12 @@ impl Block<BufGenerateInputs> {
                 for path in inputs.iter().filter_map(TemplateInput::path) {
                     sources.add_input(self.dir.as_deref(), path)?;
                 }
+                if let Some(config) = super::config_file(self.dir.as_deref(), &self.flags) {
+                    sources.add_config(config);
+                }
                 sources
             }
-            None => self.target.sources(self.dir.as_deref())?,
+            None => self.target.sources(self.dir.as_deref(), &self.flags)?,
         };
         if let Some(path) = self.template_file() {
             sources.add_file(path);
@@ -91,7 +94,7 @@ impl Block<BufGenerateInputs> {
     /// buf prefixes each with `--output`, even an absolute one.
     fn outputs(&self) -> Result<Vec<PathBuf>, BoxError> {
         let dir = self.dir.as_deref();
-        let base = flag_value(&self.flags, "output", "o").filter(|base| !base.is_empty() && *base != ".");
+        let base = super::flag_value(&self.flags, "output", Some("o")).filter(|base| !base.is_empty() && *base != ".");
         Ok(self
             .read_template()?
             .plugins
@@ -164,25 +167,6 @@ impl TemplateInput {
         .into_iter()
         .find_map(Option::as_deref)
     }
-}
-
-/// The last value given for `--long` or `-short` in `flags`, in any of the
-/// spellings the buf CLI accepts.
-fn flag_value<'a>(flags: &'a [String], long: &str, short: &str) -> Option<&'a str> {
-    let long = format!("--{long}");
-    let short = format!("-{short}");
-    let mut value = None;
-    let mut flags = flags.iter();
-    while let Some(flag) = flags.next() {
-        if *flag == long || *flag == short {
-            value = flags.next().map(String::as_str);
-        } else if let Some(rest) = flag.strip_prefix(&long).and_then(|rest| rest.strip_prefix('=')) {
-            value = Some(rest);
-        } else if let Some(rest) = flag.strip_prefix(&short) {
-            value = Some(rest.strip_prefix('=').unwrap_or(rest));
-        }
-    }
-    value
 }
 
 #[derive(Deserialize)]

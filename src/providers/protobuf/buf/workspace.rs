@@ -47,6 +47,9 @@ pub(super) struct Sources {
     proto_roots: Vec<PathBuf>,
     /// Files buf reads, hashed when they exist.
     files: Vec<PathBuf>,
+    /// Config files named by `--config`, which buf reads as it would a
+    /// `buf.yaml`.
+    configs: Vec<PathBuf>,
 }
 
 impl Sources {
@@ -77,11 +80,19 @@ impl Sources {
         self.files.push(path);
     }
 
-    /// The module and workspace `buf.yaml` files found.
+    /// Add a config file named by `--config`.
+    pub(super) fn add_config(&mut self, path: PathBuf) {
+        self.files.push(path.clone());
+        self.configs.push(path);
+    }
+
+    /// The module and workspace `buf.yaml` files found, and any `--config`
+    /// file.
     pub(super) fn buf_yamls(&self) -> impl Iterator<Item = &Path> {
         self.files
             .iter()
             .filter(|path| path.file_name().is_some_and(|name| name == BUF_YAML[0]))
+            .chain(&self.configs)
             .map(PathBuf::as_path)
     }
 
