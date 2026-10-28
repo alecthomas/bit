@@ -433,6 +433,25 @@ impl Resource for ImageResource {
             });
         }
 
+        // A tag moved by another build or a pull leaves the image in place,
+        // but consumers of either tag would get another image. A
+        // multi-platform build has no local tags.
+        if inputs.platform.len() <= 1 {
+            let pinned = prior
+                .pinned_tag
+                .clone()
+                .unwrap_or_else(|| pinned_tag(&prior.tag, &prior.image_id));
+            for tag in [&prior.tag, &pinned] {
+                if self.inspect_image_id(tag).as_deref() != Some(prior.image_id.as_str()) {
+                    return Ok(PlanResult {
+                        action: PlanAction::Update,
+                        description: desc,
+                        reason: Some(format!("{tag} no longer names the image")),
+                    });
+                }
+            }
+        }
+
         Ok(PlanResult {
             action: PlanAction::None,
             description: desc,
@@ -795,6 +814,63 @@ exit 0
         )
         .unwrap();
         assert_eq!(result.action, PlanAction::Create);
+    }
+
+    /// An image resource whose `docker image inspect` reports `ids` for
+    /// each reference, and fails for any other.
+    fn resource_with_images(dir: &Path, ids: &[(&str, &str)]) -> ImageResource {
+        let docker = dir.join("docker");
+        let cases: String = ids
+            .iter()
+            .map(|(reference, id)| format!("  {reference}) echo sha256:{id} ;;\n"))
+            .collect();
+        std::fs::write(
+            &docker,
+            format!(
+                "#!/bin/sh\n[ \"$1 $2\" = \"image inspect\" ] || exit 91\ncase \"$5\" in\n{cases}  *) exit 1 ;;\nesac\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ImageResource {
+            tracker: Arc::new(FileTracker::default()),
+            docker,
+        }
+    }
+
+    #[test]
+    fn plan_update_when_a_tag_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = |ids: &[(&str, &str)]| {
+            Resource::plan(
+                &resource_with_images(dir.path(), ids),
+                &test_inputs(),
+                Some(&test_state()),
+            )
+            .unwrap()
+        };
+
+        let unchanged = plan(&[
+            ("abc123", "abc123"),
+            ("myapp:latest", "abc123"),
+            ("myapp:abc123", "abc123"),
+        ]);
+        assert_eq!(unchanged.action, PlanAction::None);
+
+        let moved = plan(&[
+            ("abc123", "abc123"),
+            ("myapp:latest", "def456"),
+            ("myapp:abc123", "abc123"),
+        ]);
+        assert_eq!(moved.action, PlanAction::Update);
+        assert_eq!(moved.reason.as_deref(), Some("myapp:latest no longer names the image"));
+
+        let untagged = plan(&[("abc123", "abc123"), ("myapp:latest", "abc123")]);
+        assert_eq!(untagged.action, PlanAction::Update);
+        assert_eq!(
+            untagged.reason.as_deref(),
+            Some("myapp:abc123 no longer names the image")
+        );
     }
 
     #[test]
