@@ -47,9 +47,23 @@ fn path_list(value: &str) -> impl Iterator<Item = &str> {
 }
 
 fn is_archive(out: &str) -> bool {
-    Path::new(out)
+    Path::new(out_location(out))
         .extension()
         .is_some_and(|extension| ARCHIVE_EXTENSIONS.iter().any(|archive| extension == *archive))
+}
+
+/// An `out` value split as protoc splits `--NAME_out`: generator options,
+/// if any, before the first `:`, and the output location after it.
+fn split_out(out: &str) -> (Option<&str>, &str) {
+    match out.split_once(':') {
+        Some((options, location)) => (Some(options), location),
+        None => (None, out),
+    }
+}
+
+/// The output location of an `out` value, without its options.
+fn out_location(out: &str) -> &str {
+    split_out(out).1
 }
 
 /// Generate code from Protobuf files with protoc
@@ -60,7 +74,7 @@ pub struct ProtocGenerateInputs {
     /// Import paths passed as `-I` (defaults to `dir`)
     #[serde(default)]
     pub include: Vec<String>,
-    /// Output directory for each generator (e.g. `{ go = "gen/go" }` passes `--go_out=gen/go`)
+    /// Output directory for each generator (e.g. `{ go = "gen/go" }` passes `--go_out=gen/go`), optionally preceded by generator options and `:`, as in `paths=source_relative:gen/go`
     pub out: HashMap<String, String>,
     /// Options for each generator (e.g. `{ go = "paths=source_relative" }` passes `--go_opt=paths=source_relative`). Options that name an existing file are tracked as inputs.
     #[serde(default)]
@@ -74,15 +88,19 @@ pub struct ProtocGenerateInputs {
 }
 
 impl ProtocGenerateInputs {
-    /// Arguments before the source files, with each output path passed
-    /// through `out`. Generators are sorted so the command is the same on
-    /// every run.
+    /// Arguments before the source files, with each output location passed
+    /// through `out` and its generator options kept in front of it.
+    /// Generators are sorted so the command is the same on every run.
     fn args(&self, out: impl Fn(&str) -> String) -> Vec<String> {
         let mut args: Vec<String> = self.include.iter().map(|path| format!("-I{path}")).collect();
         let mut outs: Vec<_> = self.out.iter().collect();
         outs.sort();
-        for (generator, path) in outs {
-            args.push(format!("--{generator}_out={}", out(path)));
+        for (generator, value) in outs {
+            let location = match split_out(value) {
+                (Some(options), location) => format!("{options}:{}", out(location)),
+                (None, location) => out(location),
+            };
+            args.push(format!("--{generator}_out={location}"));
         }
         let mut opt: Vec<_> = self.opt.iter().collect();
         opt.sort();
@@ -155,8 +173,10 @@ impl Block<ProtocGenerateInputs> {
             .map(|path| super::in_dir(dir, path))
             .collect();
         // Generator options are `name=value` pairs separated by commas, and
-        // which name files is up to each generator.
-        for options in self.opt.values() {
+        // which name files is up to each generator. They come from `opt` and
+        // from `out` values in the `options:location` form.
+        let out_options = self.out.values().filter_map(|out| split_out(out).0);
+        for options in self.opt.values().map(String::as_str).chain(out_options) {
             for option in options.split(',') {
                 for candidate in [Some(option), option.split_once('=').map(|(_, value)| value)]
                     .into_iter()
@@ -244,7 +264,7 @@ impl Block<ProtocGenerateInputs> {
         let mut outputs: Vec<_> = self
             .out
             .values()
-            .map(|out| super::in_dir(self.dir.as_deref(), out))
+            .map(|out| super::in_dir(self.dir.as_deref(), out_location(out)))
             .collect();
         outputs.sort();
         outputs.dedup();
@@ -380,7 +400,7 @@ fn stage(inputs: &Block<ProtocGenerateInputs>, files: &[String], writer: &BlockW
     // protoc runs in `dir`, so staged paths must not be relative to bit's.
     let root = staging.path().canonicalize()?;
 
-    let mut outs: Vec<&String> = inputs.out.values().collect();
+    let mut outs: Vec<&str> = inputs.out.values().map(|out| out_location(out)).collect();
     outs.sort();
     outs.dedup();
     // Generators that share an output share a staging directory, which
@@ -389,11 +409,11 @@ fn stage(inputs: &Block<ProtocGenerateInputs>, files: &[String], writer: &BlockW
     for (index, out) in outs.iter().enumerate() {
         let stage_dir = root.join(index.to_string());
         std::fs::create_dir_all(&stage_dir)?;
-        let path = match Path::new(out.as_str()).file_name() {
+        let path = match Path::new(out).file_name() {
             Some(name) if is_archive(out) => stage_dir.join(name),
             _ => stage_dir,
         };
-        staged_outs.insert(out.as_str(), path);
+        staged_outs.insert(*out, path);
     }
 
     // An argument file keeps thousands of sources under the OS limit on
@@ -410,7 +430,7 @@ fn stage(inputs: &Block<ProtocGenerateInputs>, files: &[String], writer: &BlockW
     let mut staged = Vec::new();
     for out in outs {
         let destination = super::in_dir(dir, out);
-        let path = &staged_outs[out.as_str()];
+        let path = &staged_outs[out];
         if is_archive(out) {
             if path.is_file() {
                 staged.push((path.clone(), destination));
@@ -641,7 +661,7 @@ impl Resource for ProtocGenerateResource {
         let outputs = inputs.outputs();
         // Output directories exist even when nothing was generated into them.
         for out in inputs.out.values().filter(|out| !is_archive(out)) {
-            let path = super::in_dir(inputs.dir.as_deref(), out);
+            let path = super::in_dir(inputs.dir.as_deref(), out_location(out));
             std::fs::create_dir_all(&path).map_err(|e| format!("failed to create {}: {e}", path.display()))?;
         }
 
@@ -830,6 +850,24 @@ mod tests {
             assert!(resolved.keys().any(|path| path.ends_with(&suffix)), "{resolved:?}");
         }
         assert!(!resolved.keys().any(|path| path.ends_with("d.proto")), "{resolved:?}");
+    }
+
+    #[test]
+    fn out_options_stay_in_front_of_the_location() {
+        let (dir, mut inputs) = project();
+        std::fs::write(dir.path().join("lint.yaml"), "").unwrap();
+        inputs.out = HashMap::from([("go".into(), "paths=source_relative,config=lint.yaml:gen/go".into())]);
+        inputs.opt.clear();
+
+        assert_eq!(
+            inputs.args(|location| format!("<{location}>")),
+            ["-Iproto", "--go_out=paths=source_relative,config=lint.yaml:<gen/go>"]
+        );
+        assert_eq!(inputs.outputs(), [dir.path().join("gen/go")]);
+        let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
+        assert!(resolved.keys().any(|path| path.ends_with("lint.yaml")), "{resolved:?}");
+        assert!(!is_archive("opts:gen/java"));
+        assert!(is_archive("opts:gen/java.jar"));
     }
 
     #[test]
