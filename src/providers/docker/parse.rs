@@ -342,10 +342,15 @@ pub struct DockerIgnore {
 }
 
 impl DockerIgnore {
-    /// Load a .dockerignore from the build context directory.
-    /// Returns `None` if no .dockerignore exists.
-    pub fn load(context: &Path) -> Option<Self> {
-        let contents = std::fs::read_to_string(context.join(".dockerignore")).ok()?;
+    /// Load the ignore file BuildKit uses when building `dockerfile` in
+    /// `context`: `<Dockerfile>.dockerignore` beside the Dockerfile, or
+    /// else the context's `.dockerignore`. Returns `None` if neither exists.
+    pub fn load(context: &Path, dockerfile: &Path) -> Option<Self> {
+        let mut specific = dockerfile.as_os_str().to_owned();
+        specific.push(".dockerignore");
+        let contents = std::fs::read_to_string(PathBuf::from(specific))
+            .or_else(|_| std::fs::read_to_string(context.join(".dockerignore")))
+            .ok()?;
         Some(Self::parse(context, &contents))
     }
 
@@ -721,7 +726,7 @@ mod tests {
         std::fs::write(src.join("important.log"), "keep").unwrap();
         std::fs::write(dir.path().join(".dockerignore"), "**/*.log\n!**/important.log\n").unwrap();
 
-        let di = DockerIgnore::load(dir.path()).unwrap();
+        let di = DockerIgnore::load(dir.path(), &dir.path().join("Dockerfile")).unwrap();
         assert!(di.is_ignored(&src.join("a.log")));
         assert!(!di.is_ignored(&src.join("important.log")));
     }
@@ -763,8 +768,23 @@ mod tests {
         std::fs::write(build_dir.join("output.o"), "binary").unwrap();
         std::fs::write(dir.path().join(".dockerignore"), "src/build\n").unwrap();
 
-        let di = DockerIgnore::load(dir.path()).unwrap();
+        let di = DockerIgnore::load(dir.path(), &dir.path().join("Dockerfile")).unwrap();
         assert!(di.is_ignored(&build_dir.join("output.o")));
         assert!(!di.is_ignored(&dir.path().join("src/main.rs")));
+    }
+
+    #[test]
+    fn dockerfile_specific_ignore_file_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docker")).unwrap();
+        std::fs::write(dir.path().join(".dockerignore"), "a.txt\n").unwrap();
+        std::fs::write(dir.path().join("docker/app.Dockerfile.dockerignore"), "b.txt\n").unwrap();
+
+        let di = DockerIgnore::load(dir.path(), &dir.path().join("docker/app.Dockerfile")).unwrap();
+        assert!(!di.is_ignored(&dir.path().join("a.txt")));
+        assert!(di.is_ignored(&dir.path().join("b.txt")));
+
+        let di = DockerIgnore::load(dir.path(), &dir.path().join("docker/other.Dockerfile")).unwrap();
+        assert!(di.is_ignored(&dir.path().join("a.txt")));
     }
 }

@@ -358,7 +358,7 @@ impl Resource for ImageResource {
     fn resolve(&self, inputs: &Block<ImageInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let context = &inputs.context_path();
         let dockerfile = inputs.dockerfile_path();
-        let dockerignore = parse::DockerIgnore::load(context);
+        let dockerignore = parse::DockerIgnore::load(context, &dockerfile);
 
         let tracker = &*self.tracker;
         let mut files = BTreeMap::new();
