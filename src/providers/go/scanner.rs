@@ -226,6 +226,25 @@ pub fn scan(patterns: &[String], tests: Tests, base_dir: Option<&Path>) -> Resul
     Ok(all_files)
 }
 
+/// The `.go` files, tests included, of the packages `patterns` name, without
+/// those of the packages they import, sorted.
+pub fn package_go_files(patterns: &[String], base_dir: Option<&Path>) -> Result<Vec<PathBuf>, BoxError> {
+    let (_, pkg_dirs) = pattern_packages(patterns, base_dir)?;
+    let mut files = Vec::new();
+    for (module, dir) in &pkg_dirs {
+        let (_, scan) = package_scan(module, dir)?;
+        files.extend(
+            scan.go_files
+                .iter()
+                .chain(&scan.test_files)
+                .filter(|path| path.extension().is_some_and(|extension| extension == "go"))
+                .cloned(),
+        );
+    }
+    files.sort();
+    Ok(files)
+}
+
 /// A package a pattern names, with every file its tests depend on.
 pub struct TestedPackage {
     pub import_path: String,

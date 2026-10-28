@@ -14,8 +14,6 @@ use crate::provider::{
 };
 use crate::sha256::SHA256;
 
-use super::scanner::Tests;
-
 fn default_package() -> Vec<String> {
     vec!["./...".to_owned()]
 }
@@ -48,20 +46,27 @@ pub struct GoFmtState {
     pub package: Vec<String>,
 }
 
-/// Collect `.go` file paths, including `_test.go` files, for the given package patterns.
+/// The `.go` files, including `_test.go` files, of the packages the patterns
+/// name. The packages they import are someone else's to format.
 ///
 /// `dir` mirrors [`super::scanner::scan`]'s `base_dir`: when set, module-root
 /// discovery starts from that directory so a block targeting a separate-module
 /// subdirectory scans the right module.
-fn go_source_files(patterns: &[String], dir: Option<&std::path::Path>) -> Result<Vec<String>, BoxError> {
-    let files = super::scanner::scan(patterns, Tests::Sources, dir)?;
-    let mut paths: Vec<String> = files
+fn go_source_files(patterns: &[String], dir: Option<&str>) -> Result<Vec<String>, BoxError> {
+    let files = super::scanner::package_go_files(patterns, dir.map(Path::new))?;
+    Ok(files.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
+}
+
+/// The hashes of the files `gofmt` reads: [`go_source_files`].
+fn resolve_go_source_files(
+    inputs: &Block<GoFmtInputs>,
+    tracker: &FileTracker,
+) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let files: Vec<_> = go_source_files(&inputs.package, inputs.dir.as_deref())?
         .into_iter()
-        .filter(|p| p.extension().is_some_and(|e| e == "go"))
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(std::path::PathBuf::from)
         .collect();
-    paths.sort();
-    Ok(paths)
+    tracker.hash_files(&files)
 }
 
 /// The `gofmt` executable bit runs. It has no version output, and the go
@@ -82,7 +87,7 @@ fn gofmt_command(mode: &str, targets: &[String], dir: Option<&str>) -> String {
 /// The block's `.go` files that changed since its last success, or all of
 /// them when anything may have changed.
 fn changed_go_files(inputs: &Block<GoFmtInputs>, changes: &Changes) -> Result<Vec<String>, BoxError> {
-    let files = go_source_files(&inputs.package, inputs.dir.as_deref().map(Path::new))?;
+    let files = go_source_files(&inputs.package, inputs.dir.as_deref())?;
     Ok(match changes {
         Changes::All => files,
         Changes::Paths(changed) => files
@@ -123,14 +128,7 @@ impl Resource for GoFmtResource {
     }
 
     fn resolve(&self, inputs: &Block<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        super::resolve_go_inputs(
-            &inputs.package,
-            inputs.dir.as_deref(),
-            &[],
-            Tests::Sources,
-            &[],
-            &self.tracker,
-        )
+        resolve_go_source_files(inputs, &self.tracker)
     }
 
     fn plan(&self, inputs: &Block<GoFmtInputs>, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -258,14 +256,7 @@ impl Resource for GoFmtCheckResource {
     }
 
     fn resolve(&self, inputs: &Block<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        super::resolve_go_inputs(
-            &inputs.package,
-            inputs.dir.as_deref(),
-            &[],
-            Tests::Sources,
-            &[],
-            &self.tracker,
-        )
+        resolve_go_source_files(inputs, &self.tracker)
     }
 
     fn plan(&self, inputs: &Block<GoFmtInputs>, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
@@ -515,6 +506,45 @@ mod tests {
         for resolved in [fmt_inputs, check_inputs] {
             assert!(resolved.keys().any(|p| p.ends_with("pkg/lib_test.go")), "{resolved:?}");
         }
+    }
+
+    #[test]
+    fn fmt_leaves_imported_packages_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        std::fs::create_dir_all(root.join("cmd")).unwrap();
+        std::fs::write(
+            root.join("cmd/main.go"),
+            "package main\n\nimport _ \"example.com/test/lib\"\n\nfunc main() {}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("lib/lib.go"), UNFORMATTED_TEST).unwrap();
+        let inputs = Block::new(
+            Some(root.to_string_lossy().into_owned()),
+            GoFmtInputs {
+                package: vec!["./cmd".into()],
+            },
+        );
+
+        let resolved = Resource::resolve(&test_fmt_resource(), &inputs).unwrap();
+        assert!(resolved.keys().any(|p| p.ends_with("cmd/main.go")), "{resolved:?}");
+        assert!(!resolved.keys().any(|p| p.ends_with("lib/lib.go")), "{resolved:?}");
+
+        let output = crate::output::Output::new(&[]);
+        Resource::apply(
+            &test_fmt_resource(),
+            &inputs,
+            None,
+            &Changes::All,
+            &output.writer("fmt"),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("lib/lib.go")).unwrap(),
+            UNFORMATTED_TEST
+        );
     }
 
     #[test]

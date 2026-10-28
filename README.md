@@ -109,7 +109,8 @@ include a changed file. It tests the whole pattern on its first run, with
 changed, or a tracked file was deleted. `go.lint` narrows its run the same way. It lints the whole
 pattern when the golangci-lint config changed, or when a changed package is
 excluded by build constraints without extra build tags. `go.fmt` and
-`go.fmt-l` format or check only the changed `.go` files.
+`go.fmt-l` format or check only the changed `.go` files of the packages they
+name, not of the packages those import.
 
 Go blocks track the files the go command compiles in each package: `.go`
 files, assembly, cgo and SWIG sources and headers, `.syso` objects, and
