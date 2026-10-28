@@ -273,8 +273,27 @@ pub fn toolchain(env: &GoEnv, dir: Option<&str>) -> Ambient {
             "CGO_ENABLED",
             "GOFLAGS",
             "GOEXPERIMENT",
+            "GOFIPS140",
+            // Each architecture's feature level.
             "GOARM",
+            "GOARM64",
             "GOAMD64",
+            "GO386",
+            "GOPPC64",
+            "GOMIPS",
+            "GOMIPS64",
+            "GORISCV64",
+            "GOWASM",
+            // The C toolchain cgo builds with.
+            "CC",
+            "CXX",
+            "FC",
+            "CGO_CFLAGS",
+            "CGO_CPPFLAGS",
+            "CGO_CXXFLAGS",
+            "CGO_FFLAGS",
+            "CGO_LDFLAGS",
+            "PKG_CONFIG",
             // The workspace file in use, from `GOWORK` or found upward.
             "GOWORK",
         ],
@@ -563,6 +582,25 @@ mod tests {
         let args = ["test", "-json", "example.com/m/lib", "example.com/other"].map(String::from);
         let line = display_command("go", &args, dir.path().to_str());
         assert_eq!(line, "go test -json ./lib example.com/other");
+    }
+
+    #[test]
+    fn toolchain_reports_cgo_and_architecture_settings() {
+        let Ambient::Version(command) = toolchain(&GoEnv::default(), None) else {
+            panic!("the toolchain is a version command");
+        };
+        for name in [
+            "CC",
+            "CXX",
+            "CGO_CFLAGS",
+            "CGO_LDFLAGS",
+            "PKG_CONFIG",
+            "GOARM64",
+            "GOWASM",
+            "GOWORK",
+        ] {
+            assert!(command.args.iter().any(|arg| arg == name), "missing {name}");
+        }
     }
 
     fn strings(args: &[&str]) -> Vec<String> {
