@@ -38,16 +38,17 @@ impl Workspace {
 
 static CACHE: Mutex<Option<Workspace>> = Mutex::new(None);
 
-/// Acquire the workspace for `dir`, loading it on first call and reusing
-/// the cached copy while the same root is used. Mirrors the go provider's
-/// per-module-root cache pattern.
+/// Acquire the workspace pnpm uses when run in `dir`, loading it on first
+/// call and reusing the cached copy while the same root is used. Mirrors
+/// the go provider's per-module-root cache pattern.
 pub fn with_workspace<F, R>(dir: &Path, f: F) -> Result<R, BoxError>
 where
     F: FnOnce(&Workspace) -> Result<R, BoxError>,
 {
-    let root = dir
+    let dir = dir
         .canonicalize()
         .map_err(|e| format!("pnpm: canonicalizing {}: {e}", dir.display()))?;
+    let root = workspace_root(&dir, |name| std::env::var_os(name));
     let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let needs_init = match &*guard {
         Some(ws) => ws.root != root,
@@ -57,6 +58,21 @@ where
         *guard = Some(load_workspace(&root)?);
     }
     f(guard.as_ref().expect("workspace initialized above"))
+}
+
+/// The root of the workspace pnpm uses when run in `dir`, as pnpm's
+/// `find-workspace-dir` finds it: the directory `NPM_CONFIG_WORKSPACE_DIR`
+/// names, or else the nearest directory at or above `dir` holding a
+/// `pnpm-workspace.yaml`. Outside a workspace, `dir` is its own root.
+fn workspace_root(dir: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(root) = var("NPM_CONFIG_WORKSPACE_DIR").or_else(|| var("npm_config_workspace_dir")) {
+        let root = dir.join(root);
+        return root.canonicalize().unwrap_or(root);
+    }
+    dir.ancestors()
+        .find(|ancestor| ancestor.join("pnpm-workspace.yaml").is_file())
+        .unwrap_or(dir)
+        .to_path_buf()
 }
 
 fn load_workspace(root: &Path) -> Result<Workspace, BoxError> {
@@ -264,6 +280,38 @@ mod tests {
             assert_eq!(ws.packages.len(), 2);
             assert!(ws.packages.contains_key("bff"));
             assert!(ws.packages.contains_key("frontend"));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn workspace_root_is_found_upward_or_named_by_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        setup_workspace(&root);
+        let no_env = |_: &str| None;
+        assert_eq!(workspace_root(&root.join("bff/src"), no_env), root);
+        assert_eq!(workspace_root(&root, no_env), root);
+
+        let solo = tempfile::tempdir().unwrap();
+        let solo = solo.path().canonicalize().unwrap();
+        assert_eq!(workspace_root(&solo, no_env), solo);
+
+        let env = |name: &str| (name == "npm_config_workspace_dir").then(|| root.clone().into_os_string());
+        assert_eq!(workspace_root(&solo, env), root);
+    }
+
+    #[test]
+    fn subdirectory_uses_the_workspace_lockfile() {
+        reset_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        setup_workspace(&root);
+
+        with_workspace(&root.join("bff"), |ws| {
+            assert_eq!(ws.root, root);
+            assert_eq!(ws.lockfile.as_deref(), Some(root.join("pnpm-lock.yaml").as_path()));
             Ok(())
         })
         .unwrap();
