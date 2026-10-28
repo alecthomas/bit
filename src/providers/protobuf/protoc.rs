@@ -18,6 +18,34 @@ use super::imports::ImportGraph;
 /// Output extensions protoc writes as one archive rather than a directory.
 const ARCHIVE_EXTENSIONS: [&str; 3] = ["zip", "jar", "srcjar"];
 
+/// The values protoc takes for an option among `flags`: `--long=value`,
+/// `--long value`, `-Svalue` or `-S value` for the `short` letter, if any.
+fn flag_values<'a>(flags: &'a [String], long: &str, short: Option<char>) -> Vec<&'a str> {
+    let long_flag = format!("--{long}");
+    let short_flag = short.map(|short| format!("-{short}"));
+    let mut values = Vec::new();
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        if *flag == long_flag || short_flag.as_ref() == Some(flag) {
+            values.extend(flags.next().map(String::as_str));
+        } else if let Some(value) = flag.strip_prefix(&long_flag).and_then(|rest| rest.strip_prefix('=')) {
+            values.push(value);
+        } else if let Some(value) = short_flag
+            .as_deref()
+            .filter(|_| !flag.starts_with("--"))
+            .and_then(|short| flag.strip_prefix(short))
+        {
+            values.push(value);
+        }
+    }
+    values
+}
+
+/// The paths in a protoc path list, which separates them with `:`.
+fn path_list(value: &str) -> impl Iterator<Item = &str> {
+    value.split(':').filter(|path| !path.is_empty())
+}
+
 fn is_archive(out: &str) -> bool {
     Path::new(out)
         .extension()
@@ -34,10 +62,10 @@ pub struct ProtocGenerateInputs {
     pub include: Vec<String>,
     /// Output directory for each generator (e.g. `{ go = "gen/go" }` passes `--go_out=gen/go`)
     pub out: HashMap<String, String>,
-    /// Options for each generator (e.g. `{ go = "paths=source_relative" }` passes `--go_opt=paths=source_relative`)
+    /// Options for each generator (e.g. `{ go = "paths=source_relative" }` passes `--go_opt=paths=source_relative`). Options that name an existing file are tracked as inputs.
     #[serde(default)]
     pub opt: HashMap<String, String>,
-    /// Extra flags passed to protoc
+    /// Extra flags passed to protoc. `-I`/`--proto_path` paths are searched for imports after `include`, `--descriptor_set_in` files are tracked as inputs, and `--descriptor_set_out`/`-o` files as outputs.
     #[serde(default)]
     pub flags: Vec<String>,
     /// Compile only the sources that changed or import a changed file. Every generator must write each output from a single source; descriptor sets, documentation, and merged API specs need full runs.
@@ -95,16 +123,62 @@ impl Block<ProtocGenerateInputs> {
         Ok(files)
     }
 
-    /// The `-I` paths protoc resolves imports against, in order.
+    /// The `-I` paths protoc resolves imports against, in order: `include`,
+    /// then those `flags` add.
     fn roots(&self) -> Vec<PathBuf> {
         let dir = self.dir.as_deref();
-        if self.include.is_empty() {
+        let flagged = flag_values(&self.flags, "proto_path", Some('I'))
+            .into_iter()
+            .flat_map(path_list);
+        let roots: Vec<PathBuf> = self
+            .include
+            .iter()
+            .map(String::as_str)
+            .chain(flagged)
+            .map(|path| super::normalize(&super::in_dir(dir, path)))
+            .collect();
+        if roots.is_empty() {
             // protoc imports from its working directory when given no `-I`.
             return vec![super::normalize(&super::in_dir(dir, ""))];
         }
-        self.include
-            .iter()
-            .map(|path| super::normalize(&super::in_dir(dir, path)))
+        roots
+    }
+
+    /// Files besides `.proto` sources that protoc or its generators read:
+    /// the descriptor sets `--descriptor_set_in` names, and generator
+    /// options in `opt` that name an existing file, such as a config.
+    fn option_files(&self) -> Vec<PathBuf> {
+        let dir = self.dir.as_deref();
+        let mut files: Vec<PathBuf> = flag_values(&self.flags, "descriptor_set_in", None)
+            .into_iter()
+            .flat_map(path_list)
+            .map(|path| super::in_dir(dir, path))
+            .collect();
+        // Generator options are `name=value` pairs separated by commas, and
+        // which name files is up to each generator.
+        for options in self.opt.values() {
+            for option in options.split(',') {
+                for candidate in [Some(option), option.split_once('=').map(|(_, value)| value)]
+                    .into_iter()
+                    .flatten()
+                {
+                    let path = super::in_dir(dir, candidate);
+                    if !candidate.is_empty() && path.is_file() {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+        files
+    }
+
+    /// The descriptor sets `--descriptor_set_out` or `-o` writes, as bit's
+    /// process sees them. protoc writes them itself, outside the staging
+    /// directory generators write to.
+    fn descriptor_outputs(&self) -> Vec<PathBuf> {
+        flag_values(&self.flags, "descriptor_set_out", Some('o'))
+            .into_iter()
+            .map(|path| super::in_dir(self.dir.as_deref(), path))
             .collect()
     }
 
@@ -210,10 +284,13 @@ fn incremental_batches(
     compilation: &Compilation,
     hashes: &Hashes,
 ) -> Option<Batches> {
+    // An archive or descriptor set holds every source's output, so a run
+    // over some sources would replace it with a partial one.
     if !inputs.incremental
         || prior.inputs != inputs.value
         || prior.tools != hashes.tools
         || inputs.out.values().any(|out| is_archive(out))
+        || !inputs.descriptor_outputs().is_empty()
     {
         return None;
     }
@@ -503,9 +580,11 @@ impl Resource for ProtocGenerateResource {
         ResourceKind::Build
     }
 
-    /// Tracks the sources and the files they transitively import.
+    /// Tracks the sources, the files they transitively import, and the
+    /// files flags and generator options name.
     fn resolve(&self, inputs: &Block<ProtocGenerateInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let files = inputs.compilation()?.graph.files();
+        let mut files = inputs.compilation()?.graph.files();
+        files.extend(inputs.option_files());
         self.tracker.hash_files(&files)
     }
 
@@ -598,7 +677,14 @@ impl Resource for ProtocGenerateResource {
     }
 
     fn output_keys(&self, inputs: &Block<ProtocGenerateInputs>) -> Vec<String> {
-        super::removable_outputs(&inputs.outputs()).unwrap_or_default()
+        let mut keys = super::removable_outputs(&inputs.outputs()).unwrap_or_default();
+        keys.extend(
+            inputs
+                .descriptor_outputs()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
+        keys
     }
 }
 
@@ -747,6 +833,41 @@ mod tests {
     }
 
     #[test]
+    fn flag_values_read_every_spelling() {
+        let flags: Vec<String> = ["-Ia", "-I", "b", "--proto_path=c:d", "--proto_path", "e", "--opt=x"]
+            .map(String::from)
+            .into();
+        let paths: Vec<_> = flag_values(&flags, "proto_path", Some('I'))
+            .into_iter()
+            .flat_map(path_list)
+            .collect();
+        assert_eq!(paths, ["a", "b", "c", "d", "e"]);
+        assert!(flag_values(&flags, "descriptor_set_out", Some('o')).is_empty());
+    }
+
+    #[test]
+    fn flags_and_options_name_inputs_and_outputs() {
+        let (dir, mut inputs) = project();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("vendor/acme/v1")).unwrap();
+        std::fs::write(root.join("vendor/acme/v1/c.proto"), "").unwrap();
+        std::fs::remove_file(root.join("proto/acme/v1/c.proto")).unwrap();
+        std::fs::write(root.join("deps.binpb"), "").unwrap();
+        std::fs::write(root.join("lint.yaml"), "").unwrap();
+        inputs.flags = ["-Ivendor", "--descriptor_set_in=deps.binpb", "-oout/set.binpb"]
+            .map(String::from)
+            .into();
+        inputs.opt.insert("doc".into(), "config=lint.yaml,markdown".into());
+
+        let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
+        for name in ["vendor/acme/v1/c.proto", "deps.binpb", "lint.yaml"] {
+            assert!(resolved.keys().any(|path| path.ends_with(name)), "{name}: {resolved:?}");
+        }
+        let keys = Resource::output_keys(&test_resource(), &inputs);
+        assert!(keys.iter().any(|key| key.ends_with("out/set.binpb")), "{keys:?}");
+    }
+
+    #[test]
     fn tools_skip_builtin_generators_and_honor_plugin_flags() {
         let (_dir, mut inputs) = project();
         inputs.out.insert("grpc".into(), "gen/grpc".into());
@@ -822,6 +943,16 @@ mod tests {
         let mut archive_inputs = inputs.clone();
         archive_inputs.out.insert("java".into(), "gen/java.jar".into());
         assert_eq!(batches(&archive_inputs, &archive), None, "an output is an archive");
+
+        let mut descriptors = prior.clone();
+        descriptors.inputs.flags = vec!["--descriptor_set_out=set.binpb".into()];
+        let mut descriptor_inputs = inputs.clone();
+        descriptor_inputs.flags = descriptors.inputs.flags.clone();
+        assert_eq!(
+            batches(&descriptor_inputs, &descriptors),
+            None,
+            "a descriptor set is written"
+        );
 
         std::fs::remove_file(dir.path().join("proto/acme/v1/d.proto")).unwrap();
         assert_eq!(batches(&inputs, &prior), None, "a source was removed");

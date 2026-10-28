@@ -1014,8 +1014,8 @@ block = protoc.generate {
   sources = [string]        # Protobuf files or glob patterns to compile, relative to `dir`
   include = [string]?       # Import paths passed as `-I` (defaults to `dir`)
   out = {string = string}   # Output directory for each generator (e.g. `{ go = "gen/go" }` passes `--go_out=gen/go`)
-  opt = {string = string}?  # Options for each generator (e.g. `{ go = "paths=source_relative" }` passes `--go_opt=paths=source_relative`)
-  flags = [string]?         # Extra flags passed to protoc
+  opt = {string = string}?  # Options for each generator (e.g. `{ go = "paths=source_relative" }` passes `--go_opt=paths=source_relative`). Options that name an existing file are tracked as inputs.
+  flags = [string]?         # Extra flags passed to protoc. `-I`/`--proto_path` paths are searched for imports after `include`, `--descriptor_set_in` files are tracked as inputs, and `--descriptor_set_out`/`-o` files as outputs.
   incremental = bool?       # Compile only the sources that changed or import a changed file. Every generator must write each output from a single source; descriptor sets, documentation, and merged API specs need full runs.
 }
 ```
