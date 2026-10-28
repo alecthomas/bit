@@ -143,6 +143,15 @@ Dockerfile. `docker.push` does not check the registry either. It pushes again
 only when the image changes, not when the registry copy was deleted or
 overwritten.
 
+`buf.generate` fingerprints the local plugins its template runs, but not
+remote plugins, which run on the Buf Schema Registry. A remote plugin named
+without a version, such as `buf.build/protocolbuffers/go`, runs its latest
+release, so a new release does not rerun the block. Pin remote plugins to a
+version, such as `buf.build/protocolbuffers/go:v1.36.6`. A `buf.lint`,
+`buf.format` or `buf.format-check` block whose input is a Git repository, BSR
+module or URL keeps its result in this worktree, since bit cannot hash what
+buf reads.
+
 `exec.test` can report individual tests from any runner with JSON or JSONL
 output. Its `results` field is a jq filter that maps each JSON value to test
 and suite results. Records without a `name` describe the suite, so a runner
