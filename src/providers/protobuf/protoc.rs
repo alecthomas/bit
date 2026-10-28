@@ -666,8 +666,11 @@ impl Resource for ProtocGenerateResource {
         // The engine reports every change when a field changed, including
         // `dir`, which the prior state does not record. Sources and outputs
         // resolve against `dir`, so the prior run says nothing about them.
+        // A generated file changed or removed since may belong to a source
+        // that did not change, which only a full run writes again.
         let batches = prior_state
             .filter(|_| !matches!(changes, Changes::All))
+            .filter(|prior| prior.drifted(&self.tracker).is_none())
             .and_then(|prior| Some((prior, incremental_batches(inputs, prior, &compilation, &hashes)?)));
         let incremental = match batches {
             Some((prior, batches)) => run_incremental(inputs, prior, &batches, compilation.files.len(), writer)?,
