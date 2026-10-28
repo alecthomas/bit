@@ -89,9 +89,14 @@ struct Affected {
 
 /// The packages whose own or imported files include a changed path, or
 /// `None` to lint the whole pattern.
-fn affected_packages(inputs: &Block<GoLintInputs>, changes: &Changes) -> Result<Option<Affected>, BoxError> {
+fn affected_packages(
+    tracker: &FileTracker,
+    inputs: &Block<GoLintInputs>,
+    changes: &Changes,
+) -> Result<Option<Affected>, BoxError> {
     let env = super::GoEnv::default();
     let Some(affected) = super::affected_packages(
+        tracker,
         &inputs.package,
         Tests::Sources,
         inputs.dir.as_deref(),
@@ -210,7 +215,7 @@ impl Resource for GoLintResource {
             package: inputs.package.clone(),
             flags: inputs.flags.clone(),
         };
-        let affected = affected_packages(inputs, changes)?;
+        let affected = affected_packages(&self.tracker, inputs, changes)?;
         if let Some(Affected { dirs, total }) = &affected
             && dirs.is_empty()
         {
@@ -425,19 +430,25 @@ mod tests {
         );
         let affected = |names: &[&str]| {
             let changes = Changes::Paths(names.iter().map(|name| root.join(name)).collect());
-            affected_packages(&inputs, &changes).unwrap().map(|affected| {
-                assert_eq!(affected.total, 3);
-                let mut dirs = affected.dirs;
-                dirs.sort();
-                dirs
-            })
+            affected_packages(&FileTracker::new(), &inputs, &changes)
+                .unwrap()
+                .map(|affected| {
+                    assert_eq!(affected.total, 3);
+                    let mut dirs = affected.dirs;
+                    dirs.sort();
+                    dirs
+                })
         };
 
         assert_eq!(affected(&["lib/lib.go"]).unwrap(), [root.clone(), root.join("lib")]);
         assert_eq!(affected(&["util/util.go"]).unwrap(), [root.join("util")]);
         assert_eq!(affected(&["tagged/tagged.go"]), None);
         assert_eq!(affected(&[".golangci.yml"]), None);
-        assert!(affected_packages(&inputs, &Changes::All).unwrap().is_none());
+        assert!(
+            affected_packages(&FileTracker::new(), &inputs, &Changes::All)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

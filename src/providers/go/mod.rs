@@ -88,7 +88,8 @@ pub fn resolve_go_inputs(
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let go_dir = run_dir(dir, flags);
-    let mut files: Vec<_> = scanner::scan(patterns, tests, go_dir.as_deref().map(Path::new))?
+    let scans = tracker.derived::<scanner::Scans>();
+    let mut files: Vec<_> = scanner::scan(&scans, patterns, tests, go_dir.as_deref().map(Path::new))?
         .into_iter()
         .collect();
     files.extend(flag_inputs(go_dir.as_deref(), flags));
@@ -432,6 +433,7 @@ struct Affected {
 /// reports the packages `go` matches for the patterns, so `args` and `env`
 /// must match those of the narrowed command.
 fn affected_packages(
+    tracker: &FileTracker,
     patterns: &[String],
     tests: Tests,
     dir: Option<&str>,
@@ -442,7 +444,8 @@ fn affected_packages(
     let Changes::Paths(changed) = changes else {
         return Ok(None);
     };
-    let scanned = scanner::tested_packages(patterns, tests, dir.map(Path::new))?;
+    let scans = tracker.derived::<scanner::Scans>();
+    let scanned = scanner::tested_packages(&scans, patterns, tests, dir.map(Path::new))?;
     // A path no package depends on is an extra input, a config file or a
     // deleted file, whose dependents cannot be found.
     if changed

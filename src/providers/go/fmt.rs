@@ -52,9 +52,13 @@ pub struct GoFmtState {
 /// `dir` mirrors [`super::scanner::scan`]'s `base_dir`: when set, module-root
 /// discovery starts from that directory so a block targeting a separate-module
 /// subdirectory scans the right module.
-fn go_source_files(patterns: &[String], dir: Option<&str>) -> Result<Vec<String>, BoxError> {
-    let files = super::scanner::package_go_files(patterns, dir.map(Path::new))?;
-    Ok(files.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
+fn go_source_files(
+    tracker: &FileTracker,
+    patterns: &[String],
+    dir: Option<&str>,
+) -> Result<Vec<std::path::PathBuf>, BoxError> {
+    let scans = tracker.derived::<super::scanner::Scans>();
+    super::scanner::package_go_files(&scans, patterns, dir.map(Path::new))
 }
 
 /// The hashes of the files `gofmt` reads: [`go_source_files`].
@@ -62,11 +66,7 @@ fn resolve_go_source_files(
     inputs: &Block<GoFmtInputs>,
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let files: Vec<_> = go_source_files(&inputs.package, inputs.dir.as_deref())?
-        .into_iter()
-        .map(std::path::PathBuf::from)
-        .collect();
-    tracker.hash_files(&files)
+    tracker.hash_files(&go_source_files(tracker, &inputs.package, inputs.dir.as_deref())?)
 }
 
 /// The `gofmt` executable bit runs. It has no version output, and the go
@@ -86,15 +86,20 @@ fn gofmt_command(mode: &str, targets: &[String], dir: Option<&str>) -> String {
 
 /// The block's `.go` files that changed since its last success, or all of
 /// them when anything may have changed.
-fn changed_go_files(inputs: &Block<GoFmtInputs>, changes: &Changes) -> Result<Vec<String>, BoxError> {
-    let files = go_source_files(&inputs.package, inputs.dir.as_deref())?;
-    Ok(match changes {
-        Changes::All => files,
-        Changes::Paths(changed) => files
-            .into_iter()
-            .filter(|file| changed.contains(Path::new(file)))
-            .collect(),
-    })
+fn changed_go_files(
+    tracker: &FileTracker,
+    inputs: &Block<GoFmtInputs>,
+    changes: &Changes,
+) -> Result<Vec<String>, BoxError> {
+    let files = go_source_files(tracker, &inputs.package, inputs.dir.as_deref())?;
+    Ok(files
+        .into_iter()
+        .filter(|file| match changes {
+            Changes::All => true,
+            Changes::Paths(changed) => changed.contains(file),
+        })
+        .map(|file| file.to_string_lossy().into_owned())
+        .collect())
 }
 
 // ── go.fmt (build) ──────────────────────────────────────────────────────
@@ -162,7 +167,7 @@ impl Resource for GoFmtResource {
         changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoFmtState, GoFmtOutputs>, BoxError> {
-        let files = changed_go_files(inputs, changes)?;
+        let files = changed_go_files(&self.tracker, inputs, changes)?;
         if files.is_empty() {
             writer.starting("no Go files changed");
             return Ok(ApplyResult {
@@ -290,7 +295,7 @@ impl Resource for GoFmtCheckResource {
         changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<GoFmtState, GoFmtCheckOutputs>, BoxError> {
-        let files = changed_go_files(inputs, changes)?;
+        let files = changed_go_files(&self.tracker, inputs, changes)?;
         if files.is_empty() {
             writer.starting("no Go files changed");
             return Ok(ApplyResult {

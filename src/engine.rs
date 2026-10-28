@@ -1504,7 +1504,10 @@ fn execute_block(
     let wrapped_state = if let Some(new_state) = &apply_result.state {
         // Re-resolve after apply: outputs now exist and mutating actions
         // such as formatters change their own inputs. The tracker rehashes
-        // any file whose metadata changed.
+        // any file whose metadata changed, but globs and providers' parsed
+        // sources may predate files the block added, here and for every
+        // block that resolves after it.
+        tracker.invalidate();
         let ResolvedHashes {
             sources: post_sources,
             tracked: post_resolve,

@@ -1,3 +1,4 @@
+use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,8 @@ use crate::sha256::SHA256;
 pub struct FileTracker {
     hashes: DashMap<PathBuf, FileHash>,
     globs: DashMap<String, Arc<[PathBuf]>>,
+    /// See [`FileTracker::derived`].
+    derived: DashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     executables: ExecutableHashes,
     /// How old a file's timestamps must be before its hash is cached.
     settle: Duration,
@@ -39,6 +42,7 @@ impl FileTracker {
         Self {
             hashes: DashMap::new(),
             globs: DashMap::new(),
+            derived: DashMap::new(),
             executables: ExecutableHashes {
                 path: None,
                 entries: DashMap::new(),
@@ -154,11 +158,32 @@ impl FileTracker {
         Ok(map)
     }
 
+    /// The tracker's cache of type `T`, which a provider derives from files,
+    /// such as parsed sources. It lives until [`FileTracker::invalidate`],
+    /// so a provider caches nothing that outlives the files it came from.
+    pub fn derived<T: Default + Send + Sync + 'static>(&self) -> Arc<T> {
+        let entry = self
+            .derived
+            .entry(TypeId::of::<T>())
+            .or_insert_with(|| Arc::new(T::default()))
+            .clone();
+        // Keyed by the type's ID, so the entry is always a `T`.
+        entry.downcast().expect("derived cache keyed by its type")
+    }
+
+    /// Drop the caches that cannot revalidate themselves against the
+    /// filesystem, glob expansions and [`FileTracker::derived`] caches,
+    /// because a block may have written files since they were filled.
+    pub fn invalidate(&self) {
+        self.globs.clear();
+        self.derived.clear();
+    }
+
     /// Reset all caches for a new engine run. Ambient hashes are kept: each
     /// lookup revalidates them against the filesystem.
     pub fn reset(&self) {
         self.hashes.clear();
-        self.globs.clear();
+        self.invalidate();
     }
 }
 

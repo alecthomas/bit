@@ -239,7 +239,11 @@ struct Affected {
 
 /// The packages whose tests depend on a changed path, or `None` to test the
 /// whole pattern.
-fn affected_packages(inputs: &Block<GoTestInputs>, changes: &Changes) -> Result<Option<Affected>, BoxError> {
+fn affected_packages(
+    tracker: &FileTracker,
+    inputs: &Block<GoTestInputs>,
+    changes: &Changes,
+) -> Result<Option<Affected>, BoxError> {
     // A profile covers only the packages a run tests, so a narrowed run
     // would replace it with a partial one.
     if !profile_outputs(None, &inputs.flags).is_empty() {
@@ -247,6 +251,7 @@ fn affected_packages(inputs: &Block<GoTestInputs>, changes: &Changes) -> Result<
     }
     let tags = tag_flags(&inputs.flags);
     let affected = super::affected_packages(
+        tracker,
         &inputs.package,
         Tests::SourcesAndData,
         go_dir(inputs).as_deref(),
@@ -388,7 +393,7 @@ impl Resource for GoTestResource {
             flags: inputs.flags.clone(),
             env: inputs.env.clone(),
         };
-        let affected = affected_packages(inputs, changes)?;
+        let affected = affected_packages(&self.tracker, inputs, changes)?;
         if let Some(Affected { packages, total }) = &affected
             && packages.is_empty()
         {
@@ -569,12 +574,14 @@ mod tests {
         );
         let affected = |names: &[&str]| {
             let changes = Changes::Paths(names.iter().map(|name| root.join(name)).collect());
-            affected_packages(&inputs, &changes).unwrap().map(|affected| {
-                assert_eq!(affected.total, 3);
-                let mut packages = affected.packages;
-                packages.sort();
-                packages
-            })
+            affected_packages(&FileTracker::new(), &inputs, &changes)
+                .unwrap()
+                .map(|affected| {
+                    assert_eq!(affected.total, 3);
+                    let mut packages = affected.packages;
+                    packages.sort();
+                    packages
+                })
         };
 
         assert_eq!(
@@ -585,7 +592,11 @@ mod tests {
         assert_eq!(affected(&["util/util.go"]).unwrap(), ["example.com/m/util"]);
         assert_eq!(affected(&["go.mod"]).unwrap().len(), 3);
         assert_eq!(affected(&["lib/removed.go"]), None);
-        assert!(affected_packages(&inputs, &Changes::All).unwrap().is_none());
+        assert!(
+            affected_packages(&FileTracker::new(), &inputs, &Changes::All)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -610,7 +621,11 @@ mod tests {
         assert_eq!(Resource::output_keys(&test_resource(), &inputs), ["svc/mod/cover.out"]);
         // A narrowed run would write a profile of only the packages it tests.
         let changes = Changes::Paths(["svc/mod/lib.go".into()].into());
-        assert!(affected_packages(&inputs, &changes).unwrap().is_none());
+        assert!(
+            affected_packages(&FileTracker::new(), &inputs, &changes)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

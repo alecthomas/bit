@@ -2,7 +2,7 @@ use crate::process::CommandExt;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 
@@ -48,13 +48,28 @@ struct Module {
     packages: DashMap<PathBuf, Arc<PackageScan>>,
 }
 
-/// Scanned modules keyed by canonical root, shared across all go resource
-/// resolve() calls. Blocks resolve concurrently and may belong to different
-/// modules, so each module keeps its own cache rather than one cache being
-/// swapped between them. The maps are sharded and locked only to copy an
-/// entry in or out, never while a directory is read, so two blocks that
-/// miss on the same directory may both scan it.
-static MODULES: LazyLock<DashMap<PathBuf, Arc<Module>>> = LazyLock::new(DashMap::new);
+/// What the scanner has read, shared across all go resource resolve() calls.
+///
+/// The file tracker owns it as a [`FileTracker::derived`] cache, which it
+/// drops whenever a block may have written files: a block such as
+/// `go.generate` can add sources to a package scanned before it ran, and
+/// unlike file hashes a scan cannot tell it is stale.
+///
+/// Blocks resolve concurrently and may belong to different modules, so each
+/// module keeps its own cache rather than one cache being swapped between
+/// them. The maps are sharded and locked only to copy an entry in or out,
+/// never while a directory is read, so two blocks that miss on the same
+/// directory may both scan it.
+///
+/// [`FileTracker::derived`]: crate::file_tracker::FileTracker::derived
+#[derive(Default)]
+pub struct Scans {
+    /// Scanned modules keyed by canonical root.
+    modules: DashMap<PathBuf, Arc<Module>>,
+    /// Local module sets by canonical working directory, since `go.work`
+    /// discovery and `GOWORK` depend on where the go command runs.
+    local_modules: DashMap<PathBuf, Arc<LocalModules>>,
+}
 
 /// Which test inputs a scan tracks for the packages a pattern names. Test
 /// inputs are never tracked for the packages those import.
@@ -69,18 +84,23 @@ pub enum Tests {
 }
 
 /// The module containing `start_dir`, loaded on first use.
-fn module(start_dir: &Path) -> Result<Arc<Module>, BoxError> {
+fn module(scans: &Scans, start_dir: &Path) -> Result<Arc<Module>, BoxError> {
     let root = find_module_root(start_dir)?;
-    if let Some(module) = MODULES.get(&root) {
+    if let Some(module) = scans.modules.get(&root) {
         return Ok(Arc::clone(&module));
     }
+    let module = Arc::new(load_module(root.clone())?);
+    Ok(scans.modules.entry(root).or_insert(module).value().clone())
+}
+
+/// The module rooted at `root`, with no packages scanned.
+fn load_module(root: PathBuf) -> Result<Module, BoxError> {
     let content = fs::read_to_string(root.join("go.mod"))?;
-    let module = Arc::new(Module {
-        root: root.clone(),
+    Ok(Module {
         path: parse_module_path(&content)?,
+        root,
         packages: DashMap::new(),
-    });
-    Ok(MODULES.entry(root).or_insert(module).value().clone())
+    })
 }
 
 /// Scan a single package directory, whose canonical path is `canonical`,
@@ -210,8 +230,13 @@ fn collect_tests(
 /// upward looking for `go.mod`). Pass `Some(dir)` when the calling block runs
 /// `go` from a non-project-root directory — e.g. a `go.exe` block with a `dir`
 /// pointing at a separate-module subdirectory. `None` starts from bit's CWD.
-pub fn scan(patterns: &[String], tests: Tests, base_dir: Option<&Path>) -> Result<HashSet<PathBuf>, BoxError> {
-    let (local, pkg_dirs) = pattern_packages(patterns, base_dir)?;
+pub fn scan(
+    scans: &Scans,
+    patterns: &[String],
+    tests: Tests,
+    base_dir: Option<&Path>,
+) -> Result<HashSet<PathBuf>, BoxError> {
+    let (local, pkg_dirs) = pattern_packages(scans, patterns, base_dir)?;
 
     let mut all_files = local.files.clone();
     let mut visited = HashSet::new();
@@ -228,8 +253,8 @@ pub fn scan(patterns: &[String], tests: Tests, base_dir: Option<&Path>) -> Resul
 
 /// The `.go` files, tests included, of the packages `patterns` name, without
 /// those of the packages they import, sorted.
-pub fn package_go_files(patterns: &[String], base_dir: Option<&Path>) -> Result<Vec<PathBuf>, BoxError> {
-    let (_, pkg_dirs) = pattern_packages(patterns, base_dir)?;
+pub fn package_go_files(scans: &Scans, patterns: &[String], base_dir: Option<&Path>) -> Result<Vec<PathBuf>, BoxError> {
+    let (_, pkg_dirs) = pattern_packages(scans, patterns, base_dir)?;
     let mut files = Vec::new();
     for (module, dir) in &pkg_dirs {
         let (_, scan) = package_scan(module, dir)?;
@@ -256,11 +281,12 @@ pub struct TestedPackage {
 /// List the packages the patterns name, each with the files a scan of that
 /// package alone, tracking `tests`, would return.
 pub fn tested_packages(
+    scans: &Scans,
     patterns: &[String],
     tests: Tests,
     base_dir: Option<&Path>,
 ) -> Result<Vec<TestedPackage>, BoxError> {
-    let (local, pkg_dirs) = pattern_packages(patterns, base_dir)?;
+    let (local, pkg_dirs) = pattern_packages(scans, patterns, base_dir)?;
     pkg_dirs
         .iter()
         .map(|(module, dir)| {
@@ -285,17 +311,18 @@ type PackageDirs = Vec<(Arc<Module>, PathBuf)>;
 /// The local modules the go command run in `base_dir` (or bit's CWD) builds
 /// from, and the package directories `patterns` name, each once.
 fn pattern_packages(
+    scans: &Scans,
     patterns: &[String],
     base_dir: Option<&Path>,
 ) -> Result<(Arc<LocalModules>, PackageDirs), BoxError> {
-    let base = base_module(base_dir)?;
     let cwd = match base_dir {
         Some(dir) => dir.to_path_buf(),
         None => std::env::current_dir()?,
     };
+    let base = module(scans, &cwd)?;
     // Canonical, like the module root, so package directories compare equal.
     let cwd = cwd.canonicalize().unwrap_or(cwd);
-    let local = local_modules(&cwd, &base);
+    let local = local_modules(scans, &cwd, &base);
     let mut seen = HashSet::new();
     let mut pkg_dirs = Vec::new();
     for pattern in patterns {
@@ -315,17 +342,13 @@ fn pattern_packages(
     Ok((local, pkg_dirs))
 }
 
-/// The module `base_dir` (or bit's CWD) belongs to.
-fn base_module(base_dir: Option<&Path>) -> Result<Arc<Module>, BoxError> {
-    match base_dir {
-        Some(dir) => module(dir),
-        None => module(&std::env::current_dir()?),
-    }
-}
-
 /// The import path of the module `base_dir` (or bit's CWD) belongs to.
 pub fn module_path(base_dir: Option<&Path>) -> Result<String, BoxError> {
-    Ok(base_module(base_dir)?.path.clone())
+    let base = match base_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    Ok(load_module(find_module_root(&base)?)?.path)
 }
 
 /// The import path of the package in `rel_dir`, a directory relative to
@@ -336,7 +359,7 @@ pub fn package_import_path(base_dir: Option<&Path>, rel_dir: &str) -> Result<Str
         None => std::env::current_dir()?,
     };
     let pkg_dir = base.join(rel_dir).canonicalize()?;
-    Ok(import_path(&*module(&pkg_dir)?, &pkg_dir))
+    Ok(import_path(&load_module(find_module_root(&pkg_dir)?)?, &pkg_dir))
 }
 
 /// The modules a go command builds from local directories, and the files
@@ -349,10 +372,6 @@ struct LocalModules {
     /// where they exist.
     files: HashSet<PathBuf>,
 }
-
-/// Local module sets by canonical working directory, since `go.work`
-/// discovery and `GOWORK` depend on where the go command runs.
-static LOCAL_MODULES: LazyLock<DashMap<PathBuf, Arc<LocalModules>>> = LazyLock::new(DashMap::new);
 
 impl LocalModules {
     /// The local module an import path belongs to, by the path it is known by.
@@ -388,15 +407,15 @@ impl LocalModules {
 /// The go command reports the main modules and the workspace file, and
 /// parses the `replace` directives, so this follows its rules rather than
 /// reimplementing them. Without a working go command, only `base` is local.
-fn local_modules(cwd: &Path, base: &Arc<Module>) -> Arc<LocalModules> {
-    if let Some(local) = LOCAL_MODULES.get(cwd) {
+fn local_modules(scans: &Scans, cwd: &Path, base: &Arc<Module>) -> Arc<LocalModules> {
+    if let Some(local) = scans.local_modules.get(cwd) {
         return Arc::clone(&local);
     }
     let mut modules = vec![(base.path.clone(), Arc::clone(base))];
     if let Some(main) = go_json(cwd, &["list", "-m", "-json"]) {
         for entry in &main {
             if let (Some(path), Some(dir)) = (entry["Path"].as_str(), entry["Dir"].as_str())
-                && let Ok(module) = module(Path::new(dir))
+                && let Ok(module) = module(scans, Path::new(dir))
             {
                 modules.push((path.to_owned(), module));
             }
@@ -449,7 +468,7 @@ fn local_modules(cwd: &Path, base: &Arc<Module>) -> Arc<LocalModules> {
             if !(target.starts_with("./") || target.starts_with("../") || Path::new(target).is_absolute()) {
                 continue;
             }
-            if let Ok(module) = module(&source_dir.join(target)) {
+            if let Ok(module) = module(scans, &source_dir.join(target)) {
                 modules.push((path.to_owned(), module));
             }
         }
@@ -465,7 +484,12 @@ fn local_modules(cwd: &Path, base: &Arc<Module>) -> Arc<LocalModules> {
     modules.dedup_by(|(a, _), (b, _)| a == b);
 
     let local = Arc::new(LocalModules { modules, files });
-    LOCAL_MODULES.entry(cwd.to_path_buf()).or_insert(local).value().clone()
+    scans
+        .local_modules
+        .entry(cwd.to_path_buf())
+        .or_insert(local)
+        .value()
+        .clone()
 }
 
 /// The trimmed stdout of `go <args>` run in `dir`, or `None` if it failed.
@@ -923,7 +947,7 @@ var content embed.FS
             ],
         );
 
-        let files = scan(&[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        let files = scan(&Scans::default(), &[".".into()], Tests::Excluded, Some(&root)).unwrap();
         for expected in ["static/css/site/main.css", "static/index.html", "my docs/guide.md"] {
             assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
         }
@@ -987,7 +1011,13 @@ var content embed.FS
             ],
         );
 
-        let files = scan(&[".".into()], Tests::Excluded, Some(&root.join("app"))).unwrap();
+        let files = scan(
+            &Scans::default(),
+            &[".".into()],
+            Tests::Excluded,
+            Some(&root.join("app")),
+        )
+        .unwrap();
         for expected in ["lib/util/util.go", "lib/go.mod", "go.work", "app/go.mod"] {
             assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
         }
@@ -995,6 +1025,7 @@ var content embed.FS
 
         // A pattern may name another workspace module by its import path.
         let files = scan(
+            &Scans::default(),
             &["example.com/lib/...".into()],
             Tests::Excluded,
             Some(&root.join("app")),
@@ -1023,7 +1054,13 @@ var content embed.FS
             ],
         );
 
-        let files = scan(&[".".into()], Tests::Excluded, Some(&root.join("app"))).unwrap();
+        let files = scan(
+            &Scans::default(),
+            &[".".into()],
+            Tests::Excluded,
+            Some(&root.join("app")),
+        )
+        .unwrap();
         for expected in ["dep/dep.go", "dep/go.mod", "app/go.mod"] {
             assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
         }
@@ -1041,7 +1078,7 @@ var content embed.FS
                 ("vendor/example.com/dep/dep.go", "package dep\n"),
             ],
         );
-        let files = scan(&[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        let files = scan(&Scans::default(), &[".".into()], Tests::Excluded, Some(&root)).unwrap();
         assert!(
             !files.contains(&root.join("vendor/example.com/dep/dep.go")),
             "{files:?}"
@@ -1061,7 +1098,7 @@ var content embed.FS
                 ("vendor/example.com/dep/dep.go", "package dep\n"),
             ],
         );
-        let files = scan(&[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        let files = scan(&Scans::default(), &[".".into()], Tests::Excluded, Some(&root)).unwrap();
         for expected in ["vendor/modules.txt", "vendor/example.com/dep/dep.go"] {
             assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
         }
@@ -1077,7 +1114,13 @@ var content embed.FS
         fs::write(root.join("svc/cmd/cmd.go"), "package cmd").unwrap();
         fs::write(root.join("root.go"), "package root").unwrap();
 
-        let files = scan(&[".".into()], Tests::Excluded, Some(&root.join("svc"))).unwrap();
+        let files = scan(
+            &Scans::default(),
+            &[".".into()],
+            Tests::Excluded,
+            Some(&root.join("svc")),
+        )
+        .unwrap();
         assert!(files.contains(&root.join("svc/main.go")), "{files:?}");
         assert!(!files.contains(&root.join("root.go")), "{files:?}");
         let mut dirs = resolve_package_dirs(&root, "example.com/test", &root.join("svc"), "./...").unwrap();
@@ -1122,15 +1165,14 @@ var content embed.FS
         assert!(dirs.contains(&root.join("internal/lib")));
     }
 
-    // Each test uses its own temporary module, and caches are keyed by
-    // module root, so tests running in parallel share no cache entries.
-    fn scan_from(root: &Path, pattern: &str, tests: Tests) -> Result<HashSet<PathBuf>, BoxError> {
-        scan(&[pattern.to_owned()], tests, Some(root))
+    fn scan_from(scans: &Scans, root: &Path, pattern: &str, tests: Tests) -> Result<HashSet<PathBuf>, BoxError> {
+        scan(scans, &[pattern.to_owned()], tests, Some(root))
     }
 
-    /// How many package directories the module rooted at `root` has cached.
-    fn cached_packages(root: &Path) -> usize {
-        MODULES.get(&root.canonicalize().unwrap()).unwrap().packages.len()
+    /// How many package directories `scans` holds for the module rooted at
+    /// `root`.
+    fn cached_packages(scans: &Scans, root: &Path) -> usize {
+        scans.modules.get(&root.canonicalize().unwrap()).unwrap().packages.len()
     }
 
     #[test]
@@ -1165,7 +1207,7 @@ func Hello() { fmt.Println("hello") }
         )
         .unwrap();
 
-        let files = scan_from(root, "./cmd/app", Tests::Excluded).unwrap();
+        let files = scan_from(&Scans::default(), root, "./cmd/app", Tests::Excluded).unwrap();
         let canon_root = root.canonicalize().unwrap();
         let rel: HashSet<_> = files
             .iter()
@@ -1203,7 +1245,7 @@ func Hello() { fmt.Println("hello") }
             ],
         );
 
-        let files = scan(&[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        let files = scan(&Scans::default(), &[".".into()], Tests::Excluded, Some(&root)).unwrap();
         for expected in [
             "default.pgo",
             "lib/add_amd64.s",
@@ -1231,8 +1273,8 @@ func Hello() { fmt.Println("hello") }
         fs::write(root.join("pkg/lib.go"), "package pkg\n").unwrap();
         fs::write(root.join("pkg/lib_test.go"), "package pkg\n").unwrap();
 
-        let without_tests = scan_from(root, "./pkg", Tests::Excluded).unwrap();
-        let with_tests = scan_from(root, "./pkg", Tests::Sources).unwrap();
+        let without_tests = scan_from(&Scans::default(), root, "./pkg", Tests::Excluded).unwrap();
+        let with_tests = scan_from(&Scans::default(), root, "./pkg", Tests::Sources).unwrap();
 
         let canon_root = root.canonicalize().unwrap();
         let rel_without: HashSet<_> = without_tests
@@ -1274,8 +1316,8 @@ func Hello() { fmt.Println("hello") }
                 .map(|p| p.strip_prefix(&canon_root).unwrap().to_path_buf())
                 .collect()
         };
-        let sources = relative(scan_from(root, "./pkg", Tests::Sources).unwrap());
-        let testdata = relative(scan_from(root, "./pkg", Tests::SourcesAndData).unwrap());
+        let sources = relative(scan_from(&Scans::default(), root, "./pkg", Tests::Sources).unwrap());
+        let testdata = relative(scan_from(&Scans::default(), root, "./pkg", Tests::SourcesAndData).unwrap());
 
         for data in ["pkg/testdata/nested/golden.txt", "pkg/config.json"] {
             assert!(!sources.contains(Path::new(data)), "{sources:?}");
@@ -1303,7 +1345,7 @@ func Hello() { fmt.Println("hello") }
         fs::write(root.join("lib/testdata/golden.txt"), "golden\n").unwrap();
 
         let canon_root = root.canonicalize().unwrap();
-        let files: HashSet<_> = scan_from(root, "./...", Tests::SourcesAndData)
+        let files: HashSet<_> = scan_from(&Scans::default(), root, "./...", Tests::SourcesAndData)
             .unwrap()
             .iter()
             .map(|p| p.strip_prefix(&canon_root).unwrap().to_path_buf())
@@ -1337,8 +1379,8 @@ func Hello() { fmt.Println("hello") }
                 .map(|p| p.strip_prefix(&canon_root).unwrap().to_path_buf())
                 .collect()
         };
-        let excluded = relative(scan_from(root, "./pkg", Tests::Excluded).unwrap());
-        let sources = relative(scan_from(root, "./pkg", Tests::Sources).unwrap());
+        let excluded = relative(scan_from(&Scans::default(), root, "./pkg", Tests::Excluded).unwrap());
+        let sources = relative(scan_from(&Scans::default(), root, "./pkg", Tests::Sources).unwrap());
 
         for test_only in ["testutil/util.go", "pkg/fixture.txt"] {
             assert!(!excluded.contains(Path::new(test_only)), "{excluded:?}");
@@ -1399,9 +1441,10 @@ func Hello() { fmt.Println("hello") }
         fs::create_dir_all(root.join("internal/shared")).unwrap();
         fs::write(root.join("internal/shared/lib.go"), "package shared\n").unwrap();
 
-        let files_a = scan_from(root, "./cmd/a", Tests::Excluded).unwrap();
-        let files_b = scan_from(root, "./cmd/b", Tests::Excluded).unwrap();
-        let cached_count = cached_packages(root);
+        let scans = Scans::default();
+        let files_a = scan_from(&scans, root, "./cmd/a", Tests::Excluded).unwrap();
+        let files_b = scan_from(&scans, root, "./cmd/b", Tests::Excluded).unwrap();
+        let cached_count = cached_packages(&scans, root);
 
         let canon_root = root.canonicalize().unwrap();
         let rel_a: HashSet<_> = files_a
@@ -1439,7 +1482,8 @@ func Hello() { fmt.Println("hello") }
 
         // base_dir = inner_root → scanner finds the inner module's go.mod
         // and returns only inner.go (plus go.mod).
-        let inner_files = scan_from(&inner_root, ".", Tests::Excluded).unwrap();
+        let scans = Scans::default();
+        let inner_files = scan_from(&scans, &inner_root, ".", Tests::Excluded).unwrap();
         assert!(
             inner_files.iter().any(|p| p.ends_with("inner.go")),
             "expected inner.go in {inner_files:?}"
@@ -1451,7 +1495,7 @@ func Hello() { fmt.Println("hello") }
 
         // base_dir = outer_root → scanner finds the outer module and skips
         // inner.go (different module).
-        let outer_files = scan_from(outer_root, ".", Tests::Excluded).unwrap();
+        let outer_files = scan_from(&scans, outer_root, ".", Tests::Excluded).unwrap();
         assert!(
             outer_files.iter().any(|p| p.ends_with("outer.go")),
             "expected outer.go in {outer_files:?}"
@@ -1462,7 +1506,7 @@ func Hello() { fmt.Println("hello") }
         );
 
         // Scanning the outer module did not discard the inner module's cache.
-        assert_eq!(cached_packages(&inner_root), 1);
+        assert_eq!(cached_packages(&scans, &inner_root), 1);
     }
 
     #[test]
@@ -1481,15 +1525,37 @@ func Hello() { fmt.Println("hello") }
         fs::create_dir_all(root.join("shared")).unwrap();
         fs::write(root.join("shared/shared.go"), "package shared\n").unwrap();
 
+        let scans = Scans::default();
         let results: Vec<_> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..8)
-                .map(|_| scope.spawn(|| scan_from(root, "./...", Tests::Excluded).unwrap()))
+                .map(|_| scope.spawn(|| scan_from(&scans, root, "./...", Tests::Excluded).unwrap()))
                 .collect();
             handles.into_iter().map(|handle| handle.join().unwrap()).collect()
         });
         assert_eq!(results[0].len(), 6, "five sources and go.mod: {:?}", results[0]);
         assert!(results.iter().all(|files| *files == results[0]));
-        assert_eq!(cached_packages(root), 5);
+        assert_eq!(cached_packages(&scans, root), 5);
+    }
+
+    #[test]
+    fn invalidating_the_tracker_rescans_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write_files(
+            &root,
+            &[("go.mod", "module example.com/test\n"), ("main.go", "package main\n")],
+        );
+        let tracker = crate::file_tracker::FileTracker::new();
+        let scan_with = |tracker: &crate::file_tracker::FileTracker| {
+            scan_from(&tracker.derived::<Scans>(), &root, ".", Tests::Excluded).unwrap()
+        };
+
+        assert!(!scan_with(&tracker).contains(&root.join("gen.go")));
+        // As `go.generate` would, after the package was scanned.
+        fs::write(root.join("gen.go"), "package main\n").unwrap();
+        assert!(!scan_with(&tracker).contains(&root.join("gen.go")), "cached");
+        tracker.invalidate();
+        assert!(scan_with(&tracker).contains(&root.join("gen.go")));
     }
 
     #[test]
@@ -1503,7 +1569,7 @@ func Hello() { fmt.Println("hello") }
         }
 
         let patterns = ["./a".to_owned(), "./b".to_owned(), "./a".to_owned()];
-        let mut packages: Vec<_> = tested_packages(&patterns, Tests::SourcesAndData, Some(root))
+        let mut packages: Vec<_> = tested_packages(&Scans::default(), &patterns, Tests::SourcesAndData, Some(root))
             .unwrap()
             .into_iter()
             .map(|p| p.import_path)
@@ -1511,7 +1577,7 @@ func Hello() { fmt.Println("hello") }
         packages.sort();
         assert_eq!(packages, ["example.com/test/a", "example.com/test/b"]);
 
-        let files = scan(&patterns, Tests::Excluded, Some(root)).unwrap();
+        let files = scan(&Scans::default(), &patterns, Tests::Excluded, Some(root)).unwrap();
         assert!(files.iter().any(|p| p.ends_with("b/lib.go")), "{files:?}");
         assert!(!files.iter().any(|p| p.ends_with("c/lib.go")), "{files:?}");
     }
