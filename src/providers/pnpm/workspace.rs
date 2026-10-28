@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use serde::Deserialize;
 
+use crate::process::CommandExt;
 use crate::provider::BoxError;
 
 /// A discovered pnpm workspace (or a single-package project).
@@ -18,9 +19,19 @@ pub struct Workspace {
     pub workspace_yaml: Option<PathBuf>,
     /// Root `package.json` path.
     pub root_package_json: PathBuf,
-    /// Map of package `name` (from each `package.json`) to its directory.
-    /// Includes the root package when the root `package.json` has a name.
-    pub packages: HashMap<String, PathBuf>,
+    /// Every project pnpm finds in the workspace, the root included, sorted
+    /// by directory. Keyed by directory rather than name, since a name may
+    /// be missing or shared by several projects.
+    pub projects: Vec<Project>,
+}
+
+/// A workspace project: a directory with a `package.json`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Project {
+    /// Canonical directory.
+    pub dir: PathBuf,
+    /// The `name` its `package.json` gives, if any.
+    pub name: Option<String>,
 }
 
 impl Workspace {
@@ -29,10 +40,14 @@ impl Workspace {
         self.workspace_yaml.is_some()
     }
 
-    /// Directory for a package by name. If the workspace has no sub-packages,
-    /// any lookup falls back to the root.
-    pub fn package_dir(&self, name: &str) -> Option<&Path> {
-        self.packages.get(name).map(|p| p.as_path())
+    /// The directories of the projects named `name`, which `--filter name`
+    /// selects. Several projects may share a name.
+    pub fn package_dirs(&self, name: &str) -> Vec<&Path> {
+        self.projects
+            .iter()
+            .filter(|project| project.name.as_deref() == Some(name))
+            .map(|project| project.dir.as_path())
+            .collect()
     }
 }
 
@@ -85,74 +100,52 @@ fn load_workspace(root: &Path) -> Result<Workspace, BoxError> {
     let lockfile = lockfile_path.exists().then_some(lockfile_path);
 
     let ws_yaml = root.join("pnpm-workspace.yaml");
-    let (workspace_yaml, package_dirs): (Option<PathBuf>, Vec<PathBuf>) = if ws_yaml.exists() {
-        let patterns = parse_workspace_yaml(&ws_yaml)?;
-        let dirs = expand_workspace_patterns(root, &patterns)?;
-        (Some(ws_yaml), dirs)
-    } else {
-        (None, vec![root.to_path_buf()])
-    };
-
-    let mut packages = HashMap::new();
-    for dir in &package_dirs {
-        let pkg_json = dir.join("package.json");
-        if !pkg_json.exists() {
-            continue;
-        }
-        if let Some(name) = parse_package_name(&pkg_json)? {
-            packages.insert(name, dir.clone());
-        }
-    }
+    let workspace_yaml = ws_yaml.exists().then_some(ws_yaml);
 
     Ok(Workspace {
         root: root.to_path_buf(),
         lockfile,
         workspace_yaml,
         root_package_json,
-        packages,
+        projects: list_projects(root)?,
     })
 }
 
+/// A project as `pnpm ls --json` reports it.
 #[derive(Deserialize)]
-struct WorkspaceYaml {
-    #[serde(default)]
-    packages: Vec<String>,
-}
-
-fn parse_workspace_yaml(path: &Path) -> Result<Vec<String>, BoxError> {
-    let content = fs::read_to_string(path).map_err(|e| format!("pnpm: reading {}: {e}", path.display()))?;
-    let ws: WorkspaceYaml =
-        serde_yml::from_str(&content).map_err(|e| format!("pnpm: parsing {}: {e}", path.display()))?;
-    Ok(ws.packages)
-}
-
-/// Expand pnpm-workspace.yaml `packages` glob patterns into actual directories.
-/// Exclusion patterns (leading `!`) are honored: dirs matched by an exclusion
-/// are removed from the result. Non-directories are ignored.
-fn expand_workspace_patterns(root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>, BoxError> {
-    let mut included: Vec<PathBuf> = Vec::new();
-    let mut excluded: Vec<PathBuf> = Vec::new();
-    for pattern in patterns {
-        let (list, pat) = match pattern.strip_prefix('!') {
-            Some(p) => (&mut excluded, p),
-            None => (&mut included, pattern.as_str()),
-        };
-        let full = root.join(pat);
-        for entry in glob::glob(&full.to_string_lossy()).map_err(|e| format!("pnpm: invalid glob {pat:?}: {e}"))? {
-            let Ok(path) = entry else { continue };
-            if path.is_dir() {
-                list.push(path);
-            }
-        }
-    }
-    included.retain(|p| !excluded.contains(p));
-    Ok(included)
-}
-
-#[derive(Deserialize)]
-struct PackageJsonName {
+struct ListedProject {
     #[serde(default)]
     name: Option<String>,
+    path: PathBuf,
+}
+
+/// The workspace's projects, as pnpm finds them from its `packages`
+/// patterns, which follow fast-glob's rules rather than the glob crate's.
+fn list_projects(root: &Path) -> Result<Vec<Project>, BoxError> {
+    let output = std::process::Command::new("pnpm")
+        .args(["ls", "--recursive", "--depth", "-1", "--json"])
+        .current_dir(root)
+        .logged_output()
+        .map_err(|e| format!("pnpm: failed to execute `pnpm ls`: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "pnpm: `pnpm ls` in {} failed: {}",
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    let listed: Vec<ListedProject> =
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("pnpm: parsing `pnpm ls` output: {e}"))?;
+    let mut projects: Vec<Project> = listed
+        .into_iter()
+        .map(|project| Project {
+            dir: project.path.canonicalize().unwrap_or(project.path),
+            name: project.name,
+        })
+        .collect();
+    projects.sort_by(|a, b| a.dir.cmp(&b.dir));
+    Ok(projects)
 }
 
 #[derive(Deserialize)]
@@ -161,17 +154,17 @@ struct PackageJsonScripts {
     scripts: HashMap<String, String>,
 }
 
-fn parse_package_name(path: &Path) -> Result<Option<String>, BoxError> {
-    let content = fs::read_to_string(path).map_err(|e| format!("pnpm: reading {}: {e}", path.display()))?;
-    let pkg: PackageJsonName =
-        serde_json::from_str(&content).map_err(|e| format!("pnpm: parsing {}: {e}", path.display()))?;
-    Ok(pkg.name)
-}
-
+/// The names of the projects that define `script`, as `pnpm --recursive run`
+/// would run it: a workspace's root project is left out unless it is the
+/// only one.
 pub fn packages_with_script(workspace: &Workspace, script: &str) -> Result<Vec<String>, BoxError> {
     let mut packages = Vec::new();
-    for (name, dir) in &workspace.packages {
-        let path = dir.join("package.json");
+    for project in &workspace.projects {
+        let Some(name) = &project.name else { continue };
+        if workspace.is_workspace() && project.dir == workspace.root {
+            continue;
+        }
+        let path = project.dir.join("package.json");
         let content = fs::read_to_string(&path).map_err(|e| format!("pnpm: reading {}: {e}", path.display()))?;
         let package: PackageJsonScripts =
             serde_json::from_str(&content).map_err(|e| format!("pnpm: parsing {}: {e}", path.display()))?;
@@ -180,6 +173,7 @@ pub fn packages_with_script(workspace: &Workspace, script: &str) -> Result<Vec<S
         }
     }
     packages.sort();
+    packages.dedup();
     Ok(packages)
 }
 
@@ -275,11 +269,42 @@ mod tests {
         with_workspace(root, |ws| {
             assert!(ws.is_workspace());
             assert!(ws.lockfile.is_some());
-            // pnpm-workspace.yaml lists bff + frontend. The root itself isn't
-            // a package unless listed.
-            assert_eq!(ws.packages.len(), 2);
-            assert!(ws.packages.contains_key("bff"));
-            assert!(ws.packages.contains_key("frontend"));
+            // pnpm-workspace.yaml lists bff + frontend, and pnpm always
+            // counts the root as a project.
+            let names: Vec<_> = ws.projects.iter().map(|p| p.name.as_deref()).collect();
+            assert_eq!(names, [Some("root"), Some("bff"), Some("frontend")]);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn unnamed_and_duplicate_projects_are_kept() {
+        reset_cache();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        setup_workspace(&root);
+        fs::write(root.join("pnpm-workspace.yaml"), "packages:\n  - 'packages/*'\n").unwrap();
+        for (dir, manifest) in [
+            ("packages/unnamed", "{}"),
+            ("packages/a", r#"{ "name": "dup", "scripts": { "test": "t" } }"#),
+            ("packages/b", r#"{ "name": "dup", "scripts": { "test": "t" } }"#),
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            fs::write(root.join(dir).join("package.json"), manifest).unwrap();
+        }
+
+        with_workspace(&root, |ws| {
+            assert!(
+                ws.projects
+                    .iter()
+                    .any(|p| p.dir == root.join("packages/unnamed") && p.name.is_none())
+            );
+            assert_eq!(
+                ws.package_dirs("dup"),
+                [root.join("packages/a"), root.join("packages/b")]
+            );
+            assert_eq!(packages_with_script(ws, "test")?, ["dup"]);
             Ok(())
         })
         .unwrap();
@@ -327,8 +352,7 @@ mod tests {
         with_workspace(root, |ws| {
             assert!(!ws.is_workspace());
             assert!(ws.lockfile.is_none());
-            assert_eq!(ws.packages.len(), 1);
-            assert!(ws.packages.contains_key("solo"));
+            assert_eq!(ws.package_dirs("solo"), [root.canonicalize().unwrap()]);
             Ok(())
         })
         .unwrap();
@@ -427,9 +451,9 @@ mod tests {
         fs::write(root.join("packages/ignored/package.json"), r#"{ "name": "ignored" }"#).unwrap();
 
         with_workspace(root, |ws| {
-            assert!(ws.packages.contains_key("a"));
-            assert!(ws.packages.contains_key("b"));
-            assert!(!ws.packages.contains_key("ignored"));
+            assert_eq!(ws.package_dirs("a").len(), 1);
+            assert_eq!(ws.package_dirs("b").len(), 1);
+            assert!(ws.package_dirs("ignored").is_empty());
             Ok(())
         })
         .unwrap();

@@ -58,13 +58,16 @@ pub(super) fn resolve_inputs<T>(
 
         match package {
             Some(pkg) => {
-                let pkg_dir = ws
-                    .package_dir(pkg)
-                    .ok_or_else(|| format!("pnpm: package '{pkg}' not found in workspace"))?
-                    .to_path_buf();
+                let pkg_dirs = ws.package_dirs(pkg);
+                if pkg_dirs.is_empty() {
+                    return Err(format!("pnpm: package '{pkg}' not found in workspace").into());
+                }
                 let exclude_outputs: Vec<PathBuf> = outputs.iter().map(|output| block.path(output).into()).collect();
-                let sources = workspace::scan_sources(&pkg_dir, &exclude_outputs);
-                files.extend(tracker.hash_files(&sources)?);
+                // `--filter` selects every project with the name.
+                for pkg_dir in pkg_dirs {
+                    let sources = workspace::scan_sources(pkg_dir, &exclude_outputs);
+                    files.extend(tracker.hash_files(&sources)?);
+                }
             }
             None => {
                 files.insert(

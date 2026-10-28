@@ -76,12 +76,8 @@ impl Resource for PnpmInstallResource {
             if let Some(y) = &ws.workspace_yaml {
                 files.insert(y.to_string_lossy().into_owned(), tracker.hash_file(y)?);
             }
-            for pkg_dir in ws.packages.values() {
-                let pj = pkg_dir.join("package.json");
-                if pj.exists() {
-                    files.insert(pj.to_string_lossy().into_owned(), tracker.hash_file(&pj)?);
-                }
-            }
+            let manifests: Vec<PathBuf> = ws.projects.iter().map(|p| p.dir.join("package.json")).collect();
+            files.extend(tracker.hash_files(&manifests)?);
             Ok(files)
         })
     }
@@ -132,9 +128,9 @@ impl Resource for PnpmInstallResource {
         let (node_modules_path, node_modules_dirs) =
             workspace::with_workspace(Path::new(workspace_dir(inputs)), |ws| {
                 let mut dirs: Vec<String> = vec![ws.root.to_string_lossy().into_owned()];
-                for pkg_dir in ws.packages.values() {
-                    if pkg_dir != &ws.root {
-                        dirs.push(pkg_dir.to_string_lossy().into_owned());
+                for project in &ws.projects {
+                    if project.dir != ws.root {
+                        dirs.push(project.dir.to_string_lossy().into_owned());
                     }
                 }
                 let nm = ws.root.join("node_modules").to_string_lossy().into_owned();
