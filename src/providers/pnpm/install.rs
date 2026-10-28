@@ -39,6 +39,14 @@ pub struct PnpmInstallState {
     /// Absolute paths of every directory that contains a `node_modules/`.
     /// Used by `destroy` to remove them all.
     pub node_modules_dirs: Vec<String>,
+    /// The name of each project's modules directory, the `modules-dir`
+    /// setting. State from before it was recorded used the default.
+    #[serde(default = "default_modules_dir")]
+    pub modules_dir: String,
+}
+
+fn default_modules_dir() -> String {
+    "node_modules".to_owned()
 }
 
 /// The files besides manifests and the lockfile that change what `pnpm
@@ -188,7 +196,8 @@ impl Resource for PnpmInstallResource {
                 node_modules_dirs.push(project.dir.to_string_lossy().into_owned());
             }
         }
-        let node_modules_path = ws.root.join("node_modules").to_string_lossy().into_owned();
+        let layout = self.layout(inputs);
+        let node_modules_path = ws.root.join(&layout.modules_dir).to_string_lossy().into_owned();
 
         Ok(ApplyResult {
             outputs: PnpmInstallOutputs {
@@ -197,13 +206,14 @@ impl Resource for PnpmInstallResource {
             state: Some(PnpmInstallState {
                 frozen: inputs.frozen,
                 node_modules_dirs,
+                modules_dir: layout.modules_dir,
             }),
         })
     }
 
     fn destroy(&self, prior_state: &Block<PnpmInstallState>, writer: &BlockWriter) -> Result<(), BoxError> {
         for dir in &prior_state.node_modules_dirs {
-            let nm: PathBuf = Path::new(dir).join("node_modules");
+            let nm: PathBuf = Path::new(dir).join(&prior_state.modules_dir);
             crate::providers::remove_path(&nm, writer)?;
         }
         Ok(())
@@ -215,13 +225,50 @@ impl Resource for PnpmInstallResource {
         CachePolicy::Local
     }
 
+    /// Two files pnpm rewrites on every install, which stand in for the
+    /// trees: hashing every package in them would cost more than a rerun.
+    /// `.modules.yaml` records the layout and `lock.yaml` the packages the
+    /// virtual store holds, so an install by hand, or a deleted or
+    /// re-created tree, changes one of them.
     fn output_keys(&self, inputs: &Block<PnpmInstallInputs>) -> Vec<String> {
-        vec![
-            Path::new(workspace_dir(inputs))
-                .join("node_modules/.modules.yaml")
-                .to_string_lossy()
-                .into_owned(),
+        let layout = self.layout(inputs);
+        [
+            layout.root.join(&layout.modules_dir).join(".modules.yaml"),
+            layout.virtual_store_dir.join("lock.yaml"),
         ]
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+    }
+}
+
+/// Where `pnpm install` writes in a workspace.
+struct Layout {
+    root: PathBuf,
+    /// The `modules-dir` setting: each project's modules directory, relative
+    /// to the project.
+    modules_dir: String,
+    /// The `virtual-store-dir` setting, resolved against the root.
+    virtual_store_dir: PathBuf,
+}
+
+impl PnpmInstallResource {
+    /// The block's install layout, from the settings `pnpm config list`
+    /// reports. Without them, pnpm's defaults in `dir`.
+    fn layout(&self, inputs: &Block<PnpmInstallInputs>) -> Layout {
+        let dir = Path::new(workspace_dir(inputs));
+        let root = workspace::workspace(&self.tracker, dir).map_or_else(|_| dir.to_path_buf(), |ws| ws.root.clone());
+        let config = workspace::config(&self.tracker, dir).unwrap_or_default();
+        let modules_dir = config["modules-dir"].as_str().unwrap_or("node_modules").to_owned();
+        let virtual_store_dir = match config["virtual-store-dir"].as_str() {
+            Some(virtual_store_dir) => root.join(virtual_store_dir),
+            None => root.join(&modules_dir).join(".pnpm"),
+        };
+        Layout {
+            root,
+            modules_dir,
+            virtual_store_dir,
+        }
     }
 }
 
@@ -290,6 +337,7 @@ mod tests {
         let prior = PnpmInstallState {
             frozen: true,
             node_modules_dirs: vec![],
+            modules_dir: default_modules_dir(),
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
@@ -299,8 +347,8 @@ mod tests {
     fn destroy_removes_all_node_modules_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::create_dir_all(root.join("node_modules")).unwrap();
-        std::fs::create_dir_all(root.join("pkg/node_modules")).unwrap();
+        std::fs::create_dir_all(root.join("nm")).unwrap();
+        std::fs::create_dir_all(root.join("pkg/nm")).unwrap();
 
         let state = PnpmInstallState {
             frozen: true,
@@ -308,12 +356,44 @@ mod tests {
                 root.to_string_lossy().into_owned(),
                 root.join("pkg").to_string_lossy().into_owned(),
             ],
+            modules_dir: "nm".into(),
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
         let state = Block::new(Some(root.to_string_lossy().into_owned()), state);
         Resource::destroy(&test_resource(), &state, &writer).unwrap();
-        assert!(!root.join("node_modules").exists());
-        assert!(!root.join("pkg/node_modules").exists());
+        assert!(!root.join("nm").exists());
+        assert!(!root.join("pkg/nm").exists());
+    }
+
+    #[test]
+    fn state_without_a_modules_dir_still_loads() {
+        let state: PnpmInstallState = serde_json::from_str(r#"{"frozen": true, "node_modules_dirs": []}"#).unwrap();
+        assert_eq!(state.modules_dir, "node_modules");
+    }
+
+    #[test]
+    fn output_keys_follow_the_configured_layout_at_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("package.json"), r#"{ "name": "root" }"#).unwrap();
+        std::fs::write(root.join("pnpm-workspace.yaml"), "packages:\n  - app\n").unwrap();
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(root.join("app/package.json"), r#"{ "name": "app" }"#).unwrap();
+        let keys = |dir: &Path| {
+            let inputs = Block::new(
+                Some(dir.to_string_lossy().into_owned()),
+                PnpmInstallInputs { frozen: true },
+            );
+            Resource::output_keys(&test_resource(), &inputs)
+        };
+        let path = |rel: &str| root.join(rel).to_string_lossy().into_owned();
+
+        assert_eq!(
+            keys(&root.join("app")),
+            [path("node_modules/.modules.yaml"), path("node_modules/.pnpm/lock.yaml")]
+        );
+        std::fs::write(root.join(".npmrc"), "modules-dir=nm\nvirtual-store-dir=.store\n").unwrap();
+        assert_eq!(keys(&root), [path("nm/.modules.yaml"), path(".store/lock.yaml")]);
     }
 }
