@@ -106,8 +106,9 @@ When only Go files changed since `go.test` last passed, it tests just the
 packages whose sources, tests, other files, `testdata/` or local imports
 include a changed file. It tests the whole pattern on its first run, with
 `--force`, or when its fields, toolchain, dependencies or extra `inputs`
-changed, or a tracked file was deleted. `go.lint` narrows its run the same way. It lints the whole
-pattern when the golangci-lint config changed, or when a changed package is
+changed, or a tracked file was deleted. `go.lint` narrows its run the same
+way. It lints the whole pattern when the golangci-lint config changed, or
+when a changed package is
 excluded by build constraints without extra build tags. `go.fmt` and
 `go.fmt-l` format or check only the changed `.go` files of the packages they
 name, not of the packages those import.
@@ -126,6 +127,21 @@ local directories: the modules a `go.work` file uses, and the targets of
 `go.mod` and `go.sum`, and the `go.work` and `go.work.sum` in use. When the
 workspace or main module has a `vendor/modules.txt`, they track every file in
 `vendor/`.
+
+`docker.image` tracks the Dockerfile and the context files its `COPY`, `ADD`
+and `RUN --mount=type=bind` instructions read, less those its ignore file
+excludes. It expands variables in their paths as Docker does, and takes
+`TARGETARCH` and the other target platform arguments from `platform`. It
+cannot see changes that only a registry or network request would reveal:
+
+- a base image tag, such as `FROM node:latest`, that now names another image
+- a file that `ADD` downloads from a URL
+- the frontend a `# syntax=` line names
+
+Pin base images and frontends by digest so that a change to them changes the
+Dockerfile. `docker.push` does not check the registry either. It pushes again
+only when the image changes, not when the registry copy was deleted or
+overwritten.
 
 `exec.test` can report individual tests from any runner with JSON or JSONL
 output. Its `results` field is a jq filter that maps each JSON value to test
