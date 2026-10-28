@@ -99,6 +99,40 @@ pub fn workspace(tracker: &FileTracker, dir: &Path) -> Result<Arc<Workspace>, Bo
     Ok(workspaces.0.entry(root).or_insert(workspace).value().clone())
 }
 
+/// pnpm's settings by canonical directory, a [`FileTracker::derived`] cache
+/// like [`Workspaces`], since the `.npmrc` files they come from may change.
+#[derive(Default)]
+struct Configs(DashMap<PathBuf, Arc<serde_json::Value>>);
+
+/// The settings pnpm uses when run in `dir`, as `pnpm config list` reports
+/// them from every `.npmrc`, `pnpm-workspace.yaml` and environment
+/// variable it reads, with the paths of the config files themselves.
+pub fn config(tracker: &FileTracker, dir: &Path) -> Result<Arc<serde_json::Value>, BoxError> {
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("pnpm: canonicalizing {}: {e}", dir.display()))?;
+    let configs = tracker.derived::<Configs>();
+    if let Some(config) = configs.0.get(&dir) {
+        return Ok(Arc::clone(&config));
+    }
+    let output = std::process::Command::new("pnpm")
+        .args(["config", "list", "--json"])
+        .current_dir(&dir)
+        .logged_output()
+        .map_err(|e| format!("pnpm: failed to execute `pnpm config list`: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "pnpm: `pnpm config list` in {} failed: {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    let config =
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("pnpm: parsing `pnpm config list` output: {e}"))?;
+    Ok(configs.0.entry(dir).or_insert(Arc::new(config)).value().clone())
+}
+
 /// The workspace pnpm uses when run in `dir`, loaded without a cache.
 pub fn load(dir: &Path) -> Result<Workspace, BoxError> {
     load_workspace(&root_of(dir)?)
