@@ -230,13 +230,15 @@ pub fn tested_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<V
         .collect()
 }
 
+/// Package directories, each with the module it belongs to.
+type PackageDirs = Vec<(Arc<Module>, PathBuf)>;
+
 /// The local modules the go command run in `base_dir` (or bit's CWD) builds
-/// from, and the package directories `patterns` name, each once with the
-/// module it belongs to.
+/// from, and the package directories `patterns` name, each once.
 fn pattern_packages(
     patterns: &[String],
     base_dir: Option<&Path>,
-) -> Result<(Arc<LocalModules>, Vec<(Arc<Module>, PathBuf)>), BoxError> {
+) -> Result<(Arc<LocalModules>, PackageDirs), BoxError> {
     let base = base_module(base_dir)?;
     let cwd = match base_dir {
         Some(dir) => dir.to_path_buf(),
