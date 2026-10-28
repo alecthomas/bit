@@ -897,7 +897,7 @@ block = go.test {
 ```bit
 block = go.lint {
   package = (string | [string])?  # Go package pattern or list of patterns
-  flags = [string]?               # Extra flags passed to golangci-lint run
+  flags = [string]?               # Extra flags passed to golangci-lint run. The config `--config` names is tracked as an input instead of the one golangci-lint would find.
   inputs = [string]?              # Input file glob patterns, relative to `dir` (in addition to Go sources)
 }
 ```

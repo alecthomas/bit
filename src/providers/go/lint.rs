@@ -23,7 +23,7 @@ pub struct GoLintInputs {
     #[serde(default = "default_package", deserialize_with = "super::package_patterns")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub package: Vec<String>,
-    /// Extra flags passed to golangci-lint run
+    /// Extra flags passed to golangci-lint run. The config `--config` names is tracked as an input instead of the one golangci-lint would find.
     #[serde(default)]
     pub flags: Vec<String>,
     /// Input file glob patterns, relative to `dir` (in addition to Go sources)
@@ -158,15 +158,16 @@ impl Resource for GoLintResource {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref();
         // golangci-lint lints tests by default; tracking them when disabled only costs a rerun.
-        // Its flags are not the go command's, so none name files to track.
+        // Its flags are not the go command's, so the go command's flags are not looked for.
         let mut files = super::resolve_go_inputs(&inputs.package, dir, &[], Tests::Sources, &inputs.inputs, tracker)?;
         let lint_dir = std::env::current_dir()?.join(dir.unwrap_or(""));
-        let home = dirs::home_dir();
-        // golangci-lint searches for its config from the first package only.
-        for path in golangci_config_files(&lint_dir, &inputs.package[0], home.as_deref()) {
-            let hash = tracker.hash_file(&path)?;
-            files.insert(path.to_string_lossy().into_owned(), hash);
-        }
+        // A config named by `--config` replaces the search, which starts from
+        // the first package only.
+        let configs = match super::flag_values(&inputs.flags, &["c", "config"]).last() {
+            Some(flag) => vec![lint_dir.join(flag.value)],
+            None => golangci_config_files(&lint_dir, &inputs.package[0], dirs::home_dir().as_deref()),
+        };
+        files.extend(tracker.hash_files(&configs)?);
         Ok(files)
     }
 
@@ -374,6 +375,30 @@ mod tests {
             resolved.contains_key(&root.join(".golangci.yml").to_string_lossy().into_owned()),
             "{resolved:?}"
         );
+    }
+
+    #[test]
+    fn resolve_tracks_config_named_by_flag_instead_of_searching() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
+        std::fs::write(root.join("main.go"), "package main\n").unwrap();
+        std::fs::write(root.join(".golangci.yml"), "version: \"2\"\n").unwrap();
+        std::fs::create_dir_all(root.join("ci")).unwrap();
+        std::fs::write(root.join("ci/lint.yml"), "version: \"2\"\n").unwrap();
+        for flags in [["--config", "ci/lint.yml"], ["-c", "ci/lint.yml"]] {
+            let inputs = Block::new(
+                Some(root.to_string_lossy().into_owned()),
+                GoLintInputs {
+                    package: vec!["./...".into()],
+                    flags: flags.map(String::from).into(),
+                    inputs: vec![],
+                },
+            );
+            let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
+            assert!(resolved.keys().any(|p| p.ends_with("ci/lint.yml")), "{resolved:?}");
+            assert!(!resolved.keys().any(|p| p.ends_with(".golangci.yml")), "{resolved:?}");
+        }
     }
 
     #[test]
