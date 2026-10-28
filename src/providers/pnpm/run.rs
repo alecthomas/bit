@@ -36,10 +36,9 @@ pub(super) fn describe(script: &str, package: Option<&str>, script_args: &[Strin
 }
 
 /// Resolve input files for a `pnpm.run` or `pnpm.test` block: auto-scan the
-/// target package's source tree (recursively, excluding common build
-/// directories and declared outputs) plus the workspace lockfile. When no
-/// `package` is given, only the root `package.json` and lockfile are
-/// included — root-level scripts rarely need the whole tree hashed.
+/// source trees (recursively, excluding common build directories and
+/// declared outputs) of the projects whose script runs and of their local
+/// dependencies, plus the workspace lockfile.
 ///
 /// `outputs` and `extra_globs` are relative to the block's `dir`.
 pub(super) fn resolve_inputs<T>(
@@ -56,30 +55,26 @@ pub(super) fn resolve_inputs<T>(
         files.insert(lf.to_string_lossy().into_owned(), tracker.hash_file(lf)?);
     }
 
-    match package {
+    let project_dirs = match package {
+        // `--filter` selects every project with the name.
         Some(pkg) => {
             let pkg_dirs = ws.package_dirs(pkg);
             if pkg_dirs.is_empty() {
                 return Err(format!("pnpm: package '{pkg}' not found in workspace").into());
             }
-            let exclude_outputs: Vec<PathBuf> = outputs.iter().map(|output| block.path(output).into()).collect();
-            // `--filter` selects every project with the name, and each
-            // builds from its local dependencies too.
-            for source in ws.local_sources(&pkg_dirs) {
-                let files_in = match source.is_dir() {
-                    true => workspace::scan_sources(&source, &exclude_outputs),
-                    // A tarball, or a dependency that no longer exists.
-                    false => vec![source],
-                };
-                files.extend(tracker.hash_files(&files_in)?);
-            }
+            pkg_dirs
         }
-        None => {
-            files.insert(
-                ws.root_package_json.to_string_lossy().into_owned(),
-                tracker.hash_file(&ws.root_package_json)?,
-            );
-        }
+        None => script_projects(&ws, Path::new(workspace_dir(block))),
+    };
+    let exclude_outputs: Vec<PathBuf> = outputs.iter().map(|output| block.path(output).into()).collect();
+    // Each project builds from its local dependencies too.
+    for source in ws.local_sources(&project_dirs) {
+        let files_in = match source.is_dir() {
+            true => workspace::scan_sources(&source, &exclude_outputs),
+            // A tarball, or a dependency that no longer exists.
+            false => vec![source],
+        };
+        files.extend(tracker.hash_files(&files_in)?);
     }
 
     for glob in extra_globs {
@@ -88,12 +83,28 @@ pub(super) fn resolve_inputs<T>(
     Ok(files)
 }
 
+/// The projects a script run in `dir` without `--filter` may read: pnpm runs
+/// the script of the project containing `dir`. The workspace root's script
+/// can touch any package, as `pnpm -r build` does, so it reads them all.
+fn script_projects<'a>(ws: &'a workspace::Workspace, dir: &Path) -> Vec<&'a Path> {
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let project = ws
+        .projects
+        .iter()
+        .filter(|project| dir.starts_with(&project.dir))
+        .max_by_key(|project| project.dir.components().count());
+    match project {
+        Some(project) if project.dir != ws.root => vec![project.dir.as_path()],
+        _ => ws.projects.iter().map(|project| project.dir.as_path()).collect(),
+    }
+}
+
 /// Run a script defined in `package.json`.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct PnpmRunInputs {
     /// Script name from `package.json` (e.g. "build")
     pub script: String,
-    /// Package name from its `package.json`. Omit to run at the workspace root.
+    /// Package name from its `package.json`. Omit to run the script of the project in `dir`; at the workspace root, the script may touch any package, so every project's sources are tracked.
     #[serde(default)]
     pub package: Option<String>,
     /// Additional arguments passed to the script after `--`
@@ -335,6 +346,45 @@ mod tests {
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn a_script_without_package_reads_the_project_it_runs_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        fs::write(root.join("package.json"), r#"{ "name": "root" }"#).unwrap();
+        fs::write(root.join("pnpm-workspace.yaml"), "packages:\n  - 'packages/*'\n").unwrap();
+        for name in ["a", "b"] {
+            fs::create_dir_all(root.join("packages").join(name).join("src")).unwrap();
+            fs::write(
+                root.join("packages").join(name).join("package.json"),
+                format!(r#"{{ "name": "{name}" }}"#),
+            )
+            .unwrap();
+            fs::write(root.join("packages").join(name).join("src/index.ts"), "").unwrap();
+        }
+        let resolve = |dir: &Path| {
+            let inputs = Block::new(
+                Some(dir.to_string_lossy().into_owned()),
+                PnpmRunInputs {
+                    script: "build".into(),
+                    package: None,
+                    args: vec![],
+                    outputs: vec![],
+                    inputs: vec![],
+                },
+            );
+            Resource::resolve(&test_resource(), &inputs).unwrap()
+        };
+        let tracked = |files: &BTreeMap<String, SHA256>, name: &str| files.keys().any(|p| p.ends_with(name));
+
+        let at_root = resolve(&root);
+        assert!(tracked(&at_root, "packages/a/src/index.ts"), "{at_root:?}");
+        assert!(tracked(&at_root, "packages/b/src/index.ts"), "{at_root:?}");
+
+        let in_a = resolve(&root.join("packages/a"));
+        assert!(tracked(&in_a, "packages/a/src/index.ts"), "{in_a:?}");
+        assert!(!tracked(&in_a, "packages/b/src/index.ts"), "{in_a:?}");
     }
 
     #[test]

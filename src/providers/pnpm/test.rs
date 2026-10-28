@@ -23,7 +23,7 @@ pub struct PnpmTestInputs {
     /// Script name from `package.json` (defaults to "test")
     #[serde(default = "default_script")]
     pub script: String,
-    /// Package name from its `package.json`. Omit to run at the workspace root.
+    /// Package name from its `package.json`. Omit to run the script of the project in `dir`; at the workspace root, the script may touch any package, so every project's sources are tracked.
     #[serde(default)]
     pub package: Option<String>,
     /// Additional arguments passed to the script after `--`
