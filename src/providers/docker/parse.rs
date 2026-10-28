@@ -160,6 +160,18 @@ fn platform_sources(
                         }
                     }
                 }
+                Instruction::Run(run) => {
+                    let mounts = run
+                        .options
+                        .iter()
+                        .filter(|flag| &*flag.name.value == "mount")
+                        .filter_map(|flag| flag.value.as_ref());
+                    for mount in mounts {
+                        if let Some(source) = context_bind_source(&expand(&mount.value, &vars)?) {
+                            paths.push(context.join(source));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -168,6 +180,24 @@ fn platform_sources(
         }
     }
     Ok(paths)
+}
+
+/// The context path a `RUN --mount` mounts, given its comma-separated
+/// options: the `source` (or `src`) of a bind mount, which is the default
+/// type, or the whole context when it names none. A mount with `from`
+/// reads another stage or image, so it reads nothing from the context.
+fn context_bind_source(options: &str) -> Option<&str> {
+    let mut kind = "bind";
+    let mut source = ".";
+    for option in options.split(',') {
+        match option.trim().split_once('=') {
+            Some(("type", value)) => kind = value,
+            Some(("source" | "src", value)) => source = value,
+            Some(("from", _)) => return None,
+            _ => {}
+        }
+    }
+    (kind == "bind").then_some(source)
 }
 
 /// The names an `ARG` instruction declares, each with its default, if it
@@ -519,6 +549,19 @@ mod tests {
 
         let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
         assert_eq!(sources, [dir.path().join("dist/app-")]);
+    }
+
+    #[test]
+    fn bind_mounts_from_the_context_are_sources() {
+        let dockerfile = concat!(
+            "FROM golang\n",
+            "ARG DIR=src\n",
+            "RUN --mount=type=bind,source=go.mod,target=/go.mod --mount=type=cache,target=/root/.cache go build\n",
+            "RUN --mount=target=/app,src=$DIR make\n",
+            "RUN --mount=type=bind,from=builder,source=/out,target=/out true\n",
+            "RUN --mount=type=bind,target=/ctx ls\n",
+        );
+        assert_eq!(sources(dockerfile, &[]), ["go.mod", "src", "."]);
     }
 
     #[test]
