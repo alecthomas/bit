@@ -275,10 +275,12 @@ pub fn packages_with_script(workspace: &Workspace, script: &str) -> Result<Vec<S
     Ok(packages)
 }
 
-/// Directory names that are never considered source inputs.
-const SKIP_DIRS: &[&str] = &[
-    "node_modules",
-    ".git",
+/// Directory names that are never source inputs, at any depth.
+const SKIP_DIRS: &[&str] = &["node_modules", ".git"];
+
+/// Directory names that are build output or tool caches at the top of a
+/// package. Deeper down they may be sources, such as `src/build/`.
+const SKIP_TOP_LEVEL_DIRS: &[&str] = &[
     "dist",
     "build",
     "out",
@@ -294,20 +296,21 @@ const SKIP_DIRS: &[&str] = &[
 /// File names that are never considered source inputs.
 const SKIP_FILE_SUFFIXES: &[&str] = &[".tsbuildinfo"];
 
-/// Recursively collect source files under `dir`, skipping common
-/// build-output and tooling directories as well as any paths listed in
-/// `exclude`. Returns absolute-ish paths (as walked from `dir`).
+/// Recursively collect source files under `dir`, a package directory,
+/// skipping common build-output and tooling directories as well as any
+/// paths listed in `exclude`. Returns absolute-ish paths (as walked from
+/// `dir`).
 pub fn scan_sources(dir: &Path, exclude: &[PathBuf]) -> Vec<PathBuf> {
     let exclude_canonical: Vec<PathBuf> = exclude
         .iter()
         .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
         .collect();
     let mut out = Vec::new();
-    scan_dir(dir, &exclude_canonical, &mut out);
+    scan_dir(dir, &exclude_canonical, true, &mut out);
     out
 }
 
-fn scan_dir(dir: &Path, exclude: &[PathBuf], out: &mut Vec<PathBuf>) {
+fn scan_dir(dir: &Path, exclude: &[PathBuf], top_level: bool, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -321,10 +324,11 @@ fn scan_dir(dir: &Path, exclude: &[PathBuf], out: &mut Vec<PathBuf>) {
         }
 
         if ft.is_dir() {
-            if SKIP_DIRS.contains(&name_str.as_ref()) {
+            if SKIP_DIRS.contains(&name_str.as_ref()) || (top_level && SKIP_TOP_LEVEL_DIRS.contains(&name_str.as_ref()))
+            {
                 continue;
             }
-            scan_dir(&path, exclude, out);
+            scan_dir(&path, exclude, false, out);
         } else if ft.is_file() && is_source_file(&name_str) {
             out.push(path);
         }
@@ -552,6 +556,27 @@ mod tests {
         assert!(names.contains(&"package.json"));
         assert!(!names.contains(&"bar.js"));
         assert!(!names.contains(&"bundle.js"));
+    }
+
+    #[test]
+    fn scan_sources_skips_build_names_only_at_the_top() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for path in [
+            "dist/bundle.js",
+            "src/build/plugin.ts",
+            "src/out/index.ts",
+            "src/node_modules/x/index.js",
+        ] {
+            fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            fs::write(root.join(path), "").unwrap();
+        }
+
+        let files = scan_sources(root, &[]);
+        assert!(files.contains(&root.join("src/build/plugin.ts")), "{files:?}");
+        assert!(files.contains(&root.join("src/out/index.ts")), "{files:?}");
+        assert!(!files.contains(&root.join("dist/bundle.js")), "{files:?}");
+        assert!(!files.contains(&root.join("src/node_modules/x/index.js")), "{files:?}");
     }
 
     #[test]

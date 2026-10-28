@@ -69,11 +69,17 @@ pub(super) fn resolve_inputs<T>(
         }
         None => script_projects(&ws, Path::new(workspace_dir(block))),
     };
-    let exclude_outputs: Vec<PathBuf> = outputs.iter().map(|output| block.path(output).into()).collect();
+    // Projects nested in another are scanned as projects of their own when
+    // they are sources, so their build output is skipped at their top.
+    let mut exclude: Vec<PathBuf> = outputs.iter().map(|output| block.path(output).into()).collect();
+    exclude.extend(ws.projects.iter().map(|project| project.dir.clone()));
     // Each project builds from its local dependencies too.
     for source in ws.local_sources(&project_dirs) {
         let files_in = match source.is_dir() {
-            true => workspace::scan_sources(&source, &exclude_outputs),
+            true => {
+                let exclude: Vec<PathBuf> = exclude.iter().filter(|dir| **dir != source).cloned().collect();
+                workspace::scan_sources(&source, &exclude)
+            }
             // A tarball, or a dependency that no longer exists.
             false => vec![source],
         };
@@ -381,9 +387,13 @@ mod tests {
         };
         let tracked = |files: &BTreeMap<String, SHA256>, name: &str| files.keys().any(|p| p.ends_with(name));
 
+        fs::create_dir_all(root.join("packages/a/dist")).unwrap();
+        fs::write(root.join("packages/a/dist/index.js"), "").unwrap();
         let at_root = resolve(&root);
         assert!(tracked(&at_root, "packages/a/src/index.ts"), "{at_root:?}");
         assert!(tracked(&at_root, "packages/b/src/index.ts"), "{at_root:?}");
+        // Build output at the top of a nested project, not of the root.
+        assert!(!tracked(&at_root, "packages/a/dist/index.js"), "{at_root:?}");
 
         let in_a = resolve(&root.join("packages/a"));
         assert!(tracked(&in_a, "packages/a/src/index.ts"), "{in_a:?}");
