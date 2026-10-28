@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanResult, Provider,
-    Resource, ResourceKind,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanAction, PlanResult,
+    Provider, Resource, ResourceKind,
 };
 use crate::sha256::SHA256;
 use crate::value::Value;
@@ -509,6 +509,22 @@ pub struct ProtocGenerateState {
     /// Files the generators wrote, removed on destroy.
     #[serde(default)]
     pub generated: Vec<String>,
+    /// Hashes of the generated files as the run left them. State written
+    /// before they were recorded has none, and is not checked.
+    #[serde(default)]
+    pub generated_hashes: BTreeMap<String, SHA256>,
+}
+
+impl ProtocGenerateState {
+    /// The first generated file that is missing or no longer holds what the
+    /// run wrote. The engine cannot see these files when an output
+    /// directory also holds sources, since it claims no outputs there.
+    fn drifted(&self, tracker: &FileTracker) -> Option<&str> {
+        self.generated_hashes
+            .iter()
+            .find(|(path, hash)| tracker.hash_file(Path::new(path)).ok().as_ref() != Some(*hash))
+            .map(|(path, _)| path.as_str())
+    }
 }
 
 pub struct ProtocGenerateResource {
@@ -617,11 +633,18 @@ impl Resource for ProtocGenerateResource {
         inputs: &Block<ProtocGenerateInputs>,
         prior_state: Option<&ProtocGenerateState>,
     ) -> Result<PlanResult, BoxError> {
-        Ok(super::plan(
+        let mut plan = super::plan(
             command_line(inputs, &inputs.sources),
             prior_state.map(|prior| &prior.inputs),
             inputs,
-        ))
+        );
+        if plan.action == PlanAction::None
+            && let Some(file) = prior_state.and_then(|prior| prior.drifted(&self.tracker))
+        {
+            plan.action = PlanAction::Update;
+            plan.reason = Some(format!("{file} was changed or removed"));
+        }
+        Ok(plan)
     }
 
     fn apply(
@@ -665,6 +688,8 @@ impl Resource for ProtocGenerateResource {
             std::fs::create_dir_all(&path).map_err(|e| format!("failed to create {}: {e}", path.display()))?;
         }
 
+        let generated_paths: Vec<PathBuf> = generated.iter().map(PathBuf::from).collect();
+        let generated_hashes = self.tracker.hash_files(&generated_paths)?;
         Ok(ApplyResult {
             outputs: ProtocGenerateOutputs {
                 paths: outputs.iter().map(|path| path.to_string_lossy().into_owned()).collect(),
@@ -675,6 +700,7 @@ impl Resource for ProtocGenerateResource {
                 protos: hashes.protos,
                 tools: hashes.tools,
                 generated,
+                generated_hashes,
             }),
         })
     }
@@ -778,14 +804,47 @@ mod tests {
         inputs.incremental = true;
         let compilation = inputs.compilation().unwrap();
         let hashes = inputs.hashes(&compilation, &FileTracker::default()).unwrap();
+        // Generated beside its source, where the engine claims no outputs.
+        let generated = dir.path().join("proto/acme/v1/a.pb.go");
+        std::fs::write(&generated, "package v1").unwrap();
+        let generated = generated.to_string_lossy().into_owned();
+        let generated_hashes = FileTracker::default().hash_files(&[PathBuf::from(&generated)]).unwrap();
         let prior = ProtocGenerateState {
             inputs: inputs.value.clone(),
             compiled: compilation.files,
             protos: hashes.protos,
             tools: hashes.tools,
-            generated: vec![],
+            generated: vec![generated],
+            generated_hashes,
         };
         (dir, inputs, prior)
+    }
+
+    #[test]
+    fn plan_updates_when_a_generated_file_drifted() {
+        let (dir, inputs, prior) = incremental_project();
+        let generated = dir.path().join("proto/acme/v1/a.pb.go");
+        let plan = |prior: &ProtocGenerateState| Resource::plan(&test_resource(), &inputs, Some(prior)).unwrap();
+        assert_eq!(plan(&prior).action, PlanAction::None);
+
+        std::fs::write(&generated, "package edited").unwrap();
+        let result = plan(&prior);
+        assert_eq!(result.action, PlanAction::Update);
+        assert_eq!(
+            result.reason,
+            Some(format!("{} was changed or removed", generated.display()))
+        );
+
+        std::fs::remove_file(&generated).unwrap();
+        assert_eq!(plan(&prior).action, PlanAction::Update);
+        assert_eq!(
+            prior.drifted(&FileTracker::default()),
+            Some(&*generated.to_string_lossy())
+        );
+
+        let mut unrecorded = prior.clone();
+        unrecorded.generated_hashes.clear();
+        assert_eq!(plan(&unrecorded).action, PlanAction::None, "older state is not checked");
     }
 
     fn batches(inputs: &Block<ProtocGenerateInputs>, prior: &ProtocGenerateState) -> Option<Batches> {
@@ -1030,6 +1089,7 @@ mod tests {
             protos: BTreeMap::new(),
             tools: BTreeMap::new(),
             generated: vec![out.join("acme/v1/a.pb.go").to_string_lossy().into_owned()],
+            generated_hashes: BTreeMap::new(),
         };
         let output = crate::output::Output::new(&[]);
         let state = Block::new(inputs.dir.clone(), state);
