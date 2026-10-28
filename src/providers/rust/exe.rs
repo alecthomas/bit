@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -221,7 +222,7 @@ impl Resource for RustExeResource {
             .command()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .logged_spawn()
             .map_err(|e| format!("failed to execute `{}`: {e}", cargo.display()))?;
 
         let stdout = child.stdout.take();

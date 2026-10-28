@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,10 +21,12 @@ struct PackageScan {
     embed_files: HashSet<PathBuf>,
     /// Files embedded by //go:embed directives in test files.
     test_embed_files: HashSet<PathBuf>,
-    /// Directories of local (same-module) packages imported by source files.
-    import_dirs: HashSet<PathBuf>,
-    /// Directories of local packages imported by test files.
-    test_import_dirs: HashSet<PathBuf>,
+    /// Non-standard-library import paths of source files. They are kept
+    /// unresolved because which are local depends on the workspace the scan
+    /// is used in, and one module can belong to several.
+    imports: HashSet<String>,
+    /// Non-standard-library import paths of test files.
+    test_imports: HashSet<String>,
 }
 
 /// A module's identity and the scans of its package directories.
@@ -83,8 +86,8 @@ fn scan_package_dir(module: &Module, pkg_dir: &Path, canonical: &Path) -> Result
         test_files: HashSet::new(),
         embed_files: HashSet::new(),
         test_embed_files: HashSet::new(),
-        import_dirs: HashSet::new(),
-        test_import_dirs: HashSet::new(),
+        imports: HashSet::new(),
+        test_imports: HashSet::new(),
     };
 
     for entry in entries {
@@ -101,33 +104,13 @@ fn scan_package_dir(module: &Module, pkg_dir: &Path, canonical: &Path) -> Result
         let path = entry.path();
         let source = fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
 
-        let (files, embed_files, import_dirs) = if name_str.ends_with("_test.go") {
-            (
-                &mut scan.test_files,
-                &mut scan.test_embed_files,
-                &mut scan.test_import_dirs,
-            )
+        let (files, embed_files, imports) = if name_str.ends_with("_test.go") {
+            (&mut scan.test_files, &mut scan.test_embed_files, &mut scan.test_imports)
         } else {
-            (&mut scan.go_files, &mut scan.embed_files, &mut scan.import_dirs)
+            (&mut scan.go_files, &mut scan.embed_files, &mut scan.imports)
         };
         files.insert(path);
-
-        for imp in parse_imports(&source) {
-            if is_stdlib(&imp) {
-                continue;
-            }
-            if let Some(rel) = imp.strip_prefix(&module.path) {
-                let rel = rel.strip_prefix('/').unwrap_or(rel);
-                let dep_dir = if rel.is_empty() {
-                    module.root.clone()
-                } else {
-                    module.root.join(rel)
-                };
-                if dep_dir.is_dir() {
-                    import_dirs.insert(dep_dir);
-                }
-            }
-        }
+        imports.extend(parse_imports(&source).into_iter().filter(|imp| !is_stdlib(imp)));
 
         let embeds = parse_embeds(&source);
         if !embeds.is_empty() {
@@ -150,6 +133,7 @@ fn package_scan(module: &Module, pkg_dir: &Path) -> Result<(PathBuf, Arc<Package
 /// Collect a package's non-test files and those of its transitive local
 /// imports. `visited` holds packages whose sources are already collected.
 fn collect_sources(
+    local: &LocalModules,
     module: &Module,
     pkg_dir: &Path,
     files: &mut HashSet<PathBuf>,
@@ -162,8 +146,8 @@ fn collect_sources(
 
     files.extend(scan.go_files.iter().cloned());
     files.extend(scan.embed_files.iter().cloned());
-    for dep_dir in &scan.import_dirs {
-        collect_sources(module, dep_dir, files, visited)?;
+    for (dep_module, dep_dir) in scan.imports.iter().filter_map(|imp| local.resolve(imp)) {
+        collect_sources(local, &dep_module, &dep_dir, files, visited)?;
     }
 
     Ok(())
@@ -174,6 +158,7 @@ fn collect_sources(
 /// Skips the `visited` check for the package itself: it may have been visited
 /// only as another package's import, which collects no test inputs.
 fn collect_tests(
+    local: &LocalModules,
     module: &Module,
     pkg_dir: &Path,
     tests: Tests,
@@ -186,8 +171,8 @@ fn collect_tests(
     if tests == Tests::SourcesAndTestdata {
         files.extend(files_under(&pkg_dir.join("testdata")));
     }
-    for dep_dir in &scan.test_import_dirs {
-        collect_sources(module, dep_dir, files, visited)?;
+    for (dep_module, dep_dir) in scan.test_imports.iter().filter_map(|imp| local.resolve(imp)) {
+        collect_sources(local, &dep_module, &dep_dir, files, visited)?;
     }
     Ok(())
 }
@@ -202,15 +187,15 @@ fn collect_tests(
 /// `go` from a non-project-root directory — e.g. a `go.exe` block with a `dir`
 /// pointing at a separate-module subdirectory. `None` starts from bit's CWD.
 pub fn scan(patterns: &[String], tests: Tests, base_dir: Option<&Path>) -> Result<HashSet<PathBuf>, BoxError> {
-    let (module, pkg_dirs) = pattern_packages(patterns, base_dir)?;
+    let (local, pkg_dirs) = pattern_packages(patterns, base_dir)?;
 
-    let mut all_files = module_files(&module);
+    let mut all_files = local.files.clone();
     let mut visited = HashSet::new();
 
-    for dir in &pkg_dirs {
-        collect_sources(&module, dir, &mut all_files, &mut visited)?;
+    for (module, dir) in &pkg_dirs {
+        collect_sources(&local, module, dir, &mut all_files, &mut visited)?;
         if tests != Tests::Excluded {
-            collect_tests(&module, dir, tests, &mut all_files, &mut visited)?;
+            collect_tests(&local, module, dir, tests, &mut all_files, &mut visited)?;
         }
     }
 
@@ -228,16 +213,16 @@ pub struct TestedPackage {
 /// List the packages the patterns name, each with the files a
 /// [`Tests::SourcesAndTestdata`] scan of that package alone would return.
 pub fn tested_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<Vec<TestedPackage>, BoxError> {
-    let (module, pkg_dirs) = pattern_packages(patterns, base_dir)?;
+    let (local, pkg_dirs) = pattern_packages(patterns, base_dir)?;
     pkg_dirs
         .iter()
-        .map(|dir| {
-            let mut files = module_files(&module);
+        .map(|(module, dir)| {
+            let mut files = local.files.clone();
             let mut visited = HashSet::new();
-            collect_sources(&module, dir, &mut files, &mut visited)?;
-            collect_tests(&module, dir, Tests::SourcesAndTestdata, &mut files, &mut visited)?;
+            collect_sources(&local, module, dir, &mut files, &mut visited)?;
+            collect_tests(&local, module, dir, Tests::SourcesAndTestdata, &mut files, &mut visited)?;
             Ok(TestedPackage {
-                import_path: import_path(&module, dir),
+                import_path: import_path(module, dir),
                 dir: dir.clone(),
                 files,
             })
@@ -245,26 +230,38 @@ pub fn tested_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<V
         .collect()
 }
 
-/// The module `base_dir` (or bit's CWD) belongs to, and the package
-/// directories `patterns` name in it, each once.
-fn pattern_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<(Arc<Module>, Vec<PathBuf>), BoxError> {
-    let module = base_module(base_dir)?;
+/// The local modules the go command run in `base_dir` (or bit's CWD) builds
+/// from, and the package directories `patterns` name, each once with the
+/// module it belongs to.
+fn pattern_packages(
+    patterns: &[String],
+    base_dir: Option<&Path>,
+) -> Result<(Arc<LocalModules>, Vec<(Arc<Module>, PathBuf)>), BoxError> {
+    let base = base_module(base_dir)?;
     let cwd = match base_dir {
         Some(dir) => dir.to_path_buf(),
         None => std::env::current_dir()?,
     };
     // Canonical, like the module root, so package directories compare equal.
     let cwd = cwd.canonicalize().unwrap_or(cwd);
+    let local = local_modules(&cwd, &base);
     let mut seen = HashSet::new();
     let mut pkg_dirs = Vec::new();
     for pattern in patterns {
-        for dir in resolve_package_dirs(&module.root, &module.path, &cwd, pattern)? {
+        // An import path pattern may name another local module.
+        let (path, module) = match pattern.starts_with('.') {
+            true => (base.path.clone(), Arc::clone(&base)),
+            false => local
+                .module_for(pattern.trim_end_matches("/..."))
+                .unwrap_or_else(|| (base.path.clone(), Arc::clone(&base))),
+        };
+        for dir in resolve_package_dirs(&module.root, &path, &cwd, pattern)? {
             if seen.insert(dir.clone()) {
-                pkg_dirs.push(dir);
+                pkg_dirs.push((Arc::clone(&module), dir));
             }
         }
     }
-    Ok((module, pkg_dirs))
+    Ok((local, pkg_dirs))
 }
 
 /// The module `base_dir` (or bit's CWD) belongs to.
@@ -291,13 +288,141 @@ pub fn package_import_path(base_dir: Option<&Path>, rel_dir: &str) -> Result<Str
     Ok(import_path(&*module(&pkg_dir)?, &pkg_dir))
 }
 
-/// The module's `go.mod` and `go.sum`, which every package depends on.
-fn module_files(module: &Module) -> HashSet<PathBuf> {
-    ["go.mod", "go.sum"]
-        .into_iter()
-        .map(|name| module.root.join(name))
-        .filter(|path| path.exists())
-        .collect()
+/// The modules a go command builds from local directories, and the files
+/// that define them, which every package depends on.
+struct LocalModules {
+    /// Each module by the import path it is known by, longest first, so the
+    /// deepest module owns an import.
+    modules: Vec<(String, Arc<Module>)>,
+    /// `go.work` and `go.work.sum`, and each module's `go.mod` and `go.sum`,
+    /// where they exist.
+    files: HashSet<PathBuf>,
+}
+
+/// Local module sets by canonical working directory, since `go.work`
+/// discovery and `GOWORK` depend on where the go command runs.
+static LOCAL_MODULES: LazyLock<DashMap<PathBuf, Arc<LocalModules>>> = LazyLock::new(DashMap::new);
+
+impl LocalModules {
+    /// The local module an import path belongs to, by the path it is known by.
+    fn module_for(&self, import: &str) -> Option<(String, Arc<Module>)> {
+        self.modules
+            .iter()
+            .find(|(path, _)| {
+                import == path
+                    || import
+                        .strip_prefix(path.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .map(|(path, module)| (path.clone(), Arc::clone(module)))
+    }
+
+    /// The module and package directory of a local import, if it is one.
+    fn resolve(&self, import: &str) -> Option<(Arc<Module>, PathBuf)> {
+        let (path, module) = self.module_for(import)?;
+        let rel = import[path.len()..].trim_start_matches('/');
+        let dir = if rel.is_empty() {
+            module.root.clone()
+        } else {
+            module.root.join(rel)
+        };
+        dir.is_dir().then_some((module, dir))
+    }
+}
+
+/// The local modules the go command run in `cwd` builds from: the main
+/// modules, which are the workspace's `use` modules or else `base`, and the
+/// targets of `replace` directives naming local directories.
+///
+/// The go command reports the main modules and the workspace file, and
+/// parses the `replace` directives, so this follows its rules rather than
+/// reimplementing them. Without a working go command, only `base` is local.
+fn local_modules(cwd: &Path, base: &Arc<Module>) -> Arc<LocalModules> {
+    if let Some(local) = LOCAL_MODULES.get(cwd) {
+        return Arc::clone(&local);
+    }
+    let mut modules = vec![(base.path.clone(), Arc::clone(base))];
+    if let Some(main) = go_json(cwd, &["list", "-m", "-json"]) {
+        for entry in &main {
+            if let (Some(path), Some(dir)) = (entry["Path"].as_str(), entry["Dir"].as_str())
+                && let Ok(module) = module(Path::new(dir))
+            {
+                modules.push((path.to_owned(), module));
+            }
+        }
+    }
+
+    // `replace` directives apply from `go.work` and from each main module's
+    // `go.mod`, which `go work edit` and `go mod edit` parse.
+    let mut files = HashSet::new();
+    let mut replace_sources: Vec<(PathBuf, &str)> = vec![];
+    if let Some(gowork) = go_output(cwd, &["env", "GOWORK"]).filter(|path| !path.is_empty() && path != "off") {
+        files.insert(PathBuf::from(format!("{gowork}.sum")));
+        replace_sources.push((PathBuf::from(gowork), "work"));
+    }
+    for (_, module) in &modules {
+        let go_mod = module.root.join("go.mod");
+        if !replace_sources.iter().any(|(source, _)| *source == go_mod) {
+            replace_sources.push((go_mod, "mod"));
+        }
+    }
+
+    for (source, kind) in &replace_sources {
+        files.insert(source.clone());
+        let source_arg = source.to_string_lossy();
+        let Some(edit) = go_json(cwd, &[kind, "edit", "-json", &source_arg]).and_then(|mut edits| edits.pop()) else {
+            continue;
+        };
+        let source_dir = source.parent().unwrap_or(Path::new(""));
+        for replace in edit["Replace"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            let (Some(path), Some(target)) = (replace["Old"]["Path"].as_str(), replace["New"]["Path"].as_str()) else {
+                continue;
+            };
+            // The go command treats a replacement as a directory when it is
+            // a filesystem path, and as a module otherwise.
+            if !(target.starts_with("./") || target.starts_with("../") || Path::new(target).is_absolute()) {
+                continue;
+            }
+            if let Ok(module) = module(&source_dir.join(target)) {
+                modules.push((path.to_owned(), module));
+            }
+        }
+    }
+
+    for (_, module) in &modules {
+        files.extend(["go.mod", "go.sum"].map(|name| module.root.join(name)));
+    }
+    files.retain(|path| path.exists());
+    // Longest first, and equal paths together so the first, a main module
+    // ahead of any replacement, is kept.
+    modules.sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    modules.dedup_by(|(a, _), (b, _)| a == b);
+
+    let local = Arc::new(LocalModules { modules, files });
+    LOCAL_MODULES.entry(cwd.to_path_buf()).or_insert(local).value().clone()
+}
+
+/// The trimmed stdout of `go <args>` run in `dir`, or `None` if it failed.
+fn go_output(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("go")
+        .args(args)
+        .current_dir(dir)
+        .stderr(std::process::Stdio::null())
+        .logged_output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// The JSON values `go <args>` prints, one after another, in `dir`.
+fn go_json(dir: &Path, args: &[&str]) -> Option<Vec<serde_json::Value>> {
+    let output = go_output(dir, args)?;
+    serde_json::Deserializer::from_str(&output)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<_, _>>()
+        .ok()
 }
 
 fn import_path(module: &Module, pkg_dir: &Path) -> String {
@@ -685,6 +810,75 @@ var content embed.FS
 
         let dirs = resolve_package_dirs(dir.path(), "example.com/test", dir.path(), "./cmd/app").unwrap();
         assert_eq!(dirs, vec![cmd_dir]);
+    }
+
+    fn write_files(root: &Path, files: &[(&str, &str)]) {
+        for (path, content) in files {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+    }
+
+    #[test]
+    fn scan_follows_imports_into_workspace_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write_files(
+            &root,
+            &[
+                ("go.work", "go 1.22\n\nuse (\n\t./app\n\t./lib\n)\n"),
+                ("app/go.mod", "module example.com/app\n\ngo 1.22\n"),
+                (
+                    "app/main.go",
+                    "package main\n\nimport _ \"example.com/lib/util\"\n\nfunc main() {}\n",
+                ),
+                ("lib/go.mod", "module example.com/lib\n\ngo 1.22\n"),
+                ("lib/util/util.go", "package util\n"),
+                ("lib/other/other.go", "package other\n"),
+            ],
+        );
+
+        let files = scan(&[".".into()], Tests::Excluded, Some(&root.join("app"))).unwrap();
+        for expected in ["lib/util/util.go", "lib/go.mod", "go.work", "app/go.mod"] {
+            assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
+        }
+        assert!(!files.contains(&root.join("lib/other/other.go")), "{files:?}");
+
+        // A pattern may name another workspace module by its import path.
+        let files = scan(
+            &["example.com/lib/...".into()],
+            Tests::Excluded,
+            Some(&root.join("app")),
+        )
+        .unwrap();
+        assert!(files.contains(&root.join("lib/other/other.go")), "{files:?}");
+    }
+
+    #[test]
+    fn scan_follows_imports_into_local_replacements() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write_files(
+            &root,
+            &[
+                (
+                    "app/go.mod",
+                    "module example.com/app\n\ngo 1.22\n\nrequire example.com/dep v0.0.0\n\nreplace example.com/dep => ../dep\n",
+                ),
+                (
+                    "app/main.go",
+                    "package main\n\nimport _ \"example.com/dep\"\n\nfunc main() {}\n",
+                ),
+                ("dep/go.mod", "module example.com/dep\n\ngo 1.22\n"),
+                ("dep/dep.go", "package dep\n"),
+            ],
+        );
+
+        let files = scan(&[".".into()], Tests::Excluded, Some(&root.join("app"))).unwrap();
+        for expected in ["dep/dep.go", "dep/go.mod", "app/go.mod"] {
+            assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
+        }
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -367,7 +368,9 @@ impl Resource for GoTestResource {
         }
         inputs.env.apply_to(&mut cmd);
 
-        let mut child = cmd.spawn().map_err(|e| format!("failed to execute `go test`: {e}"))?;
+        let mut child = cmd
+            .logged_spawn()
+            .map_err(|e| format!("failed to execute `go test`: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();

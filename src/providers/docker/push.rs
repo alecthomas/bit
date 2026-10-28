@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -37,7 +38,7 @@ pub struct PushState {
 fn inspect_id(image: &str) -> Result<String, BoxError> {
     let output = Command::new("docker")
         .args(["inspect", "--format", "{{.Id}}", image])
-        .output()
+        .logged_output()
         .map_err(|e| format!("docker inspect failed: {e}"))?;
     if !output.status.success() {
         return Err(format!("image {image} not found").into());
@@ -125,7 +126,7 @@ impl Resource for PushResource {
     ) -> Result<ApplyResult<PushState, PushOutputs>, BoxError> {
         let tag_status = Command::new("docker")
             .args(["tag", &inputs.image, &inputs.tag])
-            .output()
+            .logged_output()
             .map_err(|e| format!("docker tag failed: {e}"))?;
         if !tag_status.status.success() {
             return Err(format!(
@@ -140,7 +141,7 @@ impl Resource for PushResource {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| format!("docker push failed: {e}"))?;
+        let mut child = cmd.logged_spawn().map_err(|e| format!("docker push failed: {e}"))?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
@@ -177,7 +178,7 @@ impl Resource for PushResource {
         writer.event(Event::Starting, &format!("docker rmi {}", prior_state.tag));
         let output = Command::new("docker")
             .args(["rmi", &prior_state.tag])
-            .output()
+            .logged_output()
             .map_err(|e| format!("docker rmi failed: {e}"))?;
         super::check_remove_output("docker rmi", output)
     }

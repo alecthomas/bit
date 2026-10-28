@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -78,7 +79,7 @@ fn git_baseline_commit(against: &str, dir: Option<&str>) -> Result<Option<String
         .arg(&repo)
         .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
         .arg(format!("{rev}^{{commit}}"))
-        .output()
+        .logged_output()
         .map_err(|e| format!("failed to execute `git rev-parse`: {e}"))?;
     if !output.status.success() {
         return Err(format!("baseline `{against}` does not name a commit in {}", repo.display()).into());

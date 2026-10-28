@@ -111,6 +111,11 @@ pattern when the golangci-lint config changed, or when a changed package is
 excluded by build constraints without extra build tags. `go.fmt` and
 `go.fmt-l` format or check only the changed `.go` files.
 
+Go blocks follow local imports into every module the go command builds from
+local directories: the modules a `go.work` file uses, and the targets of
+`replace` directives that name a directory. They track each of those modules'
+`go.mod` and `go.sum`, and the `go.work` and `go.work.sum` in use.
+
 `exec.test` can report individual tests from any runner with JSON or JSONL
 output. Its `results` field is a jq filter that maps each JSON value to test
 and suite results. Records without a `name` describe the suite, so a runner

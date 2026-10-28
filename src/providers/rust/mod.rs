@@ -4,6 +4,7 @@ pub mod exe;
 pub mod fmt;
 pub mod test;
 
+use crate::process::CommandExt;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -144,7 +145,7 @@ impl CargoCommand {
             .command()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .logged_spawn()
             .map_err(|e| format!("failed to execute `{}`: {e}", self.display()))?;
 
         let stdout = child.stdout.take();
@@ -596,7 +597,7 @@ fn git_files(root: &Path) -> Option<Vec<PathBuf>> {
         ])
         .current_dir(root)
         .stderr(Stdio::null())
-        .output()
+        .logged_output()
         .ok()?;
     if !output.status.success() {
         return None;
@@ -635,17 +636,34 @@ fn walk_files(dir: &Path, files: &mut Vec<PathBuf>) {
 /// resolving never rewrites `Cargo.lock`, and `--offline` so it never hits
 /// the network. Until the lockfile and the registry crates exist, which the
 /// first build provides, only the workspace members can be reported.
+///
+/// The graph is filtered to the host platform. Unfiltered, cargo needs the
+/// manifest of every dependency of every platform, and a build downloads
+/// only the host's, so `--offline` would never succeed. A local dependency
+/// only of another platform, used when cross-compiling, is not reported.
 fn cargo_metadata(dir: Option<&str>) -> Result<serde_json::Value, BoxError> {
     let mut guard = CARGO_METADATA_CACHE.lock().unwrap_or_else(|error| error.into_inner());
     if let Some(metadata) = guard.get(&dir_key(dir)) {
         return Ok(metadata.clone());
     }
-    let metadata = match run_cargo_metadata(dir, &["--locked", "--offline"]) {
-        Ok(metadata) => metadata,
-        Err(_) => run_cargo_metadata(dir, &["--no-deps"])?,
+    let resolved = host_triple()
+        .and_then(|host| run_cargo_metadata(dir, &["--locked", "--offline", "--filter-platform", &host]).ok());
+    let metadata = match resolved {
+        Some(metadata) => metadata,
+        None => run_cargo_metadata(dir, &["--no-deps"])?,
     };
     guard.insert(dir_key(dir), metadata.clone());
     Ok(metadata)
+}
+
+/// The host target triple, as `rustc -vV` reports it.
+fn host_triple() -> Option<String> {
+    let output = Command::new("rustc").arg("-vV").logged_output().ok()?;
+    let output = String::from_utf8_lossy(&output.stdout);
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(str::to_owned)
 }
 
 fn run_cargo_metadata(dir: Option<&str>, flags: &[&str]) -> Result<serde_json::Value, BoxError> {
@@ -659,7 +677,7 @@ fn run_cargo_metadata(dir: Option<&str>, flags: &[&str]) -> Result<serde_json::V
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .output()
+        .logged_output()
         .map_err(|e| format!("failed to run `cargo metadata`: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

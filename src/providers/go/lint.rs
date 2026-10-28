@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -232,7 +233,7 @@ impl Resource for GoLintResource {
             cmd.current_dir(dir);
         }
         let mut child = cmd
-            .spawn()
+            .logged_spawn()
             .map_err(|e| format!("failed to execute `golangci-lint`: {e}"))?;
 
         let stdout = child.stdout.take();

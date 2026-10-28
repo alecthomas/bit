@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -40,7 +41,7 @@ pub struct NetworkState {
 fn network_id(name: &str) -> Option<String> {
     let out = Command::new("docker")
         .args(["network", "inspect", "--format", "{{.Id}}", name])
-        .output()
+        .logged_output()
         .ok()?;
     if !out.status.success() {
         return None;
@@ -161,7 +162,9 @@ impl Resource for NetworkResource {
         let mut cmd = Command::new("docker");
         cmd.args(create_args(inputs));
 
-        let output = cmd.output().map_err(|e| format!("docker network create failed: {e}"))?;
+        let output = cmd
+            .logged_output()
+            .map_err(|e| format!("docker network create failed: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
             return Err(stderr.into());
@@ -197,7 +200,7 @@ impl Resource for NetworkResource {
 fn remove_network(name: &str) -> Result<(), BoxError> {
     let out = Command::new("docker")
         .args(["network", "rm", name])
-        .output()
+        .logged_output()
         .map_err(|e| format!("docker network rm failed: {e}"))?;
     super::check_remove_output("docker network rm", out)
 }

@@ -1,5 +1,6 @@
 mod results;
 
+use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -153,7 +154,9 @@ fn changed_files(changes: &Changes) -> Option<String> {
 fn run_command(command: &str, dir: Option<&str>, changes: &Changes, writer: &BlockWriter) -> Result<(), BoxError> {
     let mut cmd = shell(command, dir);
     set_changed_files(&mut cmd, changes);
-    let mut child = cmd.spawn().map_err(|e| format!("failed to execute command: {e}"))?;
+    let mut child = cmd
+        .logged_spawn()
+        .map_err(|e| format!("failed to execute command: {e}"))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -178,7 +181,7 @@ fn run_command(command: &str, dir: Option<&str>, changes: &Changes, writer: &Blo
 /// capture external resource state without streaming through the block writer.
 fn run_capture(command: &str, dir: Option<&str>) -> Result<String, BoxError> {
     let output = shell(command, dir)
-        .output()
+        .logged_output()
         .map_err(|e| format!("failed to execute resolve command: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -490,7 +493,9 @@ fn run_with_results(
 ) -> Result<bool, BoxError> {
     let mut cmd = shell(&inputs.command, inputs.dir.as_deref());
     set_changed_files(&mut cmd, changes);
-    let mut child = cmd.spawn().map_err(|e| format!("failed to execute command: {e}"))?;
+    let mut child = cmd
+        .logged_spawn()
+        .map_err(|e| format!("failed to execute command: {e}"))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();

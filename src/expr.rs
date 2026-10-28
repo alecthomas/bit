@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::HashMap;
 use std::process::Command;
 
@@ -497,7 +498,7 @@ fn exec(command: String) -> Result<String, EvalError> {
     let output = Command::new("sh")
         .arg("-c")
         .arg(&command)
-        .output()
+        .logged_output()
         .map_err(|e| EvalError::Exec(format!("failed to run '{command}': {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

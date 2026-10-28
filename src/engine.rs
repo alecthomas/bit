@@ -569,9 +569,26 @@ fn is_ambient_key(key: &str) -> bool {
 /// change like any other.
 fn resolve_sources(node: &DagNode, inputs: &Map, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
     // Resources lock the tracker themselves while resolving.
+    let start = std::time::Instant::now();
     let mut sources = node.resource.resolve(inputs)?;
+    crate::output::debug_current(|| {
+        format!(
+            "resolved {} input(s) in {}ms",
+            sources.len(),
+            start.elapsed().as_millis()
+        )
+    });
+    let start = std::time::Instant::now();
     let ambient = node.resource.ambient(inputs)?;
-    sources.extend(crate::providers::hash_ambient(&ambient, tracker)?);
+    let fingerprints = crate::providers::hash_ambient(&ambient, tracker)?;
+    crate::output::debug_current(|| {
+        format!(
+            "fingerprinted {} tool(s) in {}ms",
+            fingerprints.len(),
+            start.elapsed().as_millis()
+        )
+    });
+    sources.extend(fingerprints);
     Ok(sources)
 }
 
@@ -725,6 +742,7 @@ fn prepare_block(
     writer: &BlockWriter,
     mode: ApplyMode,
 ) -> Result<Prepared, EngineError> {
+    let _scope = crate::output::BlockScope::enter(writer);
     let prior = restore_prior(writer, node.prior_state.as_ref());
 
     let outputs = output_files(node, &inputs, cache).map_err(provider_error(node, name, "resolve"))?;
@@ -1376,6 +1394,7 @@ fn execute_block(
     tracker: &FileTracker,
     mode: ApplyMode,
 ) -> Result<BlockResult, EngineError> {
+    let _scope = crate::output::BlockScope::enter(writer);
     let inputs = eval_fields(&node.fields, scope).map_err(|e| EngineError::Eval {
         pos: node.pos.clone(),
         block: name.to_owned(),
@@ -1621,6 +1640,7 @@ pub fn destroy(
     for name in &order {
         let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
         let writer = output.writer(name);
+        let _scope = crate::output::BlockScope::enter(&writer);
 
         if node.protected && !targets.iter().any(|target| target == name) {
             writer.event(Event::Protected, "protected");

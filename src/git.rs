@@ -1,5 +1,6 @@
 //! Spawning `git` independently of any calling git hook.
 
+use crate::process::CommandExt;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,7 +38,7 @@ pub fn is_commit(dir: &Path, rev: &str) -> bool {
         .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
         .arg(format!("{rev}^{{commit}}"))
         .current_dir(dir)
-        .output()
+        .logged_output()
         .is_ok_and(|output| output.status.success())
 }
 
@@ -77,7 +78,7 @@ pub fn changes_since(project_root: &Path, base: &str) -> Result<Changes, Changes
     let root_output = command()
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(project_root)
-        .output()
+        .logged_output()
         .map_err(|source| ChangesError::Spawn {
             operation: "rev-parse",
             source,
@@ -90,7 +91,7 @@ pub fn changes_since(project_root: &Path, base: &str) -> Result<Changes, Changes
     let merge_base_output = command()
         .args(["merge-base", "--", base, "HEAD"])
         .current_dir(&repository_root)
-        .output()
+        .logged_output()
         .map_err(|source| ChangesError::Spawn {
             operation: "merge-base",
             source,
@@ -104,7 +105,7 @@ pub fn changes_since(project_root: &Path, base: &str) -> Result<Changes, Changes
     let diff_output = command()
         .args(["diff", "--name-status", "-z", "--find-renames", merge_base, "--"])
         .current_dir(&repository_root)
-        .output()
+        .logged_output()
         .map_err(|source| ChangesError::Spawn {
             operation: "diff",
             source,
@@ -128,7 +129,7 @@ fn ls_files(repository_root: &Path, args: &[&str]) -> Result<HashSet<PathBuf>, C
         .args(args)
         .args(["-z", "--"])
         .current_dir(repository_root)
-        .output()
+        .logged_output()
         .map_err(|source| ChangesError::Spawn {
             operation: "ls-files",
             source,

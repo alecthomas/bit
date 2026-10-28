@@ -3,6 +3,7 @@ pub mod run;
 pub mod test;
 pub mod workspace;
 
+use crate::process::CommandExt;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -86,7 +87,9 @@ pub(crate) fn run_pnpm(args: &[String], dir: Option<&str>, writer: &BlockWriter)
         cmd.current_dir(d);
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("failed to execute `pnpm`: {e}"))?;
+    let mut child = cmd
+        .logged_spawn()
+        .map_err(|e| format!("failed to execute `pnpm`: {e}"))?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 

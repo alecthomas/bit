@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufReader;
@@ -217,7 +218,9 @@ impl Resource for GoExeResource {
         }
         inputs.env.apply_to(&mut cmd);
 
-        let mut child = cmd.spawn().map_err(|e| format!("failed to execute `go build`: {e}"))?;
+        let mut child = cmd
+            .logged_spawn()
+            .map_err(|e| format!("failed to execute `go build`: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();

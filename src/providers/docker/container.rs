@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::process::{Command, Stdio};
@@ -173,7 +174,7 @@ pub struct ContainerState {
 fn container_running(name: &str) -> bool {
     Command::new("docker")
         .args(["inspect", "--format", "{{.State.Running}}", name])
-        .output()
+        .logged_output()
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false)
 }
@@ -182,7 +183,7 @@ fn container_running(name: &str) -> bool {
 fn remove_container(name: &str) -> Result<(), BoxError> {
     let output = Command::new("docker")
         .args(["rm", "-f", name])
-        .output()
+        .logged_output()
         .map_err(|e| format!("docker rm failed: {e}"))?;
     super::check_remove_output("docker rm", output)
 }
@@ -201,7 +202,7 @@ fn wait_healthy(name: &str, hc: &Healthcheck, writer: &BlockWriter) -> Result<()
 
         let output = Command::new("docker")
             .args(["inspect", "--format", "{{.State.Health.Status}}", name])
-            .output()
+            .logged_output()
             .map_err(|e| format!("docker inspect failed: {e}"))?;
 
         let status = String::from_utf8_lossy(&output.stdout).trim().to_owned();
@@ -369,7 +370,9 @@ impl Resource for ContainerResource {
         }
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| format!("failed to run docker run: {e}"))?;
+        let mut child = cmd
+            .logged_spawn()
+            .map_err(|e| format!("failed to run docker run: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -399,7 +402,7 @@ impl Resource for ContainerResource {
         // Get container ID
         let id_output = Command::new("docker")
             .args(["inspect", "--format", "{{.Id}}", &inputs.name])
-            .output()
+            .logged_output()
             .map_err(|e| format!("docker inspect failed: {e}"))?;
 
         let container_id = String::from_utf8_lossy(&id_output.stdout).trim().to_owned();

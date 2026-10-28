@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
 use std::sync::Arc;
@@ -100,7 +101,7 @@ fn state_matches_inputs(state: &NetworkAttachState, inputs: &NetworkAttachInputs
 fn inspect_networks(container: &str) -> Option<String> {
     let out = Command::new("docker")
         .args(["inspect", container, "--format", "{{json .NetworkSettings.Networks}}"])
-        .output()
+        .logged_output()
         .ok()?;
     if !out.status.success() {
         return None;
@@ -201,7 +202,7 @@ fn build_connect_args(inputs: &NetworkAttachInputs) -> Vec<String> {
 fn run_connect(inputs: &NetworkAttachInputs) -> Result<(), BoxError> {
     let out = Command::new("docker")
         .args(build_connect_args(inputs))
-        .output()
+        .logged_output()
         .map_err(|e| format!("docker network connect failed: {e}"))?;
     if out.status.success() {
         return Ok(());
@@ -218,7 +219,7 @@ fn run_connect(inputs: &NetworkAttachInputs) -> Result<(), BoxError> {
 fn run_disconnect(network: &str, container: &str) -> Result<(), BoxError> {
     let out = Command::new("docker")
         .args(["network", "disconnect", network, container])
-        .output()
+        .logged_output()
         .map_err(|e| format!("docker network disconnect failed: {e}"))?;
     if out.status.success() {
         return Ok(());

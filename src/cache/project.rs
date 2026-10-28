@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use crate::sha256::Hasher;
@@ -63,7 +64,7 @@ fn git_identity(root: &Path) -> Option<ProjectIdentity> {
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .output()
+        .logged_output()
         .ok()?;
     if !output.status.success() {
         return None;

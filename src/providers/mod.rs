@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::ErrorKind;
@@ -311,7 +312,7 @@ pub fn probe_tool(key: &str, build: impl FnOnce() -> Command) -> Result<String, 
     let program = cmd.get_program().to_string_lossy().into_owned();
     let output = cmd
         .stdin(std::process::Stdio::null())
-        .output()
+        .logged_output()
         .map_err(|e| format!("failed to run `{program}`: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

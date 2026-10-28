@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, BufReader};
@@ -283,7 +284,7 @@ impl ImageResource {
         let output = self
             .command()
             .args(["image", "inspect", "--format", "{{.Id}}", image])
-            .output()
+            .logged_output()
             .map_err(|e| format!("failed to run docker image inspect: {e}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -307,7 +308,7 @@ impl ImageResource {
     fn remote_image_exists(&self, image: &str) -> bool {
         self.command()
             .args(["buildx", "imagetools", "inspect", image])
-            .output()
+            .logged_output()
             .is_ok_and(|output| output.status.success())
     }
 
@@ -315,7 +316,7 @@ impl ImageResource {
         let output = self
             .command()
             .args(["tag", image, tag])
-            .output()
+            .logged_output()
             .map_err(|e| format!("failed to run docker tag: {e}"))?;
         if !output.status.success() {
             return Err(format!("docker tag failed: {}", String::from_utf8_lossy(&output.stderr).trim()).into());
@@ -327,7 +328,7 @@ impl ImageResource {
         let output = self
             .command()
             .args(["rmi", "-f", image])
-            .output()
+            .logged_output()
             .map_err(|e| format!("docker rmi failed: {e}"))?;
         super::check_remove_output("docker rmi", output)
     }
@@ -455,7 +456,7 @@ impl Resource for ImageResource {
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd
-            .spawn()
+            .logged_spawn()
             .map_err(|e| format!("failed to run docker buildx build: {e}"))?;
 
         let stdout = child.stdout.take();
@@ -551,7 +552,7 @@ impl Resource for ImageResource {
             .args(["image", "save", "--output"])
             .arg(archive.path())
             .arg(&image)
-            .output()
+            .logged_output()
             .map_err(|e| format!("failed to run docker image save: {e}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -607,7 +608,7 @@ impl Resource for ImageResource {
                 .command()
                 .args(["image", "load", "--input"])
                 .arg(&archive)
-                .output()
+                .logged_output()
                 .map_err(|e| format!("failed to run docker image load: {e}"))?;
             if !output.status.success() {
                 return Err(format!(

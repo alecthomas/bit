@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::Path;
@@ -172,7 +173,9 @@ impl Resource for GoFmtResource {
         if let Some(dir) = &inputs.dir {
             cmd.current_dir(dir);
         }
-        let mut child = cmd.spawn().map_err(|e| format!("failed to execute `gofmt`: {e}"))?;
+        let mut child = cmd
+            .logged_spawn()
+            .map_err(|e| format!("failed to execute `gofmt`: {e}"))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -300,7 +303,9 @@ impl Resource for GoFmtCheckResource {
         if let Some(dir) = &inputs.dir {
             cmd.current_dir(dir);
         }
-        let output = cmd.output().map_err(|e| format!("failed to execute `gofmt`: {e}"))?;
+        let output = cmd
+            .logged_output()
+            .map_err(|e| format!("failed to execute `gofmt`: {e}"))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let unformatted: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();

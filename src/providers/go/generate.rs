@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::Path;
@@ -141,7 +142,7 @@ impl Resource for GoGenerateResource {
         inputs.env.apply_to(&mut cmd);
 
         let mut child = cmd
-            .spawn()
+            .logged_spawn()
             .map_err(|e| format!("failed to execute `go generate`: {e}"))?;
 
         let stdout = child.stdout.take();

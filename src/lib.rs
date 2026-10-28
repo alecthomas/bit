@@ -15,6 +15,7 @@ pub mod matrix;
 pub mod module;
 pub mod output;
 pub mod parser;
+pub mod process;
 pub mod provider;
 pub mod providers;
 pub mod schema;

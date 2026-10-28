@@ -826,7 +826,47 @@ impl Drop for OutputInner {
     }
 }
 
+thread_local! {
+    /// The writer of the block whose work is running on this thread. Code
+    /// with no writer of its own, such as a resource resolving its inputs,
+    /// logs debug messages under it. Each block runs on one thread at a
+    /// time, so the thread identifies the block.
+    static CURRENT_BLOCK: std::cell::RefCell<Option<BlockWriter>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Makes a block's writer the current block on this thread until dropped,
+/// restoring the previous one, so scopes may nest.
+pub struct BlockScope {
+    previous: Option<BlockWriter>,
+}
+
+impl BlockScope {
+    pub fn enter(writer: &BlockWriter) -> Self {
+        let previous = CURRENT_BLOCK.with(|current| current.replace(Some(writer.clone())));
+        Self { previous }
+    }
+}
+
+impl Drop for BlockScope {
+    fn drop(&mut self) {
+        CURRENT_BLOCK.with(|current| *current.borrow_mut() = self.previous.take());
+    }
+}
+
+/// Emit a debug message under the current block on this thread, if there is
+/// one and debug output is on. `message` is only built when it is shown.
+pub fn debug_current(message: impl FnOnce() -> String) {
+    CURRENT_BLOCK.with(|current| {
+        if let Some(writer) = current.borrow().as_ref()
+            && writer.debug_enabled()
+        {
+            writer.debug(&message());
+        }
+    });
+}
+
 /// A writer bound to a specific block, used by providers to emit output.
+#[derive(Clone)]
 pub struct BlockWriter {
     output: Output,
     name: String,

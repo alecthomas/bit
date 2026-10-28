@@ -1,3 +1,4 @@
+use crate::process::CommandExt;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io;
@@ -209,7 +210,7 @@ fn git_ls_remote(url: &str) -> bool {
         .args(["ls-remote", "--exit-code", "--quiet", url, "HEAD"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .logged_status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -769,7 +770,7 @@ fn extract_commit(bare: &Path, repo_url: &str, sha: &str, dest: &Path) -> Result
         .args(["archive", "--format=tar", sha])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .logged_spawn()
         .map_err(|e| mk_err(format!("spawn git: {e}")))?;
     let stdout = git.stdout.take().expect("git archive stdout piped");
 
@@ -778,7 +779,7 @@ fn extract_commit(bare: &Path, repo_url: &str, sha: &str, dest: &Path) -> Result
         .arg(dest)
         .stdin(Stdio::from(stdout))
         .stderr(Stdio::piped())
-        .spawn()
+        .logged_spawn()
         .map_err(|e| mk_err(format!("spawn tar: {e}")))?;
 
     let git_out = git.wait_with_output().map_err(|e| mk_err(format!("wait git: {e}")))?;
@@ -806,7 +807,7 @@ fn ensure_bare_clone(repo_url: &str, bare_dir: &Path) -> Result<(), ImportError>
     let out = crate::git::command()
         .args(["clone", "--bare", "--quiet", repo_url])
         .arg(bare_dir)
-        .output()
+        .logged_output()
         .map_err(|e| ImportError::GitClone {
             repo_url: repo_url.to_owned(),
             message: e.to_string(),
@@ -826,7 +827,7 @@ fn git_fetch(bare_dir: &Path, repo_url: &str) -> Result<(), ImportError> {
         .arg("--git-dir")
         .arg(bare_dir)
         .args(["fetch", "--quiet", "--tags", "--prune", "origin"])
-        .output()
+        .logged_output()
         .map_err(|e| ImportError::GitFetch {
             repo_url: repo_url.to_owned(),
             message: e.to_string(),
@@ -849,7 +850,7 @@ fn git_has_commit(bare_dir: &Path, sha: &str) -> bool {
         .arg(format!("{sha}^{{commit}}"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .logged_status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -860,7 +861,7 @@ fn git_has_commit(bare_dir: &Path, sha: &str) -> bool {
 fn git_default_branch_sha(repo_url: &str) -> Result<String, ImportError> {
     let out = crate::git::command()
         .args(["ls-remote", "--symref", repo_url, "HEAD"])
-        .output()
+        .logged_output()
         .map_err(|e| ImportError::GitDefaultBranch {
             repo_url: repo_url.to_owned(),
             message: e.to_string(),

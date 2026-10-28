@@ -5,6 +5,7 @@ pub mod buf;
 mod imports;
 pub mod protoc;
 
+use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::{Component, Path, PathBuf};
@@ -22,7 +23,9 @@ fn run(program: &str, args: &[String], dir: Option<&str>, writer: &BlockWriter) 
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("failed to execute `{program}`: {e}"))?;
+    let mut child = cmd
+        .logged_spawn()
+        .map_err(|e| format!("failed to execute `{program}`: {e}"))?;
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();

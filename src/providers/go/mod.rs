@@ -6,6 +6,7 @@ pub mod lint;
 pub mod scanner;
 pub mod test;
 
+use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -152,6 +153,8 @@ pub fn toolchain(env: &GoEnv, dir: Option<&str>) -> Ambient {
             "GOEXPERIMENT",
             "GOARM",
             "GOAMD64",
+            // The workspace file in use, from `GOWORK` or found upward.
+            "GOWORK",
         ],
     )
     .dir(dir);
@@ -170,7 +173,7 @@ fn packages(pattern: String, dir: Option<String>) -> Result<Vec<String>, BoxErro
         command.current_dir(dir);
     }
     let output = command
-        .output()
+        .logged_output()
         .map_err(|error| format!("failed to execute `go list {pattern}`: {error}"))?;
     if !output.status.success() {
         return Err(format!(
@@ -259,7 +262,7 @@ fn list_packages(
     env.apply_to(&mut cmd);
     let patterns = patterns.join(" ");
     let output = cmd
-        .output()
+        .logged_output()
         .map_err(|e| format!("failed to execute `go list {patterns}`: {e}"))?;
     if !output.status.success() {
         return Err(format!(
