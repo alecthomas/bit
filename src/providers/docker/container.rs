@@ -170,13 +170,63 @@ pub struct ContainerState {
     pub container_id: String,
 }
 
-/// Check whether a container with the given name is running.
-fn container_running(name: &str) -> bool {
-    Command::new("docker")
-        .args(["inspect", "--format", "{{.State.Running}}", name])
+/// What the daemon reports about a container.
+#[derive(Debug, PartialEq)]
+struct Inspected {
+    id: String,
+    running: bool,
+    /// The ID of the image the container was created from.
+    image_id: String,
+}
+
+/// The container named `name`, if it exists.
+fn inspect_container(name: &str) -> Option<Inspected> {
+    let output = Command::new("docker")
+        .args([
+            "container",
+            "inspect",
+            "--format",
+            "{{.Id}} {{.State.Running}} {{.Image}}",
+            name,
+        ])
         .logged_output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
-        .unwrap_or(false)
+        .ok()
+        .filter(|output| output.status.success())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut fields = stdout.split_whitespace();
+    Some(Inspected {
+        id: fields.next()?.to_owned(),
+        running: fields.next()? == "true",
+        image_id: fields.next()?.to_owned(),
+    })
+}
+
+/// The ID of the image `reference` names now, if the daemon has it.
+fn image_id(reference: &str) -> Option<String> {
+    let output = Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", reference])
+        .logged_output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned()).filter(|id| !id.is_empty())
+}
+
+/// Why the container `prior` recorded must be created again, if it must:
+/// it is gone or stopped, another container took its name, or its image
+/// reference now names another image, such as a tag rebuilt or pulled
+/// since. An image the daemon no longer has is not a reason, since `docker
+/// run` would pull it again.
+fn drift(prior: &ContainerState, container: Option<&Inspected>, image: Option<&str>) -> Option<&'static str> {
+    let Some(container) = container.filter(|container| container.running) else {
+        return Some("container not running");
+    };
+    if container.id != prior.container_id {
+        return Some("container replaced");
+    }
+    if image.is_some_and(|image| image != container.image_id) {
+        return Some("image changed");
+    }
+    None
 }
 
 /// Remove a container by name (forced).
@@ -331,14 +381,16 @@ impl Resource for ContainerResource {
             });
         };
 
-        // Re-create if the container drifted away (was stopped/removed out of
-        // band). When the block's inputs change, the engine sees a hash delta
-        // and upgrades None → Update.
-        if !container_running(&prior.name) {
+        // Re-create if the container drifted away out of band. When the
+        // block's inputs change, the engine sees a hash delta and upgrades
+        // None → Update.
+        let container = inspect_container(&prior.name);
+        let image = container.as_ref().and_then(|_| image_id(&inputs.image));
+        if let Some(reason) = drift(prior, container.as_ref(), image.as_deref()) {
             return Ok(PlanResult {
                 action: PlanAction::Create,
                 description: desc,
-                reason: Some("container not running".into()),
+                reason: Some(reason.into()),
             });
         }
 
@@ -496,6 +548,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.action, PlanAction::Create);
+    }
+
+    #[test]
+    fn drift_compares_the_container_and_its_image() {
+        let prior = ContainerState {
+            name: "app".into(),
+            container_id: "c1".into(),
+        };
+        let container = |id: &str, running: bool| Inspected {
+            id: id.into(),
+            running,
+            image_id: "sha256:i1".into(),
+        };
+
+        assert_eq!(drift(&prior, Some(&container("c1", true)), Some("sha256:i1")), None);
+        assert_eq!(drift(&prior, Some(&container("c1", true)), None), None);
+        assert_eq!(drift(&prior, None, None), Some("container not running"));
+        assert_eq!(
+            drift(&prior, Some(&container("c1", false)), None),
+            Some("container not running")
+        );
+        assert_eq!(
+            drift(&prior, Some(&container("c2", true)), None),
+            Some("container replaced")
+        );
+        assert_eq!(
+            drift(&prior, Some(&container("c1", true)), Some("sha256:i2")),
+            Some("image changed")
+        );
     }
 
     #[test]
