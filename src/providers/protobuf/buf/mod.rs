@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider};
+use crate::provider::{Ambient, BoxError, CachePolicy, DynResource, FuncSignature, Provider};
 use crate::value::Value;
 
 use workspace::Sources;
@@ -52,6 +52,16 @@ impl BufTarget {
             sources.add_config(config);
         }
         Ok(sources)
+    }
+
+    /// Whether results for the input may be shared across worktrees: only
+    /// when it has local sources, which the action key hashes. A Git or BSR
+    /// input can change without any hashed file changing.
+    fn cache_policy(&self, dir: Option<&str>) -> CachePolicy {
+        match self.sources(dir, &[]) {
+            Ok(sources) if !sources.is_remote() => CachePolicy::Shared { version: 1 },
+            _ => CachePolicy::Local,
+        }
     }
 
     /// buf and the check plugins the input's `buf.yaml`, or the config
@@ -273,6 +283,27 @@ mod tests {
         assert!(
             resolved.keys().any(|path| path.ends_with("other/b.proto")),
             "{resolved:?}"
+        );
+    }
+
+    #[test]
+    fn only_local_inputs_share_results() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("proto")).unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let policy = |input: Option<&str>| {
+            BufTarget {
+                input: input.map(str::to_owned),
+            }
+            .cache_policy(Some(&root))
+        };
+        assert_eq!(policy(None), CachePolicy::Shared { version: 1 });
+        assert_eq!(policy(Some("proto")), CachePolicy::Shared { version: 1 });
+        assert_eq!(policy(Some(".git#branch=main")), CachePolicy::Local);
+        assert_eq!(policy(Some("buf.build/acme/api")), CachePolicy::Local);
+        assert_eq!(
+            policy(Some("https://github.com/acme/api.git#subdir=proto")),
+            CachePolicy::Local
         );
     }
 

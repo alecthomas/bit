@@ -117,9 +117,9 @@ impl Resource for BufFormatResource {
     }
 
     /// The buf executable is a tool, so the action key already describes
-    /// the toolchain.
-    fn cache_policy(&self, _inputs: &Block<BufFormatInputs>) -> CachePolicy {
-        CachePolicy::Shared { version: 1 }
+    /// the toolchain, but not a remote input's content.
+    fn cache_policy(&self, inputs: &Block<BufFormatInputs>) -> CachePolicy {
+        inputs.target.cache_policy(inputs.dir.as_deref())
     }
 }
 
@@ -191,8 +191,8 @@ impl Resource for BufFormatCheckResource {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &Block<BufFormatInputs>) -> CachePolicy {
-        CachePolicy::Shared { version: 1 }
+    fn cache_policy(&self, inputs: &Block<BufFormatInputs>) -> CachePolicy {
+        inputs.target.cache_policy(inputs.dir.as_deref())
     }
 }
 

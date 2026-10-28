@@ -98,9 +98,9 @@ impl Resource for BufLintResource {
     }
 
     /// The buf and plugin executables are tools, so the action key already
-    /// describes the toolchain.
-    fn cache_policy(&self, _inputs: &Block<BufLintInputs>) -> CachePolicy {
-        CachePolicy::Shared { version: 1 }
+    /// describes the toolchain, but not a remote input's content.
+    fn cache_policy(&self, inputs: &Block<BufLintInputs>) -> CachePolicy {
+        inputs.target.cache_policy(inputs.dir.as_deref())
     }
 }
 

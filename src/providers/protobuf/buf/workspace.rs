@@ -50,6 +50,9 @@ pub(super) struct Sources {
     /// Config files named by `--config`, which buf reads as it would a
     /// `buf.yaml`.
     configs: Vec<PathBuf>,
+    /// Whether an input has no local sources, such as a Git repository or
+    /// a BSR module, so the hashes do not describe what buf reads.
+    remote: bool,
 }
 
 impl Sources {
@@ -61,6 +64,7 @@ impl Sources {
         // `path#key=value,...` options select a format or subdirectory.
         let path = input.split_once('#').map_or(input, |(path, _)| path);
         if path.trim_end_matches('/').ends_with(".git") {
+            self.remote = true;
             return Ok(());
         }
         let cwd = absolute(&super::super::in_dir(dir, ""))?;
@@ -72,8 +76,16 @@ impl Sources {
             self.add_dir(&cwd, parent);
         } else if path.is_file() {
             self.files.push(path);
+        } else {
+            self.remote = true;
         }
         Ok(())
+    }
+
+    /// Whether an input has no local sources, such as a Git repository, a
+    /// BSR module or a URL, whose content bit cannot hash.
+    pub(super) fn is_remote(&self) -> bool {
+        self.remote
     }
 
     pub(super) fn add_file(&mut self, path: PathBuf) {
