@@ -286,10 +286,13 @@ struct Affected {
 }
 
 /// The packages `patterns` name whose files include a changed path, or `None`
-/// to run the whole patterns. `list` reports the packages `go` matches for
-/// the patterns, so `args` and `env` must match those of the narrowed command.
+/// to run the whole patterns. `tests` must match what the block resolves,
+/// so each tracked path belongs to the packages that depend on it. `list`
+/// reports the packages `go` matches for the patterns, so `args` and `env`
+/// must match those of the narrowed command.
 fn affected_packages(
     patterns: &[String],
+    tests: Tests,
     dir: Option<&str>,
     args: &[String],
     env: &GoEnv,
@@ -298,7 +301,7 @@ fn affected_packages(
     let Changes::Paths(changed) = changes else {
         return Ok(None);
     };
-    let scanned = scanner::tested_packages(patterns, dir.map(Path::new))?;
+    let scanned = scanner::tested_packages(patterns, tests, dir.map(Path::new))?;
     // A path no package depends on is an extra input, a config file or a
     // deleted file, whose dependents cannot be found.
     if changed

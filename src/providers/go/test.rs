@@ -28,7 +28,7 @@ pub struct GoTestInputs {
     /// Extra flags passed to go test
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Input file glob patterns, relative to `dir` (in addition to Go sources and `testdata/`)
+    /// Input file glob patterns, relative to `dir` (in addition to Go sources, and every file in each tested package's directory and its `testdata/`)
     #[serde(default)]
     pub inputs: Vec<String>,
     /// What to show: a line per package (`suites`), a line per test
@@ -241,7 +241,14 @@ struct Affected {
 /// whole pattern.
 fn affected_packages(inputs: &Block<GoTestInputs>, changes: &Changes) -> Result<Option<Affected>, BoxError> {
     let tags = tag_flags(&inputs.flags);
-    let affected = super::affected_packages(&inputs.package, inputs.dir.as_deref(), &tags, &inputs.env, changes)?;
+    let affected = super::affected_packages(
+        &inputs.package,
+        Tests::SourcesAndData,
+        inputs.dir.as_deref(),
+        &tags,
+        &inputs.env,
+        changes,
+    )?;
     // The listing uses the test's own tags and environment, so `go test` on
     // the whole pattern skips excluded packages too.
     Ok(affected.map(|affected| Affected {
@@ -305,7 +312,7 @@ impl Resource for GoTestResource {
     fn resolve(&self, inputs: &Block<GoTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref().map(std::path::Path::new);
-        super::resolve_go_inputs(&inputs.package, dir, Tests::SourcesAndTestdata, &inputs.inputs, tracker)
+        super::resolve_go_inputs(&inputs.package, dir, Tests::SourcesAndData, &inputs.inputs, tracker)
     }
 
     fn plan(&self, inputs: &Block<GoTestInputs>, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
@@ -469,13 +476,15 @@ mod tests {
         std::fs::write(root.join("lib.go"), "package lib\n").unwrap();
         std::fs::create_dir_all(root.join("testdata")).unwrap();
         std::fs::write(root.join("testdata/golden.txt"), "golden\n").unwrap();
-        std::fs::write(root.join("schema.json"), "{}\n").unwrap();
+        // Outside every package directory, so only `inputs` tracks it.
+        std::fs::create_dir_all(root.join("schemas")).unwrap();
+        std::fs::write(root.join("schemas/schema.json"), "{}\n").unwrap();
         let inputs = Block::new(
             Some(root.to_string_lossy().into_owned()),
             GoTestInputs {
                 package: vec!["./...".into()],
                 flags: vec![],
-                inputs: vec![root.join("*.json").to_string_lossy().into_owned()],
+                inputs: vec![root.join("schemas/*.json").to_string_lossy().into_owned()],
                 report: ReportMode::default(),
                 env: GoEnv::default(),
             },

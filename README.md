@@ -103,17 +103,21 @@ prints Cargo compiler diagnostics when `cargo test` fails, including when
 another workspace suite has already passed.
 
 When only Go files changed since `go.test` last passed, it tests just the
-packages whose sources, tests, `testdata/` or local imports include a changed
-file. It tests the whole pattern on its first run, with `--force`, or when its
-fields, toolchain, dependencies or extra `inputs` changed, or a tracked file
-was deleted. `go.lint` narrows its run the same way. It lints the whole
+packages whose sources, tests, other files, `testdata/` or local imports
+include a changed file. It tests the whole pattern on its first run, with
+`--force`, or when its fields, toolchain, dependencies or extra `inputs`
+changed, or a tracked file was deleted. `go.lint` narrows its run the same way. It lints the whole
 pattern when the golangci-lint config changed, or when a changed package is
 excluded by build constraints without extra build tags. `go.fmt` and
 `go.fmt-l` format or check only the changed `.go` files.
 
 Go blocks track the files the go command compiles in each package: `.go`
 files, assembly, cgo and SWIG sources and headers, `.syso` objects, and
-`default.pgo`. They also track the files `//go:embed` names.
+`default.pgo`. They also track the files `//go:embed` names. `go.test` also
+tracks every file in each tested package's directory and its `testdata/`,
+which tests read at run time. It cannot see files tests read from other
+directories or the environment variables they read. Add those files to
+`inputs`.
 
 Go blocks follow local imports into every module the go command builds from
 local directories: the modules a `go.work` file uses, and the targets of
@@ -874,7 +878,7 @@ block = go.generate {
 block = go.test {
   package = string | [string]           # Go package pattern or list of patterns (e.g. "./...")
   flags = [string]?                     # Extra flags passed to go test
-  inputs = [string]?                    # Input file glob patterns, relative to `dir` (in addition to Go sources and `testdata/`)
+  inputs = [string]?                    # Input file glob patterns, relative to `dir` (in addition to Go sources, and every file in each tested package's directory and its `testdata/`)
   report = ("suites" | "tests" | "verbose")?  # What to show: a line per package (`suites`), a line per test (`tests`), or a line per test plus go's output as it arrives (`verbose`). Outside `verbose`, go's output is shown only on failure.
   goos = string?                        # Target OS
   goarch = string?                      # Target architecture

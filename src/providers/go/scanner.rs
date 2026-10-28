@@ -18,6 +18,8 @@ struct PackageScan {
     go_files: HashSet<PathBuf>,
     /// .go test files in this directory.
     test_files: HashSet<PathBuf>,
+    /// The directory's other files, which its tests may read at run time.
+    data_files: HashSet<PathBuf>,
     /// Files embedded by //go:embed directives in source files.
     embed_files: HashSet<PathBuf>,
     /// Files embedded by //go:embed directives in test files.
@@ -61,9 +63,9 @@ pub enum Tests {
     Excluded,
     /// `_test.go` files.
     Sources,
-    /// `_test.go` files and each package's `testdata/` tree, which tests read
-    /// at run time.
-    SourcesAndTestdata,
+    /// `_test.go` files, and the files tests read at run time from where they
+    /// run: every file in each package's directory and its `testdata/` tree.
+    SourcesAndData,
 }
 
 /// The module containing `start_dir`, loaded on first use.
@@ -93,6 +95,7 @@ fn scan_package_dir(module: &Module, pkg_dir: &Path, canonical: &Path) -> Result
     let mut scan = PackageScan {
         go_files: HashSet::new(),
         test_files: HashSet::new(),
+        data_files: HashSet::new(),
         embed_files: HashSet::new(),
         test_embed_files: HashSet::new(),
         imports: HashSet::new(),
@@ -115,6 +118,8 @@ fn scan_package_dir(module: &Module, pkg_dir: &Path, canonical: &Path) -> Result
                     .any(|extension| name_str.ends_with(extension))
             {
                 scan.go_files.insert(entry.path());
+            } else {
+                scan.data_files.insert(entry.path());
             }
             continue;
         }
@@ -186,7 +191,8 @@ fn collect_tests(
     let (_, scan) = package_scan(module, pkg_dir)?;
     files.extend(scan.test_files.iter().cloned());
     files.extend(scan.test_embed_files.iter().cloned());
-    if tests == Tests::SourcesAndTestdata {
+    if tests == Tests::SourcesAndData {
+        files.extend(scan.data_files.iter().cloned());
         files.extend(files_under(&pkg_dir.join("testdata")));
     }
     for (dep_module, dep_dir) in scan.test_imports.iter().filter_map(|imp| local.resolve(imp)) {
@@ -228,9 +234,13 @@ pub struct TestedPackage {
     pub files: HashSet<PathBuf>,
 }
 
-/// List the packages the patterns name, each with the files a
-/// [`Tests::SourcesAndTestdata`] scan of that package alone would return.
-pub fn tested_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<Vec<TestedPackage>, BoxError> {
+/// List the packages the patterns name, each with the files a scan of that
+/// package alone, tracking `tests`, would return.
+pub fn tested_packages(
+    patterns: &[String],
+    tests: Tests,
+    base_dir: Option<&Path>,
+) -> Result<Vec<TestedPackage>, BoxError> {
     let (local, pkg_dirs) = pattern_packages(patterns, base_dir)?;
     pkg_dirs
         .iter()
@@ -238,7 +248,9 @@ pub fn tested_packages(patterns: &[String], base_dir: Option<&Path>) -> Result<V
             let mut files = local.files.clone();
             let mut visited = HashSet::new();
             collect_sources(&local, module, dir, &mut files, &mut visited)?;
-            collect_tests(&local, module, dir, Tests::SourcesAndTestdata, &mut files, &mut visited)?;
+            if tests != Tests::Excluded {
+                collect_tests(&local, module, dir, tests, &mut files, &mut visited)?;
+            }
             Ok(TestedPackage {
                 import_path: import_path(module, dir),
                 dir: dir.clone(),
@@ -1230,9 +1242,11 @@ func Hello() { fmt.Println("hello") }
         )
         .unwrap();
         fs::write(root.join("pkg/testdata/nested/golden.txt"), "golden\n").unwrap();
+        fs::write(root.join("pkg/config.json"), "{}\n").unwrap();
         fs::create_dir_all(root.join("dep/testdata")).unwrap();
         fs::write(root.join("dep/dep.go"), "package dep\n").unwrap();
         fs::write(root.join("dep/testdata/fixture.txt"), "fixture\n").unwrap();
+        fs::write(root.join("dep/config.json"), "{}\n").unwrap();
 
         let canon_root = root.canonicalize().unwrap();
         let relative = |files: HashSet<PathBuf>| -> HashSet<PathBuf> {
@@ -1242,12 +1256,15 @@ func Hello() { fmt.Println("hello") }
                 .collect()
         };
         let sources = relative(scan_from(root, "./pkg", Tests::Sources).unwrap());
-        let testdata = relative(scan_from(root, "./pkg", Tests::SourcesAndTestdata).unwrap());
+        let testdata = relative(scan_from(root, "./pkg", Tests::SourcesAndData).unwrap());
 
-        assert!(!sources.contains(Path::new("pkg/testdata/nested/golden.txt")));
-        assert!(testdata.contains(Path::new("pkg/testdata/nested/golden.txt")));
+        for data in ["pkg/testdata/nested/golden.txt", "pkg/config.json"] {
+            assert!(!sources.contains(Path::new(data)), "{sources:?}");
+            assert!(testdata.contains(Path::new(data)), "{testdata:?}");
+        }
         assert!(testdata.contains(Path::new("dep/dep.go")));
         assert!(!testdata.contains(Path::new("dep/testdata/fixture.txt")));
+        assert!(!testdata.contains(Path::new("dep/config.json")));
     }
 
     #[test]
@@ -1267,7 +1284,7 @@ func Hello() { fmt.Println("hello") }
         fs::write(root.join("lib/testdata/golden.txt"), "golden\n").unwrap();
 
         let canon_root = root.canonicalize().unwrap();
-        let files: HashSet<_> = scan_from(root, "./...", Tests::SourcesAndTestdata)
+        let files: HashSet<_> = scan_from(root, "./...", Tests::SourcesAndData)
             .unwrap()
             .iter()
             .map(|p| p.strip_prefix(&canon_root).unwrap().to_path_buf())
@@ -1467,7 +1484,7 @@ func Hello() { fmt.Println("hello") }
         }
 
         let patterns = ["./a".to_owned(), "./b".to_owned(), "./a".to_owned()];
-        let mut packages: Vec<_> = tested_packages(&patterns, Some(root))
+        let mut packages: Vec<_> = tested_packages(&patterns, Tests::SourcesAndData, Some(root))
             .unwrap()
             .into_iter()
             .map(|p| p.import_path)

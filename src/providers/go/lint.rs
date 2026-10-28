@@ -91,7 +91,15 @@ struct Affected {
 /// `None` to lint the whole pattern.
 fn affected_packages(inputs: &Block<GoLintInputs>, changes: &Changes) -> Result<Option<Affected>, BoxError> {
     let env = super::GoEnv::default();
-    let Some(affected) = super::affected_packages(&inputs.package, inputs.dir.as_deref(), &[], &env, changes)? else {
+    let Some(affected) = super::affected_packages(
+        &inputs.package,
+        Tests::Sources,
+        inputs.dir.as_deref(),
+        &[],
+        &env,
+        changes,
+    )?
+    else {
         return Ok(None);
     };
     // Build tags from flags or the golangci-lint config may include a package
