@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -306,15 +306,21 @@ pub fn scan_sources(dir: &Path, exclude: &[PathBuf]) -> Vec<PathBuf> {
         .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
         .collect();
     let mut out = Vec::new();
-    scan_dir(dir, &exclude_canonical, true, &mut out);
+    let mut visited = HashSet::from([dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())]);
+    scan_dir(dir, &exclude_canonical, true, &mut visited, &mut out);
     out
 }
 
-fn scan_dir(dir: &Path, exclude: &[PathBuf], top_level: bool, out: &mut Vec<PathBuf>) {
+/// Scan `dir`, following symlinks as the tools a script runs do. `visited`
+/// holds the canonical directories already scanned, so a link back to an
+/// ancestor ends rather than recursing forever, and a directory reached by
+/// two paths is scanned once.
+fn scan_dir(dir: &Path, exclude: &[PathBuf], top_level: bool, visited: &mut HashSet<PathBuf>, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Ok(ft) = entry.file_type() else { continue };
+        // Follows a symlink; a dangling one is skipped.
+        let Ok(metadata) = fs::metadata(&path) else { continue };
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
@@ -323,13 +329,15 @@ fn scan_dir(dir: &Path, exclude: &[PathBuf], top_level: bool, out: &mut Vec<Path
             continue;
         }
 
-        if ft.is_dir() {
+        if metadata.is_dir() {
             if SKIP_DIRS.contains(&name_str.as_ref()) || (top_level && SKIP_TOP_LEVEL_DIRS.contains(&name_str.as_ref()))
             {
                 continue;
             }
-            scan_dir(&path, exclude, false, out);
-        } else if ft.is_file() && is_source_file(&name_str) {
+            if visited.insert(canonical) {
+                scan_dir(&path, exclude, false, visited, out);
+            }
+        } else if metadata.is_file() && is_source_file(&name_str) {
             out.push(path);
         }
     }
@@ -349,7 +357,7 @@ pub fn top_level_files(dir: &Path) -> Vec<PathBuf> {
     };
     entries
         .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|ft| ft.is_file()))
+        .filter(|entry| fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_file()))
         .filter(|entry| is_source_file(&entry.file_name().to_string_lossy()))
         .map(|entry| entry.path())
         .collect()
@@ -577,6 +585,29 @@ mod tests {
         assert!(files.contains(&root.join("src/out/index.ts")), "{files:?}");
         assert!(!files.contains(&root.join("dist/bundle.js")), "{files:?}");
         assert!(!files.contains(&root.join("src/node_modules/x/index.js")), "{files:?}");
+    }
+
+    #[test]
+    fn scan_sources_follows_symlinks_without_looping() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let package = root.join("package");
+        let shared = root.join("shared");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("util.ts"), "").unwrap();
+        fs::write(root.join("config.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(&shared, package.join("src/shared")).unwrap();
+        std::os::unix::fs::symlink(root.join("config.json"), package.join("config.json")).unwrap();
+        std::os::unix::fs::symlink(&package, package.join("src/loop")).unwrap();
+
+        let files = scan_sources(&package, &[]);
+        assert!(files.contains(&package.join("src/shared/util.ts")), "{files:?}");
+        assert!(files.contains(&package.join("config.json")), "{files:?}");
+        assert!(
+            !files.iter().any(|path| path.starts_with(package.join("src/loop"))),
+            "{files:?}"
+        );
     }
 
     #[test]
