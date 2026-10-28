@@ -898,7 +898,7 @@ exit 0
         let resolved = Resource::resolve(&ImageResource::new(Arc::new(FileTracker::default())), &inputs).unwrap();
         assert_eq!(resolved.len(), 3); // Dockerfile + main.rs + test.log
 
-        std::fs::write(dir.path().join(".dockerignore"), "*.log\n").unwrap();
+        std::fs::write(dir.path().join(".dockerignore"), "src/*.log\n").unwrap();
         let resolved = Resource::resolve(&ImageResource::new(Arc::new(FileTracker::default())), &inputs).unwrap();
         assert_eq!(resolved.len(), 2); // Dockerfile + main.rs
         assert!(resolved.contains_key(&dockerfile.to_string_lossy().into_owned()));

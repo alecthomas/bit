@@ -334,11 +334,11 @@ fn expand(text: &str, vars: &Vars) -> Result<String, BoxError> {
     Ok(out)
 }
 
-/// .dockerignore pattern matcher.
+/// .dockerignore pattern matcher, following Docker's `patternmatcher`.
 pub struct DockerIgnore {
     context: PathBuf,
-    ignore: Vec<glob::Pattern>,
-    negate: Vec<glob::Pattern>,
+    /// Each rule in file order, with whether it re-includes (`!`).
+    rules: Vec<(regex::Regex, bool)>,
 }
 
 impl DockerIgnore {
@@ -346,55 +346,114 @@ impl DockerIgnore {
     /// Returns `None` if no .dockerignore exists.
     pub fn load(context: &Path) -> Option<Self> {
         let contents = std::fs::read_to_string(context.join(".dockerignore")).ok()?;
-        let mut ignore = Vec::new();
-        let mut negate = Vec::new();
+        Some(Self::parse(context, &contents))
+    }
 
-        for line in contents.lines() {
+    /// Read rules as Docker's `ignorefile.ReadAll` does: each line trimmed,
+    /// `#` lines skipped, and each pattern cleaned like a path, with a
+    /// leading `/` dropped, since every pattern is anchored at the context
+    /// root.
+    fn parse(context: &Path, contents: &str) -> Self {
+        let mut rules = Vec::new();
+        for line in contents.trim_start_matches('\u{feff}').lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let (pattern, is_negation) = if let Some(rest) = line.strip_prefix('!') {
-                (rest.trim(), true)
-            } else {
-                (line, false)
+            let (pattern, include) = match line.strip_prefix('!') {
+                Some(rest) => (rest.trim(), true),
+                None => (line, false),
             };
-
-            let glob_pattern = if pattern.contains('/') {
-                pattern.to_owned()
-            } else {
-                format!("**/{pattern}")
-            };
-
-            let Ok(pat) = glob::Pattern::new(&glob_pattern) else {
-                continue;
-            };
-            let dir_pat = glob::Pattern::new(&format!("{glob_pattern}/**")).ok();
-            if is_negation {
-                negate.push(pat);
-                if let Some(dp) = dir_pat {
-                    negate.push(dp);
-                }
-            } else {
-                ignore.push(pat);
-                if let Some(dp) = dir_pat {
-                    ignore.push(dp);
-                }
+            let pattern = clean_path(pattern);
+            let pattern = pattern
+                .strip_prefix('/')
+                .filter(|rest| !rest.is_empty())
+                .unwrap_or(&pattern);
+            // An invalid pattern never matches, as in Docker.
+            if let Ok(regex) = regex::Regex::new(&pattern_regex(pattern)) {
+                rules.push((regex, include));
             }
         }
-
-        Some(Self {
+        Self {
             context: context.to_path_buf(),
-            ignore,
-            negate,
-        })
+            rules,
+        }
     }
 
     /// Returns true if a path should be excluded by .dockerignore rules.
+    ///
+    /// As Docker's `MatchesOrParentMatches`, the last rule that matches the
+    /// path or one of its parent directories decides, so excluding a
+    /// directory excludes everything in it.
     pub fn is_ignored(&self, path: &Path) -> bool {
         let rel = path.strip_prefix(&self.context).unwrap_or(path);
-        self.ignore.iter().any(|p| p.matches_path(rel)) && !self.negate.iter().any(|p| p.matches_path(rel))
+        let components: Vec<_> = rel
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(name) => Some(name.to_string_lossy()),
+                _ => None,
+            })
+            .collect();
+        let rel = components.join("/");
+        let parents: Vec<String> = (1..components.len()).map(|n| components[..n].join("/")).collect();
+        let mut ignored = false;
+        for (regex, include) in &self.rules {
+            if regex.is_match(&rel) || parents.iter().any(|parent| regex.is_match(parent)) {
+                ignored = !include;
+            }
+        }
+        ignored
     }
+}
+
+/// `path` cleaned as Go's `filepath.Clean` does: repeated and trailing
+/// separators and `.` elements removed, and `..` elements resolved.
+fn clean_path(path: &str) -> String {
+    let rooted = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|last| *last != "..") => {
+                parts.pop();
+            }
+            ".." if rooted => {}
+            _ => parts.push(part),
+        }
+    }
+    match (rooted, parts.is_empty()) {
+        (true, _) => format!("/{}", parts.join("/")),
+        (false, true) => ".".to_owned(),
+        (false, false) => parts.join("/"),
+    }
+}
+
+/// The anchored regex Docker's `patternmatcher` compiles `pattern` to: `*`
+/// and `?` match within one path element, `**` matches across elements, and
+/// `\` escapes the next character.
+fn pattern_regex(pattern: &str) -> String {
+    let mut regex = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                // `**/` is treated as `**`.
+                chars.next_if_eq(&'/');
+                regex.push_str(if chars.peek().is_none() { ".*" } else { "(.*/)?" });
+            }
+            '*' => regex.push_str("[^/]*"),
+            '?' => regex.push_str("[^/]"),
+            '\\' => match chars.next() {
+                Some(next) => regex.push_str(&regex::escape(&next.to_string())),
+                None => regex.push_str(r"\\"),
+            },
+            '[' | ']' => regex.push(c),
+            _ => regex.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    regex.push('$');
+    regex
 }
 
 /// Expand a path (file, directory, or glob) into individual files,
@@ -660,11 +719,40 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("a.log"), "log").unwrap();
         std::fs::write(src.join("important.log"), "keep").unwrap();
-        std::fs::write(dir.path().join(".dockerignore"), "*.log\n!important.log\n").unwrap();
+        std::fs::write(dir.path().join(".dockerignore"), "**/*.log\n!**/important.log\n").unwrap();
 
         let di = DockerIgnore::load(dir.path()).unwrap();
         assert!(di.is_ignored(&src.join("a.log")));
         assert!(!di.is_ignored(&src.join("important.log")));
+    }
+
+    #[test]
+    fn dockerignore_matches_as_docker_does() {
+        let context = Path::new("/ctx");
+        let di = DockerIgnore::parse(
+            context,
+            "# comment\n*.log\n/build/\ndocs/*.md\n!docs/keep.md\nnode_modules\n**/tmp\n./x/../cache/**\n",
+        );
+        let ignored = |path: &str| di.is_ignored(&context.join(path));
+
+        // Patterns are anchored at the context root, and `*` stays within
+        // one path element.
+        assert!(ignored("app.log"));
+        assert!(!ignored("src/app.log"));
+        assert!(ignored("build/out/bin"));
+        assert!(ignored("docs/a.md"));
+        assert!(!ignored("docs/sub/a.md"));
+        // The last matching rule wins.
+        assert!(!ignored("docs/keep.md"));
+        // A matched directory excludes what it contains.
+        assert!(ignored("node_modules/pkg/index.js"));
+        assert!(!ignored("src/node_modules/pkg/index.js"));
+        // `**` spans any number of directories, including none.
+        assert!(ignored("tmp/a"));
+        assert!(ignored("src/deep/tmp/a"));
+        // Patterns are cleaned like paths.
+        assert!(ignored("cache/a/b"));
+        assert!(!ignored("src/main.rs"));
     }
 
     #[test]
