@@ -115,7 +115,7 @@ pub(crate) fn materialize(
             if block.matrix_keys.is_empty() {
                 selected.push(name);
             } else {
-                selected.extend(context.matrix_slices(&block.name, &name));
+                selected.extend(matrix::group_slices(&name, context.scope).unwrap_or_default());
             }
         } else {
             if !invocation.args.is_empty() {
@@ -162,20 +162,6 @@ impl Instantiator<'_> {
         } else {
             selector.to_owned()
         }
-    }
-
-    /// List the slices of `group`, an instance of the matrix block `block_name`.
-    fn matrix_slices(&self, block_name: &str, group: &str) -> Vec<String> {
-        let Some(Value::Struct(_, slices)) = self.scope.get(group) else {
-            return Vec::new();
-        };
-        let instance_args = &group[block_name.len()..];
-        let mut names: Vec<_> = slices
-            .keys()
-            .map(|key| format!("{block_name}[{key}]{instance_args}"))
-            .collect();
-        names.sort();
-        names
     }
 
     fn target_name(&self, target: &Target, args: &[Field], caller: &Scope) -> Result<String, LoadError> {
@@ -229,7 +215,7 @@ impl Instantiator<'_> {
                     if block.matrix_keys.is_empty() {
                         blocks.push(name);
                     } else {
-                        blocks.extend(self.matrix_slices(&block.name, &name));
+                        blocks.extend(matrix::group_slices(&name, self.scope).unwrap_or_default());
                     }
                 }
             } else {

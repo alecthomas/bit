@@ -19,6 +19,22 @@ pub(crate) fn slice_name(name: &str, values: &[&Value], instance_args: &str) -> 
     format!("{}{instance_args}", matrix_key(name, values))
 }
 
+/// List the sorted slices of a matrix group, or `None` if `group` is not one.
+///
+/// Block names cannot contain `(`, so the first one starts an instance's arguments.
+pub(crate) fn group_slices(group: &str, scope: &Scope) -> Option<Vec<String>> {
+    let Some(Value::Struct(_, slices)) = scope.get(group) else {
+        return None;
+    };
+    let (name, instance_args) = group.split_at(group.find('(').unwrap_or(group.len()));
+    let mut names: Vec<_> = slices
+        .keys()
+        .map(|key| format!("{name}[{key}]{instance_args}"))
+        .collect();
+    names.sort();
+    Some(names)
+}
+
 fn matrix_values_key(values: &[&Value]) -> String {
     values
         .iter()

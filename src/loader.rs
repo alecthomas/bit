@@ -464,15 +464,10 @@ fn resolve_dep(
     if dag.has_block(name) {
         return Some(vec![name.to_owned()]);
     }
-    // If name matches a matrix block, resolve to all expanded slice names
-    if matrix_blocks.contains_key(name)
-        && let Some(Value::Struct(_, map)) = scope.get(name)
-    {
-        let mut names: Vec<_> = map.keys().map(|k| format!("{name}[{k}]")).collect();
-        names.sort();
-        return Some(names);
+    if !matrix_blocks.contains_key(name) {
+        return None;
     }
-    None
+    matrix::group_slices(name, scope)
 }
 
 #[cfg(test)]
@@ -1031,6 +1026,44 @@ target arm(tag : string) = [build["arm64"](tag = tag)]
             dag.targets()[&selected[2]].blocks,
             vec![r#"build["arm64"](tag="2.0.0")"#]
         );
+    }
+
+    #[test]
+    fn parameterized_matrix_call_in_dependencies_selects_every_slice() {
+        let input = r#"
+let arch = ["amd64", "arm64"]
+
+image[arch](tag = "dev") = exec {
+  command = "image #{arch} #{tag}"
+  outputs = "image"
+}
+push(tag : string) = exec {
+  command = "push #{tag}"
+  outputs = "pushed"
+  depends_on = [image(tag = tag)]
+}
+announce(tag : string) = exec {
+  command = "announce #{tag}"
+  outputs = "announced"
+  after = [image(tag = tag)]
+}
+"#;
+        let module = parser::parse(input, "<test>").unwrap();
+        let invocations = ["push", "announce"].map(|name| crate::invocation::Invocation {
+            name: name.into(),
+            args: vec![("tag".into(), "x".into())],
+        });
+        let (dag, _scope, _) =
+            load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
+
+        let push = r#"push(tag="x")"#;
+        let announce = r#"announce(tag="x")"#;
+        for arch in ["amd64", "arm64"] {
+            let image = format!(r#"image["{arch}"](tag="x")"#);
+            assert!(dag.content_deps(push).contains(&image));
+            assert!(dag.deps(announce).contains(&image));
+            assert!(!dag.content_deps(announce).contains(&image));
+        }
     }
 
     #[test]

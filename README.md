@@ -395,10 +395,11 @@ target arm_release = [binary["arm64"](tag = "1.2.3")]
 ```
 
 `binary(tag = "1.2.3")` selects every slice for that argument set. A slice
-call such as `binary["arm64"](tag = "1.2.3")` selects one slice and can also
-be used in expressions, `depends_on`, and `after`. Equal argument sets share
-the same slices; different values create independent instances. Matrix key
-lists can come from module bindings or list-valued block parameters.
+call such as `binary["arm64"](tag = "1.2.3")` selects one slice. Both forms can
+be used in targets, `depends_on`, and `after`, and a slice call can also be
+used in expressions. Equal argument sets share the same slices; different
+values create independent instances. Matrix key lists can come from module
+bindings or list-valued block parameters.
 
 Set `concurrency` to a positive integer to cap simultaneous slices from that
 matrix block without reducing parallelism for unrelated blocks. The global

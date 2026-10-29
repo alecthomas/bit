@@ -158,6 +158,8 @@ release = exec {
 }
 ```
 
+A call to a parameterized matrix block without keys, such as `depends_on = [build(tag = "1.2.3")]`, likewise depends on every slice of that instance.
+
 State is keyed per slice by its full name.
 
 ## 2. Modules
@@ -954,11 +956,13 @@ push = docker.push {
 
 network = docker.network { name = "myapp" }
 
+let db_password = "dev"
+
 protected db = docker.container {
   image       = "postgres:16"
   name        = "myapp-db"
   network     = network.name
-  environment = { POSTGRES_DB = "app", POSTGRES_PASSWORD = "dev" }
+  environment = { POSTGRES_DB = "app", POSTGRES_PASSWORD = db_password }
   healthcheck = { test = "pg_isready", interval = 1s, retries = 10 }
 }
 
@@ -967,7 +971,7 @@ app = docker.container {
   name        = "myapp-api"
   network     = network.name
   ports       = ["8080:8080"]
-  environment = { DATABASE_URL = "postgres://postgres:dev@myapp-db:5432/app" }
+  environment = { DATABASE_URL = "postgres://postgres:#{db_password}@myapp-db:5432/app" }
   depends_on  = [db]
 }
 
