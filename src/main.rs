@@ -144,6 +144,12 @@ struct Cli {
     #[arg(long)]
     fmt: bool,
 
+    /// Render a CI configuration that runs the selection, with large blocks in
+    /// separate jobs, from a built-in template ("github") or a template file
+    /// path containing "/"
+    #[arg(long, value_name = "TEMPLATE")]
+    ci: Option<String>,
+
     /// Output in JSON format (currently applies to --schema)
     #[arg(long)]
     json: bool,
@@ -439,6 +445,21 @@ fn plan_styles(
         .collect())
 }
 
+/// Read the template `--ci` names: a file when the name contains `/`,
+/// otherwise a built-in template.
+fn ci_template(name: &str) -> Result<String, String> {
+    if name.contains('/') {
+        return fs::read_to_string(name).map_err(|e| format!("cannot read CI template {name}: {e}"));
+    }
+    bit::ci::builtin_template(name).map(str::to_owned).ok_or_else(|| {
+        let builtins: Vec<_> = bit::ci::builtin_template_names().collect();
+        format!(
+            "unknown CI template '{name}' (built-in: {}; give a path containing '/' for a file)",
+            builtins.join(", ")
+        )
+    })
+}
+
 #[derive(Clone, Copy)]
 enum SelectionMode {
     Targets,
@@ -449,6 +470,7 @@ enum SelectionMode {
 enum Operation {
     Apply,
     Cache,
+    Ci,
     Clean,
     Dump,
     Fmt,
@@ -474,6 +496,7 @@ impl Cli {
             (self.list > 0).then_some(Operation::List),
             self.dump.then_some(Operation::Dump),
             self.fmt.then_some(Operation::Fmt),
+            self.ci.is_some().then_some(Operation::Ci),
         ]
         .into_iter()
         .flatten()
@@ -587,6 +610,21 @@ fn main() {
         eprintln!("{} --since is not supported for this operation", "error:".red().bold());
         process::exit(1);
     }
+    // Generated jobs run plain `bit`, so parameters would not reach them.
+    if operation == Operation::Ci && !cli.params.is_empty() {
+        eprintln!("{} --ci does not accept -P parameters", "error:".red().bold());
+        process::exit(1);
+    }
+    // A template path is relative to where bit runs, so read it before
+    // moving to the project root.
+    let ci_template = match cli.ci.as_deref().map(ci_template) {
+        None => None,
+        Some(Ok(source)) => Some(source),
+        Some(Err(e)) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
     if cli.since.is_some() && cli.list == 1 {
         eprintln!("{} --since requires -ll when listing blocks", "error:".red().bold());
         process::exit(1);
@@ -686,7 +724,47 @@ fn main() {
     let jobs = cli
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
-    if matches!(operation, Operation::Graph) {
+    if matches!(operation, Operation::Ci) {
+        let (_module, dag, _base, _store, targets) = load_module(&registry, &params, &invocations);
+        let jobs = engine::resolve_order(&dag, &targets)
+            .map_err(|e| e.to_string())
+            .and_then(|order| bit::ci::partition(&dag, &order).map_err(|e| e.to_string()));
+        let jobs = match jobs {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                eprintln!("{} {e}", "error:".red().bold());
+                process::exit(1);
+            }
+        };
+        let project = std::path::Path::new(".");
+        let Some(prefix) = bit::git::prefix(project) else {
+            eprintln!("{} --ci requires a Git repository", "error:".red().bold());
+            process::exit(1);
+        };
+        let default_branch = bit::git::default_branch(project);
+        let working_directory = prefix.trim_end_matches('/');
+        let name = cli.ci.as_deref().expect("--ci names a template");
+        let mut command = vec!["bit".to_owned(), "--ci".to_owned(), name.to_owned()];
+        command.extend(cli.targets.iter().cloned());
+        let rendered = bit::ci::render(
+            name,
+            ci_template.as_deref().expect("--ci template was read"),
+            &jobs,
+            &bit::ci::TemplateContext {
+                command: &command,
+                working_directory: (!working_directory.is_empty()).then_some(working_directory),
+                default_branch: default_branch.as_deref(),
+            },
+        );
+        match rendered {
+            Ok(rendered) if !cli.quiet => print!("{rendered}"),
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{} {e}", "error:".red().bold());
+                process::exit(1);
+            }
+        }
+    } else if matches!(operation, Operation::Graph) {
         let (_module, mut dag, base, _store, targets) = load_module(&registry, &params, &invocations);
         let Some(names) = selected_order_or_exit(
             &dag,

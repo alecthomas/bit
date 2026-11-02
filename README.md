@@ -89,6 +89,8 @@ bit --long       # disable live scrolling regions and stream every output line
 bit --quiet      # suppress output unless an error occurs (also -q)
 bit --since origin/master  # apply blocks affected since the branch point
 bit --since      # same, using the remote default branch (origin/HEAD)
+bit --ci github > .github/workflows/bit.yml  # generate a GitHub Actions workflow
+bit --ci ./buildkite.yml.tmpl  # render a CI configuration from a template
 ```
 
 `bit -ll` renders blocks as a dependency tree. A block's prerequisites are
@@ -213,6 +215,65 @@ the block last ran. A changed `.bit` build definition selects the full requested
 set. An unowned deleted path also selects the full set when prior state cannot
 identify its block. `--since` requires the ref and its merge base to exist
 locally, and cannot be combined with `--clean`.
+
+### CI workflows
+
+`bit --ci <template> [target...]` renders a CI configuration that applies the
+same blocks as `bit [target...]`. It splits the work so that
+[`large`](#blocks) blocks run in their own jobs:
+
+- Each large block gets a job. Blocks that depend on it run in that job too.
+- Large blocks share a job when one depends on another, or when a block
+  depends on both.
+- Every other block runs in a job named `default`.
+
+Each job runs `bit` with the blocks that nothing else in the job depends on,
+such as `bit test clippy`, and bit runs everything they depend on. A
+parameterized block is selected with its arguments, as in `bit publish
+name=web`. That selects every slice of a parameterized matrix block, so its
+slices share a job. `--ci` does not accept `-P`, because the jobs would run
+without it.
+
+Jobs share no results. A block that a large block needs runs again in the
+large block's job, and `pre` blocks run in every job. A `post` block depends on
+every block, so it puts every large block in one job.
+
+`--ci github` renders the built-in GitHub Actions template. Each job checks out
+the repository and runs `bit` in the project directory, and pushes to the
+remote's default branch and pull requests trigger the workflow. `bit` must be
+on the `PATH`. Regenerate the workflow after changing `BUILD.bit`.
+
+For anything else, such as another CI system, setup steps, or a larger runner
+for large jobs, give the path of a [MiniJinja](https://docs.rs/minijinja)
+template instead. A name containing `/` is a path, so write `./ci.yml.tmpl`
+for a file in the current directory:
+
+```yaml
+# buildkite.yml.tmpl, rendered with `bit --ci ./buildkite.yml.tmpl`
+steps:
+{% for job in jobs %}
+  - label: {{ job.name | tojson }}
+    key: {{ job.id | tojson }}
+    command: {{ job.command | tojson }}
+{% endfor %}
+```
+
+A template sees:
+
+| Variable | Description |
+|---|---|
+| `jobs` | The jobs, in order |
+| `job.id` | An identifier made of letters, digits, `_` and `-`, unique among the jobs |
+| `job.name` | The job's large blocks, or `default` |
+| `job.large` | Whether the job runs large blocks |
+| `job.command` | The shell command the job runs, such as `bit test clippy` |
+| `job.selection` | The arguments of `bit` in that command, as a list |
+| `command` | The `bit --ci` command that rendered the template |
+| `working_directory` | The project directory relative to the repository root, or none at the root |
+| `default_branch` | The remote's default branch, or none if unknown |
+
+Block tags on their own line leave no blank line, and using an undefined
+variable is an error. `tojson` quotes a value for YAML or JSON.
 
 ## Language
 

@@ -8,6 +8,7 @@ use petgraph::visit::EdgeRef;
 
 use crate::ast::{Block, Expr, Field, Phase, StringPart, Target};
 use crate::expr::{self, EvalError, Scope};
+use crate::invocation::Invocation;
 use crate::provider::DynResource;
 use crate::value::{Type, Value};
 
@@ -94,6 +95,7 @@ pub struct Dag {
     targets: HashMap<String, DagTarget>,
     block_declarations: HashMap<String, Block>,
     target_declarations: HashMap<String, Target>,
+    invocations: HashMap<String, Invocation>,
 }
 
 impl Dag {
@@ -104,7 +106,21 @@ impl Dag {
             targets: HashMap::new(),
             block_declarations: HashMap::new(),
             target_declarations: HashMap::new(),
+            invocations: HashMap::new(),
         }
+    }
+
+    /// Record the command-line invocation that selects the block instance
+    /// `name`, whose name the command line cannot take. Every slice of a
+    /// matrix instance shares its instance's invocation.
+    pub(crate) fn add_invocation(&mut self, name: String, invocation: Invocation) {
+        self.invocations.insert(name, invocation);
+    }
+
+    /// The command-line invocation that selects the block instance `name`,
+    /// if it has one.
+    pub fn invocation(&self, name: &str) -> Option<&Invocation> {
+        self.invocations.get(name)
     }
 
     /// Add a block node to the graph.

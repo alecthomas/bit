@@ -42,6 +42,27 @@ pub fn is_commit(dir: &Path, rev: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+/// `dir` relative to the root of its worktree, with a trailing `/` unless
+/// `dir` is the root. `None` outside a repository.
+pub fn prefix(dir: &Path) -> Option<String> {
+    stdout(dir, &["rev-parse", "--show-prefix"])
+}
+
+/// The branch `origin/HEAD` names, such as `main`, if the remote's default
+/// branch is known.
+pub fn default_branch(dir: &Path) -> Option<String> {
+    let reference = stdout(dir, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])?;
+    reference.strip_prefix("origin/").map(str::to_owned)
+}
+
+fn stdout(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = command().args(args).current_dir(dir).logged_output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim_end().to_owned())
+}
+
 /// Paths changed between the merge base of a requested ref and the worktree.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Changes {
@@ -245,6 +266,25 @@ mod tests {
             ])
         );
         assert_eq!(changes.paths, HashSet::from([root.join("untracked.txt")]));
+    }
+
+    #[test]
+    fn locates_directory_within_worktree_and_remote_default_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let out = command().args(args).current_dir(&root).output().unwrap();
+            assert!(out.status.success(), "{out:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::create_dir(root.join("app")).unwrap();
+
+        assert_eq!(prefix(&root), Some(String::new()));
+        assert_eq!(prefix(&root.join("app")), Some("app/".to_owned()));
+        assert_eq!(default_branch(&root), None);
+
+        git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
+        assert_eq!(default_branch(&root), Some("trunk".to_owned()));
     }
 
     #[test]

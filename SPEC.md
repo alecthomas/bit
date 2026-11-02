@@ -912,6 +912,7 @@ Positional arguments name targets or blocks, followed by `name=value` target arg
 | `bit --update [repo...]` | — | Re-resolve git imports and rewrite `BUILD.bit.lock` |
 | `bit --fmt [file]` | — | Format `BUILD.bit`, or the named `.bit` file, in place |
 | `bit --cache` | — | Show the shared build cache size; with `--clean`, delete it |
+| `bit --ci <template> [target...]` | — | Render a CI configuration for the selection from a template, built in (`github`) or a file path containing `/`, with each group of dependent `large` blocks in its own job |
 
 Modifiers:
 

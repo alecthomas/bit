@@ -2,21 +2,21 @@
 pre fmt = rust.fmt {}
 
 # Debug build of the `bit` binary.
-debug = rust.exe {}
+large debug = rust.exe {}
 
 # Release build of the `bit` binary.
-release = rust.exe {
+large release = rust.exe {
   profile = "release"
 }
 
 # Package the release binary into a Docker image tagged `bit:latest`.
-image = docker.image {
+large image = docker.image {
   tag = "bit:latest"
   depends_on = [release]
 }
 
 # Run the Rust unit test suite.
-test = rust.test {}
+large test = rust.test {}
 
 # Lint with clippy, treating warnings as errors.
 clippy = rust.clippy {
@@ -24,7 +24,7 @@ clippy = rust.clippy {
 }
 
 # End-to-end smoke test of the debug binary.
-integration-test = exec.test {
+large integration-test = exec.test {
   depends_on = [debug]
   inputs = ["BUILD.bit"]
   command = <<-EOF

@@ -345,7 +345,10 @@ impl Instantiator<'_> {
                 .into_iter()
                 .filter(|node_name| !before.contains(node_name))
                 .collect();
+            let invocation = cli_invocation(block, &bound.values);
             for node_name in expanded {
+                // Selecting the instance selects every slice.
+                self.dag.add_invocation(node_name.clone(), invocation.clone());
                 self.scope
                     .define(&node_name, SymbolKind::Block, Value::strct(Map::new()))
                     .map_err(|existing| LoadError::DuplicateName {
@@ -436,6 +439,8 @@ impl Instantiator<'_> {
                 resource,
                 prior_state,
             })?;
+            self.dag
+                .add_invocation(name.clone(), cli_invocation(block, &bound.values));
             self.scope
                 .define(&name, SymbolKind::Block, Value::strct(Map::new()))
                 .map_err(|existing| LoadError::DuplicateName {
@@ -679,6 +684,27 @@ fn cli_args(
         });
     }
     Ok(args)
+}
+
+/// The command-line invocation that selects an instance, the inverse of
+/// [`cli_args`].
+fn cli_invocation(block: &Block, values: &[Value]) -> Invocation {
+    let args = block
+        .params
+        .iter()
+        .zip(values)
+        .map(|(param, value)| {
+            let text = match (&param.typ, value) {
+                (Type::String | Type::Path, Value::Str(text)) => text.clone(),
+                _ => value.to_literal(),
+            };
+            (param.name.clone(), text)
+        })
+        .collect();
+    Invocation {
+        name: block.name.clone(),
+        args,
+    }
 }
 
 fn instance_name(name: &str, params: &[Param], values: &[Value]) -> String {
