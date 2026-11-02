@@ -273,7 +273,7 @@ pub fn hash_ambient(ambient: &[Ambient], tracker: &FileTracker) -> Result<BTreeM
                     hashes.insert(format!("executable:{name}"), SHA256::digest(b"missing"));
                 }
             },
-            Ambient::Variable(name) => {
+            Ambient::Variable(name) | Ambient::RecordedVariable(name) => {
                 if let Some(value) = std::env::var_os(name) {
                     hashes.insert(format!("env:{name}"), SHA256::digest(value.as_encoded_bytes()));
                 }
@@ -288,6 +288,17 @@ pub fn hash_ambient(ambient: &[Ambient], tracker: &FileTracker) -> Result<BTreeM
         }
     }
     Ok(hashes)
+}
+
+/// Fingerprint of one environment variable's current value. Unlike
+/// [`hash_ambient`], an unset variable has a fingerprint of its own, so a
+/// cached result recorded without it does not match once it is set.
+pub fn variable_fingerprint(name: &str) -> SHA256 {
+    match std::env::var_os(name) {
+        Some(value) => SHA256::digest(value.as_encoded_bytes()),
+        // No value can contain a NUL byte, so this matches none of them.
+        None => SHA256::digest(b"\0unset"),
+    }
 }
 
 /// Prefixes of [`hash_ambient`] keys that are not paths. Git cannot report a
@@ -493,6 +504,15 @@ mod tests {
             .collect();
         assert!(expected.contains_key("env:PATH"));
         assert_eq!(hashes, expected);
+    }
+
+    #[test]
+    fn an_unset_variable_has_a_fingerprint_distinct_from_any_value() {
+        let path = std::env::var_os("PATH").unwrap();
+        assert_eq!(variable_fingerprint("PATH"), SHA256::digest(path.as_encoded_bytes()));
+        let unset = variable_fingerprint("BIT_TEST_UNSET_VARIABLE");
+        assert_ne!(unset, SHA256::digest(b""));
+        assert_ne!(unset, variable_fingerprint("PATH"));
     }
 
     #[test]

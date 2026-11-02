@@ -226,8 +226,9 @@ impl BuildCache {
         self.shared.as_ref().map(|s| &s.receipts)
     }
 
-    pub fn lookup(&self, key: &ActionKey) -> Option<Receipt> {
-        self.receipts()?.load(key)
+    /// The first receipt under `key` that `usable` accepts.
+    pub fn lookup(&self, key: &ActionKey, usable: impl Fn(&Receipt) -> bool) -> Option<Receipt> {
+        self.receipts()?.load(key, usable)
     }
 
     pub fn publish(&self, key: &ActionKey, receipt: &Receipt) -> Result<PublishOutcome, CacheError> {
@@ -366,6 +367,7 @@ mod tests {
             outputs: crate::value::Map::new(),
             artifacts: [("exe".to_owned(), artifact)].into(),
             content_hash: SHA256::digest(b"x"),
+            variables: BTreeMap::new(),
         };
         let key = ActionKey::new(SHA256::digest(b"k"));
         cache.publish(&key, &receipt).unwrap();

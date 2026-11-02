@@ -653,6 +653,8 @@ A resource opts in through `cache_policy()`, which returns `Local` or `Shared { 
 
 The lookup key uses sources measured before apply. The publish key uses sources re-measured after apply. Inputs that a resource only discovers after building must therefore also be found before it, or the keys never match.
 
+The exception is an environment variable a tool records reading, such as one listed in rustc's dep-info, which `ambient()` reports as `RecordedVariable`. A checkout that has not built yet has no record, so these variables stay out of the key. They are part of the content hash. Each receipt stores a fingerprint of every recorded variable, with unset variables fingerprinted too. One key can hold several receipts, one for each set of fingerprints. A lookup uses the receipt whose fingerprints all match the current environment.
+
 On a hit, `check_receipt()` decides the result:
 
 - **Valid** — the outputs are already in place, so the block is skipped as cached.
@@ -661,7 +663,7 @@ On a hit, `check_receipt()` decides the result:
 
 The receipt's outputs and state are bound to the block. If binding fails, the block runs.
 
-After a successful apply, the engine captures the outputs with `capture_artifacts()` and publishes a receipt containing state, outputs, artifacts, and the content hash. Publishing is best-effort, and a conflicting receipt produces a warning. Outputs listed in `uncached` are not stored. Failed tests are never published.
+After a successful apply, the engine captures the outputs with `capture_artifacts()` and publishes a receipt containing state, outputs, artifacts, and the content hash. Publishing is best-effort. A different receipt with the same recorded fingerprints is a conflict and produces a warning. Outputs listed in `uncached` are not stored. Failed tests are never published.
 
 ## 9. Tests
 
@@ -795,6 +797,7 @@ pub enum Ambient {
     Executable(String),
     Variable(String),
     Variables(String),  // every variable with this prefix
+    RecordedVariable(String),  // recorded by an earlier run; checked, not keyed
 }
 
 /// Block inputs or state, with the block's `dir`. Derefs to `T`.

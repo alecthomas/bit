@@ -273,7 +273,103 @@ pub fn build_ambient(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec
             .iter()
             .map(|prefix| Ambient::Variables((*prefix).to_owned())),
     );
+    // The C toolchain rustc links with and build scripts compile with is
+    // deliberately not fingerprinted: toolchains vary too much to probe
+    // reliably, so builds sharing a cache are assumed to use the same one.
+    //
+    // Without a target directory nothing has been built, so nothing is
+    // recorded yet; a failure to find it surfaces when resolving instead.
+    if let Ok(target_dir) = target_directory(dir) {
+        ambient.extend(
+            recorded_variables(&target_dir)
+                .into_iter()
+                .map(Ambient::RecordedVariable),
+        );
+    }
     ambient
+}
+
+/// Environment variables previous builds in `target_dir` recorded reading:
+/// those rustc lists as `env-dep` in its dep-info, for `env!` and
+/// `option_env!`, and those build scripts name with `rerun-if-env-changed`.
+/// Neither is known before the first build, which is why they are recorded
+/// variables rather than ordinary ones.
+///
+/// Every profile and target triple in the directory is read, including
+/// builds of other packages and of tests: telling them apart would mean
+/// reproducing cargo's unit hashing, and an extra variable costs only a
+/// rerun when its value changes.
+fn recorded_variables(target_dir: &Path) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    // `<target>/<profile>` or `<target>/<triple>/<profile>`.
+    let children = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default()
+    };
+    let profiles = children(target_dir)
+        .into_iter()
+        .flat_map(|dir| children(&dir).into_iter().chain([dir]));
+    for profile in profiles {
+        for dep_info in children(&profile.join("deps")) {
+            if dep_info.extension().is_some_and(|ext| ext == "d")
+                && let Ok(contents) = std::fs::read_to_string(&dep_info)
+            {
+                names.extend(env_deps(&contents));
+            }
+        }
+        for build in children(&profile.join("build")) {
+            if let Ok(contents) = std::fs::read_to_string(build.join("output")) {
+                names.extend(rerun_if_env_changed(&contents));
+            }
+        }
+    }
+    names.into_iter().filter(|name| !set_by_cargo(name)).collect()
+}
+
+/// Variable names in rustc dep-info `# env-dep:NAME=value` lines.
+fn env_deps(dep_info: &str) -> impl Iterator<Item = String> + '_ {
+    dep_info.lines().filter_map(|line| {
+        let rest = line.strip_prefix("# env-dep:")?;
+        Some(rest.split_once('=').map_or(rest, |(name, _)| name).to_owned())
+    })
+}
+
+/// Variable names a build script's output names with
+/// `cargo:rerun-if-env-changed=` or `cargo::rerun-if-env-changed=`.
+fn rerun_if_env_changed(output: &str) -> impl Iterator<Item = String> + '_ {
+    output.lines().filter_map(|line| {
+        let rest = line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:"))?;
+        Some(rest.strip_prefix("rerun-if-env-changed=")?.trim().to_owned())
+    })
+}
+
+/// Whether cargo sets `name` itself when compiling a crate. Its value then
+/// follows from the manifest and the build's location rather than bit's
+/// environment, so bit's value is meaningless to compare.
+///
+/// `CARGO_MANIFEST_DIR`, `OUT_DIR`, and the other path variables hold the
+/// checkout's absolute location. A binary that embeds one as a string, rather
+/// than using it to find a file at compile time, still names the worktree
+/// that built it when restored elsewhere. bit cannot tell the two uses apart,
+/// and nearly every build uses `OUT_DIR` for `include!`, so it deliberately
+/// does not track the location.
+fn set_by_cargo(name: &str) -> bool {
+    const NAMES: [&str; 11] = [
+        "CARGO",
+        "CARGO_MANIFEST_DIR",
+        "CARGO_MANIFEST_PATH",
+        "CARGO_MANIFEST_LINKS",
+        "CARGO_CRATE_NAME",
+        "CARGO_BIN_NAME",
+        "CARGO_PRIMARY_PACKAGE",
+        "CARGO_TARGET_TMPDIR",
+        "CARGO_RUSTC_CURRENT_DIR",
+        "CARGO_MAKEFLAGS",
+        "OUT_DIR",
+    ];
+    const PREFIXES: [&str; 5] = ["CARGO_PKG_", "CARGO_CFG_", "CARGO_FEATURE_", "CARGO_BIN_EXE_", "DEP_"];
+    NAMES.contains(&name) || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
 /// Package directories, individual files, and directories to leave out,
@@ -1417,5 +1513,41 @@ mod tests {
         let mut cargo = env.cargo("build", None);
         cargo.features(&features);
         assert_eq!(cargo.display(), "cargo build");
+    }
+
+    #[test]
+    fn recorded_variables_come_from_dep_info_and_build_script_output() {
+        let target = tempfile::tempdir().unwrap();
+        let write = |rel: &str, contents: &str| {
+            let path = target.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        };
+        write(
+            "debug/deps/app-0123.d",
+            "/t/debug/deps/app-0123: src/main.rs\n\nsrc/main.rs:\n\n\
+             # env-dep:GIT_SHA=abc\n# env-dep:CARGO_PKG_VERSION=0.1.0\n# env-dep:OUT_DIR=/t/out\n# env-dep:BUILD_MODE\n",
+        );
+        write("debug/deps/libapp-0123.rlib", "# env-dep:NOT_DEP_INFO\n");
+        write(
+            "debug/build/cc-0123/output",
+            "cargo:rerun-if-env-changed=CC\ncargo::rerun-if-env-changed=CFLAGS\ncargo:rustc-link-lib=z\n\
+             cargo:rerun-if-env-changed=CARGO_CFG_MIRI\n",
+        );
+        write(
+            "x86_64-unknown-linux-musl/release/deps/app-4567.d",
+            "# env-dep:MUSL_ONLY=1\n",
+        );
+
+        assert_eq!(
+            recorded_variables(target.path()),
+            ["BUILD_MODE", "CC", "CFLAGS", "GIT_SHA", "MUSL_ONLY"]
+        );
+    }
+
+    #[test]
+    fn no_target_directory_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(recorded_variables(&dir.path().join("target")).is_empty());
     }
 }

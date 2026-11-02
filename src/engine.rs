@@ -11,7 +11,8 @@ use crate::file_tracker::FileTracker;
 use crate::loader::BaseScope;
 use crate::output::{BlockWriter, Event, Output};
 use crate::provider::{
-    ApplyResult, BoxError, CachePolicy, Changes, OutputFile, PlanAction, PlanResult, ReceiptCheck, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, OutputFile, PlanAction, PlanResult, ReceiptCheck,
+    ResourceKind,
 };
 use crate::sha256::{Hasher, SHA256};
 use crate::state::{StateError, StateStore};
@@ -398,7 +399,10 @@ pub fn affected_order(
                     direct = true;
                 }
                 match resolve_sources(node, &inputs, tracker) {
-                    Ok(resolved) => current = cache.normalize_keys(&resolved),
+                    Ok(resolved) => {
+                        current = cache.normalize_keys(&resolved.hashes);
+                        current.extend(resolved.recorded_hashes);
+                    }
                     Err(_) => direct = true,
                 }
                 match node.resource.output_keys(&inputs) {
@@ -555,6 +559,28 @@ fn output_files(node: &DagNode, inputs: &Map, cache: &BuildCache) -> Result<Vec<
 struct ResolvedHashes {
     sources: BTreeMap<String, SHA256>,
     tracked: BTreeMap<String, SHA256>,
+    /// Names of the variables the tool recorded reading. Their values are in
+    /// `tracked` but not `sources`; see [`Ambient::RecordedVariable`].
+    recorded: Vec<String>,
+}
+
+/// A block's sources as [`resolve_sources`] finds them.
+struct Sources {
+    /// Files and ambient fingerprints, all known before the action runs.
+    hashes: BTreeMap<String, SHA256>,
+    /// Variables the tool recorded reading: by name, and their fingerprints
+    /// keyed as [`crate::providers::hash_ambient`] keys any variable.
+    recorded: Vec<String>,
+    recorded_hashes: BTreeMap<String, SHA256>,
+}
+
+/// Whether every variable `receipt` recorded still has the value it had
+/// when the receipt was published.
+fn recorded_variables_match(receipt: &Receipt) -> bool {
+    receipt
+        .variables
+        .iter()
+        .all(|(name, fingerprint)| crate::providers::variable_fingerprint(name) == *fingerprint)
 }
 
 /// Whether a source key is an ambient fingerprint rather than a path.
@@ -567,29 +593,43 @@ fn is_ambient_key(key: &str) -> bool {
 /// The block's sources: the files its resource resolves and the ambient
 /// state it depends on, so a tool upgrade or changed variable is a source
 /// change like any other.
-fn resolve_sources(node: &DagNode, inputs: &Map, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+fn resolve_sources(node: &DagNode, inputs: &Map, tracker: &FileTracker) -> Result<Sources, BoxError> {
     // Resources lock the tracker themselves while resolving.
     let start = std::time::Instant::now();
-    let mut sources = node.resource.resolve(inputs)?;
+    let mut hashes = node.resource.resolve(inputs)?;
     crate::output::debug_current(|| {
         format!(
             "resolved {} input(s) in {}ms",
-            sources.len(),
+            hashes.len(),
             start.elapsed().as_millis()
         )
     });
     let start = std::time::Instant::now();
-    let ambient = node.resource.ambient(inputs)?;
+    let mut ambient = Vec::new();
+    let mut recorded = Vec::new();
+    for item in node.resource.ambient(inputs)? {
+        match item {
+            Ambient::RecordedVariable(name) => recorded.push(name),
+            other => ambient.push(other),
+        }
+    }
     let fingerprints = crate::providers::hash_ambient(&ambient, tracker)?;
     crate::output::debug_current(|| {
         format!(
-            "fingerprinted {} tool(s) in {}ms",
+            "fingerprinted {} tool(s) and {} recorded variable(s) in {}ms",
             fingerprints.len(),
+            recorded.len(),
             start.elapsed().as_millis()
         )
     });
-    sources.extend(fingerprints);
-    Ok(sources)
+    hashes.extend(fingerprints);
+    let as_variables: Vec<Ambient> = recorded.iter().cloned().map(Ambient::Variable).collect();
+    let recorded_hashes = crate::providers::hash_ambient(&as_variables, tracker)?;
+    Ok(Sources {
+        hashes,
+        recorded,
+        recorded_hashes,
+    })
 }
 
 fn resolve_hashes(
@@ -599,8 +639,10 @@ fn resolve_hashes(
     cache: &BuildCache,
     tracker: &FileTracker,
 ) -> Result<ResolvedHashes, BoxError> {
-    let sources = cache.normalize_keys(&resolve_sources(node, inputs, tracker)?);
+    let resolved = resolve_sources(node, inputs, tracker)?;
+    let sources = cache.normalize_keys(&resolved.hashes);
     let mut tracked = sources.clone();
+    tracked.extend(resolved.recorded_hashes);
     for output in outputs {
         let path = Path::new(&output.path);
         if path.is_file() {
@@ -614,7 +656,11 @@ fn resolve_hashes(
             }
         }
     }
-    Ok(ResolvedHashes { sources, tracked })
+    Ok(ResolvedHashes {
+        sources,
+        tracked,
+        recorded: resolved.recorded,
+    })
 }
 
 /// Every file beneath `dir`. Symlinked directories are not followed, so a
@@ -749,6 +795,7 @@ fn prepare_block(
     let ResolvedHashes {
         sources,
         tracked: resolve_map,
+        ..
     } = resolve_hashes(node, &inputs, &outputs, cache, tracker).map_err(provider_error(node, name, "resolve"))?;
     let input_hash = hash_inputs(&inputs, cache);
     let content_hash = compute_content_hash(&input_hash, &resolve_map, &dep_hashes);
@@ -841,7 +888,7 @@ fn prepare_block(
     if previously_failed || has_dirty_dep {
         return Ok(prepared);
     }
-    let Some(receipt) = cache.lookup(&key) else {
+    let Some(receipt) = cache.lookup(&key, recorded_variables_match) else {
         crate::debug!(writer, "cache miss (key={})", short_hash(&key.digest()));
         return Ok(prepared);
     };
@@ -1315,6 +1362,7 @@ fn publish_receipt(
     node: &DagNode,
     prepared: &Prepared,
     post_sources: &BTreeMap<String, SHA256>,
+    recorded: &[String],
     post_hash: SHA256,
     state: &serde_json::Value,
     outputs: &Map,
@@ -1341,6 +1389,10 @@ fn publish_receipt(
             outputs: outputs.clone(),
             artifacts,
             content_hash: post_hash,
+            variables: recorded
+                .iter()
+                .map(|name| (name.clone(), crate::providers::variable_fingerprint(name)))
+                .collect(),
         };
         Ok((key, cache.publish(&key, &receipt)?))
     };
@@ -1489,6 +1541,7 @@ fn execute_block(
         let ResolvedHashes {
             sources: post_sources,
             tracked: post_resolve,
+            recorded,
         } = resolve_hashes(node, &prepared.inputs, &prepared.outputs, cache, tracker).unwrap_or_default();
         let post_hash = compute_content_hash(&prepared.input_hash, &post_resolve, &prepared.dep_hashes);
         crate::debug!(writer, "post-apply hash={}", short_hash(&post_hash));
@@ -1502,6 +1555,7 @@ fn execute_block(
                 node,
                 &prepared,
                 &post_sources,
+                &recorded,
                 post_hash,
                 new_state,
                 &apply_result.outputs,
@@ -3168,6 +3222,10 @@ lint[module] = go.lint {
             pub passed: Option<bool>,
             #[serde(default)]
             pub tool: Option<String>,
+            /// A variable the resource reports reading once `apply` has
+            /// left a record of it behind, as rustc does in dep-info.
+            #[serde(default)]
+            pub recorded: Option<String>,
         }
 
         #[derive(Debug, Serialize, bit_derive::Schema)]
@@ -3217,6 +3275,9 @@ lint[module] = go.lint {
             name: &'static str,
         }
 
+        /// Left behind by `apply` when `recorded` is set, like a dep-info file.
+        const RECORD: &str = "record.d";
+
         fn out_path(inputs: &Block<Inputs>) -> PathBuf {
             PathBuf::from(inputs.path("out.txt"))
         }
@@ -3241,7 +3302,11 @@ lint[module] = go.lint {
                 Ok(map)
             }
             fn ambient(&self, inputs: &Block<Inputs>) -> Vec<Ambient> {
-                inputs.tool.iter().cloned().map(Ambient::Executable).collect()
+                let mut ambient: Vec<Ambient> = inputs.tool.iter().cloned().map(Ambient::Executable).collect();
+                if std::path::Path::new(&inputs.path(RECORD)).is_file() {
+                    ambient.extend(inputs.recorded.iter().cloned().map(Ambient::RecordedVariable));
+                }
+                ambient
             }
             fn plan(&self, _inputs: &Block<Inputs>, prior: Option<&State>) -> Result<PlanResult, BoxError> {
                 Ok(PlanResult {
@@ -3269,6 +3334,9 @@ lint[module] = go.lint {
                 };
                 std::fs::write(&out, content)?;
                 std::fs::set_permissions(&out, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+                if inputs.recorded.is_some() {
+                    std::fs::write(inputs.path(RECORD), "")?;
+                }
                 Ok(ApplyResult {
                     outputs: Outputs {
                         path: out.to_string_lossy().into_owned(),
@@ -3482,16 +3550,75 @@ lint[module] = go.lint {
             self.applies.load(Ordering::SeqCst)
         }
 
+        /// Every variant under the single published action key, parsed.
+        fn only_variants(&self) -> Vec<Receipt> {
+            let paths = self.receipts();
+            assert_eq!(paths.len(), 1, "expected exactly one action key");
+            serde_json::from_slice(&std::fs::read(&paths[0]).unwrap()).unwrap()
+        }
+
         /// The single published receipt, parsed.
         fn only_receipt(&self) -> Receipt {
-            let paths = self.receipts();
-            assert_eq!(paths.len(), 1, "expected exactly one receipt");
-            serde_json::from_slice(&std::fs::read(&paths[0]).unwrap()).unwrap()
+            let mut variants = self.only_variants();
+            assert_eq!(variants.len(), 1, "expected exactly one receipt");
+            variants.remove(0)
         }
     }
 
     fn wrapped(store: &MemoryStore, block: &str) -> WrappedState {
         serde_json::from_value(store.load(block).unwrap().unwrap()).unwrap()
+    }
+
+    /// A variable known only from what a build left behind is recorded in
+    /// the receipt rather than the key, so a fresh worktree, which has no
+    /// such record yet, computes the same key and reuses the result.
+    #[test]
+    fn recorded_variables_are_checked_rather_than_keyed() {
+        let h = Harness::new();
+        let a = h.worktree("a");
+        a.write_src("hello");
+        h.apply(&a, &a.block("app", "file", "  recorded = \"PATH\"\n"), 1)
+            .unwrap();
+        let receipt = h.only_receipt();
+        assert_eq!(
+            receipt.variables,
+            [("PATH".to_owned(), crate::providers::variable_fingerprint("PATH"))].into()
+        );
+
+        let b = h.worktree("b");
+        b.write_src("hello");
+        let plans = h
+            .apply(&b, &b.block("app", "file", "  recorded = \"PATH\"\n"), 1)
+            .unwrap();
+        assert_eq!(plans[0].plan.action, PlanAction::Restore);
+        assert_eq!(h.applies(), 1);
+    }
+
+    #[test]
+    fn a_receipt_whose_recorded_variable_changed_is_not_reused() {
+        let h = Harness::new();
+        let a = h.worktree("a");
+        a.write_src("hello");
+        let block = |wt: &Worktree| wt.block("app", "file", "  recorded = \"PATH\"\n");
+        h.apply(&a, &block(&a), 1).unwrap();
+        // Stand in for a build that ran with a different PATH.
+        let path = h.receipts().remove(0);
+        let mut variants = h.only_variants();
+        variants[0]
+            .variables
+            .insert("PATH".into(), SHA256::digest(b"elsewhere"));
+        std::fs::write(&path, serde_json::to_vec(&variants).unwrap()).unwrap();
+
+        let b = h.worktree("b");
+        b.write_src("hello");
+        let plans = h.apply(&b, &block(&b), 1).unwrap();
+        assert_eq!(plans[0].plan.action, PlanAction::Create);
+        assert_eq!(h.applies(), 2);
+        assert_eq!(
+            h.only_variants().len(),
+            2,
+            "the new value is published as another variant"
+        );
     }
 
     #[test]

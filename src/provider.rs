@@ -226,6 +226,13 @@ pub enum Ambient {
     /// Every environment variable whose name starts with this prefix, for a
     /// family the tool reads by pattern, such as cargo's `CARGO_PROFILE_*`.
     Variables(String),
+    /// An environment variable the tool recorded reading on a previous run,
+    /// such as an `env!` rustc lists in its dep-info. A fresh checkout has no
+    /// such record until the tool runs, so these cannot enter the shared
+    /// action key, which must be the same before and after the run. Instead
+    /// a cached result records their values and is reused only where they
+    /// still match.
+    RecordedVariable(String),
 }
 
 /// A version command for [`Ambient::Version`].

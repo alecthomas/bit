@@ -32,4 +32,6 @@ A grammar change without these updates breaks editor highlighting and structural
 
 `README.md` is user-facing documentation and must stay in sync with the code. When you change behaviour, CLI flags, syntax, or semantics, update the README in the same change.
 
+Keep README changes as brief as possible: say what a user needs to know, often a few words in existing text or a table row. Implementation mechanics, discovery and filtering rules, and intentional omissions belong in code doc comments and `SPEC.md`, not the README.
+
 The `## Providers` section is the exception: it is auto-generated from the live provider schemas by the `sync-readme` target in `BUILD.bit` (which shells out to `bit --schema --json | jq …`). Run `bit sync-readme` (or just `bit`, since `sync-readme` is in the default target) after touching any provider or module schema; don't hand-edit that section.
