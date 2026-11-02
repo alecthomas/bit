@@ -76,6 +76,7 @@ Every block also accepts these engine fields, handled by the engine rather than 
 | `after` | Ordering-only dependencies |
 | `concurrency` | Maximum number of this block's matrix slices that run at once |
 | `dir` | Directory the block runs in; relative paths resolve against it |
+| `env` | Map of environment variables set for every process the block runs, including version probes and input discovery. A resource's own variables override it. Part of the input hash. Recorded for `--clean`, except secret values |
 | `uncached` | Outputs kept out of the shared build cache |
 
 ### Parameterized Blocks
@@ -506,7 +507,7 @@ After apply, the engine re-resolves sources, hashes the declared outputs, and re
 
 - the provider's state;
 - the block's outputs;
-- the `dir` it ran in;
+- the `dir` it ran in, and its `env` less any secrets;
 - the content hash and its parts (input hash, resolved sources, dependency hashes).
 
 Outputs are persisted so that skipped blocks can still provide values to downstream blocks. On the next run, the provider's state is passed back as `prior_state`. If the provider returns no state, nothing is persisted.
@@ -804,9 +805,10 @@ pub enum Ambient {
     RecordedVariable(String),  // recorded by an earlier run; checked, not keyed
 }
 
-/// Block inputs or state, with the block's `dir`. Derefs to `T`.
+/// Block inputs or state, with the block's `dir` and `env`. Derefs to `T`.
 pub struct Block<T> {
     pub dir: Option<String>,
+    pub env: BTreeMap<String, String>,
     pub value: T,
 }
 

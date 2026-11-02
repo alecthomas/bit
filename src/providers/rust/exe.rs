@@ -33,7 +33,7 @@ pub struct RustExeInputs {
     #[serde(flatten)]
     pub features: RustFeatures,
     #[serde(flatten)]
-    pub env: RustEnv,
+    pub rust_env: RustEnv,
 }
 
 /// Outputs from a `rust.exe` block.
@@ -63,7 +63,7 @@ pub struct RustExeState {
     #[serde(flatten)]
     pub features: RustFeatures,
     #[serde(flatten)]
-    pub env: RustEnv,
+    pub rust_env: RustEnv,
 }
 
 pub struct RustExeResource {
@@ -90,12 +90,13 @@ fn state_for(inputs: &Block<RustExeInputs>, path: String, target_rel: String, tr
         target_rel,
         flags: inputs.flags.clone(),
         features: inputs.features.clone(),
-        env: inputs.env.clone(),
+        rust_env: inputs.rust_env.clone(),
     }
 }
 
 fn exe_command(inputs: &Block<RustExeInputs>) -> CargoCommand {
-    let mut cargo = inputs.env.cargo("build", inputs.dir.as_deref());
+    let mut cargo = inputs.rust_env.cargo("build", inputs.dir.as_deref());
+    cargo.envs(&inputs.env);
     if let Some(bin) = &inputs.bin {
         cargo.arg2("--bin", bin);
     }
@@ -154,7 +155,7 @@ impl Resource for RustExeResource {
     }
 
     fn ambient(&self, inputs: &Block<RustExeInputs>) -> Vec<Ambient> {
-        super::build_ambient(&inputs.env, inputs.dir.as_deref(), &[])
+        super::build_ambient(&inputs.rust_env, inputs.dir.as_deref(), &inputs.env, &[])
     }
 
     fn resolve(&self, inputs: &Block<RustExeInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -162,6 +163,7 @@ impl Resource for RustExeResource {
         super::resolve_rust_inputs(
             &super::Selection {
                 dir: inputs.dir.as_deref(),
+                env: &inputs.env,
                 package: inputs.package.as_deref(),
                 flags: &inputs.flags,
             },
@@ -184,7 +186,7 @@ impl Resource for RustExeResource {
             || prior.package != inputs.package
             || prior.flags != inputs.flags
             || prior.features != inputs.features
-            || prior.env != inputs.env
+            || prior.rust_env != inputs.rust_env
         {
             PlanAction::Update
         } else {
@@ -248,7 +250,7 @@ impl Resource for RustExeResource {
 
         let path = built_binary.ok_or("cargo build succeeded but no binary was produced")?;
         let target_rel = Path::new(&path)
-            .strip_prefix(super::target_directory(inputs.dir.as_deref())?)
+            .strip_prefix(super::target_directory(inputs.dir.as_deref(), &inputs.env)?)
             .map(|rel| rel.to_string_lossy().into_owned())
             .unwrap_or_default();
 
@@ -293,7 +295,10 @@ impl Resource for RustExeResource {
         let Some(exe) = artifacts.get(EXE_ROLE) else {
             return Ok(ReceiptCheck::Unusable);
         };
-        let Ok(dest) = exe_destination(&super::target_directory(inputs.dir.as_deref())?, &state.target_rel) else {
+        let Ok(dest) = exe_destination(
+            &super::target_directory(inputs.dir.as_deref(), &inputs.env)?,
+            &state.target_rel,
+        ) else {
             return Ok(ReceiptCheck::Unusable);
         };
         Ok(if cas.matches(exe, &dest) {
@@ -315,7 +320,10 @@ impl Resource for RustExeResource {
         writer: &BlockWriter,
     ) -> MaterializeResult<RustExeState, RustExeOutputs> {
         let exe = artifacts.get(EXE_ROLE).ok_or("receipt has no exe artifact")?;
-        let dest = exe_destination(&super::target_directory(inputs.dir.as_deref())?, &state.target_rel)?;
+        let dest = exe_destination(
+            &super::target_directory(inputs.dir.as_deref(), &inputs.env)?,
+            &state.target_rel,
+        )?;
         if !cas.matches(exe, &dest) {
             writer.line(&format!("restore {}", dest.display()));
             cas.materialize(exe, &dest)?;
@@ -364,7 +372,7 @@ mod tests {
                 package: None,
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
@@ -381,7 +389,7 @@ mod tests {
                 package: None,
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
@@ -398,7 +406,7 @@ mod tests {
                 package: Some("my-crate".into()),
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
@@ -414,7 +422,7 @@ mod tests {
                 package: None,
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let prior = RustExeState {
@@ -425,7 +433,7 @@ mod tests {
             binary: None,
             flags: vec![],
             features: RustFeatures::default(),
-            env: RustEnv::default(),
+            rust_env: RustEnv::default(),
         };
         let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -444,7 +452,7 @@ mod tests {
                 package: None,
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let prior = state_for(
@@ -479,7 +487,7 @@ mod tests {
                 package: None,
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let prior = RustExeState {
@@ -490,7 +498,7 @@ mod tests {
             binary: None,
             flags: vec![],
             features: RustFeatures::default(),
-            env: RustEnv::default(),
+            rust_env: RustEnv::default(),
         };
         let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
@@ -509,7 +517,7 @@ mod tests {
             binary: None,
             flags: vec![],
             features: RustFeatures::default(),
-            env: RustEnv::default(),
+            rust_env: RustEnv::default(),
         };
 
         let out = Output::new(&[]);

@@ -151,7 +151,7 @@ impl Resource for BufBreakingResource {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufBreakingState, BufBreakingOutputs>, BoxError> {
         let against_commit = git_baseline_commit(&inputs.against, inputs.dir.as_deref())?;
-        let status = inputs.target.run(inputs.dir.as_deref(), &inputs.args(), writer)?;
+        let status = inputs.target.run(inputs, &inputs.args(), writer)?;
         Ok(ApplyResult {
             outputs: BufBreakingOutputs {
                 passed: status.success(),

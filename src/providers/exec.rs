@@ -105,13 +105,16 @@ pub struct ExecState {
 /// the last line's exit status counts, so a trailing `echo` would hide
 /// failures. `pipefail` does the same for earlier commands in a pipeline,
 /// which is why this uses bash rather than POSIX `sh`.
-fn shell(command: &str, dir: Option<&str>) -> Command {
+///
+/// It runs in the block's `dir` with its `env`.
+fn shell<T>(command: &str, block: &Block<T>) -> Command {
     let mut cmd = Command::new("bash");
     cmd.args(["-eo", "pipefail", "-c"])
         .arg(command)
+        .envs(&block.env)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(dir) = dir {
+    if let Some(dir) = &block.dir {
         cmd.current_dir(dir);
     }
     cmd
@@ -151,8 +154,8 @@ fn changed_files(changes: &Changes) -> Option<String> {
 
 /// Run a shell command under `bash -eo pipefail`, piping stdout/stderr through the block
 /// writer. Returns `Err` if the command exits non-zero.
-fn run_command(command: &str, dir: Option<&str>, changes: &Changes, writer: &BlockWriter) -> Result<(), BoxError> {
-    let mut cmd = shell(command, dir);
+fn run_command<T>(command: &str, block: &Block<T>, changes: &Changes, writer: &BlockWriter) -> Result<(), BoxError> {
+    let mut cmd = shell(command, block);
     set_changed_files(&mut cmd, changes);
     let mut child = cmd
         .logged_spawn()
@@ -179,8 +182,8 @@ fn run_command(command: &str, dir: Option<&str>, changes: &Changes, writer: &Blo
 
 /// Run a shell command silently and return its stdout. Used by `resolve` to
 /// capture external resource state without streaming through the block writer.
-fn run_capture(command: &str, dir: Option<&str>) -> Result<String, BoxError> {
-    let output = shell(command, dir)
+fn run_capture<T>(command: &str, block: &Block<T>) -> Result<String, BoxError> {
+    let output = shell(command, block)
         .logged_output()
         .map_err(|e| format!("failed to execute resolve command: {e}"))?;
     if !output.status.success() {
@@ -196,8 +199,8 @@ fn run_capture(command: &str, dir: Option<&str>) -> Result<String, BoxError> {
 }
 
 /// Run the values command and parse its stdout as a JSON object.
-fn run_values(command: &str, dir: Option<&str>) -> Result<crate::value::Map, BoxError> {
-    let stdout = run_capture(command, dir)?;
+fn run_values<T>(command: &str, block: &Block<T>) -> Result<crate::value::Map, BoxError> {
+    let stdout = run_capture(command, block)?;
     let json: serde_json::Value =
         serde_json::from_str(&stdout).map_err(|e| format!("values command produced invalid JSON: {e}"))?;
     let map: crate::value::Map =
@@ -318,7 +321,7 @@ impl Resource for ExecResource {
         }
 
         if let Some(resolve) = &inputs.resolve {
-            let current = run_capture(resolve, inputs.dir.as_deref());
+            let current = run_capture(resolve, inputs);
             return match current {
                 Err(_) => Ok(PlanResult {
                     action: PlanAction::Create,
@@ -364,18 +367,18 @@ impl Resource for ExecResource {
             }
         }
 
-        run_command(&inputs.command, inputs.dir.as_deref(), changes, writer)?;
+        run_command(&inputs.command, inputs, changes, writer)?;
 
         let resolve_output = inputs
             .resolve
             .as_deref()
-            .map(|cmd| run_capture(cmd, inputs.dir.as_deref()))
+            .map(|cmd| run_capture(cmd, inputs))
             .transpose()?;
 
         let values_output = inputs
             .values
             .as_deref()
-            .map(|cmd| run_values(cmd, inputs.dir.as_deref()))
+            .map(|cmd| run_values(cmd, inputs))
             .transpose()?
             .unwrap_or_default();
 
@@ -397,7 +400,7 @@ impl Resource for ExecResource {
         use crate::output::Event;
         if let Some(clean) = &prior_state.clean {
             writer.event(Event::Starting, clean);
-            return run_command(clean, prior_state.dir.as_deref(), &Changes::All, writer);
+            return run_command(clean, prior_state, &Changes::All, writer);
         }
         for output in &prior_state.outputs {
             super::remove_path(Path::new(output), writer)?;
@@ -491,7 +494,7 @@ fn run_with_results(
     changes: &Changes,
     writer: &BlockWriter,
 ) -> Result<bool, BoxError> {
-    let mut cmd = shell(&inputs.command, inputs.dir.as_deref());
+    let mut cmd = shell(&inputs.command, inputs);
     set_changed_files(&mut cmd, changes);
     let mut child = cmd
         .logged_spawn()
@@ -610,7 +613,7 @@ impl Resource for ExecTestResource {
     ) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
         let passed = match &inputs.results {
             Some(code) => run_with_results(&results::ResultsFilter::compile(code)?, inputs, changes, writer)?,
-            None => run_command(&inputs.command, inputs.dir.as_deref(), changes, writer).is_ok(),
+            None => run_command(&inputs.command, inputs, changes, writer).is_ok(),
         };
 
         Ok(ApplyResult {
@@ -627,7 +630,7 @@ impl Resource for ExecTestResource {
         use crate::output::Event;
         if let Some(clean) = &prior_state.clean {
             writer.event(Event::Starting, clean);
-            return run_command(clean, prior_state.dir.as_deref(), &Changes::All, writer);
+            return run_command(clean, prior_state, &Changes::All, writer);
         }
         Ok(())
     }
@@ -979,6 +982,16 @@ mod tests {
             None,
             &Changes::Paths([std::path::PathBuf::from(long)].into())
         ));
+    }
+
+    #[test]
+    fn command_runs_with_block_env_under_changed_files() {
+        let env = BTreeMap::from([
+            ("FOO".to_owned(), "bar".to_owned()),
+            (CHANGED_FILES_VAR.to_owned(), "/stale".to_owned()),
+        ]);
+        let command = r#"test "$FOO" = bar && test -z "${BIT_CHANGED_FILES+set}""#;
+        assert!(apply_test(&test_inputs(command, None).with_env(env)).unwrap());
     }
 
     #[test]
@@ -1515,7 +1528,7 @@ mod tests {
 
     #[test]
     fn run_capture_includes_stderr_on_failure() {
-        let err = run_capture("echo 'something went wrong' >&2; exit 1", None).unwrap_err();
+        let err = run_capture("echo 'something went wrong' >&2; exit 1", &Block::new(None, ())).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("something went wrong"),
@@ -1525,7 +1538,7 @@ mod tests {
 
     #[test]
     fn run_capture_omits_stderr_when_empty() {
-        let err = run_capture("exit 1", None).unwrap_err();
+        let err = run_capture("exit 1", &Block::new(None, ())).unwrap_err();
         let msg = err.to_string();
         assert_eq!(msg, "resolve command exited with exit status: 1");
     }

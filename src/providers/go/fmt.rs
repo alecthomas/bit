@@ -46,19 +46,20 @@ pub struct GoFmtState {
     pub package: Vec<String>,
 }
 
-/// The `.go` files, including `_test.go` files, of the packages the patterns
-/// name. The packages they import are someone else's to format.
+/// The `.go` files, including `_test.go` files, of the packages the block's
+/// patterns name. The packages they import are someone else's to format.
 ///
 /// `dir` mirrors [`super::scanner::scan`]'s `base_dir`: when set, module-root
 /// discovery starts from that directory so a block targeting a separate-module
 /// subdirectory scans the right module.
-fn go_source_files(
-    tracker: &FileTracker,
-    patterns: &[String],
-    dir: Option<&str>,
-) -> Result<Vec<std::path::PathBuf>, BoxError> {
+fn go_source_files(tracker: &FileTracker, inputs: &Block<GoFmtInputs>) -> Result<Vec<std::path::PathBuf>, BoxError> {
     let scans = tracker.derived::<super::scanner::Scans>();
-    super::scanner::package_go_files(&scans, patterns, dir.map(Path::new))
+    super::scanner::package_go_files(
+        &scans,
+        &inputs.package,
+        inputs.dir.as_deref().map(Path::new),
+        &inputs.env,
+    )
 }
 
 /// The hashes of the files `gofmt` reads: [`go_source_files`].
@@ -66,7 +67,7 @@ fn resolve_go_source_files(
     inputs: &Block<GoFmtInputs>,
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    tracker.hash_files(&go_source_files(tracker, &inputs.package, inputs.dir.as_deref())?)
+    tracker.hash_files(&go_source_files(tracker, inputs)?)
 }
 
 /// The `gofmt` executable bit runs. It has no version output, and the go
@@ -91,7 +92,7 @@ fn changed_go_files(
     inputs: &Block<GoFmtInputs>,
     changes: &Changes,
 ) -> Result<Vec<String>, BoxError> {
-    let files = go_source_files(tracker, &inputs.package, inputs.dir.as_deref())?;
+    let files = go_source_files(tracker, inputs)?;
     Ok(files
         .into_iter()
         .filter(|file| match changes {
@@ -184,7 +185,11 @@ impl Resource for GoFmtResource {
             inputs.dir.as_deref(),
         ));
         let mut cmd = Command::new("gofmt");
-        cmd.arg("-w").args(&files).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.arg("-w")
+            .args(&files)
+            .envs(&inputs.env)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if let Some(dir) = &inputs.dir {
             cmd.current_dir(dir);
         }
@@ -312,7 +317,7 @@ impl Resource for GoFmtCheckResource {
             inputs.dir.as_deref(),
         ));
         let mut cmd = Command::new("gofmt");
-        cmd.arg("-l").args(&files);
+        cmd.arg("-l").args(&files).envs(&inputs.env);
         if let Some(dir) = &inputs.dir {
             cmd.current_dir(dir);
         }

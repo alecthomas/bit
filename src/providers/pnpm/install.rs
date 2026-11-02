@@ -127,8 +127,8 @@ impl Resource for PnpmInstallResource {
     fn resolve(&self, inputs: &Block<PnpmInstallInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = Path::new(workspace_dir(inputs));
-        let ws = workspace::workspace(tracker, dir)?;
-        let config = workspace::config(tracker, dir)?;
+        let ws = workspace::workspace(tracker, dir, &inputs.env)?;
+        let config = workspace::config(tracker, dir, &inputs.env)?;
         let mut files = BTreeMap::new();
         files.insert(
             ws.root_package_json.to_string_lossy().into_owned(),
@@ -187,9 +187,9 @@ impl Resource for PnpmInstallResource {
         if inputs.frozen {
             args.push("--frozen-lockfile".to_owned());
         }
-        run_pnpm(&args, Some(workspace_dir(inputs)), writer)?;
+        run_pnpm(&args, inputs, writer)?;
 
-        let ws = workspace::workspace(&self.tracker, Path::new(workspace_dir(inputs)))?;
+        let ws = workspace::workspace(&self.tracker, Path::new(workspace_dir(inputs)), &inputs.env)?;
         let mut node_modules_dirs: Vec<String> = vec![ws.root.to_string_lossy().into_owned()];
         for project in &ws.projects {
             if project.dir != ws.root {
@@ -257,8 +257,9 @@ impl PnpmInstallResource {
     /// reports. Without them, pnpm's defaults in `dir`.
     fn layout(&self, inputs: &Block<PnpmInstallInputs>) -> Layout {
         let dir = Path::new(workspace_dir(inputs));
-        let root = workspace::workspace(&self.tracker, dir).map_or_else(|_| dir.to_path_buf(), |ws| ws.root.clone());
-        let config = workspace::config(&self.tracker, dir).unwrap_or_default();
+        let root = workspace::workspace(&self.tracker, dir, &inputs.env)
+            .map_or_else(|_| dir.to_path_buf(), |ws| ws.root.clone());
+        let config = workspace::config(&self.tracker, dir, &inputs.env).unwrap_or_default();
         let modules_dir = config["modules-dir"].as_str().unwrap_or("node_modules").to_owned();
         let virtual_store_dir = match config["virtual-store-dir"].as_str() {
             Some(virtual_store_dir) => root.join(virtual_store_dir),

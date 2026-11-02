@@ -37,7 +37,7 @@ pub struct GoTestInputs {
     #[serde(default)]
     pub report: ReportMode,
     #[serde(flatten)]
-    pub env: GoEnv,
+    pub go_env: GoEnv,
 }
 
 /// Outputs from a `go.test` block.
@@ -55,7 +55,7 @@ pub struct GoTestState {
     pub package: Vec<String>,
     pub flags: Vec<String>,
     #[serde(flatten)]
-    pub env: GoEnv,
+    pub go_env: GoEnv,
 }
 
 /// A single `go test -json` event line.
@@ -256,7 +256,7 @@ fn affected_packages(
         Tests::SourcesAndData,
         go_dir(inputs).as_deref(),
         &tags,
-        &inputs.env,
+        &inputs.go_env.over(&inputs.env),
         changes,
     )?;
     // The listing uses the test's own tags and environment, so `go test` on
@@ -343,13 +343,14 @@ impl Resource for GoTestResource {
     }
 
     fn ambient(&self, inputs: &Block<GoTestInputs>) -> Vec<Ambient> {
-        vec![super::toolchain(&inputs.env, go_dir(inputs).as_deref())]
+        vec![super::toolchain(&inputs.go_env, go_dir(inputs).as_deref())]
     }
 
     fn resolve(&self, inputs: &Block<GoTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         super::resolve_go_inputs(
             &inputs.package,
             inputs.dir.as_deref(),
+            &inputs.env,
             &inputs.flags,
             Tests::SourcesAndData,
             &inputs.inputs,
@@ -368,7 +369,8 @@ impl Resource for GoTestResource {
             });
         };
 
-        let action = if prior.package != inputs.package || prior.flags != inputs.flags || prior.env != inputs.env {
+        let action = if prior.package != inputs.package || prior.flags != inputs.flags || prior.go_env != inputs.go_env
+        {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -391,7 +393,7 @@ impl Resource for GoTestResource {
         let state = GoTestState {
             package: inputs.package.clone(),
             flags: inputs.flags.clone(),
-            env: inputs.env.clone(),
+            go_env: inputs.go_env.clone(),
         };
         let affected = affected_packages(&self.tracker, inputs, changes)?;
         if let Some(Affected { packages, total }) = &affected
@@ -416,7 +418,8 @@ impl Resource for GoTestResource {
         if let Some(dir) = &go_dir {
             cmd.current_dir(dir);
         }
-        inputs.env.apply_to(&mut cmd);
+        cmd.envs(&inputs.env);
+        inputs.go_env.apply_to(&mut cmd);
 
         let mut child = cmd
             .logged_spawn()
@@ -533,7 +536,7 @@ mod tests {
                 flags: vec![],
                 inputs: vec![root.join("schemas/*.json").to_string_lossy().into_owned()],
                 report: ReportMode::default(),
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
@@ -569,7 +572,7 @@ mod tests {
                 flags: vec![],
                 inputs: vec![],
                 report: ReportMode::default(),
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let affected = |names: &[&str]| {
@@ -615,7 +618,7 @@ mod tests {
                 flags: vec!["-C".into(), "mod".into(), "-coverprofile=cover.out".into()],
                 inputs: vec![],
                 report: ReportMode::default(),
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         assert_eq!(Resource::output_keys(&test_resource(), &inputs), ["svc/mod/cover.out"]);
@@ -645,7 +648,7 @@ mod tests {
                 flags: vec![],
                 inputs: vec![],
                 report: ReportMode::default(),
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let resource = test_resource();
@@ -699,13 +702,13 @@ mod tests {
                 flags: vec!["-v".into()],
                 inputs: vec![],
                 report: ReportMode::default(),
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let prior = GoTestState {
             package: vec!["./...".into()],
             flags: vec![],
-            env: GoEnv::default(),
+            go_env: GoEnv::default(),
         };
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();

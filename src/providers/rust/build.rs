@@ -24,7 +24,7 @@ pub struct RustBuildInputs {
     #[serde(flatten)]
     pub features: RustFeatures,
     #[serde(flatten)]
-    pub env: RustEnv,
+    pub rust_env: RustEnv,
 }
 
 #[derive(Debug, Serialize, bit_derive::Schema)]
@@ -38,7 +38,7 @@ pub struct RustBuildState {
     #[serde(flatten)]
     pub features: RustFeatures,
     #[serde(flatten)]
-    pub env: RustEnv,
+    pub rust_env: RustEnv,
 }
 
 pub struct RustBuildResource {
@@ -46,7 +46,8 @@ pub struct RustBuildResource {
 }
 
 fn build_command(inputs: &Block<RustBuildInputs>) -> CargoCommand {
-    let mut cargo = inputs.env.cargo("build", inputs.dir.as_deref());
+    let mut cargo = inputs.rust_env.cargo("build", inputs.dir.as_deref());
+    cargo.envs(&inputs.env);
     if let Some(pkg) = &inputs.package {
         cargo.arg2("-p", pkg);
     }
@@ -68,7 +69,7 @@ impl Resource for RustBuildResource {
     }
 
     fn ambient(&self, inputs: &Block<RustBuildInputs>) -> Vec<Ambient> {
-        super::build_ambient(&inputs.env, inputs.dir.as_deref(), &[])
+        super::build_ambient(&inputs.rust_env, inputs.dir.as_deref(), &inputs.env, &[])
     }
 
     fn resolve(&self, inputs: &Block<RustBuildInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -76,6 +77,7 @@ impl Resource for RustBuildResource {
         super::resolve_rust_inputs(
             &super::Selection {
                 dir: inputs.dir.as_deref(),
+                env: &inputs.env,
                 package: inputs.package.as_deref(),
                 flags: &inputs.flags,
             },
@@ -101,7 +103,7 @@ impl Resource for RustBuildResource {
         let action = if prior.package != inputs.package
             || prior.flags != inputs.flags
             || prior.features != inputs.features
-            || prior.env != inputs.env
+            || prior.rust_env != inputs.rust_env
         {
             PlanAction::Update
         } else {
@@ -130,7 +132,7 @@ impl Resource for RustBuildResource {
                 package: inputs.package.clone(),
                 flags: inputs.flags.clone(),
                 features: inputs.features.clone(),
-                env: inputs.env.clone(),
+                rust_env: inputs.rust_env.clone(),
             }),
         })
     }
@@ -187,7 +189,7 @@ mod tests {
                 package: None,
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
@@ -203,7 +205,7 @@ mod tests {
                 package: Some("my-crate".into()),
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
@@ -219,14 +221,14 @@ mod tests {
                 package: None,
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let prior = RustBuildState {
             package: None,
             flags: vec![],
             features: RustFeatures::default(),
-            env: RustEnv::default(),
+            rust_env: RustEnv::default(),
         };
         let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -240,14 +242,14 @@ mod tests {
                 package: None,
                 flags: vec!["--release".into()],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let prior = RustBuildState {
             package: None,
             flags: vec![],
             features: RustFeatures::default(),
-            env: RustEnv::default(),
+            rust_env: RustEnv::default(),
         };
         let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
@@ -264,14 +266,14 @@ mod tests {
                     features: vec!["serde".into()],
                     all_features: false,
                 },
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let prior = RustBuildState {
             package: None,
             flags: vec![],
             features: RustFeatures::default(),
-            env: RustEnv::default(),
+            rust_env: RustEnv::default(),
         };
         let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);

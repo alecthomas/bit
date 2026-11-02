@@ -288,7 +288,7 @@ impl Resource for BufGenerateResource {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufGenerateState, BufGenerateOutputs>, BoxError> {
         let outputs = inputs.outputs()?;
-        let status = inputs.target.run(inputs.dir.as_deref(), &inputs.args(), writer)?;
+        let status = inputs.target.run(inputs, &inputs.args(), writer)?;
         if !status.success() {
             return Err(format!("`buf generate` exited with {status}").into());
         }

@@ -25,7 +25,7 @@ pub struct RustClippyInputs {
     #[serde(flatten)]
     pub features: RustFeatures,
     #[serde(flatten)]
-    pub env: RustEnv,
+    pub rust_env: RustEnv,
 }
 
 /// Outputs from a `rust.clippy` block.
@@ -43,7 +43,7 @@ pub struct RustClippyState {
     #[serde(flatten)]
     pub features: RustFeatures,
     #[serde(flatten)]
-    pub env: RustEnv,
+    pub rust_env: RustEnv,
 }
 
 pub struct RustClippyResource {
@@ -65,7 +65,8 @@ fn clippy_config(selection: &super::Selection) -> Result<Vec<PathBuf>, BoxError>
 }
 
 fn clippy_command(inputs: &Block<RustClippyInputs>) -> CargoCommand {
-    let mut cargo = inputs.env.cargo("clippy", inputs.dir.as_deref());
+    let mut cargo = inputs.rust_env.cargo("clippy", inputs.dir.as_deref());
+    cargo.envs(&inputs.env);
     if let Some(pkg) = &inputs.package {
         cargo.arg2("-p", pkg);
     }
@@ -87,8 +88,12 @@ impl Resource for RustClippyResource {
     }
 
     fn ambient(&self, inputs: &Block<RustClippyInputs>) -> Vec<Ambient> {
-        let mut ambient =
-            super::build_ambient(&inputs.env, inputs.dir.as_deref(), &[&["cargo", "clippy", "--version"]]);
+        let mut ambient = super::build_ambient(
+            &inputs.rust_env,
+            inputs.dir.as_deref(),
+            &inputs.env,
+            &[&["cargo", "clippy", "--version"]],
+        );
         ambient.push(Ambient::Variable(CLIPPY_CONF_DIR.to_owned()));
         ambient
     }
@@ -97,6 +102,7 @@ impl Resource for RustClippyResource {
         let tracker = &*self.tracker;
         let selection = super::Selection {
             dir: inputs.dir.as_deref(),
+            env: &inputs.env,
             package: inputs.package.as_deref(),
             flags: &inputs.flags,
         };
@@ -123,7 +129,7 @@ impl Resource for RustClippyResource {
         let action = if prior.package != inputs.package
             || prior.flags != inputs.flags
             || prior.features != inputs.features
-            || prior.env != inputs.env
+            || prior.rust_env != inputs.rust_env
         {
             PlanAction::Update
         } else {
@@ -152,7 +158,7 @@ impl Resource for RustClippyResource {
                 package: inputs.package.clone(),
                 flags: inputs.flags.clone(),
                 features: inputs.features.clone(),
-                env: inputs.env.clone(),
+                rust_env: inputs.rust_env.clone(),
             }),
         })
     }
@@ -189,7 +195,7 @@ mod tests {
                 package: None,
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
@@ -205,7 +211,7 @@ mod tests {
                 package: Some("my-crate".into()),
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let result = Resource::plan(&make_resource(), &inputs, None).unwrap();
@@ -220,14 +226,14 @@ mod tests {
                 package: None,
                 flags: vec![],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let prior = RustClippyState {
             package: None,
             flags: vec![],
             features: RustFeatures::default(),
-            env: RustEnv::default(),
+            rust_env: RustEnv::default(),
         };
         let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -241,14 +247,14 @@ mod tests {
                 package: None,
                 flags: vec!["--".into(), "-D".into(), "warnings".into()],
                 features: RustFeatures::default(),
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let prior = RustClippyState {
             package: None,
             flags: vec![],
             features: RustFeatures::default(),
-            env: RustEnv::default(),
+            rust_env: RustEnv::default(),
         };
         let result = Resource::plan(&make_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);

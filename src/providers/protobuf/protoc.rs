@@ -427,7 +427,7 @@ fn stage(inputs: &Block<ProtocGenerateInputs>, files: &[String], writer: &BlockW
     args.extend(files.iter().cloned());
     let arg_file = root.join("args");
     std::fs::write(&arg_file, args.join("\n"))?;
-    let status = super::run("protoc", &[format!("@{}", arg_file.display())], dir, writer)?;
+    let status = super::run("protoc", &[format!("@{}", arg_file.display())], inputs, writer)?;
     if !status.success() {
         return Err(format!("`protoc` exited with {status}").into());
     }

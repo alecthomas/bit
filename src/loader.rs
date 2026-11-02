@@ -2334,8 +2334,18 @@ go-test[module] = go.test {
         assert_eq!(
             input_error(input, &go_registry(), &[]),
             "<test>:4:1: block 'go-test[\".\"]': unknown field 'module'; valid fields: package, flags, inputs, \
-             report, goos, goarch, cgo, depends_on, after, concurrency, uncached, dir"
+             report, goos, goarch, cgo, depends_on, after, concurrency, uncached, dir, env"
         );
+    }
+
+    #[test]
+    fn env_values_must_be_strings() {
+        let error = input_error(
+            "build = exec { command = \"true\" env = { A = 1 } }\n",
+            &test_registry(),
+            &[],
+        );
+        assert!(error.contains("env"), "{error}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::process::CommandExt;
 use std::io::BufReader;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -35,8 +35,8 @@ pub struct PushState {
     pub image_id: String,
 }
 
-fn inspect_id(image: &str) -> Result<String, BoxError> {
-    let output = Command::new("docker")
+fn inspect_id(env: &super::Env, image: &str) -> Result<String, BoxError> {
+    let output = super::docker(env)
         .args(["inspect", "--format", "{{.Id}}", image])
         .logged_output()
         .map_err(|e| format!("docker inspect failed: {e}"))?;
@@ -101,7 +101,7 @@ impl Resource for PushResource {
             });
         }
 
-        let current_id = inspect_id(&inputs.image).unwrap_or_default();
+        let current_id = inspect_id(&inputs.env, &inputs.image).unwrap_or_default();
         if current_id != prior.image_id {
             return Ok(PlanResult {
                 action: PlanAction::Update,
@@ -124,7 +124,7 @@ impl Resource for PushResource {
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<PushState, PushOutputs>, BoxError> {
-        let tag_status = Command::new("docker")
+        let tag_status = super::docker(&inputs.env)
             .args(["tag", &inputs.image, &inputs.tag])
             .logged_output()
             .map_err(|e| format!("docker tag failed: {e}"))?;
@@ -136,7 +136,7 @@ impl Resource for PushResource {
             .into());
         }
 
-        let mut cmd = Command::new("docker");
+        let mut cmd = super::docker(&inputs.env);
         cmd.args(["push", &inputs.tag])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -159,7 +159,7 @@ impl Resource for PushResource {
             return Err(format!("docker push exited with {status}").into());
         }
 
-        let image_id = inspect_id(&inputs.tag)?;
+        let image_id = inspect_id(&inputs.env, &inputs.tag)?;
 
         Ok(ApplyResult {
             state: Some(PushState {
@@ -176,7 +176,7 @@ impl Resource for PushResource {
     fn destroy(&self, prior_state: &Block<PushState>, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         writer.event(Event::Starting, &format!("docker rmi {}", prior_state.tag));
-        let output = Command::new("docker")
+        let output = super::docker(&prior_state.env)
             .args(["rmi", &prior_state.tag])
             .logged_output()
             .map_err(|e| format!("docker rmi failed: {e}"))?;

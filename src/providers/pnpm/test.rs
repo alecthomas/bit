@@ -108,7 +108,7 @@ impl Resource for PnpmTestResource {
         writer: &BlockWriter,
     ) -> Result<ApplyResult<PnpmTestState, PnpmTestOutputs>, BoxError> {
         let args = pnpm_args(&inputs.script, inputs.package.as_deref(), &inputs.args);
-        let passed = run_pnpm(&args, Some(workspace_dir(inputs)), writer).is_ok();
+        let passed = run_pnpm(&args, inputs, writer).is_ok();
 
         Ok(ApplyResult {
             outputs: PnpmTestOutputs { passed },

@@ -13,14 +13,18 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, BoxError, PlanAction, PlanResult};
+use crate::provider::{Ambient, Block, BoxError, PlanAction, PlanResult};
 use crate::sha256::SHA256;
 
-/// Run `program args...` in `dir`, streaming its output through the writer.
-fn run(program: &str, args: &[String], dir: Option<&str>, writer: &BlockWriter) -> Result<ExitStatus, BoxError> {
+/// Run `program args...` in the block's `dir` with its `env`, streaming its
+/// output through the writer.
+fn run<T>(program: &str, args: &[String], block: &Block<T>, writer: &BlockWriter) -> Result<ExitStatus, BoxError> {
     let mut cmd = Command::new(program);
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(dir) = dir {
+    cmd.args(args)
+        .envs(&block.env)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(dir) = &block.dir {
         cmd.current_dir(dir);
     }
     let mut child = cmd

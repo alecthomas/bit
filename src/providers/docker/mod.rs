@@ -5,12 +5,25 @@ pub mod network_attach;
 pub mod parse;
 pub mod push;
 
-use std::process::Output;
+use std::collections::BTreeMap;
+use std::process::{Command, Output};
 use std::sync::Arc;
 
 use crate::file_tracker::FileTracker;
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
 use crate::value::Value;
+
+/// A block's `env`.
+pub(super) type Env = BTreeMap<String, String>;
+
+/// The `docker` CLI with the block's `env`, which configures the client,
+/// for example `DOCKER_HOST` selects the daemon. It never reaches a
+/// container: that is `docker.container`'s `environment`.
+pub(super) fn docker(env: &Env) -> Command {
+    let mut cmd = Command::new("docker");
+    cmd.envs(env);
+    cmd
+}
 
 /// Validate a Docker removal command. Destroy is idempotent when the object
 /// has already gone, but other daemon and command failures must be reported.

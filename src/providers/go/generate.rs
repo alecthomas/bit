@@ -34,7 +34,7 @@ pub struct GoGenerateInputs {
     #[serde(default)]
     pub outputs: Vec<String>,
     #[serde(flatten)]
-    pub env: GoEnv,
+    pub go_env: GoEnv,
 }
 
 /// Outputs from a `go.generate` block (none meaningful).
@@ -51,7 +51,7 @@ pub struct GoGenerateState {
     #[serde(default)]
     pub outputs: Vec<String>,
     #[serde(flatten)]
-    pub env: GoEnv,
+    pub go_env: GoEnv,
 }
 
 /// The arguments to `go` that run the block's generate directives, in
@@ -93,7 +93,7 @@ impl Resource for GoGenerateResource {
 
     /// Only the go command: the generators its directives run are unknown.
     fn ambient(&self, inputs: &Block<GoGenerateInputs>) -> Vec<Ambient> {
-        vec![super::toolchain(&inputs.env, go_dir(inputs).as_deref())]
+        vec![super::toolchain(&inputs.go_env, go_dir(inputs).as_deref())]
     }
 
     fn resolve(&self, inputs: &Block<GoGenerateInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -101,6 +101,7 @@ impl Resource for GoGenerateResource {
         super::resolve_go_inputs(
             &inputs.package,
             inputs.dir.as_deref(),
+            &inputs.env,
             &inputs.flags,
             Tests::Sources,
             &inputs.inputs,
@@ -123,7 +124,8 @@ impl Resource for GoGenerateResource {
             });
         };
 
-        let action = if prior.package != inputs.package || prior.flags != inputs.flags || prior.env != inputs.env {
+        let action = if prior.package != inputs.package || prior.flags != inputs.flags || prior.go_env != inputs.go_env
+        {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -150,7 +152,8 @@ impl Resource for GoGenerateResource {
         if let Some(dir) = go_dir(inputs) {
             cmd.current_dir(dir);
         }
-        inputs.env.apply_to(&mut cmd);
+        cmd.envs(&inputs.env);
+        inputs.go_env.apply_to(&mut cmd);
 
         let mut child = cmd
             .logged_spawn()
@@ -180,7 +183,7 @@ impl Resource for GoGenerateResource {
                 package: inputs.package.clone(),
                 flags: inputs.flags.clone(),
                 outputs: inputs.outputs.clone(),
-                env: inputs.env.clone(),
+                go_env: inputs.go_env.clone(),
             }),
         })
     }
@@ -227,7 +230,7 @@ mod tests {
                 flags: vec![],
                 inputs: vec![],
                 outputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
@@ -248,7 +251,7 @@ mod tests {
                 flags: vec![],
                 inputs: vec![],
                 outputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
@@ -264,14 +267,14 @@ mod tests {
                 flags: vec![],
                 inputs: vec![],
                 outputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let prior = GoGenerateState {
             package: vec!["./...".into()],
             flags: vec![],
             outputs: vec![],
-            env: GoEnv::default(),
+            go_env: GoEnv::default(),
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -286,14 +289,14 @@ mod tests {
                 flags: vec!["-v".into()],
                 inputs: vec![],
                 outputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let prior = GoGenerateState {
             package: vec!["./...".into()],
             flags: vec![],
             outputs: vec![],
-            env: GoEnv::default(),
+            go_env: GoEnv::default(),
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
@@ -314,7 +317,7 @@ mod tests {
                 file.to_string_lossy().into_owned(),
                 output_dir.to_string_lossy().into_owned(),
             ],
-            env: GoEnv::default(),
+            go_env: GoEnv::default(),
         };
 
         let output = crate::output::Output::new(&[]);

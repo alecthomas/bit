@@ -30,7 +30,7 @@ pub struct GoBuildInputs {
     #[serde(default)]
     pub inputs: Vec<String>,
     #[serde(flatten)]
-    pub env: GoEnv,
+    pub go_env: GoEnv,
 }
 
 /// Outputs from a `go.build` block (none meaningful).
@@ -45,7 +45,7 @@ pub struct GoBuildState {
     pub package: Vec<String>,
     pub flags: Vec<String>,
     #[serde(flatten)]
-    pub env: GoEnv,
+    pub go_env: GoEnv,
 }
 
 /// The arguments to `go` that compile the block's packages, in
@@ -86,13 +86,14 @@ impl Resource for GoBuildResource {
     }
 
     fn ambient(&self, inputs: &Block<GoBuildInputs>) -> Vec<Ambient> {
-        vec![super::toolchain(&inputs.env, go_dir(inputs).as_deref())]
+        vec![super::toolchain(&inputs.go_env, go_dir(inputs).as_deref())]
     }
 
     fn resolve(&self, inputs: &Block<GoBuildInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         super::resolve_go_inputs(
             &inputs.package,
             inputs.dir.as_deref(),
+            &inputs.env,
             &inputs.flags,
             Tests::Excluded,
             &inputs.inputs,
@@ -111,7 +112,8 @@ impl Resource for GoBuildResource {
             });
         };
 
-        let action = if prior.package != inputs.package || prior.flags != inputs.flags || prior.env != inputs.env {
+        let action = if prior.package != inputs.package || prior.flags != inputs.flags || prior.go_env != inputs.go_env
+        {
             PlanAction::Update
         } else {
             PlanAction::None
@@ -138,7 +140,8 @@ impl Resource for GoBuildResource {
         if let Some(dir) = go_dir(inputs) {
             cmd.current_dir(dir);
         }
-        inputs.env.apply_to(&mut cmd);
+        cmd.envs(&inputs.env);
+        inputs.go_env.apply_to(&mut cmd);
 
         let mut child = cmd
             .logged_spawn()
@@ -167,7 +170,7 @@ impl Resource for GoBuildResource {
             state: Some(GoBuildState {
                 package: inputs.package.clone(),
                 flags: inputs.flags.clone(),
-                env: inputs.env.clone(),
+                go_env: inputs.go_env.clone(),
             }),
         })
     }
@@ -207,7 +210,7 @@ mod tests {
                 package: vec!["./...".into()],
                 flags: vec!["-race".into()],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let resource = test_resource();
@@ -224,7 +227,7 @@ mod tests {
                 package: vec!["./...".into()],
                 flags: vec!["-C".into(), "mod".into(), "-o".into(), "bin/".into()],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         assert_eq!(Resource::output_keys(&test_resource(), &inputs), ["svc/mod/bin/"]);
@@ -240,13 +243,13 @@ mod tests {
                 package: vec!["./...".into()],
                 flags: vec![],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let prior = GoBuildState {
             package: vec!["./...".into()],
             flags: vec![],
-            env: GoEnv::default(),
+            go_env: GoEnv::default(),
         };
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();

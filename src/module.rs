@@ -7,8 +7,8 @@ use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::output::BlockWriter;
 use crate::provider::{
-    ApplyResult as ProviderApplyResult, BoxError, CachePolicy, Changes, DynResource, PlanAction, PlanResult,
-    ProviderRegistry, ResourceKind, ResourceSchema, StructField, StructType,
+    ApplyResult as ProviderApplyResult, Block as ProviderBlock, BoxError, CachePolicy, Changes, DynResource,
+    PlanAction, PlanResult, ProviderRegistry, ResourceKind, ResourceSchema, StructField, StructType,
 };
 use crate::state::StateStore;
 use crate::value::{Map, Value, validate_type};
@@ -130,12 +130,7 @@ impl DynResource for ModuleResource {
         })
     }
 
-    fn destroy(
-        &self,
-        _dir: Option<&str>,
-        _prior_state: &serde_json::Value,
-        _writer: &BlockWriter,
-    ) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &ProviderBlock<serde_json::Value>, _writer: &BlockWriter) -> Result<(), BoxError> {
         Ok(())
     }
 

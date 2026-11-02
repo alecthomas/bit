@@ -276,13 +276,15 @@ impl ImageResource {
         }
     }
 
-    fn command(&self) -> Command {
-        Command::new(&self.docker)
+    fn command(&self, env: &super::Env) -> Command {
+        let mut cmd = Command::new(&self.docker);
+        cmd.envs(env);
+        cmd
     }
 
-    fn inspect_image_id_result(&self, image: &str) -> Result<String, BoxError> {
+    fn inspect_image_id_result(&self, env: &super::Env, image: &str) -> Result<String, BoxError> {
         let output = self
-            .command()
+            .command(env)
             .args(["image", "inspect", "--format", "{{.Id}}", image])
             .logged_output()
             .map_err(|e| format!("failed to run docker image inspect: {e}"))?;
@@ -301,20 +303,20 @@ impl ImageResource {
         Ok(image_id.to_owned())
     }
 
-    fn inspect_image_id(&self, image: &str) -> Option<String> {
-        self.inspect_image_id_result(image).ok()
+    fn inspect_image_id(&self, env: &super::Env, image: &str) -> Option<String> {
+        self.inspect_image_id_result(env, image).ok()
     }
 
-    fn remote_image_exists(&self, image: &str) -> bool {
-        self.command()
+    fn remote_image_exists(&self, env: &super::Env, image: &str) -> bool {
+        self.command(env)
             .args(["buildx", "imagetools", "inspect", image])
             .logged_output()
             .is_ok_and(|output| output.status.success())
     }
 
-    fn tag_image(&self, image: &str, tag: &str) -> Result<(), BoxError> {
+    fn tag_image(&self, env: &super::Env, image: &str, tag: &str) -> Result<(), BoxError> {
         let output = self
-            .command()
+            .command(env)
             .args(["tag", image, tag])
             .logged_output()
             .map_err(|e| format!("failed to run docker tag: {e}"))?;
@@ -324,9 +326,9 @@ impl ImageResource {
         Ok(())
     }
 
-    fn remove_image(&self, image: &str) -> Result<(), BoxError> {
+    fn remove_image(&self, env: &super::Env, image: &str) -> Result<(), BoxError> {
         let output = self
-            .command()
+            .command(env)
             .args(["rmi", "-f", image])
             .logged_output()
             .map_err(|e| format!("docker rmi failed: {e}"))?;
@@ -420,9 +422,9 @@ impl Resource for ImageResource {
                 .clone()
                 .filter(|image_ref| image_ref.contains('@'))
                 .or_else(|| digest_reference(&prior.tag, &digest).ok());
-            image_ref.is_some_and(|image_ref| self.remote_image_exists(&image_ref))
+            image_ref.is_some_and(|image_ref| self.remote_image_exists(&inputs.env, &image_ref))
         } else {
-            self.inspect_image_id(&prior.image_id).as_deref() == Some(prior.image_id.as_str())
+            self.inspect_image_id(&inputs.env, &prior.image_id).as_deref() == Some(prior.image_id.as_str())
         };
 
         if !exists {
@@ -442,7 +444,7 @@ impl Resource for ImageResource {
                 .clone()
                 .unwrap_or_else(|| pinned_tag(&prior.tag, &prior.image_id));
             for tag in [&prior.tag, &pinned] {
-                if self.inspect_image_id(tag).as_deref() != Some(prior.image_id.as_str()) {
+                if self.inspect_image_id(&inputs.env, tag).as_deref() != Some(prior.image_id.as_str()) {
                     return Ok(PlanResult {
                         action: PlanAction::Update,
                         description: desc,
@@ -471,7 +473,7 @@ impl Resource for ImageResource {
             .transpose()
             .map_err(|e| format!("failed to create Buildx metadata file: {e}"))?;
         let args = build_args(inputs, metadata.as_ref().map(|file| file.path()));
-        let mut cmd = self.command();
+        let mut cmd = self.command(&inputs.env);
         cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd
@@ -504,9 +506,9 @@ impl Resource for ImageResource {
                 digest_reference(&inputs.tag, &digest)?,
             )
         } else {
-            let image_id = self.inspect_image_id_result(&inputs.tag)?;
+            let image_id = self.inspect_image_id_result(&inputs.env, &inputs.tag)?;
             let pinned = pinned_tag(&inputs.tag, &image_id);
-            self.tag_image(&inputs.tag, &pinned)?;
+            self.tag_image(&inputs.env, &inputs.tag, &pinned)?;
             (image_id, pinned)
         };
 
@@ -533,10 +535,10 @@ impl Resource for ImageResource {
         }
         if let Some(pinned) = &prior_state.pinned_tag {
             writer.event(Event::Starting, &format!("docker rmi -f {pinned}"));
-            self.remove_image(pinned)?;
+            self.remove_image(&prior_state.env, pinned)?;
         }
         writer.event(Event::Starting, &format!("docker rmi -f {}", prior_state.image_id));
-        self.remove_image(&prior_state.image_id)
+        self.remove_image(&prior_state.env, &prior_state.image_id)
     }
 
     fn cache_policy(&self, inputs: &Block<ImageInputs>) -> CachePolicy {
@@ -567,7 +569,7 @@ impl Resource for ImageResource {
             .unwrap_or_else(|| pinned_tag(&state.tag, &state.image_id));
         let archive = tempfile::NamedTempFile::new()?;
         let output = self
-            .command()
+            .command(&inputs.env)
             .args(["image", "save", "--output"])
             .arg(archive.path())
             .arg(&image)
@@ -596,7 +598,7 @@ impl Resource for ImageResource {
         }
         let pinned = pinned_tag(&inputs.tag, &state.image_id);
         Ok(
-            if self.inspect_image_id(&pinned).as_deref() == Some(state.image_id.as_str()) {
+            if self.inspect_image_id(&inputs.env, &pinned).as_deref() == Some(state.image_id.as_str()) {
                 ReceiptCheck::Valid
             } else {
                 ReceiptCheck::Restore
@@ -618,13 +620,13 @@ impl Resource for ImageResource {
         }
         let pinned = pinned_tag(&inputs.tag, &state.image_id);
 
-        if self.inspect_image_id(&state.image_id).as_deref() != Some(state.image_id.as_str()) {
+        if self.inspect_image_id(&inputs.env, &state.image_id).as_deref() != Some(state.image_id.as_str()) {
             let dir = tempfile::tempdir()?;
             let archive = dir.path().join("image.tar");
             materialize_archive(artifacts, cas, &archive)?;
             writer.line(&format!("docker image load --input {}", archive.display()));
             let output = self
-                .command()
+                .command(&inputs.env)
                 .args(["image", "load", "--input"])
                 .arg(&archive)
                 .logged_output()
@@ -638,11 +640,11 @@ impl Resource for ImageResource {
             }
         }
 
-        if self.inspect_image_id(&pinned).as_deref() != Some(state.image_id.as_str()) {
-            self.tag_image(&state.image_id, &pinned)?;
+        if self.inspect_image_id(&inputs.env, &pinned).as_deref() != Some(state.image_id.as_str()) {
+            self.tag_image(&inputs.env, &state.image_id, &pinned)?;
         }
-        if self.inspect_image_id(&inputs.tag).as_deref() != Some(state.image_id.as_str()) {
-            self.tag_image(&state.image_id, &inputs.tag)?;
+        if self.inspect_image_id(&inputs.env, &inputs.tag).as_deref() != Some(state.image_id.as_str()) {
+            self.tag_image(&inputs.env, &state.image_id, &inputs.tag)?;
         }
 
         Ok(Some(ApplyResult {

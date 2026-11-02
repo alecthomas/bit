@@ -39,6 +39,14 @@ impl GoEnv {
         cmd.envs(self.vars());
     }
 
+    /// The block's `env` with these overrides applied on top, as a command
+    /// sees them after `envs(env)` and [`GoEnv::apply_to`].
+    pub fn over(&self, env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        let mut merged = env.clone();
+        merged.extend(self.vars().into_iter().map(|(name, value)| (name.to_owned(), value)));
+        merged
+    }
+
     /// The environment variables these overrides set.
     fn vars(&self) -> Vec<(&'static str, String)> {
         let mut vars = Vec::new();
@@ -78,10 +86,11 @@ where
 /// `dir` is the block's `dir`. The go command runs there, or where a `-C`
 /// flag moves it, and the scanner walks up from there to locate `go.mod`.
 /// `None` starts from bit's CWD. The `inputs` globs are relative to `dir`,
-/// as in every other block.
+/// as in every other block. `env` is the block's `env`.
 pub fn resolve_go_inputs(
     patterns: &[String],
     dir: Option<&str>,
+    env: &BTreeMap<String, String>,
     flags: &[String],
     tests: Tests,
     inputs: &[String],
@@ -89,7 +98,7 @@ pub fn resolve_go_inputs(
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let go_dir = run_dir(dir, flags);
     let scans = tracker.derived::<scanner::Scans>();
-    let mut files: Vec<_> = scanner::scan(&scans, patterns, tests, go_dir.as_deref().map(Path::new))?
+    let mut files: Vec<_> = scanner::scan(&scans, patterns, tests, go_dir.as_deref().map(Path::new), env)?
         .into_iter()
         .collect();
     files.extend(flag_inputs(go_dir.as_deref(), flags));
@@ -394,14 +403,14 @@ fn list_packages(
     patterns: &[String],
     args: &[String],
     dir: Option<&str>,
-    env: &GoEnv,
+    env: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, BoxError> {
     let mut cmd = Command::new("go");
     cmd.args(["list", "-e"]).args(args).args(patterns);
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
-    env.apply_to(&mut cmd);
+    cmd.envs(env);
     let patterns = patterns.join(" ");
     let output = cmd
         .logged_output()
@@ -431,21 +440,21 @@ struct Affected {
 /// to run the whole patterns. `tests` must match what the block resolves,
 /// so each tracked path belongs to the packages that depend on it. `list`
 /// reports the packages `go` matches for the patterns, so `args` and `env`
-/// must match those of the narrowed command.
+/// must match those of the narrowed command: see [`GoEnv::over`].
 fn affected_packages(
     tracker: &FileTracker,
     patterns: &[String],
     tests: Tests,
     dir: Option<&str>,
     args: &[String],
-    env: &GoEnv,
+    env: &BTreeMap<String, String>,
     changes: &Changes,
 ) -> Result<Option<Affected>, BoxError> {
     let Changes::Paths(changed) = changes else {
         return Ok(None);
     };
     let scans = tracker.derived::<scanner::Scans>();
-    let scanned = scanner::tested_packages(&scans, patterns, tests, dir.map(Path::new))?;
+    let scanned = scanner::tested_packages(&scans, patterns, tests, dir.map(Path::new), env)?;
     // A path no package depends on is an extra input, a config file or a
     // deleted file, whose dependents cannot be found.
     if changed
@@ -518,6 +527,25 @@ impl Provider for GoProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn go_env_overrides_the_block_env() {
+        let env = BTreeMap::from([
+            ("GOOS".to_owned(), "linux".to_owned()),
+            ("GOFLAGS".to_owned(), "-mod=mod".to_owned()),
+        ]);
+        let go_env = GoEnv {
+            goos: Some("darwin".to_owned()),
+            ..GoEnv::default()
+        };
+        assert_eq!(
+            go_env.over(&env),
+            BTreeMap::from([
+                ("GOOS".to_owned(), "darwin".to_owned()),
+                ("GOFLAGS".to_owned(), "-mod=mod".to_owned()),
+            ])
+        );
+    }
 
     #[test]
     fn provider_registration() {

@@ -68,6 +68,7 @@ pub struct CargoCommand {
     program: String,
     args: Vec<String>,
     dir: Option<String>,
+    env: BTreeMap<String, String>,
 }
 
 impl CargoCommand {
@@ -77,12 +78,20 @@ impl CargoCommand {
             program: program.into(),
             args: Vec::new(),
             dir: None,
+            env: BTreeMap::new(),
         }
     }
 
     /// Run the command in `dir` rather than bit's working directory.
     pub fn in_dir(&mut self, dir: Option<&str>) -> &mut Self {
         self.dir = dir.map(str::to_owned);
+        self
+    }
+
+    /// Set the block's `env` for the command. [`CargoCommand::display`]
+    /// leaves it out, since its values may be secrets.
+    pub fn envs(&mut self, env: &BTreeMap<String, String>) -> &mut Self {
+        self.env.clone_from(env);
         self
     }
 
@@ -130,8 +139,11 @@ impl CargoCommand {
         if let Some(dir) = &self.dir {
             cmd.current_dir(dir);
         }
+        cmd.envs(&self.env);
+        // A wrapper the user sets, in bit's environment or the block's, wins.
         if let Some(wrapper) = remap_wrapper()
             && std::env::var_os("RUSTC_WORKSPACE_WRAPPER").is_none()
+            && !self.env.contains_key("RUSTC_WORKSPACE_WRAPPER")
         {
             cmd.env("RUSTC_WORKSPACE_WRAPPER", wrapper);
         }
@@ -257,8 +269,14 @@ pub fn toolchain(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec<Amb
 /// [`toolchain`] plus the variables cargo reads that change compiler
 /// output, for the resources that compile. No version command reports
 /// them, and without them a binary built with different flags in another
-/// worktree could be restored from the shared cache.
-pub fn build_ambient(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec<Ambient> {
+/// worktree could be restored from the shared cache. `block_env` is the
+/// block's `env`, which cargo's target directory may depend on.
+pub fn build_ambient(
+    env: &RustEnv,
+    dir: Option<&str>,
+    block_env: &BTreeMap<String, String>,
+    extra: &[&[&str]],
+) -> Vec<Ambient> {
     const BUILD_VARIABLES: [&str; 13] = [
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
@@ -292,7 +310,7 @@ pub fn build_ambient(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec
     //
     // Without a target directory nothing has been built, so nothing is
     // recorded yet; a failure to find it surfaces when resolving instead.
-    if let Ok(target_dir) = target_directory(dir) {
+    if let Ok(target_dir) = target_directory(dir, block_env) {
         ambient.extend(
             recorded_variables(&target_dir)
                 .into_iter()
@@ -409,38 +427,43 @@ struct DiscoveredPaths {
     target_dir: PathBuf,
 }
 
-/// Discovered paths and `cargo metadata` output, by the `dir` cargo runs in.
-/// Blocks in different directories can belong to different workspaces.
+/// Discovered paths and `cargo metadata` output, by the `dir` cargo runs in
+/// and the block's `env`. Blocks in different directories can belong to
+/// different workspaces, and a variable such as `CARGO_TARGET_DIR` changes
+/// what cargo reports.
 static DISCOVERED_CACHE: LazyLock<Mutex<HashMap<String, DiscoveredPaths>>> = LazyLock::new(Default::default);
 static CARGO_METADATA_CACHE: LazyLock<Mutex<HashMap<String, serde_json::Value>>> = LazyLock::new(Default::default);
 
-/// The cache key for `dir`, where `None` is bit's working directory.
-fn dir_key(dir: Option<&str>) -> String {
-    dir.unwrap_or(".").to_owned()
+/// The cache key for `dir` and `env`, where `None` is bit's working
+/// directory.
+fn discovery_key(dir: Option<&str>, env: &BTreeMap<String, String>) -> String {
+    format!("{} {env:?}", dir.unwrap_or("."))
 }
 
-/// Discover once per process and `dir`, and return a copy so the lock is
-/// released before any hashing.
-fn discovered(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
+/// Discover once per process, `dir` and `env`, and return a copy so the lock
+/// is released before any hashing.
+fn discovered(dir: Option<&str>, env: &BTreeMap<String, String>) -> Result<DiscoveredPaths, BoxError> {
     let mut guard = DISCOVERED_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(paths) = guard.get(&dir_key(dir)) {
+    if let Some(paths) = guard.get(&discovery_key(dir, env)) {
         return Ok(paths.clone());
     }
-    let paths = discover_paths(dir)?;
-    guard.insert(dir_key(dir), paths.clone());
+    let paths = discover_paths(dir, env)?;
+    guard.insert(discovery_key(dir, env), paths.clone());
     Ok(paths)
 }
 
 /// Cargo's target directory for the workspace in `dir`, honouring
 /// `CARGO_TARGET_DIR` and config.
-pub fn target_directory(dir: Option<&str>) -> Result<PathBuf, BoxError> {
-    Ok(discovered(dir)?.target_dir)
+pub fn target_directory(dir: Option<&str>, env: &BTreeMap<String, String>) -> Result<PathBuf, BoxError> {
+    Ok(discovered(dir, env)?.target_dir)
 }
 
 /// What a rust block builds: the packages its `package` field and cargo
-/// `flags` select, in the workspace cargo finds from `dir`.
+/// `flags` select, in the workspace cargo finds from `dir` with the block's
+/// `env`.
 pub struct Selection<'a> {
     pub dir: Option<&'a str>,
+    pub env: &'a BTreeMap<String, String>,
     pub package: Option<&'a str>,
     pub flags: &'a [String],
 }
@@ -499,7 +522,7 @@ impl Selection<'_> {
             crate::provider::in_dir(self.dir, &parent.to_string_lossy())
         });
         let dir = manifest_dir.as_deref().filter(|dir| !dir.is_empty()).or(self.dir);
-        let discovered = discovered(dir)?;
+        let discovered = discovered(dir, self.env)?;
         let names: Vec<&str> = self
             .package
             .into_iter()
@@ -584,9 +607,9 @@ pub fn resolve_rust_inputs(selection: &Selection, tracker: &FileTracker) -> Resu
 
 /// Discover source globs, individual files, and the target directory from
 /// `cargo metadata` in `dir`. The paths are as bit's process sees them.
-fn discover_paths(dir: Option<&str>) -> Result<DiscoveredPaths, BoxError> {
+fn discover_paths(dir: Option<&str>, env: &BTreeMap<String, String>) -> Result<DiscoveredPaths, BoxError> {
     let cwd = std::env::current_dir()?.join(dir.unwrap_or(""));
-    let meta = cargo_metadata(dir)?;
+    let meta = cargo_metadata(dir, env)?;
     let target_dir = meta
         .get("target_directory")
         .and_then(|t| t.as_str())
@@ -750,24 +773,24 @@ fn walk_files(dir: &Path, files: &mut Vec<PathBuf>) {
 /// manifest of every dependency of every platform, and a build downloads
 /// only the host's, so `--offline` would never succeed. A local dependency
 /// only of another platform, used when cross-compiling, is not reported.
-fn cargo_metadata(dir: Option<&str>) -> Result<serde_json::Value, BoxError> {
+fn cargo_metadata(dir: Option<&str>, env: &BTreeMap<String, String>) -> Result<serde_json::Value, BoxError> {
     let mut guard = CARGO_METADATA_CACHE.lock().unwrap_or_else(|error| error.into_inner());
-    if let Some(metadata) = guard.get(&dir_key(dir)) {
+    if let Some(metadata) = guard.get(&discovery_key(dir, env)) {
         return Ok(metadata.clone());
     }
-    let resolved = host_triple()
-        .and_then(|host| run_cargo_metadata(dir, &["--locked", "--offline", "--filter-platform", &host]).ok());
+    let resolved = host_triple(env)
+        .and_then(|host| run_cargo_metadata(dir, env, &["--locked", "--offline", "--filter-platform", &host]).ok());
     let metadata = match resolved {
         Some(metadata) => metadata,
-        None => run_cargo_metadata(dir, &["--no-deps"])?,
+        None => run_cargo_metadata(dir, env, &["--no-deps"])?,
     };
-    guard.insert(dir_key(dir), metadata.clone());
+    guard.insert(discovery_key(dir, env), metadata.clone());
     Ok(metadata)
 }
 
 /// The host target triple, as `rustc -vV` reports it.
-fn host_triple() -> Option<String> {
-    let output = Command::new("rustc").arg("-vV").logged_output().ok()?;
+fn host_triple(env: &BTreeMap<String, String>) -> Option<String> {
+    let output = Command::new("rustc").arg("-vV").envs(env).logged_output().ok()?;
     let output = String::from_utf8_lossy(&output.stdout);
     output
         .lines()
@@ -775,11 +798,16 @@ fn host_triple() -> Option<String> {
         .map(str::to_owned)
 }
 
-fn run_cargo_metadata(dir: Option<&str>, flags: &[&str]) -> Result<serde_json::Value, BoxError> {
+fn run_cargo_metadata(
+    dir: Option<&str>,
+    env: &BTreeMap<String, String>,
+    flags: &[&str],
+) -> Result<serde_json::Value, BoxError> {
     let mut command = Command::new("cargo");
     if let Some(dir) = dir {
         command.current_dir(dir);
     }
+    command.envs(env);
     let output = command
         .args(["metadata", "--format-version", "1"])
         .args(flags)
@@ -857,7 +885,7 @@ fn local_closure<'a>(
 /// List Cargo workspace packages.
 #[bit_derive::provider_function]
 fn packages() -> Result<Vec<String>, BoxError> {
-    workspace_package_names(&cargo_metadata(None)?)
+    workspace_package_names(&cargo_metadata(None, &BTreeMap::new())?)
 }
 
 /// List a Cargo workspace package's immediate local non-development dependencies.
@@ -870,7 +898,7 @@ fn packages() -> Result<Vec<String>, BoxError> {
 #[bit_derive::provider_function]
 fn dependencies(package: String, template: Option<String>) -> Result<Vec<BlockRef>, BoxError> {
     Ok(
-        workspace_package_dependencies(&cargo_metadata(None)?, &package, template.as_deref())?
+        workspace_package_dependencies(&cargo_metadata(None, &BTreeMap::new())?, &package, template.as_deref())?
             .into_iter()
             .map(BlockRef::new)
             .collect(),
@@ -1165,6 +1193,7 @@ mod tests {
         let tracker = FileTracker::default();
         let selection = Selection {
             dir: Some(&ws),
+            env: &BTreeMap::new(),
             package: Some("app"),
             flags: &[],
         };
@@ -1224,6 +1253,7 @@ mod tests {
             let flags: Vec<String> = flags.iter().map(|flag| (*flag).to_owned()).collect();
             let selection = Selection {
                 dir: Some(&ws),
+                env: &BTreeMap::new(),
                 package: Some("app"),
                 flags: &flags,
             };
@@ -1239,7 +1269,7 @@ mod tests {
     fn discovery_follows_path_dependencies_and_patches_outside_the_workspace() {
         let dir = workspace_with_path_dependencies();
         let ws = dir.path().join("ws").to_string_lossy().into_owned();
-        let discovered = discover_paths(Some(&ws)).unwrap();
+        let discovered = discover_paths(Some(&ws), &BTreeMap::new()).unwrap();
         let has = |paths: &InputPaths, file: &str| paths.files.iter().any(|path| path.ends_with(file));
 
         let app = &discovered.packages["app"];
@@ -1328,7 +1358,7 @@ mod tests {
     fn config_comes_from_the_workspace_root_when_run_in_a_member() {
         let dir = workspace_with_path_dependencies();
         let app = dir.path().join("ws/app").to_string_lossy().into_owned();
-        let config = discover_paths(Some(&app)).unwrap().config;
+        let config = discover_paths(Some(&app), &BTreeMap::new()).unwrap().config;
         for file in ["ws/Cargo.toml", "ws/Cargo.lock"] {
             assert!(
                 config.iter().any(|path| path.ends_with(file)),
@@ -1483,6 +1513,28 @@ mod tests {
     fn cargo_runs_in_dir() {
         let cargo = RustEnv::default().cargo("build", Some("crates/app"));
         assert_eq!(cargo.command().get_current_dir(), Some(Path::new("crates/app")));
+    }
+
+    #[test]
+    fn cargo_sets_block_env_without_displaying_it() {
+        let block_env = BTreeMap::from([
+            ("TOKEN".to_owned(), "s3cr3t".to_owned()),
+            ("RUSTC_WORKSPACE_WRAPPER".to_owned(), "mine".to_owned()),
+        ]);
+        let mut cargo = RustEnv::default().cargo("build", None);
+        cargo.envs(&block_env);
+        let command = cargo.command();
+        let envs: HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            envs[std::ffi::OsStr::new("TOKEN")],
+            Some(std::ffi::OsStr::new("s3cr3t"))
+        );
+        // The block's wrapper is the user's, so bit's remap wrapper yields.
+        assert_eq!(
+            envs[std::ffi::OsStr::new("RUSTC_WORKSPACE_WRAPPER")],
+            Some(std::ffi::OsStr::new("mine"))
+        );
+        assert_eq!(cargo.display(), "cargo build");
     }
 
     #[test]

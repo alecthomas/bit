@@ -23,15 +23,19 @@ pub const UNCACHED_FIELD: &str = "uncached";
 /// The directory a block's command runs in, which its relative paths are
 /// relative to. See [`crate::provider::Block`].
 pub const DIR_FIELD: &str = "dir";
+/// Environment variables set for the processes a block runs. See
+/// [`crate::provider::Block`].
+pub const ENV_FIELD: &str = "env";
 
 /// Block fields the engine reads itself. They are valid on every resource
 /// block even though no resource schema declares them.
-pub const ENGINE_FIELDS: [&str; 5] = [
+pub const ENGINE_FIELDS: [&str; 6] = [
     DEPENDS_ON_FIELD,
     AFTER_FIELD,
     CONCURRENCY_FIELD,
     UNCACHED_FIELD,
     DIR_FIELD,
+    ENV_FIELD,
 ];
 
 /// The type of edge between two blocks.

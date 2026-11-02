@@ -102,7 +102,7 @@ impl Resource for BufFormatResource {
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufFormatInputs, BufFormatOutputs>, BoxError> {
-        let status = inputs.target.run(inputs.dir.as_deref(), &inputs.args(&WRITE), writer)?;
+        let status = inputs.target.run(inputs, &inputs.args(&WRITE), writer)?;
         if !status.success() {
             return Err(format!("`buf format` exited with {status}").into());
         }
@@ -178,7 +178,7 @@ impl Resource for BufFormatCheckResource {
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufFormatInputs, BufFormatCheckOutputs>, BoxError> {
-        let status = inputs.target.run(inputs.dir.as_deref(), &inputs.args(&CHECK), writer)?;
+        let status = inputs.target.run(inputs, &inputs.args(&CHECK), writer)?;
         Ok(ApplyResult {
             outputs: BufFormatCheckOutputs {
                 passed: status.success(),

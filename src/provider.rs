@@ -246,6 +246,12 @@ pub struct VersionCommand {
     pub dir: Option<String>,
     /// Environment variables set for the command.
     pub env: Vec<(String, String)>,
+    /// The block's `env`, which the engine adds so the probe sees the
+    /// toolchain the action will, for example through `GOTOOLCHAIN`. `env`
+    /// overrides it. It stays out of [`VersionCommand::display`] because the
+    /// values already reach the key through the block's input hash, and may
+    /// be secrets.
+    pub block_env: BTreeMap<String, String>,
 }
 
 impl VersionCommand {
@@ -255,6 +261,7 @@ impl VersionCommand {
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             dir: None,
             env: Vec::new(),
+            block_env: BTreeMap::new(),
         }
     }
 
@@ -285,18 +292,24 @@ impl VersionCommand {
     }
 
     /// Identity of this command's output within one process. Unlike
-    /// [`VersionCommand::display`] it includes the directory, since two
-    /// blocks may run the same command where different toolchains apply.
+    /// [`VersionCommand::display`] it includes the directory and the block's
+    /// `env`, since two blocks may run the same command where different
+    /// toolchains apply.
     pub fn probe_key(&self) -> String {
-        match &self.dir {
-            Some(dir) => format!("{} (in {dir})", self.display()),
-            None => self.display(),
+        let mut key = self.display();
+        if let Some(dir) = &self.dir {
+            key.push_str(&format!(" (in {dir})"));
         }
+        if !self.block_env.is_empty() {
+            key.push_str(&format!(" (with {:?})", self.block_env));
+        }
+        key
     }
 
     pub fn command(&self) -> std::process::Command {
         let mut cmd = std::process::Command::new(&self.program);
         cmd.args(&self.args);
+        cmd.envs(&self.block_env);
         cmd.envs(self.env.iter().map(|(name, value)| (name, value)));
         if let Some(dir) = &self.dir {
             cmd.current_dir(dir);
@@ -338,9 +351,9 @@ pub trait Provider: Send + Sync {
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError>;
 }
 
-/// A resource's inputs or state together with the block's `dir`, which the
-/// engine manages for every block rather than each resource declaring its
-/// own.
+/// A resource's inputs or state together with the block's `dir` and `env`,
+/// which the engine manages for every block rather than each resource
+/// declaring its own.
 ///
 /// The command runs in `dir`, and every relative path in the block's fields
 /// is relative to it. `dir` itself is relative to the project root, which
@@ -348,12 +361,25 @@ pub trait Provider: Send + Sync {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block<T> {
     pub dir: Option<String>,
+    /// Variables set for every process the resource runs for the block,
+    /// including the commands that discover its inputs, so they see what
+    /// the action will. The engine hashes them with the block's inputs.
+    pub env: BTreeMap<String, String>,
     pub value: T,
 }
 
 impl<T> Block<T> {
     pub fn new(dir: Option<String>, value: T) -> Self {
-        Self { dir, value }
+        Self {
+            dir,
+            env: BTreeMap::new(),
+            value,
+        }
+    }
+
+    pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
+        self.env = env;
+        self
     }
 
     /// `path` as bit's process sees it: a relative path is joined onto
@@ -443,7 +469,8 @@ pub trait Resource {
         changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
-    /// `prior_state.dir` is the `dir` the block had when it last ran.
+    /// `prior_state.dir` and `prior_state.env` are what the block had when
+    /// it last ran.
     fn destroy(&self, prior_state: &Block<Self::State>, writer: &BlockWriter) -> Result<(), BoxError>;
 
     /// Whether `apply` prints its own start line through
@@ -567,8 +594,7 @@ pub trait DynResource: Send + Sync {
         changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
-    fn destroy(&self, dir: Option<&str>, prior_state: &serde_json::Value, writer: &BlockWriter)
-    -> Result<(), BoxError>;
+    fn destroy(&self, prior_state: &Block<serde_json::Value>, writer: &BlockWriter) -> Result<(), BoxError>;
     fn announces_start(&self) -> bool {
         false
     }
@@ -620,15 +646,26 @@ pub trait DynResource: Send + Sync {
     }
 }
 
-/// Deserialize a block's evaluated fields into its `dir` and the resource's
-/// typed inputs. The inputs ignore `dir` and the engine's other fields.
+/// Deserialize a block's evaluated fields into its `dir`, `env` and the
+/// resource's typed inputs. The inputs ignore the engine's fields.
 fn deserialize_inputs<T: DeserializeOwned>(map: &Map) -> Result<Block<T>, BoxError> {
     let dir = map
         .get(crate::dag::DIR_FIELD)
         .and_then(Value::as_str)
         .map(str::to_owned);
     let json = serde_json::to_value(map)?;
-    Ok(Block::new(dir, serde_json::from_value(json)?))
+    let value: T = serde_json::from_value(json)?;
+    Ok(Block::new(dir, value).with_env(block_env(map)))
+}
+
+/// The block's `env` field.
+pub fn block_env(inputs: &Map) -> BTreeMap<String, String> {
+    let Some(env) = inputs.get(crate::dag::ENV_FIELD).and_then(Value::as_map) else {
+        return BTreeMap::new();
+    };
+    env.iter()
+        .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_owned())))
+        .collect()
 }
 
 /// Serialize a typed struct back into a `Map`.
@@ -686,14 +723,10 @@ impl<R: Resource + Send + Sync> DynResource for R {
         })
     }
 
-    fn destroy(
-        &self,
-        dir: Option<&str>,
-        prior_state: &serde_json::Value,
-        writer: &BlockWriter,
-    ) -> Result<(), BoxError> {
-        let state: R::State = serde_json::from_value(prior_state.clone())?;
-        Resource::destroy(self, &Block::new(dir.map(str::to_owned), state), writer)
+    fn destroy(&self, prior_state: &Block<serde_json::Value>, writer: &BlockWriter) -> Result<(), BoxError> {
+        let state: R::State = serde_json::from_value(prior_state.value.clone())?;
+        let block = Block::new(prior_state.dir.clone(), state).with_env(prior_state.env.clone());
+        Resource::destroy(self, &block, writer)
     }
 
     fn announces_start(&self) -> bool {

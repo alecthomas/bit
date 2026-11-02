@@ -48,7 +48,7 @@ pub(super) fn resolve_inputs<T>(
     extra_globs: &[String],
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let ws = workspace::workspace(tracker, Path::new(workspace_dir(block)))?;
+    let ws = workspace::workspace(tracker, Path::new(workspace_dir(block)), &block.env)?;
     let mut files = BTreeMap::new();
 
     if let Some(lf) = &ws.lockfile {
@@ -247,7 +247,7 @@ impl Resource for PnpmRunResource {
         }
 
         let args = pnpm_args(&inputs.script, inputs.package.as_deref(), &inputs.args);
-        run_pnpm(&args, Some(workspace_dir(inputs)), writer)?;
+        run_pnpm(&args, inputs, writer)?;
 
         Ok(ApplyResult {
             outputs: PnpmRunOutputs::from_paths(&outputs),

@@ -84,7 +84,7 @@ impl Resource for BufLintResource {
         _changes: &Changes,
         writer: &BlockWriter,
     ) -> Result<ApplyResult<BufLintInputs, BufLintOutputs>, BoxError> {
-        let status = inputs.target.run(inputs.dir.as_deref(), &lint_args(inputs), writer)?;
+        let status = inputs.target.run(inputs, &lint_args(inputs), writer)?;
         Ok(ApplyResult {
             outputs: BufLintOutputs {
                 passed: status.success(),

@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 use crate::cache::{ActionKey, ActionKeyInput, BuildCache, PortablePaths, PublishOutcome, RECEIPT_VERSION, Receipt};
 use crate::dag::{
-    self, AFTER_FIELD, CONCURRENCY_FIELD, DEPENDS_ON_FIELD, DIR_FIELD, Dag, DagError, DagNode, UNCACHED_FIELD,
+    self, AFTER_FIELD, CONCURRENCY_FIELD, DEPENDS_ON_FIELD, DIR_FIELD, Dag, DagError, DagNode, ENV_FIELD,
+    UNCACHED_FIELD,
 };
 use crate::expr::{self, EvalError, Scope};
 use crate::file_tracker::FileTracker;
 use crate::loader::BaseScope;
 use crate::output::{BlockWriter, Event, Output};
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, OutputFile, PlanAction, PlanResult, ReceiptCheck,
+    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, OutputFile, PlanAction, PlanResult, ReceiptCheck,
     ResourceKind,
 };
 use crate::providers::is_ambient_key;
@@ -90,6 +91,10 @@ struct WrappedState {
     /// block definition has gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dir: Option<String>,
+    /// The block's `env` when it last ran, for `--clean` likewise, less any
+    /// secrets: state is stored in plain text.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
     content_hash: SHA256,
     #[serde(default)]
     input_hash: SHA256,
@@ -112,6 +117,7 @@ struct PriorState {
     provider_state: Option<serde_json::Value>,
     outputs: Map,
     dir: Option<String>,
+    env: BTreeMap<String, String>,
     content_hash: SHA256,
     input_hash: SHA256,
     resolve_map: BTreeMap<String, SHA256>,
@@ -139,6 +145,7 @@ fn unwrap_state(stored: &serde_json::Value) -> PriorState {
         provider_state: Some(wrapped.state),
         outputs: wrapped.outputs,
         dir,
+        env: wrapped.env,
         content_hash: wrapped.content_hash,
         input_hash,
         resolve_map,
@@ -165,6 +172,7 @@ fn default_prior() -> PriorState {
         provider_state: None,
         outputs: Map::new(),
         dir: None,
+        env: BTreeMap::new(),
         content_hash: SHA256::ZERO,
         input_hash: SHA256::ZERO,
         resolve_map: BTreeMap::new(),
@@ -622,9 +630,14 @@ fn resolve_sources(
     let start = std::time::Instant::now();
     let mut ambient = Vec::new();
     let mut recorded = Vec::new();
+    let env = crate::provider::block_env(inputs);
     for item in node.resource.ambient(inputs)? {
         match item {
             Ambient::RecordedVariable(name) => recorded.push(name),
+            Ambient::Version(mut command) => {
+                command.block_env.clone_from(&env);
+                ambient.push(Ambient::Version(command));
+            }
             other => ambient.push(other),
         }
     }
@@ -697,6 +710,18 @@ fn files_under(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
 /// The block's `dir` field.
 fn block_dir(inputs: &Map) -> Option<&str> {
     inputs.get(DIR_FIELD).and_then(Value::as_str)
+}
+
+/// The block's `env` as [`WrappedState`] records it: without secrets, whose
+/// values must not reach the state file.
+fn recorded_env(inputs: &Map) -> BTreeMap<String, String> {
+    let Some(env) = inputs.get(ENV_FIELD).and_then(Value::as_map) else {
+        return BTreeMap::new();
+    };
+    env.iter()
+        .filter(|(_, value)| !value.contains_secret())
+        .filter_map(|(name, value)| Some((name.clone(), value.as_str()?.to_owned())))
+        .collect()
 }
 
 /// The entries of `uncached`, relative to `dir` like the outputs they name.
@@ -1628,6 +1653,7 @@ fn execute_block(
             state: new_state.clone(),
             outputs: apply_result.outputs.clone(),
             dir: block_dir(&prepared.inputs).map(str::to_owned),
+            env: recorded_env(&prepared.inputs),
             content_hash: post_hash,
             input_hash,
             resolve_map,
@@ -1743,7 +1769,8 @@ pub fn destroy(
             continue;
         };
 
-        if let Err(e) = node.resource.destroy(prior.dir.as_deref(), &provider_state, &writer) {
+        let prior_state = Block::new(prior.dir, provider_state).with_env(prior.env);
+        if let Err(e) = node.resource.destroy(&prior_state, &writer) {
             let err = EngineError::Provider {
                 pos: node.pos.clone(),
                 block: name.clone(),
@@ -3184,6 +3211,56 @@ lint[module] = go.lint {
     }
 
     #[test]
+    fn changing_env_reruns_the_block_and_clean_uses_the_env_it_ran_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = test_tracker();
+        let store = MemoryStore::new();
+        let output = Output::new(&[]);
+        let block = |value: &str| {
+            let input = format!(
+                "build = exec {{\n  command = \"echo $FOO > out\"\n  clean = \"echo $FOO > cleaned\"\n  \
+                 dir = \"{}\"\n  env = {{ FOO = \"{value}\" }}\n  outputs = \"out\"\n}}\n",
+                dir.path().display()
+            );
+            parser::parse(&input, "<test>").unwrap()
+        };
+        let run = |value: &str| {
+            let (mut dag, base) =
+                loader::load(&block(value), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+            apply(&mut dag, &base, &store, &test_cache(), &output, &[], 1, &tracker).unwrap()
+        };
+
+        assert_eq!(run("a")[0].plan.action, PlanAction::Create);
+        assert_eq!(run("a")[0].plan.action, PlanAction::None);
+        assert_eq!(run("b")[0].plan.action, PlanAction::Update);
+        assert_eq!(std::fs::read_to_string(dir.path().join("out")).unwrap(), "b\n");
+
+        let (mut dag, _) = loader::load(&block("b"), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        destroy(&mut dag, &store, &output, &[], false).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("cleaned")).unwrap(), "b\n");
+    }
+
+    #[test]
+    fn recorded_env_omits_secrets() {
+        let mut env = Map::new();
+        env.insert("PLAIN".into(), Value::Str("a".into()));
+        env.insert(
+            "TOKEN".into(),
+            Value::Secret {
+                key: "TOKEN".into(),
+                value: "s3cr3t".into(),
+            },
+        );
+        let mut inputs = Map::new();
+        inputs.insert(ENV_FIELD.into(), Value::Map(Type::String, env));
+        assert_eq!(
+            recorded_env(&inputs),
+            BTreeMap::from([("PLAIN".to_owned(), "a".to_owned())])
+        );
+        assert_eq!(crate::provider::block_env(&inputs).len(), 2);
+    }
+
+    #[test]
     fn destroy_uses_dir_recorded_by_the_resource_before_the_engine_managed_it() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("cleaned");
@@ -3201,13 +3278,8 @@ lint[module] = go.lint {
         let registry = test_registry(&test_tracker());
         let resource = registry.get_resource("exec", "exec").unwrap();
         let output = Output::new(&[]);
-        resource
-            .destroy(
-                prior.dir.as_deref(),
-                &prior.provider_state.unwrap(),
-                &output.writer("build"),
-            )
-            .unwrap();
+        let prior_state = Block::new(prior.dir, prior.provider_state.unwrap());
+        resource.destroy(&prior_state, &output.writer("build")).unwrap();
         assert!(marker.exists());
     }
 

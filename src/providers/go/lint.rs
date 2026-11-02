@@ -94,14 +94,13 @@ fn affected_packages(
     inputs: &Block<GoLintInputs>,
     changes: &Changes,
 ) -> Result<Option<Affected>, BoxError> {
-    let env = super::GoEnv::default();
     let Some(affected) = super::affected_packages(
         tracker,
         &inputs.package,
         Tests::Sources,
         inputs.dir.as_deref(),
         &[],
-        &env,
+        &inputs.env,
         changes,
     )?
     else {
@@ -164,7 +163,15 @@ impl Resource for GoLintResource {
         let dir = inputs.dir.as_deref();
         // golangci-lint lints tests by default; tracking them when disabled only costs a rerun.
         // Its flags are not the go command's, so the go command's flags are not looked for.
-        let mut files = super::resolve_go_inputs(&inputs.package, dir, &[], Tests::Sources, &inputs.inputs, tracker)?;
+        let mut files = super::resolve_go_inputs(
+            &inputs.package,
+            dir,
+            &inputs.env,
+            &[],
+            Tests::Sources,
+            &inputs.inputs,
+            tracker,
+        )?;
         let lint_dir = std::env::current_dir()?.join(dir.unwrap_or(""));
         // A config named by `--config` replaces the search, which starts from
         // the first package only.
@@ -243,7 +250,10 @@ impl Resource for GoLintResource {
         }
 
         let mut cmd = Command::new("golangci-lint");
-        cmd.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.args(&args)
+            .envs(&inputs.env)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if let Some(dir) = &inputs.dir {
             cmd.current_dir(dir);
         }

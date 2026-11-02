@@ -35,7 +35,7 @@ pub struct GoExeInputs {
     #[serde(default)]
     pub inputs: Vec<String>,
     #[serde(flatten)]
-    pub env: GoEnv,
+    pub go_env: GoEnv,
 }
 
 /// Outputs from a `go.exe` block.
@@ -52,7 +52,7 @@ pub struct GoExeState {
     pub output: String,
     pub flags: Vec<String>,
     #[serde(flatten)]
-    pub env: GoEnv,
+    pub go_env: GoEnv,
 }
 
 pub struct GoExeResource {
@@ -128,7 +128,7 @@ impl GoExeResource {
             package: inputs.package.clone(),
             output,
             flags: inputs.flags.clone(),
-            env: inputs.env.clone(),
+            go_env: inputs.go_env.clone(),
         }
     }
 }
@@ -163,13 +163,17 @@ impl Resource for GoExeResource {
     }
 
     fn ambient(&self, inputs: &Block<GoExeInputs>) -> Vec<Ambient> {
-        vec![super::toolchain(&inputs.env, GoExeResource::go_dir(inputs).as_deref())]
+        vec![super::toolchain(
+            &inputs.go_env,
+            GoExeResource::go_dir(inputs).as_deref(),
+        )]
     }
 
     fn resolve(&self, inputs: &Block<GoExeInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         super::resolve_go_inputs(
             std::slice::from_ref(&inputs.package),
             inputs.dir.as_deref(),
+            &inputs.env,
             &inputs.flags,
             Tests::Excluded,
             &inputs.inputs,
@@ -201,7 +205,7 @@ impl Resource for GoExeResource {
         let action = if prior.package != inputs.package
             || prior.output != output
             || prior.flags != inputs.flags
-            || prior.env != inputs.env
+            || prior.go_env != inputs.go_env
         {
             PlanAction::Update
         } else {
@@ -239,7 +243,8 @@ impl Resource for GoExeResource {
         if let Some(dir) = GoExeResource::go_dir(inputs) {
             cmd.current_dir(dir);
         }
-        inputs.env.apply_to(&mut cmd);
+        cmd.envs(&inputs.env);
+        inputs.go_env.apply_to(&mut cmd);
 
         let mut child = cmd
             .logged_spawn()
@@ -333,7 +338,7 @@ mod tests {
                 output: None,
                 flags: vec![],
                 inputs: vec![root.join("*.c").to_string_lossy().into_owned()],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let resolved = Resource::resolve(&test_resource(), &inputs).unwrap();
@@ -351,7 +356,7 @@ mod tests {
                 output: Some("bin/app".into()),
                 flags: vec![],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         assert_eq!(
@@ -369,7 +374,7 @@ mod tests {
                 output: Some("bin/app".into()),
                 flags: vec!["-trimpath".into()],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let resource = test_resource();
@@ -386,7 +391,7 @@ mod tests {
                 output: None,
                 flags: flags.iter().map(|flag| (*flag).to_owned()).collect(),
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             };
             GoExeResource::build_args(&inputs, "app").join(" ")
         };
@@ -404,7 +409,7 @@ mod tests {
                 output: None,
                 flags: vec!["-o=bin/app".into()],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let error = Resource::plan(&test_resource(), &inputs, None).unwrap_err();
@@ -420,14 +425,14 @@ mod tests {
                 output: Some("bin/app".into()),
                 flags: vec![],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let prior = GoExeState {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
-            env: GoEnv::default(),
+            go_env: GoEnv::default(),
         };
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -443,14 +448,14 @@ mod tests {
                 output: Some("bin/app".into()),
                 flags: vec![],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let prior = GoExeState {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
-            env: GoEnv::default(),
+            go_env: GoEnv::default(),
         };
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -466,14 +471,14 @@ mod tests {
                 output: Some("bin/app".into()),
                 flags: vec!["-ldflags=-s".into()],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         let prior = GoExeState {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
-            env: GoEnv::default(),
+            go_env: GoEnv::default(),
         };
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -489,7 +494,7 @@ mod tests {
                 output: Some("bin/app".into()),
                 flags: vec![],
                 inputs: vec![],
-                env: GoEnv {
+                go_env: GoEnv {
                     goos: Some("linux".into()),
                     goarch: Some("arm64".into()),
                     cgo: Some(false),
@@ -500,7 +505,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: "bin/app".into(),
             flags: vec![],
-            env: GoEnv::default(),
+            go_env: GoEnv::default(),
         };
         let resource = test_resource();
         let result = Resource::plan(&resource, &inputs, Some(&prior)).unwrap();
@@ -516,7 +521,7 @@ mod tests {
                 output: None,
                 flags: vec![],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         assert_eq!(GoExeResource::output_path(&inputs), "foo");
@@ -535,7 +540,7 @@ mod tests {
                     output: None,
                     flags: vec![],
                     inputs: vec![],
-                    env: GoEnv::default(),
+                    go_env: GoEnv::default(),
                 },
             )
         };
@@ -570,7 +575,7 @@ mod tests {
                 output: Some("bin/foo".into()),
                 flags: vec![],
                 inputs: vec![],
-                env: GoEnv::default(),
+                go_env: GoEnv::default(),
             },
         );
         assert_eq!(GoExeResource::output_path(&inputs), "bin/foo");
@@ -586,7 +591,7 @@ mod tests {
                     output: Some(output.into()),
                     flags: vec![],
                     inputs: vec![],
-                    env: GoEnv::default(),
+                    go_env: GoEnv::default(),
                 },
             )
         };
@@ -604,7 +609,7 @@ mod tests {
             package: "./cmd/app".into(),
             output: output.to_string_lossy().into_owned(),
             flags: vec![],
-            env: GoEnv::default(),
+            go_env: GoEnv::default(),
         };
 
         let resource = test_resource();

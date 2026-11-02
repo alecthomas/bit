@@ -1,5 +1,4 @@
 use crate::process::CommandExt;
-use std::process::Command;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -38,8 +37,8 @@ pub struct NetworkState {
 }
 
 /// Query `docker network inspect <name>` and return the network ID if it exists.
-fn network_id(name: &str) -> Option<String> {
-    let out = Command::new("docker")
+fn network_id(env: &super::Env, name: &str) -> Option<String> {
+    let out = super::docker(env)
         .args(["network", "inspect", "--format", "{{.Id}}", name])
         .logged_output()
         .ok()?;
@@ -118,7 +117,7 @@ impl Resource for NetworkResource {
             });
         };
 
-        if let Some(reason) = drift(prior, network_id(&prior.name).as_deref()) {
+        if let Some(reason) = drift(prior, network_id(&inputs.env, &prior.name).as_deref()) {
             return Ok(PlanResult {
                 action: PlanAction::Create,
                 description: desc,
@@ -150,7 +149,7 @@ impl Resource for NetworkResource {
     ) -> Result<ApplyResult<NetworkState, NetworkOutputs>, BoxError> {
         // Adopt an existing network with the same name. If the driver
         // differs from what was requested, recreate.
-        if let Some(id) = network_id(&inputs.name) {
+        if let Some(id) = network_id(&inputs.env, &inputs.name) {
             let driver_matches = match prior_state {
                 Some(prior) => prior.driver == inputs.driver,
                 None => true,
@@ -169,10 +168,10 @@ impl Resource for NetworkResource {
                 });
             }
             writer.event(Event::Starting, &format!("docker network rm {}", inputs.name));
-            remove_network(&inputs.name)?;
+            remove_network(&inputs.env, &inputs.name)?;
         }
 
-        let mut cmd = Command::new("docker");
+        let mut cmd = super::docker(&inputs.env);
         cmd.args(create_args(inputs));
 
         let output = cmd
@@ -200,7 +199,7 @@ impl Resource for NetworkResource {
 
     fn destroy(&self, prior_state: &Block<NetworkState>, writer: &BlockWriter) -> Result<(), BoxError> {
         writer.event(Event::Starting, &format!("docker network rm {}", prior_state.name));
-        remove_network(&prior_state.name)
+        remove_network(&prior_state.env, &prior_state.name)
     }
 
     /// A network is named, mutable state in the local Docker daemon; see
@@ -210,8 +209,8 @@ impl Resource for NetworkResource {
     }
 }
 
-fn remove_network(name: &str) -> Result<(), BoxError> {
-    let out = Command::new("docker")
+fn remove_network(env: &super::Env, name: &str) -> Result<(), BoxError> {
+    let out = super::docker(env)
         .args(["network", "rm", name])
         .logged_output()
         .map_err(|e| format!("docker network rm failed: {e}"))?;

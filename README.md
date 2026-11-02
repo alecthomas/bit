@@ -260,17 +260,17 @@ steps:
 
 A template sees:
 
-| Variable | Description |
-|---|---|
-| `jobs` | The jobs, in order |
-| `job.id` | An identifier made of letters, digits, `_` and `-`, unique among the jobs |
-| `job.name` | The job's large blocks, or `default` |
-| `job.large` | Whether the job runs large blocks |
-| `job.command` | The shell command the job runs, such as `bit test clippy` |
-| `job.selection` | The arguments of `bit` in that command, as a list |
-| `command` | The `bit --ci` command that rendered the template |
+| Variable            | Description                                                                |
+| ------------------- | -------------------------------------------------------------------------- |
+| `jobs`              | The jobs, in order                                                         |
+| `job.id`            | An identifier made of letters, digits, `_` and `-`, unique among the jobs  |
+| `job.name`          | The job's large blocks, or `default`                                       |
+| `job.large`         | Whether the job runs large blocks                                          |
+| `job.command`       | The shell command the job runs, such as `bit test clippy`                  |
+| `job.selection`     | The arguments of `bit` in that command, as a list                          |
+| `command`           | The `bit --ci` command that rendered the template                          |
 | `working_directory` | The project directory relative to the repository root, or none at the root |
-| `default_branch` | The remote's default branch, or none if unknown |
+| `default_branch`    | The remote's default branch, or none if unknown                            |
 
 Block tags on their own line leave no blank line, and using an undefined
 variable is an error. `tojson` quotes a value for YAML or JSON.
@@ -335,6 +335,7 @@ Special fields:
 - `concurrency = N` — maximum number of this block's matrix slices that may run at once (`go.lint` defaults to 1)
 - `uncached = [output, ...]` — outputs to keep out of the [shared build cache](#shared-build-cache)
 - `dir = path` — directory the block's commands run in, relative to the project root (defaults to the project root). Relative paths in the block's other fields are relative to `dir`, and a Dockerfile is relative to its build `context`. `bit --clean` runs in the `dir` the block last ran in
+- `env = { NAME = "value", ... }` — environment variables set for every command the block runs. Changing one reruns the block. For `docker` resources they apply to the docker CLI, not the container
 
 Every other field must be an input of the block's resource, as listed under [Providers](#providers) or by `bit --schema`. bit checks fields when it loads `BUILD.bit` and rejects unknown fields, missing required fields, and values of the wrong type. A value taken from another block's outputs is checked against that output's declared type, and checked again just before the block runs.
 
@@ -813,7 +814,7 @@ block = docker.container {
   name = string                         # Container name
   ports = [string]?                     # Port mappings (e.g. "8080:80")
   volumes = [string]?                   # Volume mounts; relative host paths are relative to `dir`
-  environment = {string = string}?      # Environment variables
+  environment = {string = string}?      # Environment variables set inside the container. The block's `env` configures the docker CLI instead.
   command = string?                     # Override CMD
   entrypoint = string?                  # Override ENTRYPOINT
   restart = string?                     # Restart policy
@@ -1257,15 +1258,15 @@ in one of three ways:
 - An environment variable that no version command reports, such as
   `RUSTFLAGS`.
 
-| Provider | Fingerprints                                                                                                                                                                                                                                                         |
-| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `exec`   | `bash --version`; name any program a command depends on in `inputs`                                                                                                                                                                                                  |
-| `docker` | `docker --version` for `docker.image` and `docker.push`. Containers and networks track none, so a CLI upgrade never recreates them                                                                                                                                   |
-| `go`     | `go env GOVERSION GOOS GOARCH …` with the block's target; `golangci-lint version` for `go.lint`; the `gofmt` executable for `go.fmt` |
+| Provider | Fingerprints                                                                                                                                                                                                                                                                                                  |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `exec`   | `bash --version`; name any program a command depends on in `inputs`                                                                                                                                                                                                                                           |
+| `docker` | `docker --version` for `docker.image` and `docker.push`. Containers and networks track none, so a CLI upgrade never recreates them                                                                                                                                                                            |
+| `go`     | `go env GOVERSION GOOS GOARCH …` with the block's target; `golangci-lint version` for `go.lint`; the `gofmt` executable for `go.fmt`                                                                                                                                                                          |
 | `rust`   | `rustc -vV`; `CARGO_HOME`; for building, testing, and linting, `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTC` and wrapper variables, every `CARGO_PROFILE_*` and `CARGO_TARGET_*` variable, and variables crates and build scripts read; `cargo clippy --version` for `rust.clippy`; `rustfmt --version` for formatting |
-| `pnpm`   | `pnpm --version` and `node --version` in the workspace; for `pnpm.install`, `NODE_ENV` and every `npm_config_*` and `pnpm_config_*` variable                                                                                                                         |
-| `buf`    | `buf --version`; the content of local plugins in `buf.gen.yaml` and check plugins in `buf.yaml`                                                                                                                                                                      |
-| `protoc` | `protoc --version`; the content of each `protoc-gen-*` plugin and `--plugin` path                                                                                                                                                                                    |
+| `pnpm`   | `pnpm --version` and `node --version` in the workspace; for `pnpm.install`, `NODE_ENV` and every `npm_config_*` and `pnpm_config_*` variable                                                                                                                                                                  |
+| `buf`    | `buf --version`; the content of local plugins in `buf.gen.yaml` and check plugins in `buf.yaml`                                                                                                                                                                                                               |
+| `protoc` | `protoc --version`; the content of each `protoc-gen-*` plugin and `--plugin` path                                                                                                                                                                                                                             |
 
 A tool that cannot be found or run is recorded as missing, so installing it
 later reruns the blocks that use it.

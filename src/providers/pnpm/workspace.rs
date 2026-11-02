@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -77,47 +77,57 @@ impl Workspace {
     }
 }
 
-/// Loaded workspaces by canonical root, shared by every pnpm block.
+/// The block's `env`, which pnpm sees alongside bit's own environment.
+type Env = BTreeMap<String, String>;
+
+/// Loaded workspaces by canonical root and the block `env` pnpm ran with,
+/// shared by every pnpm block. The `env` is part of the key because pnpm
+/// reads settings from it that change what it lists.
 ///
 /// The file tracker owns it as a [`FileTracker::derived`] cache, which it
 /// drops whenever a block may have written files: `pnpm.install` rewrites
 /// the lockfile the dependency graph comes from, and a loaded workspace
 /// cannot tell it is stale.
 #[derive(Default)]
-pub struct Workspaces(DashMap<PathBuf, Arc<Workspace>>);
+pub struct Workspaces(DashMap<(PathBuf, Env), Arc<Workspace>>);
 
-/// The workspace pnpm uses when run in `dir`, loaded once into `tracker`'s
-/// cache. The map is locked only to copy an entry in or out, so two blocks
-/// that miss on the same workspace may both load it.
-pub fn workspace(tracker: &FileTracker, dir: &Path) -> Result<Arc<Workspace>, BoxError> {
-    let root = root_of(dir)?;
+/// The workspace pnpm uses when run in `dir` with `env`, loaded once into
+/// `tracker`'s cache. The map is locked only to copy an entry in or out, so
+/// two blocks that miss on the same workspace may both load it.
+pub fn workspace(tracker: &FileTracker, dir: &Path, env: &Env) -> Result<Arc<Workspace>, BoxError> {
+    let key = (root_of(dir, env)?, env.clone());
     let workspaces = tracker.derived::<Workspaces>();
-    if let Some(workspace) = workspaces.0.get(&root) {
+    if let Some(workspace) = workspaces.0.get(&key) {
         return Ok(Arc::clone(&workspace));
     }
-    let workspace = Arc::new(load_workspace(&root)?);
-    Ok(workspaces.0.entry(root).or_insert(workspace).value().clone())
+    let workspace = Arc::new(load_workspace(&key.0, env)?);
+    Ok(workspaces.0.entry(key).or_insert(workspace).value().clone())
 }
 
-/// pnpm's settings by canonical directory, a [`FileTracker::derived`] cache
-/// like [`Workspaces`], since the `.npmrc` files they come from may change.
+/// pnpm's settings by canonical directory and block `env`, a
+/// [`FileTracker::derived`] cache like [`Workspaces`], since the `.npmrc`
+/// files they come from may change.
 #[derive(Default)]
-struct Configs(DashMap<PathBuf, Arc<serde_json::Value>>);
+struct Configs(DashMap<(PathBuf, Env), Arc<serde_json::Value>>);
 
-/// The settings pnpm uses when run in `dir`, as `pnpm config list` reports
-/// them from every `.npmrc`, `pnpm-workspace.yaml` and environment
-/// variable it reads, with the paths of the config files themselves.
-pub fn config(tracker: &FileTracker, dir: &Path) -> Result<Arc<serde_json::Value>, BoxError> {
+/// The settings pnpm uses when run in `dir` with `env`, as `pnpm config
+/// list` reports them from every `.npmrc`, `pnpm-workspace.yaml` and
+/// environment variable it reads, with the paths of the config files
+/// themselves.
+pub fn config(tracker: &FileTracker, dir: &Path, env: &Env) -> Result<Arc<serde_json::Value>, BoxError> {
     let dir = dir
         .canonicalize()
         .map_err(|e| format!("pnpm: canonicalizing {}: {e}", dir.display()))?;
+    let key = (dir, env.clone());
     let configs = tracker.derived::<Configs>();
-    if let Some(config) = configs.0.get(&dir) {
+    if let Some(config) = configs.0.get(&key) {
         return Ok(Arc::clone(&config));
     }
+    let dir = &key.0;
     let output = std::process::Command::new("pnpm")
         .args(["config", "list", "--json"])
-        .current_dir(&dir)
+        .current_dir(dir)
+        .envs(env)
         .logged_output()
         .map_err(|e| format!("pnpm: failed to execute `pnpm config list`: {e}"))?;
     if !output.status.success() {
@@ -130,20 +140,24 @@ pub fn config(tracker: &FileTracker, dir: &Path) -> Result<Arc<serde_json::Value
     }
     let config =
         serde_json::from_slice(&output.stdout).map_err(|e| format!("pnpm: parsing `pnpm config list` output: {e}"))?;
-    Ok(configs.0.entry(dir).or_insert(Arc::new(config)).value().clone())
+    Ok(configs.0.entry(key).or_insert(Arc::new(config)).value().clone())
 }
 
-/// The workspace pnpm uses when run in `dir`, loaded without a cache.
-pub fn load(dir: &Path) -> Result<Workspace, BoxError> {
-    load_workspace(&root_of(dir)?)
+/// The workspace pnpm uses when run in `dir` with `env`, loaded without a
+/// cache.
+pub fn load(dir: &Path, env: &Env) -> Result<Workspace, BoxError> {
+    load_workspace(&root_of(dir, env)?, env)
 }
 
-/// The canonical root of the workspace pnpm uses when run in `dir`.
-fn root_of(dir: &Path) -> Result<PathBuf, BoxError> {
+/// The canonical root of the workspace pnpm uses when run in `dir` with
+/// `env`, which overrides bit's own environment.
+fn root_of(dir: &Path, env: &Env) -> Result<PathBuf, BoxError> {
     let dir = dir
         .canonicalize()
         .map_err(|e| format!("pnpm: canonicalizing {}: {e}", dir.display()))?;
-    Ok(workspace_root(&dir, |name| std::env::var_os(name)))
+    Ok(workspace_root(&dir, |name| {
+        env.get(name).map(Into::into).or_else(|| std::env::var_os(name))
+    }))
 }
 
 /// The root of the workspace pnpm uses when run in `dir`, as pnpm's
@@ -161,7 +175,7 @@ fn workspace_root(dir: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) 
         .to_path_buf()
 }
 
-fn load_workspace(root: &Path) -> Result<Workspace, BoxError> {
+fn load_workspace(root: &Path, env: &Env) -> Result<Workspace, BoxError> {
     let root_package_json = root.join("package.json");
     if !root_package_json.exists() {
         return Err(format!("pnpm: no package.json at {}", root.display()).into());
@@ -178,7 +192,7 @@ fn load_workspace(root: &Path) -> Result<Workspace, BoxError> {
         lockfile,
         workspace_yaml,
         root_package_json,
-        projects: list_projects(root)?,
+        projects: list_projects(root, env)?,
     })
 }
 
@@ -214,13 +228,14 @@ struct ListedDependency {
 /// The workspace's projects, as pnpm finds them from its `packages`
 /// patterns, which follow fast-glob's rules rather than the glob crate's,
 /// with the local dependencies its lockfile resolves.
-fn list_projects(root: &Path) -> Result<Vec<Project>, BoxError> {
+fn list_projects(root: &Path, env: &Env) -> Result<Vec<Project>, BoxError> {
     // `--lockfile-only` reads the graph without an install, and only pnpm
     // 10 and later accept it. Without it only the projects are listed.
     let graph = ["ls", "--recursive", "--depth", "Infinity", "--json", "--lockfile-only"];
+    let projects = ["ls", "--recursive", "--depth", "-1", "--json"];
     let listed = match root.join("pnpm-lock.yaml").is_file() {
-        true => pnpm_ls(root, &graph).or_else(|_| pnpm_ls(root, &["ls", "--recursive", "--depth", "-1", "--json"])),
-        false => pnpm_ls(root, &["ls", "--recursive", "--depth", "-1", "--json"]),
+        true => pnpm_ls(root, env, &graph).or_else(|_| pnpm_ls(root, env, &projects)),
+        false => pnpm_ls(root, env, &projects),
     }?;
     let mut projects: Vec<Project> = listed
         .into_iter()
@@ -248,10 +263,11 @@ fn list_projects(root: &Path) -> Result<Vec<Project>, BoxError> {
 }
 
 /// The projects `pnpm <args>` lists in `root`.
-fn pnpm_ls(root: &Path, args: &[&str]) -> Result<Vec<ListedProject>, BoxError> {
+fn pnpm_ls(root: &Path, env: &Env, args: &[&str]) -> Result<Vec<ListedProject>, BoxError> {
     let output = std::process::Command::new("pnpm")
         .args(args)
         .current_dir(root)
+        .envs(env)
         .logged_output()
         .map_err(|e| format!("pnpm: failed to execute `pnpm ls`: {e}"))?;
     if !output.status.success() {
@@ -419,7 +435,7 @@ mod tests {
         let root = dir.path();
         setup_workspace(root);
 
-        let ws = load(root).unwrap();
+        let ws = load(root, &Env::new()).unwrap();
         assert!(ws.is_workspace());
         assert!(ws.lockfile.is_some());
         // pnpm-workspace.yaml lists bff + frontend, and pnpm always counts
@@ -435,11 +451,15 @@ mod tests {
         setup_workspace(root);
         let tracker = FileTracker::new();
 
-        assert_eq!(workspace(&tracker, root).unwrap().projects.len(), 3);
+        assert_eq!(workspace(&tracker, root, &Env::new()).unwrap().projects.len(), 3);
         fs::write(root.join("pnpm-workspace.yaml"), "packages:\n  - bff\n").unwrap();
-        assert_eq!(workspace(&tracker, root).unwrap().projects.len(), 3, "cached");
+        assert_eq!(
+            workspace(&tracker, root, &Env::new()).unwrap().projects.len(),
+            3,
+            "cached"
+        );
         tracker.invalidate();
-        assert_eq!(workspace(&tracker, root).unwrap().projects.len(), 2);
+        assert_eq!(workspace(&tracker, root, &Env::new()).unwrap().projects.len(), 2);
     }
 
     #[test]
@@ -475,7 +495,7 @@ mod tests {
             .unwrap();
         assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
 
-        let ws = load(&root).unwrap();
+        let ws = load(&root, &Env::new()).unwrap();
         let app = root.join("packages/app");
         let expected: Vec<PathBuf> = ["deep", "ext", "linked", "packages/app", "packages/lib"]
             .iter()
@@ -499,7 +519,7 @@ mod tests {
             fs::write(root.join(dir).join("package.json"), manifest).unwrap();
         }
 
-        let ws = load(&root).unwrap();
+        let ws = load(&root, &Env::new()).unwrap();
         assert!(
             ws.projects
                 .iter()
@@ -535,7 +555,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         setup_workspace(&root);
 
-        let ws = load(&root.join("bff")).unwrap();
+        let ws = load(&root.join("bff"), &Env::new()).unwrap();
         assert_eq!(ws.root, root);
         assert_eq!(ws.lockfile.as_deref(), Some(root.join("pnpm-lock.yaml").as_path()));
     }
@@ -546,7 +566,7 @@ mod tests {
         let root = dir.path();
         fs::write(root.join("package.json"), r#"{ "name": "solo" }"#).unwrap();
 
-        let ws = load(root).unwrap();
+        let ws = load(root, &Env::new()).unwrap();
         assert!(!ws.is_workspace());
         assert!(ws.lockfile.is_none());
         assert_eq!(ws.package_dirs("solo"), [root.canonicalize().unwrap()]);
@@ -568,13 +588,16 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(packages_with_script(&load(root).unwrap(), "test").unwrap(), vec!["bff"]);
+        assert_eq!(
+            packages_with_script(&load(root, &Env::new()).unwrap(), "test").unwrap(),
+            vec!["bff"]
+        );
     }
 
     #[test]
     fn missing_package_json_errors() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(load(dir.path()).is_err());
+        assert!(load(dir.path(), &Env::new()).is_err());
     }
 
     #[test]
@@ -680,7 +703,7 @@ mod tests {
         fs::create_dir_all(root.join("packages/ignored")).unwrap();
         fs::write(root.join("packages/ignored/package.json"), r#"{ "name": "ignored" }"#).unwrap();
 
-        let ws = load(root).unwrap();
+        let ws = load(root, &Env::new()).unwrap();
         assert_eq!(ws.package_dirs("a").len(), 1);
         assert_eq!(ws.package_dirs("b").len(), 1);
         assert!(ws.package_dirs("ignored").is_empty());

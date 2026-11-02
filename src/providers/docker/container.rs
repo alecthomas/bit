@@ -1,7 +1,7 @@
 use crate::process::CommandExt;
 use std::collections::HashMap;
 use std::io::BufReader;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -111,7 +111,8 @@ pub struct ContainerInputs {
     /// Volume mounts; relative host paths are relative to `dir`
     #[serde(default)]
     pub volumes: Vec<String>,
-    /// Environment variables
+    /// Environment variables set inside the container. The block's `env`
+    /// configures the docker CLI instead.
     #[serde(default)]
     pub environment: HashMap<String, String>,
     /// Override CMD
@@ -180,8 +181,8 @@ struct Inspected {
 }
 
 /// The container named `name`, if it exists.
-fn inspect_container(name: &str) -> Option<Inspected> {
-    let output = Command::new("docker")
+fn inspect_container(env: &super::Env, name: &str) -> Option<Inspected> {
+    let output = super::docker(env)
         .args([
             "container",
             "inspect",
@@ -202,8 +203,8 @@ fn inspect_container(name: &str) -> Option<Inspected> {
 }
 
 /// The ID of the image `reference` names now, if the daemon has it.
-fn image_id(reference: &str) -> Option<String> {
-    let output = Command::new("docker")
+fn image_id(env: &super::Env, reference: &str) -> Option<String> {
+    let output = super::docker(env)
         .args(["image", "inspect", "--format", "{{.Id}}", reference])
         .logged_output()
         .ok()
@@ -230,8 +231,8 @@ fn drift(prior: &ContainerState, container: Option<&Inspected>, image: Option<&s
 }
 
 /// Remove a container by name (forced).
-fn remove_container(name: &str) -> Result<(), BoxError> {
-    let output = Command::new("docker")
+fn remove_container(env: &super::Env, name: &str) -> Result<(), BoxError> {
+    let output = super::docker(env)
         .args(["rm", "-f", name])
         .logged_output()
         .map_err(|e| format!("docker rm failed: {e}"))?;
@@ -240,7 +241,7 @@ fn remove_container(name: &str) -> Result<(), BoxError> {
 
 /// Poll `docker inspect` until the container's health status is "healthy"
 /// or the deadline is exceeded.
-fn wait_healthy(name: &str, hc: &Healthcheck, writer: &BlockWriter) -> Result<(), BoxError> {
+fn wait_healthy(env: &super::Env, name: &str, hc: &Healthcheck, writer: &BlockWriter) -> Result<(), BoxError> {
     let deadline = hc.deadline();
     let interval = hc.poll_interval();
     let start = Instant::now();
@@ -250,7 +251,7 @@ fn wait_healthy(name: &str, hc: &Healthcheck, writer: &BlockWriter) -> Result<()
     loop {
         std::thread::sleep(interval.as_std());
 
-        let output = Command::new("docker")
+        let output = super::docker(env)
             .args(["inspect", "--format", "{{.State.Health.Status}}", name])
             .logged_output()
             .map_err(|e| format!("docker inspect failed: {e}"))?;
@@ -384,8 +385,8 @@ impl Resource for ContainerResource {
         // Re-create if the container drifted away out of band. When the
         // block's inputs change, the engine sees a hash delta and upgrades
         // None → Update.
-        let container = inspect_container(&prior.name);
-        let image = container.as_ref().and_then(|_| image_id(&inputs.image));
+        let container = inspect_container(&inputs.env, &prior.name);
+        let image = container.as_ref().and_then(|_| image_id(&inputs.env, &inputs.image));
         if let Some(reason) = drift(prior, container.as_ref(), image.as_deref()) {
             return Ok(PlanResult {
                 action: PlanAction::Create,
@@ -411,9 +412,9 @@ impl Resource for ContainerResource {
         // Remove any existing container with this name (running, stopped, or
         // leftover from a previous run whose state was lost). Ignore errors
         // since the container may not exist.
-        let _ = remove_container(&inputs.name);
+        let _ = remove_container(&inputs.env, &inputs.name);
 
-        let mut cmd = Command::new("docker");
+        let mut cmd = super::docker(&inputs.env);
         cmd.args(run_args(inputs, EnvValues::Shown));
         // Relative host paths in `volumes` resolve against docker's working
         // directory, which is `dir`.
@@ -445,14 +446,14 @@ impl Resource for ContainerResource {
 
         // Wait for healthcheck to pass if configured; clean up on failure
         if let Some(hc) = &inputs.healthcheck
-            && let Err(e) = wait_healthy(&inputs.name, hc, writer)
+            && let Err(e) = wait_healthy(&inputs.env, &inputs.name, hc, writer)
         {
-            let _ = remove_container(&inputs.name);
+            let _ = remove_container(&inputs.env, &inputs.name);
             return Err(e);
         }
 
         // Get container ID
-        let id_output = Command::new("docker")
+        let id_output = super::docker(&inputs.env)
             .args(["inspect", "--format", "{{.Id}}", &inputs.name])
             .logged_output()
             .map_err(|e| format!("docker inspect failed: {e}"))?;
@@ -474,7 +475,7 @@ impl Resource for ContainerResource {
     fn destroy(&self, prior_state: &Block<ContainerState>, writer: &BlockWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         writer.event(Event::Starting, &format!("docker rm -f {}", prior_state.name));
-        remove_container(&prior_state.name)
+        remove_container(&prior_state.env, &prior_state.name)
     }
 
     /// A container is named, mutable state in the local Docker daemon.

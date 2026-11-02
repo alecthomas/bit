@@ -10,14 +10,15 @@ use std::sync::Arc;
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider};
+use crate::provider::{Ambient, Block, BoxError, DynResource, FuncSignature, Provider};
 use crate::value::Value;
 
 /// List workspace packages that define a script.
 #[bit_derive::provider_function]
 fn packages_with_script(script: String, dir: Option<String>) -> Result<Vec<String>, BoxError> {
     let dir = dir.as_deref().unwrap_or(".");
-    workspace::packages_with_script(&workspace::load(std::path::Path::new(dir))?, &script)
+    let workspace = workspace::load(std::path::Path::new(dir), &Default::default())?;
+    workspace::packages_with_script(&workspace, &script)
 }
 
 /// pnpm-aware provider with `install`, `run`, and `test` resources.
@@ -63,7 +64,7 @@ impl Provider for PnpmProvider {
 }
 
 /// The workspace root pnpm runs in: the block's `dir`, or the project root.
-fn workspace_dir<T>(block: &crate::provider::Block<T>) -> &str {
+fn workspace_dir<T>(block: &Block<T>) -> &str {
     block.dir.as_deref().unwrap_or(".")
 }
 
@@ -76,14 +77,16 @@ fn ambient(dir: &str) -> Vec<Ambient> {
     ]
 }
 
-/// Run `pnpm <args...>`, streaming stdout/stderr through the block writer.
-/// Returns `Err` on non-zero exit. Used by all three pnpm resources.
-pub(crate) fn run_pnpm(args: &[String], dir: Option<&str>, writer: &BlockWriter) -> Result<(), BoxError> {
+/// Run `pnpm <args...>` in the block's workspace with its `env`, streaming
+/// stdout/stderr through the block writer. Returns `Err` on non-zero exit.
+/// Used by all three pnpm resources.
+pub(crate) fn run_pnpm<T>(args: &[String], block: &Block<T>, writer: &BlockWriter) -> Result<(), BoxError> {
     let mut cmd = Command::new("pnpm");
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(d) = dir {
-        cmd.current_dir(d);
-    }
+    cmd.args(args)
+        .current_dir(workspace_dir(block))
+        .envs(&block.env)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = cmd
         .logged_spawn()

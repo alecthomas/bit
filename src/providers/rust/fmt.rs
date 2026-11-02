@@ -22,7 +22,7 @@ pub struct RustFmtInputs {
     #[serde(default)]
     pub flags: Vec<String>,
     #[serde(flatten)]
-    pub env: RustEnv,
+    pub rust_env: RustEnv,
 }
 
 /// Persisted state shared by `rust.fmt` and `rust.fmt-check`.
@@ -31,7 +31,7 @@ pub struct RustFmtState {
     pub package: Option<String>,
     pub flags: Vec<String>,
     #[serde(flatten)]
-    pub env: RustEnv,
+    pub rust_env: RustEnv,
 }
 
 /// Outputs from `rust.fmt` (build, no meaningful outputs).
@@ -47,13 +47,13 @@ pub struct RustFmtCheckOutputs {
 
 /// Build a cargo fmt CargoCommand. `cargo fmt` only respects toolchain, not --target/--profile.
 fn base_fmt_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
-    let program = if let Some(tc) = &inputs.env.toolchain {
+    let program = if let Some(tc) = &inputs.rust_env.toolchain {
         format!("cargo+{tc}")
     } else {
         "cargo".into()
     };
     let mut cargo = CargoCommand::new(program);
-    cargo.arg("fmt").in_dir(inputs.dir.as_deref());
+    cargo.arg("fmt").in_dir(inputs.dir.as_deref()).envs(&inputs.env);
     if let Some(pkg) = &inputs.package {
         cargo.arg2("-p", pkg);
     }
@@ -74,6 +74,7 @@ fn fmt_check_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
 fn resolve(inputs: &Block<RustFmtInputs>, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let selection = super::Selection {
         dir: inputs.dir.as_deref(),
+        env: &inputs.env,
         package: inputs.package.as_deref(),
         flags: &inputs.flags,
     };
@@ -104,7 +105,7 @@ fn plan_action(inputs: &Block<RustFmtInputs>, prior_state: Option<&RustFmtState>
     let Some(prior) = prior_state else {
         return PlanAction::Create;
     };
-    if prior.package != inputs.package || prior.flags != inputs.flags || prior.env != inputs.env {
+    if prior.package != inputs.package || prior.flags != inputs.flags || prior.rust_env != inputs.rust_env {
         PlanAction::Update
     } else {
         PlanAction::None
@@ -115,7 +116,7 @@ fn save_state(inputs: &Block<RustFmtInputs>) -> RustFmtState {
     RustFmtState {
         package: inputs.package.clone(),
         flags: inputs.flags.clone(),
-        env: inputs.env.clone(),
+        rust_env: inputs.rust_env.clone(),
     }
 }
 
@@ -139,7 +140,7 @@ impl Resource for RustFmtResource {
     }
 
     fn ambient(&self, inputs: &Block<RustFmtInputs>) -> Vec<Ambient> {
-        super::toolchain(&inputs.env, inputs.dir.as_deref(), &[&["rustfmt", "--version"]])
+        super::toolchain(&inputs.rust_env, inputs.dir.as_deref(), &[&["rustfmt", "--version"]])
     }
 
     fn resolve(&self, inputs: &Block<RustFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -198,7 +199,7 @@ impl Resource for RustFmtCheckResource {
     }
 
     fn ambient(&self, inputs: &Block<RustFmtInputs>) -> Vec<Ambient> {
-        super::toolchain(&inputs.env, inputs.dir.as_deref(), &[&["rustfmt", "--version"]])
+        super::toolchain(&inputs.rust_env, inputs.dir.as_deref(), &[&["rustfmt", "--version"]])
     }
 
     fn resolve(&self, inputs: &Block<RustFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -246,6 +247,7 @@ mod tests {
         // bit's own workspace, which the tests run in.
         let selection = crate::providers::rust::Selection {
             dir: None,
+            env: &BTreeMap::new(),
             package: Some("bit"),
             flags: &[],
         };
@@ -289,7 +291,7 @@ mod tests {
             RustFmtInputs {
                 package: None,
                 flags: vec![],
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let result = Resource::plan(&make_fmt_resource(), &inputs, None).unwrap();
@@ -304,7 +306,7 @@ mod tests {
             RustFmtInputs {
                 package: None,
                 flags: vec![],
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let result = Resource::plan(&make_fmt_check_resource(), &inputs, None).unwrap();
@@ -319,7 +321,7 @@ mod tests {
             RustFmtInputs {
                 package: Some("my-crate".into()),
                 flags: vec![],
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let result = Resource::plan(&make_fmt_resource(), &inputs, None).unwrap();
@@ -333,7 +335,7 @@ mod tests {
             RustFmtInputs {
                 package: None,
                 flags: vec![],
-                env: RustEnv {
+                rust_env: RustEnv {
                     toolchain: Some("nightly".into()),
                     ..Default::default()
                 },
@@ -350,13 +352,13 @@ mod tests {
             RustFmtInputs {
                 package: None,
                 flags: vec![],
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let prior = RustFmtState {
             package: None,
             flags: vec![],
-            env: RustEnv::default(),
+            rust_env: RustEnv::default(),
         };
         let result = Resource::plan(&make_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
@@ -369,13 +371,13 @@ mod tests {
             RustFmtInputs {
                 package: None,
                 flags: vec!["--config-path".into(), "custom.toml".into()],
-                env: RustEnv::default(),
+                rust_env: RustEnv::default(),
             },
         );
         let prior = RustFmtState {
             package: None,
             flags: vec![],
-            env: RustEnv::default(),
+            rust_env: RustEnv::default(),
         };
         let result = Resource::plan(&make_fmt_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);

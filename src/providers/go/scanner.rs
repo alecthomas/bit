@@ -1,5 +1,5 @@
 use crate::process::CommandExt;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,9 +66,10 @@ struct Module {
 pub struct Scans {
     /// Scanned modules keyed by canonical root.
     modules: DashMap<PathBuf, Arc<Module>>,
-    /// Local module sets by canonical working directory, since `go.work`
-    /// discovery and `GOWORK` depend on where the go command runs.
-    local_modules: DashMap<PathBuf, Arc<LocalModules>>,
+    /// Local module sets by canonical working directory and the block's
+    /// `env`, since `go.work` discovery depends on where the go command runs
+    /// and the environment can set `GOWORK` or `GOFLAGS`.
+    local_modules: DashMap<(PathBuf, BTreeMap<String, String>), Arc<LocalModules>>,
 }
 
 /// Which test inputs a scan tracks for the packages a pattern names. Test
@@ -230,13 +231,15 @@ fn collect_tests(
 /// upward looking for `go.mod`). Pass `Some(dir)` when the calling block runs
 /// `go` from a non-project-root directory — e.g. a `go.exe` block with a `dir`
 /// pointing at a separate-module subdirectory. `None` starts from bit's CWD.
+/// `env` is the block's `env`, which the go commands run here see.
 pub fn scan(
     scans: &Scans,
     patterns: &[String],
     tests: Tests,
     base_dir: Option<&Path>,
+    env: &BTreeMap<String, String>,
 ) -> Result<HashSet<PathBuf>, BoxError> {
-    let (local, pkg_dirs) = pattern_packages(scans, patterns, base_dir)?;
+    let (local, pkg_dirs) = pattern_packages(scans, patterns, base_dir, env)?;
 
     let mut all_files = local.files.clone();
     let mut visited = HashSet::new();
@@ -253,8 +256,13 @@ pub fn scan(
 
 /// The `.go` files, tests included, of the packages `patterns` name, without
 /// those of the packages they import, sorted.
-pub fn package_go_files(scans: &Scans, patterns: &[String], base_dir: Option<&Path>) -> Result<Vec<PathBuf>, BoxError> {
-    let (_, pkg_dirs) = pattern_packages(scans, patterns, base_dir)?;
+pub fn package_go_files(
+    scans: &Scans,
+    patterns: &[String],
+    base_dir: Option<&Path>,
+    env: &BTreeMap<String, String>,
+) -> Result<Vec<PathBuf>, BoxError> {
+    let (_, pkg_dirs) = pattern_packages(scans, patterns, base_dir, env)?;
     let mut files = Vec::new();
     for (module, dir) in &pkg_dirs {
         let (_, scan) = package_scan(module, dir)?;
@@ -285,8 +293,9 @@ pub fn tested_packages(
     patterns: &[String],
     tests: Tests,
     base_dir: Option<&Path>,
+    env: &BTreeMap<String, String>,
 ) -> Result<Vec<TestedPackage>, BoxError> {
-    let (local, pkg_dirs) = pattern_packages(scans, patterns, base_dir)?;
+    let (local, pkg_dirs) = pattern_packages(scans, patterns, base_dir, env)?;
     pkg_dirs
         .iter()
         .map(|(module, dir)| {
@@ -308,12 +317,13 @@ pub fn tested_packages(
 /// Package directories, each with the module it belongs to.
 type PackageDirs = Vec<(Arc<Module>, PathBuf)>;
 
-/// The local modules the go command run in `base_dir` (or bit's CWD) builds
-/// from, and the package directories `patterns` name, each once.
+/// The local modules the go command run in `base_dir` (or bit's CWD) with
+/// `env` builds from, and the package directories `patterns` name, each once.
 fn pattern_packages(
     scans: &Scans,
     patterns: &[String],
     base_dir: Option<&Path>,
+    env: &BTreeMap<String, String>,
 ) -> Result<(Arc<LocalModules>, PackageDirs), BoxError> {
     let cwd = match base_dir {
         Some(dir) => dir.to_path_buf(),
@@ -322,7 +332,7 @@ fn pattern_packages(
     let base = module(scans, &cwd)?;
     // Canonical, like the module root, so package directories compare equal.
     let cwd = cwd.canonicalize().unwrap_or(cwd);
-    let local = local_modules(scans, &cwd, &base);
+    let local = local_modules(scans, &cwd, &base, env);
     let mut seen = HashSet::new();
     let mut pkg_dirs = Vec::new();
     for pattern in patterns {
@@ -400,19 +410,20 @@ impl LocalModules {
     }
 }
 
-/// The local modules the go command run in `cwd` builds from: the main
+/// The local modules the go command run in `cwd` with `env` builds from: the main
 /// modules, which are the workspace's `use` modules or else `base`, and the
 /// targets of `replace` directives naming local directories.
 ///
 /// The go command reports the main modules and the workspace file, and
 /// parses the `replace` directives, so this follows its rules rather than
 /// reimplementing them. Without a working go command, only `base` is local.
-fn local_modules(scans: &Scans, cwd: &Path, base: &Arc<Module>) -> Arc<LocalModules> {
-    if let Some(local) = scans.local_modules.get(cwd) {
+fn local_modules(scans: &Scans, cwd: &Path, base: &Arc<Module>, env: &BTreeMap<String, String>) -> Arc<LocalModules> {
+    let key = (cwd.to_path_buf(), env.clone());
+    if let Some(local) = scans.local_modules.get(&key) {
         return Arc::clone(&local);
     }
     let mut modules = vec![(base.path.clone(), Arc::clone(base))];
-    if let Some(main) = go_json(cwd, &["list", "-m", "-json"]) {
+    if let Some(main) = go_json(cwd, env, &["list", "-m", "-json"]) {
         for entry in &main {
             if let (Some(path), Some(dir)) = (entry["Path"].as_str(), entry["Dir"].as_str())
                 && let Ok(module) = module(scans, Path::new(dir))
@@ -426,7 +437,7 @@ fn local_modules(scans: &Scans, cwd: &Path, base: &Arc<Module>) -> Arc<LocalModu
     // `go.mod`, which `go work edit` and `go mod edit` parse.
     let mut files = HashSet::new();
     let mut replace_sources: Vec<(PathBuf, &str)> = vec![];
-    let gowork = go_output(cwd, &["env", "GOWORK"]).filter(|path| !path.is_empty() && path != "off");
+    let gowork = go_output(cwd, env, &["env", "GOWORK"]).filter(|path| !path.is_empty() && path != "off");
     if let Some(gowork) = gowork {
         files.insert(PathBuf::from(format!("{gowork}.sum")));
         replace_sources.push((PathBuf::from(gowork), "work"));
@@ -455,7 +466,8 @@ fn local_modules(scans: &Scans, cwd: &Path, base: &Arc<Module>) -> Arc<LocalModu
     for (source, kind) in &replace_sources {
         files.insert(source.clone());
         let source_arg = source.to_string_lossy();
-        let Some(edit) = go_json(cwd, &[kind, "edit", "-json", &source_arg]).and_then(|mut edits| edits.pop()) else {
+        let Some(edit) = go_json(cwd, env, &[kind, "edit", "-json", &source_arg]).and_then(|mut edits| edits.pop())
+        else {
             continue;
         };
         let source_dir = source.parent().unwrap_or(Path::new(""));
@@ -484,19 +496,16 @@ fn local_modules(scans: &Scans, cwd: &Path, base: &Arc<Module>) -> Arc<LocalModu
     modules.dedup_by(|(a, _), (b, _)| a == b);
 
     let local = Arc::new(LocalModules { modules, files });
-    scans
-        .local_modules
-        .entry(cwd.to_path_buf())
-        .or_insert(local)
-        .value()
-        .clone()
+    scans.local_modules.entry(key).or_insert(local).value().clone()
 }
 
-/// The trimmed stdout of `go <args>` run in `dir`, or `None` if it failed.
-fn go_output(dir: &Path, args: &[&str]) -> Option<String> {
+/// The trimmed stdout of `go <args>` run in `dir` with `env`, or `None` if
+/// it failed.
+fn go_output(dir: &Path, env: &BTreeMap<String, String>, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("go")
         .args(args)
         .current_dir(dir)
+        .envs(env)
         .stderr(std::process::Stdio::null())
         .logged_output()
         .ok()?;
@@ -507,8 +516,8 @@ fn go_output(dir: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// The JSON values `go <args>` prints, one after another, in `dir`.
-fn go_json(dir: &Path, args: &[&str]) -> Option<Vec<serde_json::Value>> {
-    let output = go_output(dir, args)?;
+fn go_json(dir: &Path, env: &BTreeMap<String, String>, args: &[&str]) -> Option<Vec<serde_json::Value>> {
+    let output = go_output(dir, env, args)?;
     serde_json::Deserializer::from_str(&output)
         .into_iter::<serde_json::Value>()
         .collect::<Result<_, _>>()
@@ -947,7 +956,14 @@ var content embed.FS
             ],
         );
 
-        let files = scan(&Scans::default(), &[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        let files = scan(
+            &Scans::default(),
+            &[".".into()],
+            Tests::Excluded,
+            Some(&root),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         for expected in ["static/css/site/main.css", "static/index.html", "my docs/guide.md"] {
             assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
         }
@@ -1016,6 +1032,7 @@ var content embed.FS
             &[".".into()],
             Tests::Excluded,
             Some(&root.join("app")),
+            &BTreeMap::new(),
         )
         .unwrap();
         for expected in ["lib/util/util.go", "lib/go.mod", "go.work", "app/go.mod"] {
@@ -1029,6 +1046,7 @@ var content embed.FS
             &["example.com/lib/...".into()],
             Tests::Excluded,
             Some(&root.join("app")),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert!(files.contains(&root.join("lib/other/other.go")), "{files:?}");
@@ -1059,6 +1077,7 @@ var content embed.FS
             &[".".into()],
             Tests::Excluded,
             Some(&root.join("app")),
+            &BTreeMap::new(),
         )
         .unwrap();
         for expected in ["dep/dep.go", "dep/go.mod", "app/go.mod"] {
@@ -1078,7 +1097,14 @@ var content embed.FS
                 ("vendor/example.com/dep/dep.go", "package dep\n"),
             ],
         );
-        let files = scan(&Scans::default(), &[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        let files = scan(
+            &Scans::default(),
+            &[".".into()],
+            Tests::Excluded,
+            Some(&root),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert!(
             !files.contains(&root.join("vendor/example.com/dep/dep.go")),
             "{files:?}"
@@ -1098,7 +1124,14 @@ var content embed.FS
                 ("vendor/example.com/dep/dep.go", "package dep\n"),
             ],
         );
-        let files = scan(&Scans::default(), &[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        let files = scan(
+            &Scans::default(),
+            &[".".into()],
+            Tests::Excluded,
+            Some(&root),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         for expected in ["vendor/modules.txt", "vendor/example.com/dep/dep.go"] {
             assert!(files.contains(&root.join(expected)), "missing {expected}: {files:?}");
         }
@@ -1119,6 +1152,7 @@ var content embed.FS
             &[".".into()],
             Tests::Excluded,
             Some(&root.join("svc")),
+            &BTreeMap::new(),
         )
         .unwrap();
         assert!(files.contains(&root.join("svc/main.go")), "{files:?}");
@@ -1166,7 +1200,7 @@ var content embed.FS
     }
 
     fn scan_from(scans: &Scans, root: &Path, pattern: &str, tests: Tests) -> Result<HashSet<PathBuf>, BoxError> {
-        scan(scans, &[pattern.to_owned()], tests, Some(root))
+        scan(scans, &[pattern.to_owned()], tests, Some(root), &BTreeMap::new())
     }
 
     /// How many package directories `scans` holds for the module rooted at
@@ -1245,7 +1279,14 @@ func Hello() { fmt.Println("hello") }
             ],
         );
 
-        let files = scan(&Scans::default(), &[".".into()], Tests::Excluded, Some(&root)).unwrap();
+        let files = scan(
+            &Scans::default(),
+            &[".".into()],
+            Tests::Excluded,
+            Some(&root),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         for expected in [
             "default.pgo",
             "lib/add_amd64.s",
@@ -1569,15 +1610,28 @@ func Hello() { fmt.Println("hello") }
         }
 
         let patterns = ["./a".to_owned(), "./b".to_owned(), "./a".to_owned()];
-        let mut packages: Vec<_> = tested_packages(&Scans::default(), &patterns, Tests::SourcesAndData, Some(root))
-            .unwrap()
-            .into_iter()
-            .map(|p| p.import_path)
-            .collect();
+        let mut packages: Vec<_> = tested_packages(
+            &Scans::default(),
+            &patterns,
+            Tests::SourcesAndData,
+            Some(root),
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|p| p.import_path)
+        .collect();
         packages.sort();
         assert_eq!(packages, ["example.com/test/a", "example.com/test/b"]);
 
-        let files = scan(&Scans::default(), &patterns, Tests::Excluded, Some(root)).unwrap();
+        let files = scan(
+            &Scans::default(),
+            &patterns,
+            Tests::Excluded,
+            Some(root),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert!(files.iter().any(|p| p.ends_with("b/lib.go")), "{files:?}");
         assert!(!files.iter().any(|p| p.ends_with("c/lib.go")), "{files:?}");
     }

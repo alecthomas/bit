@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
 use crate::output::BlockWriter;
-use crate::provider::{Ambient, BoxError, CachePolicy, DynResource, FuncSignature, Provider};
+use crate::provider::{Ambient, Block, BoxError, CachePolicy, DynResource, FuncSignature, Provider};
 use crate::value::Value;
 
 use workspace::Sources;
@@ -26,9 +26,9 @@ pub struct BufTarget {
 }
 
 impl BufTarget {
-    /// Run `buf <args...> [input]` in `dir`.
-    fn run(&self, dir: Option<&str>, args: &[String], writer: &BlockWriter) -> Result<ExitStatus, BoxError> {
-        super::run("buf", &self.args(args), dir, writer)
+    /// Run `buf <args...> [input]` in the block's `dir` with its `env`.
+    fn run<T>(&self, block: &Block<T>, args: &[String], writer: &BlockWriter) -> Result<ExitStatus, BoxError> {
+        super::run("buf", &self.args(args), block, writer)
     }
 
     /// Plan description for `buf <args...> [input]`.

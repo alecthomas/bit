@@ -1,6 +1,5 @@
 use crate::process::CommandExt;
 use std::collections::{BTreeMap, HashMap};
-use std::process::Command;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -98,8 +97,8 @@ fn state_matches_inputs(state: &NetworkAttachState, inputs: &NetworkAttachInputs
 
 /// Run `docker inspect <container>` and return the `NetworkSettings.Networks`
 /// object as raw JSON text.
-fn inspect_networks(container: &str) -> Option<String> {
-    let out = Command::new("docker")
+fn inspect_networks(env: &super::Env, container: &str) -> Option<String> {
+    let out = super::docker(env)
         .args(["inspect", container, "--format", "{{json .NetworkSettings.Networks}}"])
         .logged_output()
         .ok()?;
@@ -112,8 +111,8 @@ fn inspect_networks(container: &str) -> Option<String> {
 /// Check whether `container` is currently attached to `network`. Returns
 /// `false` on any error (missing container, daemon unreachable,
 /// unparseable JSON) — callers treat that as "needs reconnect".
-fn is_attached(network: &str, container: &str) -> bool {
-    let Some(json_text) = inspect_networks(container) else {
+fn is_attached(env: &super::Env, network: &str, container: &str) -> bool {
+    let Some(json_text) = inspect_networks(env, container) else {
         return false;
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_text) else {
@@ -141,8 +140,12 @@ fn parse_endpoint_ips(networks_json: &str, network: &str) -> Result<(Option<Stri
 }
 
 /// Query Docker for the assigned endpoint addresses on this attachment.
-fn read_endpoint_ips(container: &str, network: &str) -> Result<(Option<String>, Option<String>), BoxError> {
-    let json_text = inspect_networks(container).ok_or_else(|| format!("docker inspect {container} failed"))?;
+fn read_endpoint_ips(
+    env: &super::Env,
+    container: &str,
+    network: &str,
+) -> Result<(Option<String>, Option<String>), BoxError> {
+    let json_text = inspect_networks(env, container).ok_or_else(|| format!("docker inspect {container} failed"))?;
     parse_endpoint_ips(&json_text, network)
 }
 
@@ -199,8 +202,8 @@ fn build_connect_args(inputs: &NetworkAttachInputs) -> Vec<String> {
 }
 
 /// Run `docker network connect`. Already-attached is treated as success.
-fn run_connect(inputs: &NetworkAttachInputs) -> Result<(), BoxError> {
-    let out = Command::new("docker")
+fn run_connect(env: &super::Env, inputs: &NetworkAttachInputs) -> Result<(), BoxError> {
+    let out = super::docker(env)
         .args(build_connect_args(inputs))
         .logged_output()
         .map_err(|e| format!("docker network connect failed: {e}"))?;
@@ -216,8 +219,8 @@ fn run_connect(inputs: &NetworkAttachInputs) -> Result<(), BoxError> {
 
 /// Run `docker network disconnect`. Not-attached / missing-network /
 /// missing-container are treated as success so destroy is idempotent.
-fn run_disconnect(network: &str, container: &str) -> Result<(), BoxError> {
-    let out = Command::new("docker")
+fn run_disconnect(env: &super::Env, network: &str, container: &str) -> Result<(), BoxError> {
+    let out = super::docker(env)
         .args(["network", "disconnect", network, container])
         .logged_output()
         .map_err(|e| format!("docker network disconnect failed: {e}"))?;
@@ -284,7 +287,7 @@ impl Resource for NetworkAttachResource {
             });
         };
 
-        if !is_attached(&inputs.network, &inputs.container) {
+        if !is_attached(&inputs.env, &inputs.network, &inputs.container) {
             return Ok(PlanResult {
                 action: PlanAction::Create,
                 description: desc,
@@ -320,17 +323,17 @@ impl Resource for NetworkAttachResource {
         // name from a config edit), disconnect first so the reconnect
         // produces a clean endpoint matching the current inputs.
         if let Some(prior) = prior_state {
-            run_disconnect(&prior.network, &prior.container)?;
+            run_disconnect(&inputs.env, &prior.network, &prior.container)?;
         }
         // Also clean up any external attachment under the *current* names
         // (e.g. someone connected the container by hand before us).
-        if is_attached(&inputs.network, &inputs.container) {
-            run_disconnect(&inputs.network, &inputs.container)?;
+        if is_attached(&inputs.env, &inputs.network, &inputs.container) {
+            run_disconnect(&inputs.env, &inputs.network, &inputs.container)?;
         }
 
-        run_connect(inputs)?;
+        run_connect(&inputs.env, inputs)?;
 
-        let (ip_address, ip6_address) = read_endpoint_ips(&inputs.container, &inputs.network)?;
+        let (ip_address, ip6_address) = read_endpoint_ips(&inputs.env, &inputs.container, &inputs.network)?;
 
         Ok(ApplyResult {
             state: Some(NetworkAttachState::from_inputs(inputs)),
@@ -349,7 +352,7 @@ impl Resource for NetworkAttachResource {
                 prior_state.network, prior_state.container
             ),
         );
-        run_disconnect(&prior_state.network, &prior_state.container)
+        run_disconnect(&prior_state.env, &prior_state.network, &prior_state.container)
     }
 
     /// An attachment is a live edge between two daemon objects; see
