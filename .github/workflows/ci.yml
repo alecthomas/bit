@@ -14,7 +14,7 @@ jobs:
         with:
           cache: true
       # Use the Hermit-pinned bit rather than one built from this checkout.
-      - run: "bin/bit clippy fmt-check"
+      - run: "bin/bit clippy fmt-check s3-test"
   release:
     name: "release"
     runs-on: ubuntu-latest

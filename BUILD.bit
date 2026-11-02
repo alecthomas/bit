@@ -21,9 +21,10 @@ large image = docker.image {
   depends_on = [release]
 }
 
-# Run the Rust unit test suite.
+# Run the Rust test suites of every crate in the workspace.
 large test = rust.test {
   all_features = true
+  flags = ["--workspace"]
 }
 
 # Lint with clippy, treating warnings as errors.
@@ -233,7 +234,7 @@ explicit push-release-notes(tag: string = "") = exec {
 }
 
 # The blocks CI runs.
-target ci = [release, test, fmt-check, clippy]
+target ci = [release, test, fmt-check, clippy, s3-test]
 
 # Default target: CI's blocks plus the Zed rev and workflow syncs.
 target default = [ci, sync-zed-rev, sync-ci]
