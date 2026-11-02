@@ -487,7 +487,7 @@ its unqualified name, for example `bit --schema env`.
 
 **`replace(value: string | [string], pattern: string, replacement: string) -> string | [string]`** — Replace every regular expression match in a string or each string in a list. The replacement may reference capture groups as `$1` or `${name}`.
 
-**`secret(name: string) -> string`** — Read a secret by name.
+**`secret(name: string) -> string`** — Read a secret by name. bit shows the secret as this call, never its value. A secret cannot be passed as a block or target argument.
 
 **`sha256(value: string) -> string`** — Hash a string with SHA-256.
 

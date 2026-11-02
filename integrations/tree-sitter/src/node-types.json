@@ -2449,10 +2449,6 @@
     "named": true
   },
   {
-    "type": "secret",
-    "named": false
-  },
-  {
     "type": "string",
     "named": false
   },

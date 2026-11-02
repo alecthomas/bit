@@ -175,7 +175,7 @@ impl Checker<'_> {
         match expr {
             Expr::Null => mismatch(),
             Expr::Str(parts) => match (literal_string(parts), expected) {
-                (_, Type::String | Type::Path | Type::Secret) => Ok(()),
+                (_, Type::String | Type::Path) => Ok(()),
                 (Some(value), Type::Literal(literal)) if value != *literal => mismatch(),
                 (Some(value), Type::Duration) => {
                     parse_duration_literal(&value)
@@ -326,8 +326,8 @@ fn compatible(actual: &Type, expected: &Type) -> bool {
         (_, Type::Union(variants)) => variants.iter().any(|variant| compatible(actual, variant)),
         (Type::Literal(actual), Type::Literal(expected)) => actual == expected,
         (
-            Type::String | Type::Path | Type::Secret | Type::Literal(_),
-            Type::String | Type::Path | Type::Secret | Type::Literal(_) | Type::Duration,
+            Type::String | Type::Path | Type::Literal(_),
+            Type::String | Type::Path | Type::Literal(_) | Type::Duration,
         ) => true,
         (Type::List(actual), Type::List(expected)) | (Type::Map(actual), Type::Map(expected)) => {
             compatible(actual, expected)

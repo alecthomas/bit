@@ -32,7 +32,7 @@ BUILD.bit example (illustrative):
   import "github.com/acme/build" as tools     # Load a Git module under this alias.
 
   param version: string = "dev"               # Set with -P version=v1; defaults are optional.
-  # Types: string, number (or int), bool, duration, path, secret, [type], {string = type}, type | type.
+  # Types: string, number (or int), bool, duration, path, [type], {string = type}, type | type.
 
   let arch = ["amd64", "arm64"]               # Bind a list for matrix expansion.
   let label = "app-#{version}"                # Double quotes interpolate expressions.

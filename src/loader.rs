@@ -876,6 +876,75 @@ target publish(tag : string) = [image(tag = tag)]
     }
 
     #[test]
+    fn secrets_cannot_be_bound_to_parameters() {
+        // SAFETY: only this test reads or writes this variable.
+        unsafe { std::env::set_var("BIT_TEST_LOADER_SECRET", "hunter2") };
+        let cases = [
+            (
+                "argument",
+                "job(token : string) = exec { command = token outputs = \"out\" }\n\
+                 target run = [job(token = secret(\"BIT_TEST_LOADER_SECRET\"))]\n",
+            ),
+            (
+                "nested argument",
+                "job(tokens : [string]) = exec { command = \"x\" outputs = \"out\" }\n\
+                 target run = [job(tokens = [secret(\"BIT_TEST_LOADER_SECRET\")])]\n",
+            ),
+            (
+                "default",
+                "job(token = secret(\"BIT_TEST_LOADER_SECRET\")) = exec { command = token outputs = \"out\" }\n\
+                 target run = [job()]\n",
+            ),
+            (
+                "target argument",
+                "job(token : string) = exec { command = token outputs = \"out\" }\n\
+                 target run(token : string) = [job(token = token)]\n\
+                 target outer = [run(token = secret(\"BIT_TEST_LOADER_SECRET\"))]\n",
+            ),
+        ];
+        for (case, input) in cases {
+            let module = parser::parse(input, "<test>").unwrap();
+            let error = match load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &[]) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("{case}: a secret argument must be rejected"),
+            };
+            assert!(error.contains("cannot receive a secret"), "{case}: {error}");
+            assert!(!error.contains("hunter2"), "{case}: {error}");
+        }
+
+        // CLI arguments are parsed as expressions for non-string parameters.
+        let module = parser::parse(
+            "job(tokens : [string]) = exec { command = \"x\" outputs = \"out\" }\n",
+            "<test>",
+        )
+        .unwrap();
+        let invocation = crate::invocation::Invocation {
+            name: "job".into(),
+            args: vec![("tokens".into(), r#"[secret("BIT_TEST_LOADER_SECRET")]"#.into())],
+        };
+        assert!(load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &[invocation]).is_err());
+    }
+
+    #[test]
+    fn a_block_may_read_a_secret_in_its_body() {
+        // SAFETY: only this test reads or writes this variable.
+        unsafe { std::env::set_var("BIT_TEST_LOADER_BODY_SECRET", "hunter2") };
+        let input = "let token = secret(\"BIT_TEST_LOADER_BODY_SECRET\")\n\
+                     job(name : string) = exec { command = token outputs = \"out\" }\n\
+                     target run = [job(name = \"app\")]\n";
+        let module = parser::parse(input, "<test>").unwrap();
+        let (dag, scope, _) = load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &[]).unwrap();
+        assert_eq!(
+            scope.scope.get("token"),
+            Some(&Value::Secret {
+                key: "BIT_TEST_LOADER_BODY_SECRET".into(),
+                value: "hunter2".into(),
+            })
+        );
+        assert!(dag.has_block(r#"job(name="app")"#));
+    }
+
+    #[test]
     fn parameterized_invocations_share_equal_arguments_and_separate_different_arguments() {
         let input = r#"
 job(value : string) = exec { command = value outputs = "out" }

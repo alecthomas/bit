@@ -166,7 +166,7 @@ impl Instantiator<'_> {
 
     fn target_name(&self, target: &Target, args: &[Field], caller: &Scope) -> Result<String, LoadError> {
         let bound = bind(&target.name, &target.pos, &target.params, args, caller)?;
-        instance_name(&target.name, &target.params, &bound.values)
+        Ok(instance_name(&target.name, &target.params, &bound.values))
     }
 
     fn instantiate_target(
@@ -192,7 +192,7 @@ impl Instantiator<'_> {
                 .ok_or_else(|| invalid(&crate::ast::Pos::default(), name, "unknown target"));
         };
         let bound = bind(name, &target.pos, &target.params, args, caller)?;
-        let instance = instance_name(name, &target.params, &bound.values)?;
+        let instance = instance_name(name, &target.params, &bound.values);
         if let Some(existing) = self.dag.targets().get(&instance) {
             return Ok(existing.blocks.clone());
         }
@@ -282,7 +282,7 @@ impl Instantiator<'_> {
             return Ok(block.name.clone());
         }
         let bound = bind(&block.name, &block.pos, &block.params, args, caller)?;
-        let instance_args = instance_args(&block.name, &block.params, &bound.values)?;
+        let instance_args = instance_args(&block.params, &bound.values);
         let name = format!("{}{instance_args}", block.name);
         if self.dag.has_block(&name) || self.matrix_blocks.contains_key(&name) {
             return Ok(name);
@@ -616,6 +616,18 @@ fn bind(
                 })?
             }
         };
+        // Bound values name the instance, and an instance must be writable
+        // back as a CLI invocation, which never carries secrets.
+        if value.contains_secret() {
+            return Err(invalid(
+                pos,
+                name,
+                &format!(
+                    "parameter '{}' cannot receive a secret; read it with secret(...) inside the block",
+                    param.name
+                ),
+            ));
+        }
         validate_type(&value, &param.typ).map_err(|message| LoadError::TypeError {
             pos: pos.clone(),
             name: param.name.clone(),
@@ -645,7 +657,7 @@ fn cli_args(
             .find(|param| &param.name == key)
             .ok_or_else(|| invalid(pos, name, &format!("unknown argument '{key}'")))?;
         let parsed = match &param.typ {
-            Type::String | Type::Path | Type::Secret => Value::Str(value.clone()),
+            Type::String | Type::Path => Value::Str(value.clone()).to_expr(),
             _ => {
                 let source = format!("param value : {} = {value}", param.typ);
                 let module = crate::parser::parse(&source, "<argument>")
@@ -656,43 +668,36 @@ fn cli_args(
                 let Some(expression) = &parsed.default else {
                     return Err(invalid(pos, name, &format!("invalid value for '{key}'")));
                 };
-                expr::eval(expression, &Scope::new()).map_err(|error| invalid(pos, name, &error.to_string()))?
+                expr::eval(expression, &Scope::new())
+                    .map_err(|error| invalid(pos, name, &error.to_string()))?
+                    .to_expr()
             }
         };
         args.push(Field {
             name: key.clone(),
-            value: parsed.to_expr(),
+            value: parsed,
         });
     }
     Ok(args)
 }
 
-fn instance_name(name: &str, params: &[Param], values: &[Value]) -> Result<String, LoadError> {
-    Ok(format!("{name}{}", instance_args(name, params, values)?))
+fn instance_name(name: &str, params: &[Param], values: &[Value]) -> String {
+    format!("{name}{}", instance_args(params, values))
 }
 
 /// Format bound values as the named argument list of a call, such as
 /// `(tag="1.2.3")`, so instance names read like the calls that create them.
 /// Empty when there are no values.
-fn instance_args(name: &str, params: &[Param], values: &[Value]) -> Result<String, LoadError> {
+fn instance_args(params: &[Param], values: &[Value]) -> String {
     if values.is_empty() {
-        return Ok(String::new());
+        return String::new();
     }
-    let arguments: Result<Vec<_>, _> = params
+    let arguments: Vec<_> = params
         .iter()
         .zip(values)
-        .map(|(param, value)| {
-            let literal = if param.typ == Type::Secret {
-                let encoded = serde_json::to_vec(value)?;
-                format!(r#""secret:{}""#, crate::sha256::SHA256::digest(&encoded))
-            } else {
-                value.to_literal()
-            };
-            Ok::<_, serde_json::Error>(format!("{}={literal}", param.name))
-        })
+        .map(|(param, value)| format!("{}={}", param.name, value.to_literal()))
         .collect();
-    let arguments = arguments.map_err(|error| invalid(&crate::ast::Pos::default(), name, &error.to_string()))?;
-    Ok(format!("({})", arguments.join(", ")))
+    format!("({})", arguments.join(", "))
 }
 
 fn invalid(pos: &crate::ast::Pos, name: &str, message: &str) -> LoadError {

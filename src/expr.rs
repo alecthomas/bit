@@ -190,16 +190,16 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
             }
         }
         Expr::BinOp(lhs, op, rhs) => {
-            let l = eval_inner(lhs, scope, mode)?;
-            let r = eval_inner(rhs, scope, mode)?;
+            let l = eval_inner(lhs, scope, mode)?.into_plain();
+            let r = eval_inner(rhs, scope, mode)?.into_plain();
             match op {
                 BinOp::Eq => Ok(Value::Bool(l == r)),
                 BinOp::Ne => Ok(Value::Bool(l != r)),
             }
         }
         Expr::Add(lhs, rhs) => {
-            let l = eval_inner(lhs, scope, mode)?;
-            let r = eval_inner(rhs, scope, mode)?;
+            let l = eval_inner(lhs, scope, mode)?.into_plain();
+            let r = eval_inner(rhs, scope, mode)?.into_plain();
             match (l, r) {
                 (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + b)),
                 (Value::Str(a), Value::Str(b)) => Ok(Value::Str(a + &b)),
@@ -372,7 +372,7 @@ fn builtins() -> &'static HashMap<String, BuiltinDef> {
                 Type::List(Box::new(Type::String)),
                 __bit_signature_glob(),
             ),
-            BuiltinDef::new(__bit_call_secret, Type::String, __bit_signature_secret()),
+            BuiltinDef::new(call_secret, Type::String, __bit_signature_secret()),
             BuiltinDef::new(__bit_call_trim, Type::String, __bit_signature_trim()),
             BuiltinDef::new(
                 __bit_call_lines,
@@ -530,11 +530,24 @@ fn project_dir() -> Result<String, EvalError> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
-/// Read a secret by name.
+/// Read a secret by name. bit shows the secret as this call, never its value. A secret cannot be passed as a block or target argument.
 #[bit_derive::provider_function]
 fn secret(name: String) -> Result<String, EvalError> {
     // Fall back to env var for now
     std::env::var(&name).map_err(|_| EvalError::Exec(format!("secret '{name}' not found")))
+}
+
+/// Call [`secret`], keeping the name as the secret's key. The generated
+/// adapter returns a plain string, which would lose it.
+fn call_secret(args: &[Value]) -> Result<Value, crate::provider::BoxError> {
+    let value = __bit_call_secret(args)?;
+    match (args.first().and_then(Value::as_str), value) {
+        (Some(key), Value::Str(value)) => Ok(Value::Secret {
+            key: key.to_owned(),
+            value,
+        }),
+        _ => Err("secret returned a non-string value".into()),
+    }
 }
 
 /// Trim whitespace from a string or each string in a list.

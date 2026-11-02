@@ -1762,10 +1762,18 @@ fn print_value(key: &str, value: &Value, indent: usize) {
         Value::List(_, items) => {
             println!("{pad}{key}:");
             for item in items {
-                println!("{pad}  - {item}");
+                println!("{pad}  - {}", dump_scalar(item));
             }
         }
-        _ => println!("{pad}{key}: {value}"),
+        _ => println!("{pad}{key}: {}", dump_scalar(value)),
+    }
+}
+
+/// Show a secret as the `secret("KEY")` call that reads it, never its value.
+fn dump_scalar(value: &Value) -> String {
+    match value {
+        Value::Secret { .. } => value.to_literal(),
+        _ => value.to_string(),
     }
 }
 
@@ -3516,6 +3524,70 @@ lint[module] = go.lint {
         let plans = h.apply(&b, &b.block("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::None);
         assert_eq!(h.applies(), 1);
+    }
+
+    /// Load `publish name=app`, whose block reads the secret `key`, with the
+    /// secret set to `value`. Returns the instance name, its input hash and
+    /// its shared-cache key.
+    fn load_secret_instance(key: &str, value: &str) -> (String, SHA256, ActionKey) {
+        // SAFETY: only this test reads or writes this variable.
+        unsafe { std::env::set_var(key, value) };
+        let input = format!(
+            "let token = secret(\"{key}\")\npublish(name : string) = exec {{\n  command = token\n  outputs = \"out\"\n}}\n"
+        );
+        let module = parser::parse(&input, "<test>").unwrap();
+        let invocations = [crate::invocation::Invocation {
+            name: "publish".into(),
+            args: vec![("name".into(), "app".into())],
+        }];
+        let tracker = test_tracker();
+        let (dag, base, selected) = loader::load_selected(
+            &module,
+            &Map::new(),
+            &test_registry(&tracker),
+            &MemoryStore::new(),
+            &[],
+            &invocations,
+        )
+        .unwrap();
+        let name = selected[0].clone();
+        let inputs = eval_fields(&dag.get_node(&name).unwrap().fields, &base.scope).unwrap();
+        let input_hash = hash_inputs(&inputs, &test_cache());
+        let key = ActionKeyInput {
+            receipt_version: RECEIPT_VERSION,
+            provider: "exec",
+            resource: "exec",
+            cache_version: 1,
+            block: &name,
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            inputs: input_hash,
+            sources: &BTreeMap::new(),
+            deps: &BTreeMap::new(),
+        }
+        .key();
+        (name, input_hash, key)
+    }
+
+    #[test]
+    fn rotated_secret_keeps_instance_name_and_changes_hashes() {
+        let key = "BIT_TEST_ROTATED_SECRET";
+        let (first_name, first_hash, first_key) = load_secret_instance(key, "first-value");
+        let (second_name, second_hash, second_key) = load_secret_instance(key, "second-value");
+
+        assert_eq!(first_name, r#"publish(name="app")"#);
+        assert_eq!(first_name, second_name);
+        assert_ne!(first_hash, second_hash);
+        assert_ne!(first_key, second_key);
+    }
+
+    #[test]
+    fn dump_shows_secrets_by_key() {
+        let secret = Value::Secret {
+            key: "TOKEN".into(),
+            value: "s3cr3t".into(),
+        };
+        assert_eq!(dump_scalar(&secret), r#"secret("TOKEN")"#);
     }
 
     #[test]

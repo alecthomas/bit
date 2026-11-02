@@ -307,7 +307,6 @@ fn typ_scalar(input: &mut &str) -> ModalResult<Type> {
             "bool" => Some(Type::Bool),
             "duration" => Some(Type::Duration),
             "path" => Some(Type::Path),
-            "secret" => Some(Type::Secret),
             _ => None,
         })
         .parse_next(input)

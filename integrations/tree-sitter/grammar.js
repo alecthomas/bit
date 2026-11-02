@@ -187,7 +187,7 @@ module.exports = grammar({
 
     map_type: $ => seq('{', 'string', '=', $.type, '}'),
 
-    scalar_type: _ => choice('string', 'number', 'int', 'bool', 'duration', 'path', 'secret'),
+    scalar_type: _ => choice('string', 'number', 'int', 'bool', 'duration', 'path'),
 
     // ── Expressions ──
 

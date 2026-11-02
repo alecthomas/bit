@@ -289,7 +289,6 @@ Intentionally minimal. No loops, no user-defined functions. `if` expressions are
 | `bool` | |
 | `duration` | |
 | `path` | |
-| `secret` | |
 | `[T]` | List of `T` |
 | `{string = T}` | Map with values of type `T` |
 | `A \| B` | Union, e.g. `string \| [string]` |
@@ -330,7 +329,7 @@ So `a + b | trim` is `a + (b | trim)`.
 | `env(name, default?)` | Read an environment variable, or return `default` (any type) if unset |
 | `exec(command)` | Run a shell command and return stdout |
 | `glob(pattern)` | Expand a filesystem glob |
-| `secret(name)` | Read a secret by name, currently from the environment variable `name` |
+| `secret(name)` | Read a secret by name, currently from the environment variable `name`. Returns a `string` that keeps `name` as its key (§3 Secrets) |
 | `project_dir()` | Absolute directory containing `BUILD.bit` |
 | `lines(s)` | Split into nonempty lines |
 | `split(s, sep)` | Split by a separator |
@@ -380,10 +379,27 @@ let replicas = if environment == "production" then 3 else 1
 param environment : string
 param replicas    : number = 1   # default makes it optional
 param profile     = "release"    # type inferred from the default
-param db_password : secret
 ```
 
 Parameters are set with `-P key=value` on the command line, or by arguments when the file is instantiated as a module.
+
+### Secrets
+
+Secrets are never passed; they are always read by the secret system with `secret(name)`, where they are used:
+
+```
+let db_password = secret("DB_PASSWORD")
+
+db(name : string) = docker.container {
+  image       = "postgres:16"
+  name        = name
+  environment = { POSTGRES_PASSWORD = db_password }
+}
+```
+
+`secret(name)` returns a `string` that keeps `name` as its key. bit shows it as `secret("DB_PASSWORD")`, never as its value, for example in `bit --dump` and in input type errors. Its value is still part of the block's evaluated inputs, so it reaches the input hash and the shared-cache key, and a new value reruns the block. Concatenating, interpolating, or comparing a secret yields an ordinary string or bool without a key.
+
+A secret cannot be bound to a block or target parameter, as an argument, a default, or inside a list or map. Bound values name the instance, and every instance must be expressible as a command-line invocation, which never carries secrets.
 
 ### Provider Functions
 

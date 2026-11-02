@@ -202,6 +202,15 @@ pub enum Value {
     Bool(bool),
     Number(BigDecimal),
     Str(String),
+    /// A string read from the secret system. Its type is `string`. Wherever
+    /// bit shows or reproduces the value as source, it appears as
+    /// `secret("KEY")`, so the plaintext never does. The value still
+    /// serializes as a plain string, so providers receive it and it reaches
+    /// the input hash and cache key: a rotated secret reruns the block.
+    Secret {
+        key: String,
+        value: String,
+    },
     BlockRef(String),
     Duration(Duration),
     List(Type, Vec<Value>),
@@ -212,7 +221,7 @@ pub enum Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Str(s) => write!(f, "{s}"),
+            Value::Str(s) | Value::Secret { value: s, .. } => write!(f, "{s}"),
             Value::BlockRef(name) => write!(f, "{name}"),
             Value::Number(n) => write!(f, "{n}"),
             Value::Bool(b) => write!(f, "{b}"),
@@ -281,7 +290,7 @@ impl Value {
             Value::Null => Type::String,
             Value::Bool(_) => Type::Bool,
             Value::Number(_) => Type::Number,
-            Value::Str(_) => Type::String,
+            Value::Str(_) | Value::Secret { .. } => Type::String,
             Value::BlockRef(_) => Type::BlockRef,
             Value::Duration(_) => Type::Duration,
             Value::List(typ, _) => Type::List(Box::new(typ.clone())),
@@ -300,6 +309,7 @@ impl Value {
         use crate::ast::{Expr, MapEntry, StringPart};
         match self {
             Value::Str(s) => Expr::Str(vec![StringPart::Literal(s.clone())]),
+            Value::Secret { key, .. } => secret_call(key),
             Value::BlockRef(name) => Expr::BlockRef(name.clone()),
             Value::Number(n) => Expr::Number(n.clone()),
             Value::Bool(b) => Expr::Bool(*b),
@@ -339,8 +349,27 @@ impl Value {
 
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::Str(s) => Some(s),
+            Value::Str(s) | Value::Secret { value: s, .. } => Some(s),
             _ => None,
+        }
+    }
+
+    /// Drop a secret's key, for operations whose result is no longer the
+    /// secret itself, such as concatenation and comparison.
+    pub fn into_plain(self) -> Value {
+        match self {
+            Value::Secret { value, .. } => Value::Str(value),
+            value => value,
+        }
+    }
+
+    /// Whether a secret appears anywhere in this value.
+    pub fn contains_secret(&self) -> bool {
+        match self {
+            Value::Secret { .. } => true,
+            Value::List(_, items) => items.iter().any(Value::contains_secret),
+            Value::Map(_, map) | Value::Struct(_, map) => map.values().any(Value::contains_secret),
+            _ => false,
         }
     }
 
@@ -384,6 +413,15 @@ impl Value {
     }
 }
 
+/// The expression `secret("key")`, which reads the secret named `key`.
+fn secret_call(key: &str) -> crate::ast::Expr {
+    use crate::ast::{Expr, StringPart};
+    Expr::Call(
+        "secret".into(),
+        vec![Expr::Str(vec![StringPart::Literal(key.to_owned())])],
+    )
+}
+
 /// Serialize a Value without the embedded Type — the wire format is unchanged.
 impl Serialize for Value {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -391,7 +429,7 @@ impl Serialize for Value {
             Value::Null => serializer.serialize_none(),
             Value::Bool(b) => serializer.serialize_bool(*b),
             Value::Number(n) => n.serialize(serializer),
-            Value::Str(s) => serializer.serialize_str(s),
+            Value::Str(s) | Value::Secret { value: s, .. } => serializer.serialize_str(s),
             // Once inside the evaluator, references serialize by name so they
             // remain ordinary engine metadata rather than provider input data.
             Value::BlockRef(name) => serializer.serialize_str(name),
@@ -473,7 +511,6 @@ impl std::fmt::Display for Type {
                 _ => write!(f, "{inner}?"),
             },
             Type::Path => write!(f, "path"),
-            Type::Secret => write!(f, "secret"),
             Type::Literal(s) => write!(f, "{s:?}"),
             Type::Union(types) => {
                 for (i, t) in types.iter().enumerate() {
@@ -502,7 +539,6 @@ pub enum Type {
     Struct(StructType),
     Optional(Box<Type>),
     Path,
-    Secret,
     Union(Vec<Type>),
     /// One exact string. Only provider schemas produce this (from unit enum
     /// variants); the language has no syntax for it.
@@ -515,7 +551,7 @@ pub enum Type {
 pub fn validate_type(value: &Value, typ: &Type) -> Result<(), String> {
     match (typ, value) {
         (Type::Any, _) => Ok(()),
-        (Type::String | Type::Path | Type::Secret, Value::Str(_)) => Ok(()),
+        (Type::String | Type::Path, Value::Str(_) | Value::Secret { .. }) => Ok(()),
         (Type::Literal(expected), Value::Str(s)) if s == expected => Ok(()),
         (Type::BlockRef, Value::BlockRef(_)) => Ok(()),
         (Type::Number, Value::Number(_)) => Ok(()),
@@ -563,7 +599,7 @@ fn type_name(value: &Value) -> &'static str {
         Value::Null => "null",
         Value::Bool(_) => "bool",
         Value::Number(_) => "number",
-        Value::Str(_) => "string",
+        Value::Str(_) | Value::Secret { .. } => "string",
         Value::BlockRef(_) => "block",
         Value::Duration(_) => "duration",
         Value::List(..) => "list",
@@ -697,7 +733,19 @@ mod tests {
         assert!(validate_type(&Value::Number(1.into()), &Type::Number).is_ok());
         assert!(validate_type(&Value::Bool(true), &Type::Bool).is_ok());
         assert!(validate_type(&Value::Str("/tmp".into()), &Type::Path).is_ok());
-        assert!(validate_type(&Value::Str("s3cr3t".into()), &Type::Secret).is_ok());
+    }
+
+    #[test]
+    fn secret_is_a_string_shown_by_key_and_serialized_by_value() {
+        let secret = Value::Secret {
+            key: "TOKEN".into(),
+            value: "s3cr3t".into(),
+        };
+        assert_eq!(secret.value_type(), Type::String);
+        assert!(validate_type(&secret, &Type::String).is_ok());
+        assert_eq!(secret.to_literal(), r#"secret("TOKEN")"#);
+        assert_eq!(serde_json::to_string(&secret).unwrap(), r#""s3cr3t""#);
+        assert!(Value::list(vec![secret]).contains_secret());
     }
 
     #[test]
