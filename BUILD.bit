@@ -1,5 +1,11 @@
-# Format Rust sources before any build step runs.
-pre fmt = rust.fmt {}
+# Format Rust sources.
+fmt = rust.fmt {}
+
+# Check Rust formatting. Ordered after `fmt` so `bit ...` checks the
+# formatted sources.
+fmt-check = rust.fmt-check {
+  after = [fmt]
+}
 
 # Debug build of the `bit` binary.
 large debug = rust.exe {}
@@ -16,7 +22,9 @@ large image = docker.image {
 }
 
 # Run the Rust unit test suite.
-large test = rust.test {}
+large test = rust.test {
+  all_features = true
+}
 
 # Lint with clippy, treating warnings as errors.
 clippy = rust.clippy {
@@ -160,5 +168,72 @@ sync-readme = exec {
   resolve = '#{debug.path} --schema | sha256'
 }
 
-# Default target: release binary, tests, lints, and Zed rev sync.
-target default = [release, test, clippy, sync-zed-rev]
+# Regenerate the GitHub Actions workflow from the `ci` target. The jobs run
+# the Hermit-pinned `bin/bit`, but the debug build renders the workflow.
+# Ratchet pins any action the template leaves unpinned.
+sync-ci = exec {
+  inputs = [".github/ci.yml.tmpl", "BUILD.bit"]
+  command = <<-EOF
+    #{debug.path} --ci ./.github/ci.yml.tmpl ci > .github/workflows/ci.yml
+    ratchet pin .github/workflows/ci.yml
+  EOF
+  outputs = ".github/workflows/ci.yml"
+}
+
+# Tag the next version from conventional commits and push the tag. `svu next`
+# changes only when there is a new version to tag.
+explicit bump = exec {
+  command = <<-EOF
+    test "$(svu current)" = "$(svu next)" && exit 0
+    git tag "$(svu next)"
+    echo "Bumped to $(svu next)"
+    git push --tags
+  EOF
+  resolve = "svu next"
+}
+
+# Write release notes for `tag`, or the tag at HEAD, from the commits since
+# the previous tag. The notes change whenever HEAD or the tags do.
+explicit release-notes(tag: string = "") = exec {
+  command = <<-EOF
+    CURRENT_TAG="#{tag}"
+    if [ -z "$CURRENT_TAG" ]; then
+      CURRENT_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo "HEAD")
+    fi
+    PREV_TAG=$(git describe --tags --abbrev=0 "$CURRENT_TAG^" 2>/dev/null || echo "")
+    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+    if [ -n "$PREV_TAG" ]; then
+      commits=$(git log --pretty=format:"%H" "$PREV_TAG".."$CURRENT_TAG")
+    else
+      commits=$(git log --pretty=format:"%H" "$CURRENT_TAG")
+    fi
+    {
+      echo "## What's Changed"
+      echo ""
+      for hash in $commits; do
+        message=$(git log -1 --pretty=format:"%s" "$hash" | perl -pe 's/(`[^`]*`)(*SKIP)(*FAIL)|</&lt;/g; s/(`[^`]*`)(*SKIP)(*FAIL)|>/&gt;/g' | sed -E 's/^([a-z]+)(\([^)]*\))?:/**\1\2:**/')
+        author=$(gh api "/repos/$REPO/commits/$hash" --jq '.author.login // .commit.author.name')
+        printf '* %s by @%s in %s\n' "$message" "$author" "$hash"
+      done
+    } > release-notes.md
+  EOF
+  outputs = "release-notes.md"
+  resolve = "git rev-parse HEAD && git tag --list"
+}
+
+# Replace the GitHub release notes for `tag`, or the tag at HEAD.
+explicit push-release-notes(tag: string = "") = exec {
+  command = <<-EOF
+    CURRENT_TAG="#{tag}"
+    if [ -z "$CURRENT_TAG" ]; then
+      CURRENT_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo "HEAD")
+    fi
+    gh release edit "$CURRENT_TAG" --title "$CURRENT_TAG" --notes-file #{release-notes(tag = tag).path}
+  EOF
+}
+
+# The blocks CI runs.
+target ci = [release, test, fmt-check, clippy]
+
+# Default target: CI's blocks plus the Zed rev and workflow syncs.
+target default = [ci, sync-zed-rev, sync-ci]

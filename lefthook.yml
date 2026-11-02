@@ -7,12 +7,8 @@ pre-commit:
   jobs:
     - name: fmt
       stage_fixed: true
-      run: just fmt
+      run: bin/bit fmt
 pre-push:
-  parallel: true
   jobs:
-    - name: lint
-      run: just lint
-
-    - name: test
-      run: just test
+    - name: lint and test
+      run: bin/bit fmt-check clippy test
