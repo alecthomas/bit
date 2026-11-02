@@ -19,19 +19,24 @@
 pub mod backend;
 pub mod cas;
 pub mod disk;
+pub mod location;
 pub mod project;
 pub mod receipt;
+pub mod s3;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 
 pub use backend::{Backend, BackendError};
 pub use cas::{ArtifactRef, Cas, CasError};
 pub use disk::Disk;
+pub use location::{Location, LocationError};
 pub use project::PortablePaths;
 pub use receipt::{ActionKey, PublishOutcome, RECEIPT_VERSION, Receipt, ReceiptError};
+pub use s3::S3;
 
 use crate::sha256::SHA256;
 
@@ -45,6 +50,19 @@ pub enum CacheError {
     Backend(#[from] BackendError),
     #[error(transparent)]
     Cas(#[from] CasError),
+    /// A failure reaching or reading the remote cache rather than the disk.
+    #[error("remote cache: {0}")]
+    Remote(Box<CacheError>),
+}
+
+impl CacheError {
+    fn remote(e: impl Into<CacheError>) -> Self {
+        Self::Remote(Box::new(e.into()))
+    }
+
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Self::Remote(_))
+    }
 }
 
 /// Everything that determines whether one successful action can be reused.
@@ -75,97 +93,21 @@ impl ActionKeyInput<'_> {
     }
 }
 
-/// Environment variable overriding the shared cache location.
-pub const CACHE_DIR_ENV: &str = "BIT_CACHE_DIR";
-
-/// Directory holding the shared cache: `$BIT_CACHE_DIR` if set, otherwise
-/// `bit` under the platform cache directory.
-pub fn cache_root() -> Result<PathBuf, CacheError> {
-    if let Some(dir) = std::env::var_os(CACHE_DIR_ENV) {
-        return Ok(PathBuf::from(dir));
-    }
+/// `bit` under the platform cache directory: where the disk cache lives
+/// unless `disk://<path>` moves it, and where bit keeps other per-user
+/// state, such as executable hashes, wherever the cache is.
+pub fn default_dir() -> Result<PathBuf, CacheError> {
     Ok(dirs::cache_dir().ok_or(CacheError::NoCacheDir)?.join("bit"))
 }
 
-/// Size of the shared cache, for `bit --cache`.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct CacheStats {
-    pub receipts: usize,
-    pub receipt_bytes: u64,
-    pub blobs: usize,
-    pub blob_bytes: u64,
-}
-
-impl std::fmt::Display for CacheStats {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "receipts: {} ({})", self.receipts, human_bytes(self.receipt_bytes))?;
-        write!(f, "artifacts: {} ({})", self.blobs, human_bytes(self.blob_bytes))
-    }
-}
-
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-/// Count files and bytes under `dir`, treating a missing directory as empty.
-fn measure(dir: &Path) -> std::io::Result<(usize, u64)> {
-    let mut count = 0;
-    let mut bytes = 0;
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        };
-        for entry in entries {
-            let entry = entry?;
-            let meta = entry.metadata()?;
-            if meta.is_dir() {
-                pending.push(entry.path());
-            } else if meta.is_file() {
-                count += 1;
-                bytes += meta.len();
-            }
-        }
-    }
-    Ok((count, bytes))
-}
-
-/// Measure the shared cache under `cache_dir`.
-pub fn stats(cache_dir: &Path) -> std::io::Result<CacheStats> {
-    let (receipts, receipt_bytes) = measure(&cache_dir.join("actions"))?;
-    let (blobs, blob_bytes) = measure(&cache_dir.join("cas"))?;
-    Ok(CacheStats {
-        receipts,
-        receipt_bytes,
-        blobs,
-        blob_bytes,
+/// The backend `location` names. For an S3 location that is the bucket
+/// alone, not the disk cache that a build puts in front of it.
+pub fn backend(location: &Location) -> Result<Box<dyn Backend>, CacheError> {
+    Ok(match location {
+        Location::Disk(Some(dir)) => Box::new(Disk::new(dir)),
+        Location::Disk(None) => Box::new(Disk::new(&default_dir()?)),
+        Location::S3 { bucket, prefix, .. } => Box::new(S3::new(bucket, prefix)),
     })
-}
-
-/// Delete every receipt and artifact under `cache_dir`. Worktree-local state
-/// and the import cache, which share the directory, are left alone.
-pub fn clean(cache_dir: &Path) -> std::io::Result<()> {
-    for sub in ["actions", "cas"] {
-        match std::fs::remove_dir_all(cache_dir.join(sub)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
 }
 
 /// A cache behind the local disk cache, such as one shared by a team.
@@ -236,6 +178,9 @@ pub fn project_relative<'a>(root: &Path, s: &'a str) -> std::borrow::Cow<'a, str
 pub struct BuildCache {
     paths: PortablePaths,
     shared: Option<Shared>,
+    /// Set once the remote has failed, so a run reports that once rather
+    /// than for every block.
+    remote_failed: AtomicBool,
 }
 
 impl BuildCache {
@@ -244,6 +189,7 @@ impl BuildCache {
         Self {
             paths: PortablePaths::detect(root),
             shared: None,
+            remote_failed: AtomicBool::new(false),
         }
     }
 
@@ -251,9 +197,23 @@ impl BuildCache {
         &self.paths
     }
 
-    /// Open the shared cache under [`cache_root`].
-    pub fn open(root: &Path) -> Result<Self, CacheError> {
-        Ok(Self::open_at(root, &cache_root()?))
+    /// Open the cache at `location`: on disk, or on the default disk with an
+    /// S3 bucket behind it.
+    pub fn open(root: &Path, location: &Location) -> Result<Self, CacheError> {
+        Ok(match location {
+            Location::Disk(Some(dir)) => Self::open_at(root, dir),
+            Location::Disk(None) => Self::open_at(root, &default_dir()?),
+            Location::S3 { writable, .. } => {
+                Self::open_at(root, &default_dir()?).with_remote(Remote::new(backend(location)?, *writable))
+            }
+        })
+    }
+
+    /// Whether `error` is the first remote failure this run, which callers
+    /// report; later ones would only repeat it.
+    pub fn first_remote_failure(&self, error: &CacheError) -> bool {
+        // The flag orders nothing else; it only decides who reports.
+        error.is_remote() && !self.remote_failed.swap(true, Ordering::Relaxed)
     }
 
     /// Open the shared cache under an explicit cache directory.
@@ -298,7 +258,7 @@ impl BuildCache {
         let Some(remote) = &shared.remote else {
             return Ok(None);
         };
-        let variants = receipt::variants(remote.backend.as_ref(), key)?;
+        let variants = receipt::variants(remote.backend.as_ref(), key).map_err(CacheError::remote)?;
         let found = variants.iter().find(|r| usable(r)).cloned();
         for variant in &variants {
             let _ = receipt::publish(&shared.disk, key, variant);
@@ -324,11 +284,11 @@ impl BuildCache {
         };
         for artifact in artifacts {
             if let ArtifactRef::Tree { manifest, .. } = artifact {
-                shared.download(remote, manifest)?;
+                shared.download(remote, manifest).map_err(CacheError::remote)?;
             }
             if contents {
                 for digest in shared.disk.cas().blobs(artifact)? {
-                    shared.download(remote, &digest)?;
+                    shared.download(remote, &digest).map_err(CacheError::remote)?;
                 }
             }
         }
@@ -356,12 +316,16 @@ impl BuildCache {
         let cas = shared.disk.cas();
         for artifact in receipt.artifacts.values() {
             for digest in cas.blobs(artifact)? {
-                if !remote.backend.has_blob(&digest)? {
-                    remote.backend.put_blob(&digest, &cas.blob_path(&digest))?;
+                if !remote.backend.has_blob(&digest).map_err(CacheError::remote)? {
+                    remote
+                        .backend
+                        .put_blob(&digest, &cas.blob_path(&digest))
+                        .map_err(CacheError::remote)?;
                 }
             }
         }
-        Ok(Some(receipt::publish(remote.backend.as_ref(), key, receipt)?))
+        let outcome = receipt::publish(remote.backend.as_ref(), key, receipt).map_err(CacheError::remote)?;
+        Ok(Some(outcome))
     }
 
     /// The portable form of a path a provider reports; see
@@ -478,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn stats_and_clean_cover_receipts_and_blobs_only() {
+    fn clean_removes_receipts_and_blobs_only() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("proj");
         std::fs::create_dir_all(&root).unwrap();
@@ -486,8 +450,6 @@ mod tests {
         // Unrelated content sharing the cache directory must survive a clean.
         std::fs::create_dir_all(cache_dir.join("abc123")).unwrap();
         std::fs::write(cache_dir.join("abc123/state.json"), "{}").unwrap();
-
-        assert_eq!(stats(&cache_dir).unwrap(), CacheStats::default());
 
         let cache = BuildCache::open_at(&root, &cache_dir);
         let src = root.join("bin");
@@ -507,23 +469,29 @@ mod tests {
         let key = ActionKey::new(SHA256::digest(b"k"));
         cache.publish(&key, &receipt).unwrap();
 
-        let s = stats(&cache_dir).unwrap();
-        assert_eq!((s.receipts, s.blobs, s.blob_bytes), (1, 1, 6));
-        assert!(s.receipt_bytes > 0);
-        assert!(s.to_string().starts_with("receipts: 1 ("));
-
-        clean(&cache_dir).unwrap();
-        assert_eq!(stats(&cache_dir).unwrap(), CacheStats::default());
+        let disk = backend(&Location::Disk(Some(cache_dir.clone()))).unwrap();
+        disk.clean().unwrap();
+        assert!(!cache_dir.join("actions").exists());
+        assert!(!cache_dir.join("cas").exists());
         assert!(cache_dir.join("abc123/state.json").is_file());
-        clean(&cache_dir).unwrap();
+        disk.clean().unwrap();
     }
 
     #[test]
-    fn human_bytes_units() {
-        assert_eq!(human_bytes(0), "0 B");
-        assert_eq!(human_bytes(1023), "1023 B");
-        assert_eq!(human_bytes(1536), "1.5 KiB");
-        assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MiB");
+    fn a_remote_cache_is_never_cleaned() {
+        let s3 = backend(&"s3+rw://bucket/prefix".parse().unwrap()).unwrap();
+        assert!(matches!(s3.clean(), Err(BackendError::CannotClean)));
+    }
+
+    #[test]
+    fn only_the_first_remote_failure_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BuildCache::local_only(dir.path());
+        let remote = CacheError::remote(CasError::Missing(SHA256::digest(b"x")));
+        let local = CacheError::Cas(CasError::Missing(SHA256::digest(b"x")));
+        assert!(!cache.first_remote_failure(&local));
+        assert!(cache.first_remote_failure(&remote));
+        assert!(!cache.first_remote_failure(&remote));
     }
 
     #[test]
@@ -658,7 +626,10 @@ mod tests {
 
         let dev = m.cache("dev", false);
         let err = dev.fetch(receipt.artifacts.values(), true).unwrap_err();
-        assert!(matches!(err, CacheError::Cas(CasError::Corrupt { .. })), "{err}");
+        assert!(
+            matches!(&err, CacheError::Remote(inner) if matches!(**inner, CacheError::Cas(CasError::Corrupt { .. }))),
+            "{err}"
+        );
         assert!(!dev.cas().unwrap().contains(&digest));
     }
 
@@ -672,6 +643,9 @@ mod tests {
             mode: 0o644,
         });
         let err = dev.fetch([&missing], true).unwrap_err();
-        assert!(matches!(err, CacheError::Cas(CasError::Missing(_))), "{err}");
+        assert!(
+            matches!(&err, CacheError::Remote(inner) if matches!(**inner, CacheError::Cas(CasError::Missing(_)))),
+            "{err}"
+        );
     }
 }

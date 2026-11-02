@@ -112,6 +112,7 @@ dependencies = [
  "anyhow",
  "bigdecimal",
  "bit-derive",
+ "bit-s3",
  "clap",
  "console",
  "dashmap",

@@ -137,6 +137,15 @@ pub struct Message {
 }
 
 impl Message {
+    /// A message from bit itself rather than a command, such as a warning
+    /// that must stay visible after the block succeeds.
+    pub fn new(level: MessageLevel, text: impl Into<String>) -> Self {
+        Self {
+            level,
+            text: text.into(),
+        }
+    }
+
     /// Parse `::level[ params]::text`. GitHub parameters such as `file=` are
     /// accepted but ignored. Other lines, including commands bit doesn't
     /// handle such as `::group::`, return `None` and stay in the output.

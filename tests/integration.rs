@@ -960,7 +960,7 @@ fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
         let out = Command::new(env!("CARGO_BIN_EXE_bit"))
             .args(args)
             .current_dir(root)
-            .env("BIT_CACHE_DIR", cache)
+            .env("BIT_CACHE", format!("disk://{}", cache.display()))
             .env_remove("RUSTC_WORKSPACE_WRAPPER")
             .env_remove("RUSTC_WRAPPER")
             .output()
@@ -1027,34 +1027,41 @@ fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
 }
 
 #[test]
-fn cache_flag_reports_and_cleans_shared_cache() {
+fn cache_flag_with_clean_cleans_that_cache() {
     use std::process::Command;
     let tmp = tempfile::tempdir().unwrap();
     let cache = tmp.path().join("cache");
     fs::create_dir_all(cache.join("cas/v1/sha256/ab")).unwrap();
     fs::write(cache.join("cas/v1/sha256/ab/abcd"), b"blob").unwrap();
-    fs::create_dir_all(cache.join("actions/v1/p")).unwrap();
-    fs::write(cache.join("actions/v1/p/k.json"), b"{}").unwrap();
+    fs::create_dir_all(cache.join("actions/v2")).unwrap();
+    fs::write(cache.join("actions/v2/k.json"), b"[]").unwrap();
     fs::create_dir_all(cache.join("statehash")).unwrap();
     fs::write(cache.join("statehash/state.json"), b"{}").unwrap();
 
     let bit = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_bit"))
+        Command::new(env!("CARGO_BIN_EXE_bit"))
             .args(args)
             .current_dir(tmp.path())
-            .env("BIT_CACHE_DIR", &cache)
+            .env_remove("BIT_CACHE")
             .output()
-            .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        String::from_utf8_lossy(&out.stdout).into_owned()
+            .unwrap()
     };
-    let stats = bit(&["--cache"]);
-    assert!(stats.contains("receipts: 1 ("), "{stats}");
-    assert!(stats.contains("artifacts: 1 (4 B)"), "{stats}");
-
-    bit(&["--cache", "--clean"]);
+    let uri = format!("disk://{}", cache.display());
+    let out = bit(&["--cache", &uri, "--clean"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(!cache.join("cas").exists());
     assert!(!cache.join("actions").exists());
     assert!(cache.join("statehash/state.json").is_file(), "local state must survive");
-    assert!(bit(&["--cache"]).contains("artifacts: 0 (0 B)"));
+
+    let out = bit(&["--cache", "s3+rw://bucket/prefix", "--clean"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot clean s3+rw://bucket/prefix: bit does not clean this kind of cache"),
+        "{stderr}"
+    );
+
+    let out = bit(&["--cache", "ftp://host", "--plan"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not a cache URI"));
 }

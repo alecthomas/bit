@@ -13,6 +13,8 @@ pub enum BackendError {
     Cas(#[from] CasError),
     #[error("{0}")]
     Remote(Box<dyn std::error::Error + Send + Sync>),
+    #[error("bit does not clean this kind of cache")]
+    CannotClean,
 }
 
 /// Where cache objects are stored: the receipt set published under each
@@ -42,4 +44,11 @@ pub trait Backend: Send + Sync {
 
     /// Store the file at `src` as the blob for `digest`.
     fn put_blob(&self, digest: &SHA256, src: &Path) -> Result<(), BackendError>;
+
+    /// Delete every receipt and blob, for every project. By default a
+    /// backend refuses: a shared remote cache belongs to everyone who uses
+    /// it, and its own tools or expiry rules are the place to clear it.
+    fn clean(&self) -> Result<(), BackendError> {
+        Err(BackendError::CannotClean)
+    }
 }

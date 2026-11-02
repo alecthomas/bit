@@ -935,7 +935,7 @@ fn prepare_block(
             return Ok(prepared);
         }
         Err(e) => {
-            crate::debug!(writer, "cache lookup failed (key={}): {e}", short_hash(&key.digest()));
+            report_cache_error(writer, cache, "cache lookup failed", &e);
             return Ok(prepared);
         }
     };
@@ -943,7 +943,7 @@ fn prepare_block(
         return Ok(prepared);
     };
     if let Err(e) = cache.fetch(receipt.artifacts.values(), false) {
-        crate::debug!(writer, "cannot fetch the cached result: {e}");
+        report_cache_error(writer, cache, "cannot fetch the cached result", &e);
         return Ok(prepared);
     }
     let check = match node.resource.check_receipt(
@@ -1472,7 +1472,24 @@ fn publish_receipt(
         Ok(Some(PublishOutcome::Conflict)) => warn_conflict(writer, &key),
         Ok(Some(_)) => crate::debug!(writer, "uploaded receipt (key={})", short_hash(&key.digest())),
         Ok(None) => {}
+        Err(e) if e.is_remote() => report_cache_error(writer, cache, "could not publish to the remote cache", &e),
         Err(e) => writer.stderr_line(&format!("warning: could not publish to the remote cache: {e}")),
+    }
+}
+
+/// Report a failure of the remote cache as a warning the first time in a
+/// run, since every later block would only repeat it, and anything else in
+/// the debug log. A miss is the outcome either way, so the run continues.
+fn report_cache_error(writer: &BlockWriter, cache: &BuildCache, context: &str, error: &crate::cache::CacheError) {
+    if cache.first_remote_failure(error) {
+        // A message, unlike an output line, stays visible when the block
+        // succeeds, as it will: the block just runs instead.
+        writer.message(&crate::output::Message::new(
+            crate::output::MessageLevel::Warning,
+            format!("{context}: {error}; further remote cache failures this run are not shown"),
+        ));
+    } else {
+        crate::debug!(writer, "{context}: {error}");
     }
 }
 

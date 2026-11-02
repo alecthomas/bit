@@ -225,7 +225,7 @@ fn remap_wrapper() -> Option<&'static Path> {
         if remaps.is_empty() {
             return None;
         }
-        let dir = crate::cache::cache_root().ok()?.join("rustc-wrapper");
+        let dir = crate::cache::default_dir().ok()?.join("rustc-wrapper");
         let script = wrapper_script(&remaps);
         let path = dir.join(format!("{}.sh", SHA256::digest(script.as_bytes())));
         if path.is_file() {

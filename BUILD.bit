@@ -53,22 +53,31 @@ s3-server = docker.container {
   command = "serve s3 --auth-key test,testsecret --addr :8080 /"
 }
 
-# Test the S3 client, including against the server above. The credentials
-# and endpoint are set the way users set them, so the client resolves them
-# for real. An unknown profile keeps the user's own AWS configuration out,
-# and the client treats an empty variable as unset.
+# How tests reach the server above. The credentials and endpoint are set the
+# way users set them, so they are resolved for real. An unknown profile keeps
+# the user's own AWS configuration out, and an empty variable counts as unset.
+let s3_test_env = {
+  AWS_ACCESS_KEY_ID     = "test",
+  AWS_SECRET_ACCESS_KEY = "testsecret",
+  AWS_SESSION_TOKEN     = "",
+  AWS_PROFILE           = "bit-s3-test",
+  AWS_ENDPOINT_URL      = "http://127.0.0.1:19000",
+  AWS_ENDPOINT_URL_S3   = "",
+  BIT_S3_TEST_BUCKET    = "tmp"
+}
+
+# Test the S3 client, including against the server above.
 s3-test = rust.test {
   package = "bit-s3"
   depends_on = [s3-server]
-  env = {
-    AWS_ACCESS_KEY_ID     = "test",
-    AWS_SECRET_ACCESS_KEY = "testsecret",
-    AWS_SESSION_TOKEN     = "",
-    AWS_PROFILE           = "bit-s3-test",
-    AWS_ENDPOINT_URL      = "http://127.0.0.1:19000",
-    AWS_ENDPOINT_URL_S3   = "",
-    BIT_S3_TEST_BUCKET    = "tmp"
-  }
+  env = s3_test_env
+}
+
+# Test `bit --cache s3://…` end to end against the server above.
+s3-cache-test = rust.test {
+  flags = ["--test", "s3_cache"]
+  depends_on = [s3-server]
+  env = s3_test_env
 }
 
 # Demonstrate script messages at every level. The changing `resolve` output
@@ -234,7 +243,7 @@ explicit push-release-notes(tag: string = "") = exec {
 }
 
 # The blocks CI runs.
-target ci = [release, test, fmt-check, clippy, s3-test]
+target ci = [release, test, fmt-check, clippy, s3-test, s3-cache-test]
 
 # Default target: CI's blocks plus the Zed rev and workflow syncs.
 target default = [ci, sync-zed-rev, sync-ci]

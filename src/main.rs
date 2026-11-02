@@ -5,7 +5,7 @@ use std::sync::Arc;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use yansi::Paint;
 
-use bit::cache::BuildCache;
+use bit::cache::{BuildCache, Location};
 use bit::engine;
 use bit::file_tracker::FileTracker;
 use bit::loader;
@@ -105,10 +105,11 @@ struct Cli {
     #[arg(short = 'c', long)]
     clean: bool,
 
-    /// Show the shared build cache size; with --clean, delete every cached
-    /// receipt and artifact for all projects
-    #[arg(long)]
-    cache: bool,
+    /// Build cache to use: disk:// (default), disk://PATH, s3://BUCKET/PREFIX
+    /// (read-only), or s3+rw://BUCKET/PREFIX. Defaults to $BIT_CACHE. With
+    /// --clean, delete everything in it instead (disk only)
+    #[arg(long, value_name = "URI")]
+    cache: Option<String>,
 
     /// Force builds past change detection and cache; with --clean, continue past errors
     #[arg(short = 'f', long)]
@@ -348,40 +349,44 @@ fn load_module(
     (module, dag, base, store, selectors)
 }
 
-/// `bit --cache`: print the shared cache size, or with `--clean` delete it.
-fn manage_cache(clean: bool, quiet: bool) {
-    let root = match bit::cache::cache_root() {
-        Ok(root) => root,
+/// Variable naming the build cache when `--cache` does not.
+const CACHE_ENV: &str = "BIT_CACHE";
+
+/// The build cache `--cache` or `BIT_CACHE` names, or the default disk cache.
+fn cache_location(cli: &Cli) -> Location {
+    let uri = cli
+        .cache
+        .clone()
+        .or_else(|| std::env::var(CACHE_ENV).ok().filter(|v| !v.is_empty()));
+    match uri.map(|uri| uri.parse::<Location>()).transpose() {
+        Ok(location) => location.unwrap_or_default(),
         Err(e) => {
             eprintln!("{} {e}", "error:".red().bold());
             process::exit(1);
         }
-    };
-    let result = if clean {
-        bit::cache::clean(&root)
-    } else {
-        bit::cache::stats(&root).map(|stats| {
-            if !quiet {
-                println!("{}", root.display());
-                println!("{stats}");
-            }
-        })
-    };
-    if let Err(e) = result {
-        eprintln!("{} {e}", "error:".red().bold());
+    }
+}
+
+/// `bit --cache <uri> --clean`: delete everything in that cache, if its
+/// backend allows it.
+fn clean_cache(location: &Location) {
+    let cleaned = bit::cache::backend(location).and_then(|backend| Ok(backend.clean()?));
+    if let Err(e) = cleaned {
+        eprintln!("{} cannot clean {location}: {e}", "error:".red().bold());
         process::exit(1);
     }
 }
 
-/// Open the shared build cache for the project in the current directory.
-/// Failure to open it only disables sharing; builds still run locally.
-fn open_build_cache(quiet: bool) -> BuildCache {
+/// Open the build cache for the project in the current directory. A cache
+/// that cannot be opened only disables sharing; builds still run. A remote
+/// that turns out to be unreachable is reported when it is first used.
+fn open_build_cache(location: &Location, quiet: bool) -> BuildCache {
     let root = std::path::Path::new(".");
-    match BuildCache::open(root) {
+    match BuildCache::open(root, location) {
         Ok(cache) => cache,
         Err(e) => {
             if !quiet {
-                eprintln!("{} shared build cache unavailable: {e}", "warning:".yellow().bold());
+                eprintln!("{} build cache {location} unavailable: {e}", "warning:".yellow().bold());
             }
             BuildCache::local_only(root)
         }
@@ -469,7 +474,7 @@ enum SelectionMode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Apply,
-    Cache,
+    CleanCache,
     Ci,
     Clean,
     Dump,
@@ -485,14 +490,18 @@ enum Operation {
 impl Cli {
     /// Select once so mode-specific validation and dispatch cannot diverge.
     fn selected(&self) -> Option<Operation> {
+        // `--clean` cleans the cache only when `--cache` names one on the
+        // command line; a cache set in the environment never turns a block
+        // clean into deleting the cache.
+        let cleans_cache = self.clean && self.cache.is_some();
         let requested: Vec<_> = [
             self.schema.is_some().then_some(Operation::Schema),
             self.info.then_some(Operation::Info),
             self.update.then_some(Operation::Update),
-            self.cache.then_some(Operation::Cache),
+            cleans_cache.then_some(Operation::CleanCache),
             self.graph.then_some(Operation::Graph),
             self.plan.then_some(Operation::Plan),
-            self.clean.then_some(Operation::Clean),
+            (self.clean && !cleans_cache).then_some(Operation::Clean),
             (self.list > 0).then_some(Operation::List),
             self.dump.then_some(Operation::Dump),
             self.fmt.then_some(Operation::Fmt),
@@ -505,7 +514,6 @@ impl Cli {
         match requested.as_slice() {
             [] => Some(Operation::Apply),
             [operation] => Some(*operation),
-            [Operation::Cache, Operation::Clean] => Some(Operation::Cache),
             [Operation::Graph, Operation::Plan] => Some(Operation::Graph),
             _ => None,
         }
@@ -584,7 +592,7 @@ fn main() {
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     let Some(operation) = cli.selected() else {
         eprintln!(
-            "{} operation modes are mutually exclusive (except --plan --graph and --clean --cache)",
+            "{} operation modes are mutually exclusive (except --plan --graph)",
             "error:".red().bold()
         );
         process::exit(1);
@@ -592,7 +600,7 @@ fn main() {
 
     // Without a cache directory, executables are still fingerprinted, just
     // read on every run.
-    let tracker = match bit::cache::cache_root() {
+    let tracker = match bit::cache::default_dir() {
         Ok(root) => FileTracker::with_executable_cache(root.join("executable-hashes-v1.json")),
         Err(_) => FileTracker::new(),
     };
@@ -699,13 +707,14 @@ fn main() {
         return;
     }
 
-    // --cache operates on the global cache and needs no project.
-    if matches!(operation, Operation::Cache) {
+    // Cleaning a cache operates on the cache alone and needs no project.
+    let location = cache_location(&cli);
+    if matches!(operation, Operation::CleanCache) {
         if !cli.targets.is_empty() {
-            eprintln!("{} --cache does not accept targets", "error:".red().bold());
+            eprintln!("{} --cache --clean does not accept targets", "error:".red().bold());
             process::exit(1);
         }
-        manage_cache(cli.clean, cli.quiet);
+        clean_cache(&location);
         return;
     }
 
@@ -720,7 +729,7 @@ fn main() {
             process::exit(1);
         }
     };
-    let cache = open_build_cache(cli.quiet);
+    let cache = open_build_cache(&location, cli.quiet);
     let jobs = cli
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));

@@ -10,6 +10,7 @@ use crate::sha256::SHA256;
 /// The cache on local disk: one JSON file of receipts per action key, and a
 /// [`Cas`] of artifact blobs that providers restore files from directly.
 pub struct Disk {
+    dir: PathBuf,
     receipts: PathBuf,
     cas: Cas,
 }
@@ -18,6 +19,7 @@ impl Disk {
     /// The cache under `cache_dir`.
     pub fn new(cache_dir: &Path) -> Self {
         Self {
+            dir: cache_dir.to_owned(),
             receipts: cache_dir.join("actions").join("v2"),
             cas: Cas::new(cache_dir.join("cas").join("v1").join("sha256")),
         }
@@ -77,5 +79,19 @@ impl Backend for Disk {
             return Err(e.into());
         }
         Ok(self.cas.adopt(digest, &tmp)?)
+    }
+
+    /// Removes every layout version of receipts and blobs. Worktree-local
+    /// state and the import cache, which may share the directory, are left
+    /// alone.
+    fn clean(&self) -> Result<(), BackendError> {
+        for sub in ["actions", "cas"] {
+            match fs::remove_dir_all(self.dir.join(sub)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
     }
 }

@@ -13,7 +13,7 @@ fn run_bit_with_cache(project: &std::path::Path, cache: &std::path::Path, args: 
     Command::new(env!("CARGO_BIN_EXE_bit"))
         .args(args)
         .current_dir(project)
-        .env("BIT_CACHE_DIR", cache)
+        .env("BIT_CACHE", format!("disk://{}", cache.display()))
         .output()
         .expect("run bit")
 }
@@ -180,7 +180,7 @@ fn quiet_suppresses_success_output_across_modes() {
         vec!["-q", "--schema", "go"],
         vec!["-q", "--schema", "--json"],
         vec!["-q", "--update", "missing"],
-        vec!["-q", "--cache"],
+        vec!["-q", "--cache", "disk://elsewhere", "--clean"],
     ] {
         let output = run_bit_with_cache(project.path(), cache.path(), &args);
         assert!(

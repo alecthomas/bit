@@ -83,8 +83,8 @@ bit --schema --json  # group schemas by builtins, provider, or imported module
 bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock
 bit --fmt        # canonically format the project's BUILD.bit, preserving comments
 bit --fmt path/to/file.bit  # format a specified .bit file in place
-bit --cache      # show the size of the shared build cache
-bit --cache --clean  # delete every cached receipt and artifact
+bit --cache s3://bucket/prefix  # also use a remote build cache (or set BIT_CACHE)
+bit --cache disk:// --clean  # delete every cached receipt and artifact
 bit --long       # disable live scrolling regions and stream every output line
 bit --quiet      # suppress output unless an error occurs (also -q)
 bit --since origin/master  # apply blocks affected since the branch point
@@ -1401,7 +1401,24 @@ Checkouts share an entry when the action is the same in each, including the
 paths of its files relative to the repository root. Failed tests
 and lint runs are never shared. Restored files are independent copies, so
 editing or deleting one cannot affect the cache. `bit --clean` removes only
-the worktree's own outputs and state. `bit --cache` shows how much the
-shared cache holds and `bit --cache --clean` deletes all of it, for every
-project. It lives under `~/Library/Caches/bit` (or `~/.cache/bit` on Linux);
-set `BIT_CACHE_DIR` to relocate it.
+the worktree's own outputs and state.
+
+The cache lives under `~/Library/Caches/bit` (or `~/.cache/bit` on Linux).
+`--cache` or `BIT_CACHE` chooses another:
+
+- `disk:///path` keeps it in another directory.
+- `s3://bucket/prefix` also reads results from an S3 bucket, or any
+  S3-compatible service, so other machines such as CI can share them. The
+  local cache stays in front of it.
+- `s3+rw://bucket/prefix` also publishes results to the bucket. Anyone who can
+  write to the bucket decides what everyone else restores, so usually only CI
+  should.
+
+Credentials, region, and endpoint come from the usual `AWS_*` variables and
+`~/.aws` files, including `AWS_PROFILE`, `credential_process`, and
+`AWS_ENDPOINT_URL`. Grant `s3:ListBucket` as well as read access, or S3
+reports a result that isn't there as access denied rather than missing. If
+the bucket can't be reached, bit warns once and builds without it.
+
+`bit --cache <uri> --clean` deletes everything in that cache, for every
+project. bit does not delete S3 caches; use the bucket's expiry rules.

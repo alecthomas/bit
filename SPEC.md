@@ -637,7 +637,7 @@ This forms a Merkle tree over the DAG. A change in any leaf propagates up throug
 
 ### 8.1 Shared Build Cache
 
-Besides the per-project state, bit keeps a build cache shared across projects and git worktrees. It lives in `$BIT_CACHE_DIR`, or `<cache dir>/bit`, and has two parts:
+Besides the per-project state, bit keeps a build cache shared across projects and git worktrees. It lives in `<cache dir>/bit`, or where `--cache disk://<path>` or `BIT_CACHE` puts it, and has two parts:
 
 - **Receipts** at `actions/v2/<key>.json`, shared by all projects.
 - **Artifacts** in a content-addressed store at `cas/v1/sha256/`, shared by all projects.
@@ -668,7 +668,7 @@ The receipt's outputs and state are bound to the block. If binding fails, the bl
 
 After a successful apply, the engine captures the outputs with `capture_artifacts()` and publishes a receipt containing state, outputs, artifacts, and the content hash. Publishing is best-effort. A different receipt with the same recorded fingerprints is a conflict and produces a warning. Outputs listed in `uncached` are not stored. Failed tests are never published.
 
-A remote cache can sit behind the local one. A lookup that misses locally reads the remote's receipts and copies them to disk. Before checking a receipt, the engine copies any tree manifests it needs. Before restoring, it copies the artifact blobs, checking each against its digest. Planning never downloads artifact contents. Results are published to the remote only when it is writable, blobs before the receipt that references them.
+A remote cache can sit behind the local one. A lookup that misses locally reads the remote's receipts and copies them to disk. Before checking a receipt, the engine copies any tree manifests it needs. Before restoring, it copies the artifact blobs, checking each against its digest. Planning never downloads artifact contents. Results are published to the remote only when it is writable, blobs before the receipt that references them. A remote failure is a cache miss; the first in a run is shown as a warning message and later ones only in the debug log. An S3 remote stores objects under its prefix with the disk cache's layout.
 
 ## 9. Tests
 
@@ -920,12 +920,13 @@ Positional arguments name targets or blocks, followed by `name=value` target arg
 | `bit --schema [name]` | — | Show built-in functions and provider schemas |
 | `bit --update [repo...]` | — | Re-resolve git imports and rewrite `BUILD.bit.lock` |
 | `bit --fmt [file]` | — | Format `BUILD.bit`, or the named `.bit` file, in place |
-| `bit --cache` | — | Show the shared build cache size; with `--clean`, delete it |
+| `bit --cache <uri> --clean` | — | Delete everything in that build cache; disk only |
 | `bit --ci <template> [target...]` | — | Render a CI configuration for the selection from a template, built in (`github`) or a file path containing `/`, with each group of dependent `large` blocks in its own job |
 
 Modifiers:
 
 - `--force` (`-f`) — rebuild past change detection and the cache; with `--clean`, continue past errors.
+- `--cache <uri>` — the build cache, defaulting to `$BIT_CACHE`, then `disk://`: `disk://[path]`, `s3://bucket/prefix` (read-only), or `s3+rw://bucket/prefix`. With `--clean`, the cache is cleaned instead of blocks; a cache set only by `BIT_CACHE` never is.
 - `--since [ref]` — limit apply, plan, graph, dump, and block listing to blocks affected since `merge-base(ref, HEAD)`.
 - `-P key=value` — set a module parameter.
 - `-j N` — number of parallel jobs.
