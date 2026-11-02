@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "bit-derive"]
+members = [".", "bit-derive", "bit-s3"]
 
 [package]
 name = "bit"
