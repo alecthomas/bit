@@ -27,9 +27,9 @@ large test = rust.test {
   flags = ["--workspace"]
 }
 
-# Lint with clippy, treating warnings as errors.
+# Lint every crate in the workspace with clippy, treating warnings as errors.
 clippy = rust.clippy {
-  flags = ["--", "-D", "warnings"]
+  flags = ["--workspace", "--", "-D", "warnings"]
 }
 
 # End-to-end smoke test of the debug binary.
