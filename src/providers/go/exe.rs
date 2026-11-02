@@ -104,6 +104,15 @@ impl GoExeResource {
     /// [`GoExeResource::go_dir`].
     fn build_args(inputs: &GoExeInputs, output: &str) -> Vec<String> {
         let mut args = vec!["build".to_owned(), "-o".to_owned(), output.to_owned()];
+        // Otherwise the binary embeds the absolute path of the checkout that
+        // built it, and a copy the shared cache restores elsewhere names it.
+        let trimmed = inputs.flags.iter().any(|flag| {
+            let flag = flag.trim_start_matches('-');
+            flag == "trimpath" || flag.starts_with("trimpath=")
+        });
+        if !trimmed {
+            args.push("-trimpath".to_owned());
+        }
         args.extend(super::run_flags(&inputs.flags));
         args.push(inputs.package.clone());
         args
@@ -266,9 +275,9 @@ impl Resource for GoExeResource {
 
     /// Version 2 records the built binary under its project-relative path
     /// rather than a provider-defined role, so version 1 receipts are not
-    /// readable.
+    /// readable. Version 3 binaries are built with `-trimpath`.
     fn cache_policy(&self, _inputs: &Block<GoExeInputs>) -> CachePolicy {
-        CachePolicy::Shared { version: 2 }
+        CachePolicy::Shared { version: 3 }
     }
 
     fn output_keys(&self, inputs: &Block<GoExeInputs>) -> Vec<String> {
@@ -347,7 +356,7 @@ mod tests {
         );
         assert_eq!(
             Resource::cache_policy(&test_resource(), &inputs),
-            CachePolicy::Shared { version: 2 }
+            CachePolicy::Shared { version: 3 }
         );
     }
 
@@ -367,6 +376,23 @@ mod tests {
         let result = Resource::plan(&resource, &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "go build -o bin/app -trimpath ./cmd/app");
+    }
+
+    #[test]
+    fn builds_with_trimpath_unless_flags_set_it() {
+        let args = |flags: &[&str]| {
+            let inputs = GoExeInputs {
+                package: "./cmd/app".into(),
+                output: None,
+                flags: flags.iter().map(|flag| (*flag).to_owned()).collect(),
+                inputs: vec![],
+                env: GoEnv::default(),
+            };
+            GoExeResource::build_args(&inputs, "app").join(" ")
+        };
+        assert_eq!(args(&[]), "build -o app -trimpath ./cmd/app");
+        assert_eq!(args(&["-trimpath=false"]), "build -o app -trimpath=false ./cmd/app");
+        assert_eq!(args(&["--trimpath"]), "build -o app --trimpath ./cmd/app");
     }
 
     #[test]

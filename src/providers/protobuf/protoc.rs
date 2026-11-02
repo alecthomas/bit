@@ -255,7 +255,12 @@ impl Block<ProtocGenerateInputs> {
     fn hashes(&self, compilation: &Compilation, tracker: &FileTracker) -> Result<Hashes, BoxError> {
         Ok(Hashes {
             protos: tracker.hash_files(&compilation.graph.files())?,
-            tools: crate::providers::hash_ambient(&self.ambient(), tracker)?,
+            tools: crate::providers::hash_ambient(
+                &self.ambient(),
+                tracker,
+                // bit runs in the project root.
+                &crate::cache::PortablePaths::detect(Path::new(".")),
+            )?,
         })
     }
 

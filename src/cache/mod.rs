@@ -4,13 +4,14 @@
 //!
 //! - Worktree-local live state ([`crate::state`]) remains the authority for
 //!   planning, drift detection, and `--clean`.
-//! - A project-scoped action cache maps an [`ActionKey`] to an immutable
-//!   [`Receipt`] describing a successful action.
-//! - A global content-addressed store ([`Cas`]) holds the artifact bytes
-//!   those receipts reference, outside every worktree.
+//! - An action cache maps an [`ActionKey`] to immutable [`Receipt`]s
+//!   describing successful actions.
+//! - A content-addressed store ([`Cas`]) holds the artifact bytes those
+//!   receipts reference, outside every worktree.
 //!
-//! Path strings inside a project are rewritten to project-relative form
-//! before hashing so that keys and content hashes agree across worktrees.
+//! Both are global rather than per project: path strings are rewritten by
+//! [`PortablePaths`] before hashing, so a key is the same wherever the same
+//! action runs, and any checkout can reuse it.
 
 pub mod cas;
 pub mod project;
@@ -22,7 +23,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 pub use cas::{ArtifactRef, Cas, CasError};
-pub use project::ProjectIdentity;
+pub use project::PortablePaths;
 pub use receipt::{ActionKey, PublishOutcome, RECEIPT_VERSION, Receipt, ReceiptError, ReceiptStore};
 
 use crate::sha256::SHA256;
@@ -183,9 +184,7 @@ pub fn project_relative<'a>(root: &Path, s: &'a str) -> std::borrow::Cow<'a, str
 /// Always provides path normalization; receipt lookup and artifact storage
 /// are available only when opened with a shared backend.
 pub struct BuildCache {
-    /// Canonical project root. Providers that emit absolute paths (the Go
-    /// scanner) canonicalize them, so a plain prefix comparison suffices.
-    root: PathBuf,
+    paths: PortablePaths,
     shared: Option<Shared>,
 }
 
@@ -193,9 +192,13 @@ impl BuildCache {
     /// A cache that only normalizes paths and never shares results.
     pub fn local_only(root: &Path) -> Self {
         Self {
-            root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+            paths: PortablePaths::detect(root),
             shared: None,
         }
+    }
+
+    pub fn paths(&self) -> &PortablePaths {
+        &self.paths
     }
 
     /// Open the shared cache under [`cache_root`].
@@ -206,9 +209,8 @@ impl BuildCache {
     /// Open the shared cache under an explicit cache directory.
     pub fn open_at(root: &Path, cache_dir: &Path) -> Self {
         let mut cache = Self::local_only(root);
-        let identity = ProjectIdentity::detect(&cache.root);
         cache.shared = Some(Shared {
-            receipts: ReceiptStore::new(cache_dir.join("actions").join("v1").join(identity.id())),
+            receipts: ReceiptStore::new(cache_dir.join("actions").join("v2")),
             cas: Cas::new(cache_dir.join("cas").join("v1").join("sha256")),
         });
         cache
@@ -238,32 +240,41 @@ impl BuildCache {
         }
     }
 
-    /// Rewrite an absolute path inside the project root to a project-relative
-    /// one. Paths outside the project and non-path strings are returned as-is.
+    /// The portable form of a path a provider reports; see
+    /// [`PortablePaths::portable_path`].
     pub fn normalize_str<'a>(&self, s: &'a str) -> std::borrow::Cow<'a, str> {
-        project_relative(&self.root, s)
+        self.paths.portable_path(s)
     }
 
     /// Make a path [`BuildCache::normalize_str`] produced absolute again.
     pub fn absolute(&self, s: &str) -> PathBuf {
-        if s == "." { self.root.clone() } else { self.root.join(s) }
+        self.paths.absolute(s)
     }
 
-    /// Normalize every string in a JSON value.
+    /// Rewrite every absolute path in a JSON value. Relative strings are
+    /// left alone: they may not be paths at all.
     pub fn normalize_json(&self, value: serde_json::Value) -> serde_json::Value {
         use serde_json::Value;
         match value {
-            Value::String(s) => Value::String(self.normalize_str(&s).into_owned()),
+            Value::String(s) => Value::String(self.paths.portable(&s).into_owned()),
             Value::Array(items) => Value::Array(items.into_iter().map(|v| self.normalize_json(v)).collect()),
             Value::Object(map) => Value::Object(map.into_iter().map(|(k, v)| (k, self.normalize_json(v))).collect()),
             other => other,
         }
     }
 
-    /// Normalize the keys of a resolve map.
+    /// Normalize the path keys of a resolve map. Ambient fingerprint keys
+    /// are not paths and are kept as they are.
     pub fn normalize_keys(&self, map: &BTreeMap<String, SHA256>) -> BTreeMap<String, SHA256> {
         map.iter()
-            .map(|(k, v)| (self.normalize_str(k).into_owned(), *v))
+            .map(|(k, v)| {
+                let key = if crate::providers::is_ambient_key(k) {
+                    k.clone()
+                } else {
+                    self.normalize_str(k).into_owned()
+                };
+                (key, *v)
+            })
             .collect()
     }
 }
@@ -392,16 +403,17 @@ mod tests {
     }
 
     #[test]
-    fn open_at_creates_project_scoped_store() {
+    fn open_at_shares_one_store_between_projects() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("proj");
-        std::fs::create_dir_all(&root).unwrap();
-        let cache = BuildCache::open_at(&root, &dir.path().join("cache"));
-        assert!(cache.is_shared());
-        let expected = dir
-            .path()
-            .join("cache/actions/v1")
-            .join(ProjectIdentity::detect(&root).id());
-        assert_eq!(cache.receipts().unwrap().dir(), expected);
+        let cache_dir = dir.path().join("cache");
+        let receipts = |name: &str| {
+            let root = dir.path().join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            let cache = BuildCache::open_at(&root, &cache_dir);
+            assert!(cache.is_shared());
+            cache.receipts().unwrap().dir().to_path_buf()
+        };
+        assert_eq!(receipts("a"), cache_dir.join("actions/v2"));
+        assert_eq!(receipts("a"), receipts("b"));
     }
 }

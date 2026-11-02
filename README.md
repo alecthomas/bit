@@ -1337,8 +1337,8 @@ pass.
 ### Shared build cache
 
 Successful results of some resources are also recorded in a shared cache so
-that linked Git worktrees of the same repository can reuse them, even after
-the worktree that produced them has been deleted:
+that other checkouts can reuse them, even after the checkout that produced
+them has been deleted:
 
 - `rust.build`, `rust.test`, `rust.clippy`, `rust.fmt`, `rust.fmt-check`,
   `go.build`, `go.test`, `go.lint`, `go.fmt`, `go.fmt-l`, `buf.lint`,
@@ -1388,17 +1388,16 @@ block is considered up to date, only what is stored, so a worktree that reuses
 this result gets `dist/` and no `node_modules/`. Exclude an output when it is
 large and reproducible by other means, not when later blocks need it.
 
-So that Rust binaries built in different worktrees are interchangeable, bit
-compiles workspace crates with `--remap-path-prefix` rewriting the worktree
-root to the repository's main worktree. Panic locations and debug info
-therefore point at the main checkout rather than the worktree that happened
-to build them. bit applies this through Cargo's workspace wrapper, so
-`.cargo/config.toml` rustflags are untouched and dependencies are compiled
-exactly as before. Workspace crates themselves are recompiled when switching
-between bit and plain `cargo` commands in the same worktree.
+So that binaries built in different checkouts are interchangeable, they embed
+paths relative to the repository root, or to `~` outside it, rather than
+absolute ones. bit builds `go.exe` with `-trimpath` unless `flags` set it, and
+compiles Rust workspace crates with `--remap-path-prefix` through Cargo's
+workspace wrapper, so `.cargo/config.toml` rustflags are untouched and
+dependencies are compiled exactly as before. Workspace crates are recompiled
+when switching between bit and plain `cargo` commands in the same checkout.
 
-Only linked worktrees of one repository share entries, and only when the
-`BUILD.bit` sits at the same path relative to the worktree root. Failed tests
+Checkouts share an entry when the action is the same in each, including the
+paths of its files relative to the repository root. Failed tests
 and lint runs are never shared. Restored files are independent copies, so
 editing or deleting one cannot affect the cache. `bit --clean` removes only
 the worktree's own outputs and state. `bit --cache` shows how much the

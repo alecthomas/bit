@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::cache::{ActionKey, ActionKeyInput, BuildCache, PublishOutcome, RECEIPT_VERSION, Receipt};
+use crate::cache::{ActionKey, ActionKeyInput, BuildCache, PortablePaths, PublishOutcome, RECEIPT_VERSION, Receipt};
 use crate::dag::{
     self, AFTER_FIELD, CONCURRENCY_FIELD, DEPENDS_ON_FIELD, DIR_FIELD, Dag, DagError, DagNode, UNCACHED_FIELD,
 };
@@ -14,6 +14,7 @@ use crate::provider::{
     Ambient, ApplyResult, BoxError, CachePolicy, Changes, OutputFile, PlanAction, PlanResult, ReceiptCheck,
     ResourceKind,
 };
+use crate::providers::is_ambient_key;
 use crate::sha256::{Hasher, SHA256};
 use crate::state::{StateError, StateStore};
 use crate::value::{Map, Type, Value};
@@ -96,7 +97,15 @@ struct WrappedState {
     resolve_map: BTreeMap<String, SHA256>,
     #[serde(default)]
     dep_hashes: BTreeMap<String, SHA256>,
+    /// The [`KEY_FORMAT`] `resolve_map` keys and `input_hash` were written in.
+    #[serde(default)]
+    key_format: u32,
 }
+
+/// Version of the path form in [`WrappedState`]. Format 0 wrote paths
+/// relative to the project rather than the repository, so its keys name
+/// different files in a nested project.
+const KEY_FORMAT: u32 = 1;
 
 /// Extracted prior state fields.
 struct PriorState {
@@ -118,13 +127,21 @@ fn unwrap_state(stored: &serde_json::Value) -> PriorState {
         let dir = wrapped.state.get(DIR_FIELD).and_then(serde_json::Value::as_str);
         dir.map(str::to_owned)
     });
+    // Keys in an older format cannot be compared, and turning one back into
+    // a path would name the wrong file. Dropping them reports every input
+    // as changed, once.
+    let (input_hash, resolve_map) = if wrapped.key_format == KEY_FORMAT {
+        (wrapped.input_hash, wrapped.resolve_map)
+    } else {
+        (SHA256::ZERO, BTreeMap::new())
+    };
     PriorState {
         provider_state: Some(wrapped.state),
         outputs: wrapped.outputs,
         dir,
         content_hash: wrapped.content_hash,
-        input_hash: wrapped.input_hash,
-        resolve_map: wrapped.resolve_map,
+        input_hash,
+        resolve_map,
         dep_hashes: wrapped.dep_hashes,
     }
 }
@@ -156,8 +173,8 @@ fn default_prior() -> PriorState {
 }
 
 /// Hash the block's evaluated input fields in canonical (key-sorted) JSON
-/// form, with project-internal paths made project-relative so the hash
-/// agrees across worktrees.
+/// form, with absolute paths made portable so the hash agrees across
+/// checkouts.
 fn hash_inputs(inputs: &Map, cache: &BuildCache) -> SHA256 {
     let canonical = serde_json::to_value(inputs)
         .map(|v| cache.normalize_json(v))
@@ -398,7 +415,7 @@ pub fn affected_order(
                 if prior.provider_state.is_some() && hash_inputs(&inputs, cache) != prior.input_hash {
                     direct = true;
                 }
-                match resolve_sources(node, &inputs, tracker) {
+                match resolve_sources(node, &inputs, tracker, cache.paths()) {
                     Ok(resolved) => {
                         current = cache.normalize_keys(&resolved.hashes);
                         current.extend(resolved.recorded_hashes);
@@ -512,7 +529,7 @@ struct Prepared {
     content_hash: SHA256,
     changes: Changes,
     plan: PlanResult,
-    /// Declared outputs paired with their project-relative roles. Empty for
+    /// Declared outputs paired with their portable roles. Empty for
     /// resources the shared cache never consults.
     outputs: Vec<OutputFile>,
     /// The subset of `outputs` the shared cache stores and restores. Both an
@@ -537,9 +554,9 @@ impl Prepared {
     }
 }
 
-/// Pair each key a resource declares as an output with its project-relative
-/// form. The relative form is what a receipt records, so that a receipt
-/// written in one worktree is legible in every other; the key itself stays as
+/// Pair each key a resource declares as an output with its portable form.
+/// The portable form is what a receipt records, so that a receipt written in
+/// one checkout is legible in every other; the key itself stays as
 /// the destination, because that is the path this process can write.
 fn output_files(node: &DagNode, inputs: &Map, cache: &BuildCache) -> Result<Vec<OutputFile>, BoxError> {
     Ok(node
@@ -576,24 +593,22 @@ struct Sources {
 
 /// Whether every variable `receipt` recorded still has the value it had
 /// when the receipt was published.
-fn recorded_variables_match(receipt: &Receipt) -> bool {
+fn recorded_variables_match(receipt: &Receipt, paths: &PortablePaths) -> bool {
     receipt
         .variables
         .iter()
-        .all(|(name, fingerprint)| crate::providers::variable_fingerprint(name) == *fingerprint)
-}
-
-/// Whether a source key is an ambient fingerprint rather than a path.
-fn is_ambient_key(key: &str) -> bool {
-    crate::providers::AMBIENT_KEY_PREFIXES
-        .iter()
-        .any(|prefix| key.starts_with(prefix))
+        .all(|(name, fingerprint)| crate::providers::variable_fingerprint(name, paths) == *fingerprint)
 }
 
 /// The block's sources: the files its resource resolves and the ambient
 /// state it depends on, so a tool upgrade or changed variable is a source
 /// change like any other.
-fn resolve_sources(node: &DagNode, inputs: &Map, tracker: &FileTracker) -> Result<Sources, BoxError> {
+fn resolve_sources(
+    node: &DagNode,
+    inputs: &Map,
+    tracker: &FileTracker,
+    paths: &PortablePaths,
+) -> Result<Sources, BoxError> {
     // Resources lock the tracker themselves while resolving.
     let start = std::time::Instant::now();
     let mut hashes = node.resource.resolve(inputs)?;
@@ -613,7 +628,7 @@ fn resolve_sources(node: &DagNode, inputs: &Map, tracker: &FileTracker) -> Resul
             other => ambient.push(other),
         }
     }
-    let fingerprints = crate::providers::hash_ambient(&ambient, tracker)?;
+    let fingerprints = crate::providers::hash_ambient(&ambient, tracker, paths)?;
     crate::output::debug_current(|| {
         format!(
             "fingerprinted {} tool(s) and {} recorded variable(s) in {}ms",
@@ -624,7 +639,7 @@ fn resolve_sources(node: &DagNode, inputs: &Map, tracker: &FileTracker) -> Resul
     });
     hashes.extend(fingerprints);
     let as_variables: Vec<Ambient> = recorded.iter().cloned().map(Ambient::Variable).collect();
-    let recorded_hashes = crate::providers::hash_ambient(&as_variables, tracker)?;
+    let recorded_hashes = crate::providers::hash_ambient(&as_variables, tracker, paths)?;
     Ok(Sources {
         hashes,
         recorded,
@@ -639,7 +654,7 @@ fn resolve_hashes(
     cache: &BuildCache,
     tracker: &FileTracker,
 ) -> Result<ResolvedHashes, BoxError> {
-    let resolved = resolve_sources(node, inputs, tracker)?;
+    let resolved = resolve_sources(node, inputs, tracker, cache.paths())?;
     let sources = cache.normalize_keys(&resolved.hashes);
     let mut tracked = sources.clone();
     tracked.extend(resolved.recorded_hashes);
@@ -888,7 +903,7 @@ fn prepare_block(
     if previously_failed || has_dirty_dep {
         return Ok(prepared);
     }
-    let Some(receipt) = cache.lookup(&key, recorded_variables_match) else {
+    let Some(receipt) = cache.lookup(&key, |receipt| recorded_variables_match(receipt, cache.paths())) else {
         crate::debug!(writer, "cache miss (key={})", short_hash(&key.digest()));
         return Ok(prepared);
     };
@@ -1391,7 +1406,12 @@ fn publish_receipt(
             content_hash: post_hash,
             variables: recorded
                 .iter()
-                .map(|name| (name.clone(), crate::providers::variable_fingerprint(name)))
+                .map(|name| {
+                    (
+                        name.clone(),
+                        crate::providers::variable_fingerprint(name, cache.paths()),
+                    )
+                })
                 .collect(),
         };
         Ok((key, cache.publish(&key, &receipt)?))
@@ -1583,6 +1603,7 @@ fn execute_block(
             input_hash,
             resolve_map,
             dep_hashes,
+            key_format: KEY_FORMAT,
         };
         Some(serde_json::to_value(&wrapped).expect("serialize wrapped state"))
     } else {
@@ -3582,7 +3603,11 @@ lint[module] = go.lint {
         let receipt = h.only_receipt();
         assert_eq!(
             receipt.variables,
-            [("PATH".to_owned(), crate::providers::variable_fingerprint("PATH"))].into()
+            [(
+                "PATH".to_owned(),
+                crate::providers::variable_fingerprint("PATH", h.cache(&a).paths())
+            )]
+            .into()
         );
 
         let b = h.worktree("b");
@@ -3618,6 +3643,47 @@ lint[module] = go.lint {
             h.only_variants().len(),
             2,
             "the new value is published as another variant"
+        );
+    }
+
+    /// Keys hold repository-relative paths, so a separate clone, not just a
+    /// linked worktree, reuses a result.
+    #[test]
+    fn a_separate_clone_reuses_a_result() {
+        let h = Harness::new();
+        let a = h.worktree("a");
+        a.write_src("hello");
+        h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+
+        let other = h.base.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        git(&other, &["init", "-q"]);
+        let b = Worktree {
+            root: other.canonicalize().unwrap(),
+            store: MemoryStore::new(),
+        };
+        b.write_src("hello");
+        let plans = h.apply(&b, &b.block("app", "file", ""), 1).unwrap();
+        assert_eq!(plans[0].plan.action, PlanAction::Restore);
+        assert_eq!(h.applies(), 1);
+    }
+
+    #[test]
+    fn state_with_keys_in_an_older_format_reports_every_input_changed() {
+        let state = serde_json::json!({
+            "state": {},
+            "outputs": {},
+            "content_hash": SHA256::digest(b"c"),
+            "input_hash": SHA256::digest(b"i"),
+            "resolve_map": { "src/main.rs": SHA256::digest(b"m") },
+        });
+        let prior = unwrap_state(&state);
+        assert_eq!(prior.input_hash, SHA256::ZERO);
+        assert!(prior.resolve_map.is_empty());
+        assert_eq!(
+            prior.content_hash,
+            SHA256::digest(b"c"),
+            "an unchanged block still skips"
         );
     }
 

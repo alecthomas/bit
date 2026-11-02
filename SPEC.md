@@ -615,7 +615,7 @@ Each block's state includes a **content hash** computed by the engine:
 
 ```
 content_hash = sha256(
-  input_hash,   # sha256 of the block's evaluated fields as canonical JSON, paths project-relative
+  input_hash,   # sha256 of the block's evaluated fields as canonical JSON, paths rewritten as in §8.1
   resolve_map,  # sources, ambient fingerprints, and existing declared outputs (directories file by file)
   dep_hashes,   # name + content hash of each depends_on parent
 )
@@ -638,8 +638,10 @@ This forms a Merkle tree over the DAG. A change in any leaf propagates up throug
 
 Besides the per-project state, bit keeps a build cache shared across projects and git worktrees. It lives in `$BIT_CACHE_DIR`, or `<cache dir>/bit`, and has two parts:
 
-- **Receipts** at `actions/v1/<project-id>/<key>.json`. The project id combines the git common directory with the project's path inside the worktree, so linked worktrees share receipts. Outside git, it is the canonical project path.
+- **Receipts** at `actions/v2/<key>.json`, shared by all projects.
 - **Artifacts** in a content-addressed store at `cas/v1/sha256/`, shared by all projects.
+
+Before hashing, absolute paths in source keys, inputs, path-valued environment variables, and version output are rewritten: inside the repository relative to its root, otherwise under the home directory as `~/…`. Relative source keys are relative to the project root and are rewritten the same way. Other paths stay absolute. Outside git, the project root stands in for the repository root. A key is therefore the same in any checkout where the action is the same.
 
 The action key hashes:
 

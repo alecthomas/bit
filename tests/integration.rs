@@ -912,8 +912,9 @@ fn go_exe_restores_from_shared_cache_after_worktree_deleted() {
 
 /// End to end with the real binary: build a `rust.exe` block in linked
 /// worktree A, delete A, and confirm worktree B restores the binary from the
-/// shared cache without cargo compiling anything. The binary prints
-/// `file!()`, which must be the remapped main-worktree path.
+/// shared cache without cargo compiling anything. The binary prints the
+/// `file!()` of a file it includes by absolute path, which only the remap
+/// makes relative to the repository.
 #[test]
 fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
     use std::process::Command;
@@ -935,7 +936,12 @@ fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .unwrap();
-        fs::write(root.join("src/main.rs"), "fn main() { println!(\"{}\", file!()); }\n").unwrap();
+        fs::write(
+            root.join("src/main.rs"),
+            "include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/here.rs\"));\nfn main() { println!(\"{}\", here()); }\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/here.rs"), "fn here() -> &'static str { file!() }\n").unwrap();
         fs::write(root.join("BUILD.bit"), "app = rust.exe {}\n").unwrap();
         // The lockfile is an input. Without one the first build writes it,
         // so the key A publishes would differ from the one B looks up.
@@ -946,21 +952,6 @@ fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
             .status()
             .unwrap();
         assert!(status.success());
-    }
-    /// Whether any regular file under `dir` contains `needle`.
-    fn artifacts_contain(dir: &std::path::Path, needle: &[u8]) -> bool {
-        fn walk(dir: &std::path::Path, needle: &[u8]) -> bool {
-            let Ok(entries) = fs::read_dir(dir) else { return false };
-            entries.flatten().any(|e| {
-                let path = e.path();
-                if path.is_dir() {
-                    walk(&path, needle)
-                } else {
-                    fs::read(&path).is_ok_and(|bytes| bytes.windows(needle.len()).any(|w| w == needle))
-                }
-            })
-        }
-        walk(dir, needle)
     }
     fn bit(root: &std::path::Path, cache: &std::path::Path, args: &[&str]) -> std::process::Output {
         // When this suite itself runs under bit, cargo hands the
@@ -1012,14 +1003,7 @@ fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
     assert!(exe_a.is_file());
     assert_eq!(
         String::from_utf8_lossy(&Command::new(&exe_a).output().unwrap().stdout).trim(),
-        "src/main.rs"
-    );
-    // `--remap-path-prefix` rewrites the DWARF compilation directory from the
-    // worktree to the main repository path, which is otherwise unknown to
-    // cargo, so its presence in the build artifacts proves the flag applied.
-    assert!(
-        artifacts_contain(&a.join("target/debug"), repo.as_os_str().as_encoded_bytes()),
-        "build artifacts must embed the remapped main-worktree path"
+        "src/here.rs"
     );
     fs::remove_dir_all(&a).unwrap();
 
@@ -1038,7 +1022,7 @@ fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
     );
     assert_eq!(
         String::from_utf8_lossy(&Command::new(&exe_b).output().unwrap().stdout).trim(),
-        "src/main.rs"
+        "src/here.rs"
     );
 }
 

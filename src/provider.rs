@@ -123,8 +123,9 @@ pub type MaterializeResult<S, O> = Result<Option<ApplyResult<S, O>>, BoxError>;
 /// One file a resource declared as an output, in the two spellings the cache
 /// needs.
 ///
-/// `role` is the project-relative path the engine derived, and is what a
-/// receipt records: it is the same string in every worktree of a repository,
+/// `role` is the portable path the engine derived (see
+/// [`crate::cache::PortablePaths`]), and is what a receipt records: it is the
+/// same string in every checkout of a repository,
 /// so a receipt written by one is legible to the others. `path` is where that
 /// file lives for this process, which is what any filesystem access must use.
 /// The two differ whenever a block names an output by absolute path.
@@ -482,7 +483,7 @@ pub trait Resource {
     /// change detection, so a deleted output triggers a rebuild. Output hashes
     /// enter the shared action key only when `resolve` also names them as sources.
     ///
-    /// The engine also pairs each key with its project-relative form and
+    /// The engine also pairs each key with its portable form and
     /// hands the result to the cache methods below as [`OutputFile`]s, so
     /// these must be paths this process can read and write.
     ///

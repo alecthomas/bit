@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 
+use crate::cache::PortablePaths;
 use crate::file_tracker::FileTracker;
 use crate::output::{BlockWriter, Event};
 use crate::provider::{Ambient, BoxError, VersionCommand};
@@ -252,7 +253,15 @@ pub fn find_executable(program: &str) -> Option<PathBuf> {
 /// failing the block: running it fails anyway, and recording it means
 /// installing it later reruns the block. An unset variable is omitted, so
 /// setting it later is a new source.
-pub fn hash_ambient(ambient: &[Ambient], tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+///
+/// Values that are paths, a variable's or a line of version output such as
+/// `go env GOWORK` prints, are hashed in their [`PortablePaths`] form, so a
+/// checkout elsewhere agrees.
+pub fn hash_ambient(
+    ambient: &[Ambient],
+    tracker: &FileTracker,
+    paths: &PortablePaths,
+) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let mut hashes = BTreeMap::new();
     for item in ambient {
         match item {
@@ -260,7 +269,10 @@ pub fn hash_ambient(ambient: &[Ambient], tracker: &FileTracker) -> Result<BTreeM
                 let key = format!("version:{}", command.display());
                 let output = probe_tool(&command.probe_key(), || command.command());
                 let hash = match output {
-                    Ok(output) => SHA256::digest(output.as_bytes()),
+                    Ok(output) => {
+                        let lines: Vec<_> = output.lines().map(|line| paths.portable_value(line)).collect();
+                        SHA256::digest(lines.join("\n").as_bytes())
+                    }
                     Err(_) => SHA256::digest(b"unavailable"),
                 };
                 hashes.insert(key, hash);
@@ -275,13 +287,13 @@ pub fn hash_ambient(ambient: &[Ambient], tracker: &FileTracker) -> Result<BTreeM
             },
             Ambient::Variable(name) | Ambient::RecordedVariable(name) => {
                 if let Some(value) = std::env::var_os(name) {
-                    hashes.insert(format!("env:{name}"), SHA256::digest(value.as_encoded_bytes()));
+                    hashes.insert(format!("env:{name}"), hash_value(&value, paths));
                 }
             }
             Ambient::Variables(prefix) => {
                 for (name, value) in std::env::vars_os() {
                     if let Some(name) = name.to_str().filter(|name| name.starts_with(prefix.as_str())) {
-                        hashes.insert(format!("env:{name}"), SHA256::digest(value.as_encoded_bytes()));
+                        hashes.insert(format!("env:{name}"), hash_value(&value, paths));
                     }
                 }
             }
@@ -290,12 +302,21 @@ pub fn hash_ambient(ambient: &[Ambient], tracker: &FileTracker) -> Result<BTreeM
     Ok(hashes)
 }
 
-/// Fingerprint of one environment variable's current value. Unlike
-/// [`hash_ambient`], an unset variable has a fingerprint of its own, so a
-/// cached result recorded without it does not match once it is set.
-pub fn variable_fingerprint(name: &str) -> SHA256 {
+/// Hash an environment variable's value in its portable form.
+fn hash_value(value: &std::ffi::OsStr, paths: &PortablePaths) -> SHA256 {
+    match value.to_str() {
+        Some(value) => SHA256::digest(paths.portable_value(value).as_bytes()),
+        None => SHA256::digest(value.as_encoded_bytes()),
+    }
+}
+
+/// Fingerprint of one environment variable's current value, as
+/// [`hash_ambient`] hashes it. Unlike there, an unset variable has a
+/// fingerprint of its own, so a cached result recorded without it does not
+/// match once it is set.
+pub fn variable_fingerprint(name: &str, paths: &PortablePaths) -> SHA256 {
     match std::env::var_os(name) {
-        Some(value) => SHA256::digest(value.as_encoded_bytes()),
+        Some(value) => hash_value(&value, paths),
         // No value can contain a NUL byte, so this matches none of them.
         None => SHA256::digest(b"\0unset"),
     }
@@ -304,6 +325,11 @@ pub fn variable_fingerprint(name: &str) -> SHA256 {
 /// Prefixes of [`hash_ambient`] keys that are not paths. Git cannot report a
 /// change to them, so change detection compares them directly.
 pub const AMBIENT_KEY_PREFIXES: [&str; 3] = ["version:", "executable:", "env:"];
+
+/// Whether a source key is an ambient fingerprint rather than a path.
+pub fn is_ambient_key(key: &str) -> bool {
+    AMBIENT_KEY_PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+}
 
 /// A tool's version command, as an [`Ambient::Version`].
 pub(crate) fn version(program: &str, args: &[&str], dir: Option<&str>) -> Ambient {
@@ -492,14 +518,28 @@ mod tests {
         assert_eq!(find_executable(&format!("{tool}-missing")), None);
     }
 
+    /// Path rewriting for a project in a fresh directory outside any
+    /// repository, with the real home directory.
+    fn temp_paths() -> (tempfile::TempDir, PortablePaths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = PortablePaths::detect(dir.path());
+        (dir, paths)
+    }
+
+    /// The fingerprint `hash_ambient` gives a variable's current value.
+    fn portable_hash(value: &std::ffi::OsStr, paths: &PortablePaths) -> SHA256 {
+        SHA256::digest(paths.portable_value(value.to_str().unwrap()).as_bytes())
+    }
+
     #[test]
     fn variables_fingerprint_every_variable_with_the_prefix() {
-        let hashes = hash_ambient(&[Ambient::Variables("PATH".into())], &FileTracker::default()).unwrap();
+        let (_dir, paths) = temp_paths();
+        let hashes = hash_ambient(&[Ambient::Variables("PATH".into())], &FileTracker::default(), &paths).unwrap();
         let expected: BTreeMap<String, SHA256> = std::env::vars_os()
             .filter_map(|(name, value)| {
                 let name = name.into_string().ok()?;
                 name.starts_with("PATH")
-                    .then(|| (format!("env:{name}"), SHA256::digest(value.as_encoded_bytes())))
+                    .then(|| (format!("env:{name}"), portable_hash(&value, &paths)))
             })
             .collect();
         assert!(expected.contains_key("env:PATH"));
@@ -508,11 +548,31 @@ mod tests {
 
     #[test]
     fn an_unset_variable_has_a_fingerprint_distinct_from_any_value() {
+        let (_dir, paths) = temp_paths();
         let path = std::env::var_os("PATH").unwrap();
-        assert_eq!(variable_fingerprint("PATH"), SHA256::digest(path.as_encoded_bytes()));
-        let unset = variable_fingerprint("BIT_TEST_UNSET_VARIABLE");
+        assert_eq!(variable_fingerprint("PATH", &paths), portable_hash(&path, &paths));
+        let unset = variable_fingerprint("BIT_TEST_UNSET_VARIABLE", &paths);
         assert_ne!(unset, SHA256::digest(b""));
-        assert_ne!(unset, variable_fingerprint("PATH"));
+        assert_ne!(unset, variable_fingerprint("PATH", &paths));
+    }
+
+    /// `go env GOWORK`, for example, prints an absolute path that differs
+    /// between checkouts of one repository.
+    #[test]
+    fn paths_in_version_output_are_hashed_portably() {
+        let (a, a_paths) = temp_paths();
+        let (b, b_paths) = temp_paths();
+        let probe = |dir: &tempfile::TempDir, paths: &PortablePaths| {
+            let file = dir.path().canonicalize().unwrap().join("go.work");
+            let command = VersionCommand::new("echo", &[&format!("go1.25\n{}", file.display())]);
+            hash_ambient(&[command.ambient()], &FileTracker::default(), paths)
+                .unwrap()
+                .into_values()
+                .next()
+                .unwrap()
+        };
+        assert_eq!(probe(&a, &a_paths), SHA256::digest(b"go1.25\ngo.work"));
+        assert_eq!(probe(&a, &a_paths), probe(&b, &b_paths));
     }
 
     #[test]
@@ -529,7 +589,8 @@ mod tests {
             Ambient::Variable("PATH".into()),
             Ambient::Variable("BIT_TEST_UNSET_VARIABLE".into()),
         ];
-        let hashes = hash_ambient(&tools, &FileTracker::default()).unwrap();
+        let paths = PortablePaths::detect(dir.path());
+        let hashes = hash_ambient(&tools, &FileTracker::default(), &paths).unwrap();
         let path = std::env::var_os("PATH").unwrap();
         assert_eq!(
             hashes,
@@ -541,7 +602,7 @@ mod tests {
                     "version:bit-test-no-such-tool --version".into(),
                     SHA256::digest(b"unavailable")
                 ),
-                ("env:PATH".into(), SHA256::digest(path.as_encoded_bytes())),
+                ("env:PATH".into(), portable_hash(&path, &paths)),
             ])
         );
     }
