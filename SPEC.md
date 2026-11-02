@@ -667,6 +667,8 @@ The receipt's outputs and state are bound to the block. If binding fails, the bl
 
 After a successful apply, the engine captures the outputs with `capture_artifacts()` and publishes a receipt containing state, outputs, artifacts, and the content hash. Publishing is best-effort. A different receipt with the same recorded fingerprints is a conflict and produces a warning. Outputs listed in `uncached` are not stored. Failed tests are never published.
 
+A remote cache can sit behind the local one. A lookup that misses locally reads the remote's receipts and copies them to disk. Before checking a receipt, the engine copies any tree manifests it needs. Before restoring, it copies the artifact blobs, checking each against its digest. Planning never downloads artifact contents. Results are published to the remote only when it is writable, blobs before the receipt that references them.
+
 ## 9. Tests
 
 Tests are blocks whose resource has `kind = "test"`. There is no `test` keyword in the language.

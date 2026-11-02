@@ -903,13 +903,24 @@ fn prepare_block(
     if previously_failed || has_dirty_dep {
         return Ok(prepared);
     }
-    let Some(receipt) = cache.lookup(&key, |receipt| recorded_variables_match(receipt, cache.paths())) else {
-        crate::debug!(writer, "cache miss (key={})", short_hash(&key.digest()));
-        return Ok(prepared);
+    let receipt = match cache.lookup(&key, |receipt| recorded_variables_match(receipt, cache.paths())) {
+        Ok(Some(receipt)) => receipt,
+        Ok(None) => {
+            crate::debug!(writer, "cache miss (key={})", short_hash(&key.digest()));
+            return Ok(prepared);
+        }
+        Err(e) => {
+            crate::debug!(writer, "cache lookup failed (key={}): {e}", short_hash(&key.digest()));
+            return Ok(prepared);
+        }
     };
     let Some(cas) = cache.cas() else {
         return Ok(prepared);
     };
+    if let Err(e) = cache.fetch(receipt.artifacts.values(), false) {
+        crate::debug!(writer, "cannot fetch the cached result: {e}");
+        return Ok(prepared);
+    }
     let check = match node.resource.check_receipt(
         &prepared.inputs,
         &receipt.state,
@@ -1344,6 +1355,11 @@ fn bind_receipt(
     writer: &BlockWriter,
 ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
     let cas = cache.cas().ok_or("shared cache unavailable")?;
+    // A valid receipt's outputs are already in place, so only a restore
+    // needs the artifacts' contents.
+    if hit.check == ReceiptCheck::Restore {
+        cache.fetch(hit.receipt.artifacts.values(), true)?;
+    }
     let materialize = || {
         node.resource
             .materialize(inputs, &hit.receipt.state, outputs, &hit.receipt.artifacts, cas, writer)
@@ -1390,7 +1406,7 @@ fn publish_receipt(
     let Some(cas) = cache.cas() else {
         return;
     };
-    let attempt = || -> Result<(ActionKey, PublishOutcome), BoxError> {
+    let attempt = || -> Result<(ActionKey, Receipt, PublishOutcome), BoxError> {
         let artifacts = node
             .resource
             .capture_artifacts(&prepared.inputs, state, &prepared.cached_outputs, cas)?;
@@ -1414,20 +1430,33 @@ fn publish_receipt(
                 })
                 .collect(),
         };
-        Ok((key, cache.publish(&key, &receipt)?))
+        let outcome = cache.publish(&key, &receipt)?;
+        Ok((key, receipt, outcome))
     };
-    match attempt() {
-        Ok((key, PublishOutcome::Published)) => {
-            crate::debug!(writer, "published receipt (key={})", short_hash(&key.digest()));
+    let (key, receipt) = match attempt() {
+        Ok((key, _, PublishOutcome::Conflict)) => return warn_conflict(writer, &key),
+        Ok((key, receipt, outcome)) => {
+            if outcome == PublishOutcome::Published {
+                crate::debug!(writer, "published receipt (key={})", short_hash(&key.digest()));
+            }
+            (key, receipt)
         }
-        Ok((_, PublishOutcome::AlreadyPresent)) => {}
-        Ok((key, PublishOutcome::Conflict)) => writer.stderr_line(&format!(
-            "warning: a different receipt already exists for this action (key={}); keeping it. \
-             The action key may be missing an input the result depends on.",
-            short_hash(&key.digest())
-        )),
-        Err(e) => writer.stderr_line(&format!("warning: could not publish to the shared cache: {e}")),
+        Err(e) => return writer.stderr_line(&format!("warning: could not publish to the shared cache: {e}")),
+    };
+    match cache.upload(&key, &receipt) {
+        Ok(Some(PublishOutcome::Conflict)) => warn_conflict(writer, &key),
+        Ok(Some(_)) => crate::debug!(writer, "uploaded receipt (key={})", short_hash(&key.digest())),
+        Ok(None) => {}
+        Err(e) => writer.stderr_line(&format!("warning: could not publish to the remote cache: {e}")),
     }
+}
+
+fn warn_conflict(writer: &BlockWriter, key: &ActionKey) {
+    writer.stderr_line(&format!(
+        "warning: a different receipt already exists for this action (key={}); keeping it. \
+         The action key may be missing an input the result depends on.",
+        short_hash(&key.digest())
+    ));
 }
 
 /// Execute a single block: evaluate fields, plan, restore or apply if
@@ -3517,18 +3546,19 @@ lint[module] = go.lint {
         }
 
         fn apply(&self, wt: &Worktree, input: &str, jobs: usize) -> Result<Vec<BlockPlan>, EngineError> {
+            self.apply_with(wt, input, jobs, &self.cache(wt))
+        }
+
+        fn apply_with(
+            &self,
+            wt: &Worktree,
+            input: &str,
+            jobs: usize,
+            cache: &BuildCache,
+        ) -> Result<Vec<BlockPlan>, EngineError> {
             let (mut dag, base, tracker) = self.load(wt, input);
             let output = Output::new(&[]);
-            apply(
-                &mut dag,
-                &base,
-                &wt.store,
-                &self.cache(wt),
-                &output,
-                &[],
-                jobs,
-                &tracker,
-            )
+            apply(&mut dag, &base, &wt.store, cache, &output, &[], jobs, &tracker)
         }
 
         fn plan(&self, wt: &Worktree, input: &str) -> Vec<BlockPlan> {
@@ -3685,6 +3715,32 @@ lint[module] = go.lint {
             SHA256::digest(b"c"),
             "an unchanged block still skips"
         );
+    }
+
+    /// A result built on one machine reaches another through a remote
+    /// cache, whose disk cache starts empty.
+    #[test]
+    fn restores_a_result_another_machine_uploaded() {
+        use crate::cache::{Disk, Remote};
+        let h = Harness::new();
+        let machine = |name: &str, wt: &Worktree, writable: bool| {
+            let remote = Disk::new(&h.base.join("remote"));
+            BuildCache::open_at(&wt.root, &h.base.join(name)).with_remote(Remote::new(Box::new(remote), writable))
+        };
+
+        let a = h.worktree("a");
+        a.write_src("hello");
+        h.apply_with(&a, &a.block("app", "file", ""), 1, &machine("ci", &a, true))
+            .unwrap();
+        a.delete();
+
+        let b = h.worktree("b");
+        b.write_src("hello");
+        let dev = machine("dev", &b, false);
+        let plans = h.apply_with(&b, &b.block("app", "file", ""), 1, &dev).unwrap();
+        assert_eq!(plans[0].plan.action, PlanAction::Restore);
+        assert_eq!(h.applies(), 1, "provider must not run on a remote hit");
+        assert_eq!(std::fs::read_to_string(b.out()).unwrap(), "hello");
     }
 
     #[test]

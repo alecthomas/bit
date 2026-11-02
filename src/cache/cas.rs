@@ -120,7 +120,7 @@ impl Cas {
         Self { root: root.into() }
     }
 
-    fn blob_path(&self, digest: &SHA256) -> PathBuf {
+    pub(super) fn blob_path(&self, digest: &SHA256) -> PathBuf {
         let hex = digest.to_string();
         self.root.join(&hex[..2]).join(hex)
     }
@@ -143,9 +143,7 @@ impl Cas {
 
         // Hash the copy rather than the source so the digest describes the
         // bytes that were actually stored.
-        let staging = self.root.join("tmp");
-        fs::create_dir_all(&staging)?;
-        let tmp = staging.join(format!("put.{}.{}", std::process::id(), unique_suffix()));
+        let tmp = self.staging_file()?;
         let result = copy_and_hash(src, &tmp);
         let (digest, size) = match result {
             Ok(v) => v,
@@ -154,28 +152,86 @@ impl Cas {
                 return Err(e);
             }
         };
+        self.publish(&tmp, &digest)?;
+        Ok(FileRef { digest, size, mode })
+    }
 
-        let dest = self.blob_path(&digest);
-        if dest.is_file() {
-            let _ = fs::remove_file(&tmp);
-            return Ok(FileRef { digest, size, mode });
-        }
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o444))?;
-        match fs::rename(&tmp, &dest) {
-            Ok(()) => {}
-            // Lost the race; another writer published the same digest.
-            Err(_) if dest.is_file() => {
-                let _ = fs::remove_file(&tmp);
-            }
+    /// A fresh path in the store's staging directory, on the same
+    /// filesystem as the blobs so a file there can be renamed into place.
+    pub fn staging_file(&self) -> Result<PathBuf, CasError> {
+        let staging = self.root.join("tmp");
+        fs::create_dir_all(&staging)?;
+        Ok(staging.join(format!("put.{}.{}", std::process::id(), unique_suffix())))
+    }
+
+    /// Move `tmp`, a file in [`Cas::staging_file`], into the store as the
+    /// blob for `expected`, such as one downloaded from a remote backend.
+    /// Its content is hashed first, so a corrupt or truncated download is
+    /// rejected rather than published.
+    pub fn adopt(&self, expected: &SHA256, tmp: &Path) -> Result<(), CasError> {
+        let actual = match hash_path(tmp) {
+            Ok(actual) => actual,
             Err(e) => {
-                let _ = fs::remove_file(&tmp);
+                let _ = fs::remove_file(tmp);
                 return Err(e.into());
             }
+        };
+        if actual != *expected {
+            let _ = fs::remove_file(tmp);
+            return Err(CasError::Corrupt {
+                expected: *expected,
+                actual,
+            });
         }
-        Ok(FileRef { digest, size, mode })
+        self.publish(tmp, expected)
+    }
+
+    /// Rename `tmp`, whose content hashes to `digest`, into place. Blobs
+    /// are immutable, so if one is already there `tmp` is discarded.
+    fn publish(&self, tmp: &Path, digest: &SHA256) -> Result<(), CasError> {
+        let dest = self.blob_path(digest);
+        if dest.is_file() {
+            let _ = fs::remove_file(tmp);
+            return Ok(());
+        }
+        let renamed = dest
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::set_permissions(tmp, fs::Permissions::from_mode(0o444)))
+            .and_then(|()| fs::rename(tmp, &dest));
+        match renamed {
+            Ok(()) => Ok(()),
+            // Lost the race; another writer published the same digest.
+            Err(_) if dest.is_file() => {
+                let _ = fs::remove_file(tmp);
+                Ok(())
+            }
+            Err(e) => {
+                let _ = fs::remove_file(tmp);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Every blob `artifact` needs: a file's own, or a tree's manifest and
+    /// the files it lists. A tree's manifest must already be in the store.
+    pub fn blobs(&self, artifact: &ArtifactRef) -> Result<Vec<SHA256>, CasError> {
+        match artifact {
+            ArtifactRef::File(file) => Ok(vec![file.digest]),
+            ArtifactRef::Tree { manifest, .. } => {
+                let mut blobs = vec![*manifest];
+                blobs.extend(
+                    self.read_manifest(manifest)?
+                        .entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            TreeEntry::File { file, .. } => Some(file.digest),
+                            TreeEntry::Dir { .. } => None,
+                        }),
+                );
+                Ok(blobs)
+            }
+        }
     }
 
     /// Capture the directory at `src` as a tree: every file beneath it

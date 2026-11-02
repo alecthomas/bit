@@ -12,8 +12,13 @@
 //! Both are global rather than per project: path strings are rewritten by
 //! [`PortablePaths`] before hashing, so a key is the same wherever the same
 //! action runs, and any checkout can reuse it.
+//!
+//! Both live on local [`Disk`], and optionally also in a [`Remote`] behind
+//! it; see [`Backend`].
 
+pub mod backend;
 pub mod cas;
+pub mod disk;
 pub mod project;
 pub mod receipt;
 
@@ -22,9 +27,11 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+pub use backend::{Backend, BackendError};
 pub use cas::{ArtifactRef, Cas, CasError};
+pub use disk::Disk;
 pub use project::PortablePaths;
-pub use receipt::{ActionKey, PublishOutcome, RECEIPT_VERSION, Receipt, ReceiptError, ReceiptStore};
+pub use receipt::{ActionKey, PublishOutcome, RECEIPT_VERSION, Receipt, ReceiptError};
 
 use crate::sha256::SHA256;
 
@@ -34,6 +41,10 @@ pub enum CacheError {
     NoCacheDir,
     #[error(transparent)]
     Receipt(#[from] ReceiptError),
+    #[error(transparent)]
+    Backend(#[from] BackendError),
+    #[error(transparent)]
+    Cas(#[from] CasError),
 }
 
 /// Everything that determines whether one successful action can be reused.
@@ -157,9 +168,48 @@ pub fn clean(cache_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A cache behind the local disk cache, such as one shared by a team.
+pub struct Remote {
+    backend: Box<dyn Backend>,
+    /// Whether results published locally are also published here. Anyone
+    /// who can write to a cache decides what every reader restores, so a
+    /// remote is only written when configured to be.
+    writable: bool,
+}
+
+impl Remote {
+    pub fn new(backend: Box<dyn Backend>, writable: bool) -> Self {
+        Self { backend, writable }
+    }
+}
+
 struct Shared {
-    receipts: ReceiptStore,
-    cas: Cas,
+    disk: Disk,
+    remote: Option<Remote>,
+}
+
+impl Shared {
+    /// Copy the blob for `digest` from `remote` to disk unless it is there
+    /// already. The download is checked against the digest before it is
+    /// published, so a corrupt one is rejected.
+    fn download(&self, remote: &Remote, digest: &SHA256) -> Result<(), CacheError> {
+        let cas = self.disk.cas();
+        if cas.contains(digest) {
+            return Ok(());
+        }
+        let tmp = cas.staging_file()?;
+        match remote.backend.get_blob(digest, &tmp) {
+            Ok(true) => Ok(cas.adopt(digest, &tmp)?),
+            Ok(false) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(CasError::Missing(*digest).into())
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e.into())
+            }
+        }
+    }
 }
 
 /// Rewrite an absolute path inside `root` to one relative to it, with `root`
@@ -210,34 +260,108 @@ impl BuildCache {
     pub fn open_at(root: &Path, cache_dir: &Path) -> Self {
         let mut cache = Self::local_only(root);
         cache.shared = Some(Shared {
-            receipts: ReceiptStore::new(cache_dir.join("actions").join("v2")),
-            cas: Cas::new(cache_dir.join("cas").join("v1").join("sha256")),
+            disk: Disk::new(cache_dir),
+            remote: None,
         });
         cache
+    }
+
+    /// Put `remote` behind the disk cache. A cache that never shares
+    /// results ignores it.
+    pub fn with_remote(mut self, remote: Remote) -> Self {
+        if let Some(shared) = &mut self.shared {
+            shared.remote = Some(remote);
+        }
+        self
     }
 
     pub fn is_shared(&self) -> bool {
         self.shared.is_some()
     }
 
+    /// The local artifact store providers restore files from.
     pub fn cas(&self) -> Option<&Cas> {
-        self.shared.as_ref().map(|s| &s.cas)
+        self.shared.as_ref().map(|s| s.disk.cas())
     }
 
-    pub fn receipts(&self) -> Option<&ReceiptStore> {
-        self.shared.as_ref().map(|s| &s.receipts)
+    /// The first receipt under `key` that `usable` accepts, from disk or
+    /// else from the remote. The remote's receipts are copied to disk, so
+    /// the next lookup is local; failing to copy them only costs another
+    /// remote lookup.
+    pub fn lookup(&self, key: &ActionKey, usable: impl Fn(&Receipt) -> bool) -> Result<Option<Receipt>, CacheError> {
+        let Some(shared) = &self.shared else {
+            return Ok(None);
+        };
+        if let Some(receipt) = receipt::load(&shared.disk, key, &usable)? {
+            return Ok(Some(receipt));
+        }
+        let Some(remote) = &shared.remote else {
+            return Ok(None);
+        };
+        let variants = receipt::variants(remote.backend.as_ref(), key)?;
+        let found = variants.iter().find(|r| usable(r)).cloned();
+        for variant in &variants {
+            let _ = receipt::publish(&shared.disk, key, variant);
+        }
+        Ok(found)
     }
 
-    /// The first receipt under `key` that `usable` accepts.
-    pub fn lookup(&self, key: &ActionKey, usable: impl Fn(&Receipt) -> bool) -> Option<Receipt> {
-        self.receipts()?.load(key, usable)
+    /// Copy the blobs `artifacts` need from the remote to disk, where
+    /// providers restore them from. A tree's manifest is always copied,
+    /// because checking a receipt reads it; with `contents`, so are the
+    /// files themselves, which only restoring needs, so planning never
+    /// downloads them.
+    pub fn fetch<'a>(
+        &self,
+        artifacts: impl IntoIterator<Item = &'a ArtifactRef>,
+        contents: bool,
+    ) -> Result<(), CacheError> {
+        let Some(shared) = &self.shared else {
+            return Ok(());
+        };
+        let Some(remote) = &shared.remote else {
+            return Ok(());
+        };
+        for artifact in artifacts {
+            if let ArtifactRef::Tree { manifest, .. } = artifact {
+                shared.download(remote, manifest)?;
+            }
+            if contents {
+                for digest in shared.disk.cas().blobs(artifact)? {
+                    shared.download(remote, &digest)?;
+                }
+            }
+        }
+        Ok(())
     }
 
+    /// Publish `receipt` to disk. See [`BuildCache::upload`] for the remote.
     pub fn publish(&self, key: &ActionKey, receipt: &Receipt) -> Result<PublishOutcome, CacheError> {
-        match self.receipts() {
-            Some(store) => Ok(store.publish(key, receipt)?),
+        match &self.shared {
+            Some(shared) => Ok(receipt::publish(&shared.disk, key, receipt)?),
             None => Ok(PublishOutcome::Published),
         }
+    }
+
+    /// Publish `receipt`, already published to disk, to a writable remote:
+    /// its blobs first, so the remote never holds a receipt whose
+    /// artifacts it lacks. Returns `None` when there is no writable remote.
+    pub fn upload(&self, key: &ActionKey, receipt: &Receipt) -> Result<Option<PublishOutcome>, CacheError> {
+        let Some(shared) = &self.shared else {
+            return Ok(None);
+        };
+        let Some(remote) = shared.remote.as_ref().filter(|remote| remote.writable) else {
+            return Ok(None);
+        };
+        let cas = shared.disk.cas();
+        for artifact in receipt.artifacts.values() {
+            for digest in cas.blobs(artifact)? {
+                if !remote.backend.has_blob(&digest)? {
+                    remote.backend.put_blob(&digest, &cas.blob_path(&digest))?;
+                }
+            }
+        }
+        Ok(Some(receipt::publish(remote.backend.as_ref(), key, receipt)?))
     }
 
     /// The portable form of a path a provider reports; see
@@ -411,9 +535,143 @@ mod tests {
             std::fs::create_dir_all(&root).unwrap();
             let cache = BuildCache::open_at(&root, &cache_dir);
             assert!(cache.is_shared());
-            cache.receipts().unwrap().dir().to_path_buf()
+            cache.shared.unwrap().disk.receipts_dir().to_path_buf()
         };
         assert_eq!(receipts("a"), cache_dir.join("actions/v2"));
         assert_eq!(receipts("a"), receipts("b"));
+    }
+
+    fn receipt_with(artifacts: BTreeMap<String, ArtifactRef>) -> Receipt {
+        Receipt {
+            version: RECEIPT_VERSION,
+            provider: "p".into(),
+            resource: "r".into(),
+            cache_version: 1,
+            state: serde_json::Value::Null,
+            outputs: crate::value::Map::new(),
+            artifacts,
+            content_hash: SHA256::digest(b"x"),
+            variables: BTreeMap::new(),
+        }
+    }
+
+    /// Two machines' caches, each with its own disk, in front of one remote
+    /// that a third directory stands in for.
+    struct Machines {
+        dir: tempfile::TempDir,
+    }
+
+    impl Machines {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("proj")).unwrap();
+            Self { dir }
+        }
+
+        fn cache(&self, machine: &str, writable: bool) -> BuildCache {
+            let remote = Disk::new(&self.dir.path().join("remote"));
+            BuildCache::open_at(&self.dir.path().join("proj"), &self.dir.path().join(machine))
+                .with_remote(Remote::new(Box::new(remote), writable))
+        }
+
+        fn remote(&self) -> Disk {
+            Disk::new(&self.dir.path().join("remote"))
+        }
+
+        fn write(&self, rel: &str, contents: &str) -> PathBuf {
+            let path = self.dir.path().join("proj").join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    fn any(_: &Receipt) -> bool {
+        true
+    }
+
+    #[test]
+    fn a_result_uploaded_from_one_machine_is_used_on_another() {
+        let m = Machines::new();
+        let ci = m.cache("ci", true);
+        let exe = ci.cas().unwrap().put_file(&m.write("bin", "binary")).unwrap();
+        m.write("dist/index.js", "main");
+        let dist = ci.cas().unwrap().put_tree(&m.dir.path().join("proj/dist")).unwrap();
+        let receipt = receipt_with([("exe".to_owned(), exe.clone()), ("dist".to_owned(), dist.clone())].into());
+        let key = ActionKey::new(SHA256::digest(b"k"));
+        ci.publish(&key, &receipt).unwrap();
+        assert_eq!(ci.upload(&key, &receipt).unwrap(), Some(PublishOutcome::Published));
+
+        let dev = m.cache("dev", false);
+        assert_eq!(dev.lookup(&key, any).unwrap(), Some(receipt.clone()));
+        let dev_cas = dev.cas().unwrap();
+        let ArtifactRef::Tree { manifest, .. } = &dist else {
+            unreachable!()
+        };
+
+        dev.fetch(receipt.artifacts.values(), false).unwrap();
+        assert!(dev_cas.contains(manifest), "checking a receipt needs the manifest");
+        assert!(
+            !dev_cas.contains(&exe.file().unwrap().digest),
+            "planning downloads no contents"
+        );
+
+        dev.fetch(receipt.artifacts.values(), true).unwrap();
+        for artifact in receipt.artifacts.values() {
+            for digest in dev_cas.blobs(artifact).unwrap() {
+                assert!(dev_cas.contains(&digest));
+            }
+        }
+
+        // The receipt was copied to disk, so the remote is no longer needed.
+        let offline = BuildCache::open_at(&m.dir.path().join("proj"), &m.dir.path().join("dev"));
+        assert_eq!(offline.lookup(&key, any).unwrap(), Some(receipt));
+    }
+
+    #[test]
+    fn a_read_only_remote_is_never_written() {
+        let m = Machines::new();
+        let dev = m.cache("dev", false);
+        let exe = dev.cas().unwrap().put_file(&m.write("bin", "binary")).unwrap();
+        let receipt = receipt_with([("exe".to_owned(), exe.clone())].into());
+        let key = ActionKey::new(SHA256::digest(b"k"));
+        dev.publish(&key, &receipt).unwrap();
+
+        assert_eq!(dev.upload(&key, &receipt).unwrap(), None);
+        assert!(m.remote().get_receipts(&key).unwrap().is_none());
+        assert!(!m.remote().has_blob(&exe.file().unwrap().digest).unwrap());
+    }
+
+    #[test]
+    fn a_corrupt_remote_blob_is_rejected() {
+        let m = Machines::new();
+        let ci = m.cache("ci", true);
+        let exe = ci.cas().unwrap().put_file(&m.write("bin", "binary")).unwrap();
+        let receipt = receipt_with([("exe".to_owned(), exe.clone())].into());
+        let key = ActionKey::new(SHA256::digest(b"k"));
+        ci.publish(&key, &receipt).unwrap();
+        ci.upload(&key, &receipt).unwrap();
+        let digest = exe.file().unwrap().digest;
+        let blob = m.remote().cas().blob_path(&digest);
+        std::fs::set_permissions(&blob, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+        std::fs::write(&blob, "tampered").unwrap();
+
+        let dev = m.cache("dev", false);
+        let err = dev.fetch(receipt.artifacts.values(), true).unwrap_err();
+        assert!(matches!(err, CacheError::Cas(CasError::Corrupt { .. })), "{err}");
+        assert!(!dev.cas().unwrap().contains(&digest));
+    }
+
+    #[test]
+    fn a_blob_missing_from_the_remote_is_reported() {
+        let m = Machines::new();
+        let dev = m.cache("dev", false);
+        let missing = ArtifactRef::File(cas::FileRef {
+            digest: SHA256::digest(b"nope"),
+            size: 4,
+            mode: 0o644,
+        });
+        let err = dev.fetch([&missing], true).unwrap_err();
+        assert!(matches!(err, CacheError::Cas(CasError::Missing(_))), "{err}");
     }
 }
