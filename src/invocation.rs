@@ -345,7 +345,7 @@ impl Instantiator<'_> {
                 .into_iter()
                 .filter(|node_name| !before.contains(node_name))
                 .collect();
-            let invocation = cli_invocation(block, &bound.values);
+            let invocation = cli_invocation(block, &bound.values, self.scope);
             for node_name in expanded {
                 // Selecting the instance selects every slice.
                 self.dag.add_invocation(node_name.clone(), invocation.clone());
@@ -440,7 +440,7 @@ impl Instantiator<'_> {
                 prior_state,
             })?;
             self.dag
-                .add_invocation(name.clone(), cli_invocation(block, &bound.values));
+                .add_invocation(name.clone(), cli_invocation(block, &bound.values, self.scope));
             self.scope
                 .define(&name, SymbolKind::Block, Value::strct(Map::new()))
                 .map_err(|existing| LoadError::DuplicateName {
@@ -687,20 +687,26 @@ fn cli_args(
 }
 
 /// The command-line invocation that selects an instance, the inverse of
-/// [`cli_args`].
-fn cli_invocation(block: &Block, values: &[Value]) -> Invocation {
-    let args = block
-        .params
-        .iter()
-        .zip(values)
-        .map(|(param, value)| {
+/// [`cli_args`]. It leaves out arguments that equal their default.
+fn cli_invocation(block: &Block, values: &[Value], module_scope: &Scope) -> Invocation {
+    // Evaluate defaults as `bind` does for a command-line invocation, so an
+    // argument left out binds to the same value.
+    let mut scope = module_scope.clone();
+    let mut args = Vec::new();
+    for (param, value) in block.params.iter().zip(values) {
+        let default = param
+            .default
+            .as_ref()
+            .and_then(|default| expr::eval(default, &scope).ok());
+        if default.as_ref() != Some(value) {
             let text = match (&param.typ, value) {
                 (Type::String | Type::Path, Value::Str(text)) => text.clone(),
                 _ => value.to_literal(),
             };
-            (param.name.clone(), text)
-        })
-        .collect();
+            args.push((param.name.clone(), text));
+        }
+        scope.set(&param.name, value.clone());
+    }
     Invocation {
         name: block.name.clone(),
         args,

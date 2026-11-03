@@ -228,9 +228,10 @@ same blocks as `bit [target...]`. It splits the work so that
 - Every other block runs in a job named `default`.
 
 Each job runs `bit` with the blocks that nothing else in the job depends on,
-such as `bit test clippy`, and bit runs everything they depend on. A
+such as `bit test clippy`, and bit runs everything they depend on. A matrix
+block whose slices all run in the job is selected by its name. A
 parameterized block is selected with its arguments, as in `bit publish
-name=web`. That selects every slice of a parameterized matrix block, so its
+name=web`, leaving out arguments that equal their default. That selects every slice of a parameterized matrix block, so its
 slices share a job. `--ci` does not accept `-P`, because the jobs would run
 without it.
 

@@ -23,6 +23,8 @@ pub struct Job {
     /// Large blocks this job exists for, in topological order. Empty for the
     /// default job.
     pub large: Vec<String>,
+    /// The large blocks as the command line selects them, or `default`.
+    pub name: String,
     /// Blocks the job runs, including their dependencies, in topological order.
     pub order: Vec<String>,
     /// Arguments to `bit` that select the job's blocks.
@@ -111,6 +113,7 @@ pub fn partition(dag: &Dag, order: &[String]) -> Result<Vec<Job>, CiError> {
         covered.extend(job_order.iter().cloned());
         jobs.push(Job {
             id: unique_id(&large[0], &mut ids),
+            name: job_name(dag, &job_order, &large),
             large,
             selection: selection(dag, &job_order)?,
             order: job_order,
@@ -123,6 +126,7 @@ pub fn partition(dag: &Dag, order: &[String]) -> Result<Vec<Job>, CiError> {
             0,
             Job {
                 id: DEFAULT_JOB.to_owned(),
+                name: DEFAULT_JOB.to_owned(),
                 large: Vec::new(),
                 selection: selection(dag, &job_order)?,
                 order: job_order,
@@ -173,31 +177,104 @@ fn invocation_words(invocation: &Invocation) -> Vec<String> {
 /// Arguments that make `bit` run exactly `job_order`, a dependency-closed
 /// set of blocks: the blocks nothing else in the set depends on.
 fn selection(dag: &Dag, job_order: &[String]) -> Result<Vec<String>, CiError> {
-    let in_job: HashSet<&str> = job_order.iter().map(String::as_str).collect();
+    let selectors = Selectors::new(dag, job_order);
     let mut words = Vec::new();
-    let mut invoked = HashSet::new();
+    let mut selected = HashSet::new();
     for name in job_order {
         if dag
             .dependents(name)
             .iter()
-            .any(|dependent| in_job.contains(dependent.as_str()))
+            .any(|dependent| selectors.in_job.contains(dependent.as_str()))
         {
             continue;
         }
-        if let Some(invocation) = dag.invocation(name) {
-            let invocation = invocation_words(invocation);
-            if invoked.insert(invocation.clone()) {
-                words.extend(invocation);
-            }
-        } else if name.contains(['(', '=']) {
-            // The command line reads `=` as a target argument, and only a
-            // recorded invocation can recreate an instance.
-            return Err(CiError::Unselectable(name.clone()));
-        } else {
-            words.push(name.clone());
+        let selector = selectors.get(name).ok_or_else(|| CiError::Unselectable(name.clone()))?;
+        if selected.insert(selector.clone()) {
+            words.extend(selector);
         }
     }
     Ok(words)
+}
+
+/// The job's large blocks as the command line selects them, or
+/// [`DEFAULT_JOB`].
+fn job_name(dag: &Dag, job_order: &[String], large: &[String]) -> String {
+    if large.is_empty() {
+        return DEFAULT_JOB.to_owned();
+    }
+    let selectors = Selectors::new(dag, job_order);
+    let mut names: Vec<String> = Vec::new();
+    for block in large {
+        let name = selectors
+            .get(block)
+            .map_or_else(|| block.clone(), |selector| shell_join(&selector));
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names.join(", ")
+}
+
+/// Finds the command-line words that select a block within one job.
+struct Selectors<'a> {
+    dag: &'a Dag,
+    in_job: HashSet<&'a str>,
+    matrices: HashMap<String, Vec<String>>,
+}
+
+impl<'a> Selectors<'a> {
+    fn new(dag: &'a Dag, job_order: &'a [String]) -> Self {
+        Self {
+            dag,
+            in_job: job_order.iter().map(String::as_str).collect(),
+            matrices: matrix_slices(dag),
+        }
+    }
+
+    /// The words that select `name`, or `None` if the command line cannot.
+    fn get(&self, name: &str) -> Option<Vec<String>> {
+        if let Some(invocation) = self.dag.invocation(name) {
+            Some(invocation_words(invocation))
+        } else if let Some(matrix) = whole_matrix(self.dag, &self.matrices, &self.in_job, name) {
+            Some(vec![matrix.to_owned()])
+        } else if name.contains(['(', '=']) {
+            // The command line reads `=` as a target argument, and only a
+            // recorded invocation can recreate an instance.
+            None
+        } else {
+            Some(vec![name.to_owned()])
+        }
+    }
+}
+
+/// The slices of each matrix block, keyed by the block's name.
+///
+/// Only matrix expansion gives an uninvoked block a foreign concurrency group.
+fn matrix_slices(dag: &Dag) -> HashMap<String, Vec<String>> {
+    let mut matrices: HashMap<String, Vec<String>> = HashMap::new();
+    for name in dag.block_names() {
+        let Some(node) = dag.get_node(&name) else { continue };
+        if node.concurrency_group != name && dag.invocation(&name).is_none() {
+            matrices.entry(node.concurrency_group.clone()).or_default().push(name);
+        }
+    }
+    matrices
+}
+
+/// The name of the matrix block that `slice` belongs to, if the job runs all
+/// of that block's slices, so naming the block selects nothing extra.
+fn whole_matrix<'a>(
+    dag: &'a Dag,
+    matrices: &HashMap<String, Vec<String>>,
+    in_job: &HashSet<&str>,
+    slice: &str,
+) -> Option<&'a str> {
+    let matrix = dag.get_node(slice)?.concurrency_group.as_str();
+    let slices = matrices.get(matrix)?;
+    slices
+        .iter()
+        .all(|slice| in_job.contains(slice.as_str()))
+        .then_some(matrix)
 }
 
 /// A GitHub Actions job ID derived from a block name, which may contain
@@ -278,7 +355,7 @@ pub struct TemplateContext<'a> {
 #[derive(Serialize)]
 struct TemplateJob<'a> {
     id: &'a str,
-    name: String,
+    name: &'a str,
     large: bool,
     command: String,
     selection: &'a [String],
@@ -289,6 +366,12 @@ pub fn render(name: &str, source: &str, jobs: &[Job], context: &TemplateContext)
     let mut env = minijinja::Environment::new();
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Strict);
     env.set_auto_escape_callback(|_| minijinja::AutoEscape::None);
+    // The built-in `tojson` escapes `'`, `<`, `>` and `&` for HTML, which
+    // YAML and JSON don't need and which makes commands unreadable.
+    env.add_filter("tojson", |value: minijinja::Value| {
+        serde_json::to_string(&value)
+            .map_err(|e| minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e.to_string()))
+    });
     // Block tags sit on their own lines in YAML templates; drop those lines.
     let syntax = minijinja::syntax::SyntaxConfig::builder()
         .trim_blocks(true)
@@ -304,11 +387,7 @@ pub fn render(name: &str, source: &str, jobs: &[Job], context: &TemplateContext)
             command.extend(job.selection.iter().cloned());
             TemplateJob {
                 id: &job.id,
-                name: if job.large.is_empty() {
-                    DEFAULT_JOB.to_owned()
-                } else {
-                    job.large.join(", ")
-                },
+                name: &job.name,
                 large: !job.large.is_empty(),
                 command: shell_join(&command),
                 selection: &job.selection,
@@ -550,6 +629,20 @@ large publish(name : string, count = 1) = exec { command = "publish #{name} #{co
     }
 
     #[test]
+    fn instances_leave_out_default_arguments() {
+        let jobs = jobs_for(
+            r#"
+let arch = ["amd64", "arm64"]
+large test[arch](package = "./...", run = ".", tags = package) = exec { command = "test #{package} #{run} #{tags}" }
+"#,
+            "test",
+            &[("run", "x"), ("tags", "./...")],
+        )
+        .unwrap();
+        assert_eq!(jobs[0].selection, vec!["test", "run=x"]);
+    }
+
+    #[test]
     fn matrix_instance_slices_share_a_job() {
         let jobs = jobs_for(
             r#"
@@ -568,6 +661,50 @@ large build[arch](name : string) = exec { command = "build #{name} #{arch}" }
                 vec!["build", "name=app"]
             )]
         );
+        assert_eq!(jobs[0].name, "build name=app");
+    }
+
+    #[test]
+    fn job_names_select_their_large_blocks() {
+        let jobs = jobs(
+            r#"
+let arch = ["amd64", "arm64"]
+large build[arch] = exec { command = "build #{arch}" }
+large image = exec { command = "image" depends_on = [build] }
+lint = exec { command = "lint" }
+"#,
+        );
+        let names: Vec<_> = jobs.iter().map(|job| job.name.as_str()).collect();
+        assert_eq!(names, vec!["default", "build, image"]);
+    }
+
+    #[test]
+    fn whole_matrices_are_selected_by_name() {
+        let jobs = jobs(
+            r#"
+let arch = ["amd64", "arm64"]
+build[arch] = exec { command = "build #{arch}" }
+lint = exec { command = "lint" }
+"#,
+        );
+        assert_eq!(jobs[0].selection, vec!["build", "lint"]);
+    }
+
+    #[test]
+    fn matrix_slices_split_across_jobs_are_selected_alone() {
+        let jobs = jobs(
+            r#"
+let arch = ["amd64", "arm64"]
+large build[arch] = exec { command = "build #{arch}" }
+"#,
+        );
+        assert_eq!(
+            summary(&jobs),
+            vec![
+                ("build-amd64", vec![r#"build["amd64"]"#], vec![r#"build["amd64"]"#]),
+                ("build-arm64", vec![r#"build["arm64"]"#], vec![r#"build["arm64"]"#]),
+            ]
+        );
     }
 
     #[test]
@@ -575,12 +712,14 @@ large build[arch](name : string) = exec { command = "build #{name} #{arch}" }
         let jobs = vec![
             Job {
                 id: "default".into(),
+                name: "default".into(),
                 large: vec![],
                 order: vec!["lint".into()],
                 selection: vec!["lint".into()],
             },
             Job {
                 id: "publish".into(),
+                name: "publish name='web app'".into(),
                 large: vec![r#"publish(name="web app")"#.into()],
                 order: vec![r#"publish(name="web app")"#.into()],
                 selection: vec!["publish".into(), "name=web app".into()],
@@ -596,11 +735,12 @@ large build[arch](name : string) = exec { command = "build #{name} #{arch}" }
             },
         );
         assert!(yaml.starts_with("# Generated by `bit --ci github publish name='web app'`. Do not edit.\n"));
+        assert!(yaml.contains(r#"- run: "bit publish name='web app'""#), "{yaml}");
         let workflow: serde_yml::Value = serde_yml::from_str(&yaml).unwrap();
         assert_eq!(workflow["on"]["push"]["branches"][0], "main");
         assert!(workflow["on"]["pull_request"].is_null());
         let job = &workflow["jobs"]["publish"];
-        assert_eq!(job["name"], r#"publish(name="web app")"#);
+        assert_eq!(job["name"], "publish name='web app'");
         assert_eq!(job["runs-on"], "ubuntu-latest");
         assert_eq!(job["steps"][0]["uses"], "actions/checkout@v6");
         assert_eq!(job["steps"][1]["run"], "bit publish name='web app'");
@@ -620,6 +760,7 @@ large build[arch](name : string) = exec { command = "build #{name} #{arch}" }
     fn templates_see_each_job() {
         let jobs = vec![Job {
             id: "build".into(),
+            name: "build".into(),
             large: vec!["build".into()],
             order: vec!["build".into()],
             selection: words(&["build", "name=web app"]),
@@ -633,7 +774,7 @@ large build[arch](name : string) = exec { command = "build #{name} #{arch}" }
         let source = "# {{ command }}\n{% for job in jobs %}\n{{ job.id }} {{ job.name }} {{ job.large | tojson }} {{ job.selection | tojson }}: {{ job.command }}\n{% endfor %}\n";
         assert_eq!(
             render("ci.tmpl", source, &jobs, &context).unwrap(),
-            "# bit --ci ./ci.tmpl\nbuild build true [\"build\", \"name=web app\"]: bit build name='web app'\n"
+            "# bit --ci ./ci.tmpl\nbuild build true [\"build\",\"name=web app\"]: bit build name='web app'\n"
         );
     }
 
@@ -670,6 +811,7 @@ large build[arch](name : string) = exec { command = "build #{name} #{arch}" }
     fn workflow_without_branch_or_working_directory() {
         let jobs = vec![Job {
             id: "default".into(),
+            name: "default".into(),
             large: vec![],
             order: vec!["a".into()],
             selection: vec!["a".into()],
