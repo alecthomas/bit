@@ -1490,8 +1490,7 @@ mod tests {
         assert!(script.contains("'--remap-path-prefix=/it'\\''s/a=/repo'"), "{script}");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("w.sh");
-        std::fs::write(&path, &script).unwrap();
-        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        crate::process::write_test_executable(&path, &script);
         let out = Command::new(&path)
             .args(["/bin/sh", "-c", "printf '%s\\n' \"$@\"", "sh", "--crate-name", "x"])
             .output()

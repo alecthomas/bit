@@ -38,6 +38,27 @@ impl CommandExt for Command {
     }
 }
 
+/// Writes an executable script for a test to run.
+///
+/// Tests run as threads of one process. If a thread forks while another
+/// holds a write descriptor to the script, the child keeps a copy until it
+/// execs, and running the script in that window fails with `ETXTBSY`. A
+/// child process writes the script instead, so this process never holds a
+/// write descriptor to it.
+#[cfg(test)]
+pub(crate) fn write_test_executable(path: &std::path::Path, contents: &str) {
+    use std::io::Write;
+
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(contents.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success(), "failed to write {}", path.display());
+}
+
 fn log_finished(command: &Command, elapsed: Duration, status: Result<ExitStatus, &io::Error>) {
     crate::output::debug_current(|| {
         let result = match status {

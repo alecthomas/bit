@@ -777,15 +777,13 @@ mod tests {
     fn destroy_removes_pinned_tag_and_image() {
         let dir = tempfile::tempdir().unwrap();
         let docker = dir.path().join("docker");
-        std::fs::write(
+        crate::process::write_test_executable(
             &docker,
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "$(dirname "$0")/docker.log"
 exit 0
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let resource = ImageResource {
             tracker: Arc::new(FileTracker::default()),
             docker,
@@ -826,14 +824,12 @@ exit 0
             .iter()
             .map(|(reference, id)| format!("  {reference}) echo sha256:{id} ;;\n"))
             .collect();
-        std::fs::write(
+        crate::process::write_test_executable(
             &docker,
-            format!(
+            &format!(
                 "#!/bin/sh\n[ \"$1 $2\" = \"image inspect\" ] || exit 91\ncase \"$5\" in\n{cases}  *) exit 1 ;;\nesac\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         ImageResource {
             tracker: Arc::new(FileTracker::default()),
             docker,
@@ -1061,7 +1057,7 @@ exit 0
     fn multi_platform_apply_uses_buildx_digest_without_local_tagging() {
         let dir = tempfile::tempdir().unwrap();
         let docker = dir.path().join("docker");
-        std::fs::write(
+        crate::process::write_test_executable(
             &docker,
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "$(dirname "$0")/docker.log"
@@ -1076,9 +1072,7 @@ if [ "$1" = "buildx" ] && [ "$2" = "build" ]; then
 fi
 exit 91
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let resource = ImageResource {
             tracker: Arc::new(FileTracker::default()),
             docker,
@@ -1110,15 +1104,13 @@ exit 91
     fn multi_platform_plan_checks_immutable_registry_reference() {
         let dir = tempfile::tempdir().unwrap();
         let docker = dir.path().join("docker");
-        std::fs::write(
+        crate::process::write_test_executable(
             &docker,
             r#"#!/bin/sh
 printf '%s\n' "$*" > "$(dirname "$0")/docker.log"
 [ "$1" = "buildx" ] && [ "$2" = "imagetools" ] && [ "$3" = "inspect" ]
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let resource = ImageResource {
             tracker: Arc::new(FileTracker::default()),
             docker,
@@ -1161,7 +1153,7 @@ printf '%s\n' "$*" > "$(dirname "$0")/docker.log"
     fn single_platform_apply_reports_inspect_failure_without_tagging() {
         let dir = tempfile::tempdir().unwrap();
         let docker = dir.path().join("docker");
-        std::fs::write(
+        crate::process::write_test_executable(
             &docker,
             r#"#!/bin/sh
 if [ "$1" = "buildx" ] && [ "$2" = "build" ]; then
@@ -1177,9 +1169,7 @@ if [ "$1" = "tag" ]; then
 fi
 exit 91
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let resource = ImageResource {
             tracker: Arc::new(FileTracker::default()),
             docker,
@@ -1230,7 +1220,7 @@ exit 91
                 ("blobs/sha256/layer", b"shared layer"),
             ],
         );
-        std::fs::write(
+        crate::process::write_test_executable(
             &docker,
             r#"#!/bin/sh
 log="$(dirname "$0")/docker.log"
@@ -1253,9 +1243,7 @@ if [ "$1" = "tag" ]; then
 fi
 exit 1
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let resource = ImageResource {
             tracker: Arc::new(FileTracker::default()),
