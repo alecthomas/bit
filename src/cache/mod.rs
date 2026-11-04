@@ -23,6 +23,7 @@ pub mod location;
 pub mod project;
 pub mod receipt;
 pub mod s3;
+mod trim;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -247,12 +248,14 @@ impl BuildCache {
     /// The first receipt under `key` that `usable` accepts, from disk or
     /// else from the remote. The remote's receipts are copied to disk, so
     /// the next lookup is local; failing to copy them only costs another
-    /// remote lookup.
+    /// remote lookup. The receipt found is marked used, so the disk cache
+    /// keeps it; see [`BuildCache::trim`].
     pub fn lookup(&self, key: &ActionKey, usable: impl Fn(&Receipt) -> bool) -> Result<Option<Receipt>, CacheError> {
         let Some(shared) = &self.shared else {
             return Ok(None);
         };
         if let Some(receipt) = receipt::load(&shared.disk, key, &usable)? {
+            shared.disk.mark_used(key, &receipt);
             return Ok(Some(receipt));
         }
         let Some(remote) = &shared.remote else {
@@ -263,7 +266,20 @@ impl BuildCache {
         for variant in &variants {
             let _ = receipt::publish(&shared.disk, key, variant);
         }
+        if let Some(receipt) = &found {
+            shared.disk.mark_used(key, receipt);
+        }
         Ok(found)
+    }
+
+    /// Remove what the disk cache has not used for days, at most once a
+    /// day. Runs in the calling process, as Go's build cache does, but
+    /// costs one small read whenever no trim is due, and never waits for
+    /// another process's trim. A remote is never trimmed.
+    pub fn trim(&self) {
+        if let Some(shared) = &self.shared {
+            shared.disk.trim();
+        }
     }
 
     /// Copy the blobs `artifacts` need from the remote to disk, where
@@ -631,6 +647,47 @@ mod tests {
             "{err}"
         );
         assert!(!dev.cas().unwrap().contains(&digest));
+    }
+
+    #[test]
+    fn trim_keeps_what_lookups_used_and_removes_the_rest() {
+        let m = Machines::new();
+        let cache_dir = m.dir.path().join("dev");
+        let cache = BuildCache::open_at(&m.dir.path().join("proj"), &cache_dir);
+        let cas = cache.cas().unwrap();
+        m.write("dist/index.js", "main");
+        let dist = cas.put_tree(&m.dir.path().join("proj/dist")).unwrap();
+        let used = receipt_with([("dist".to_owned(), dist.clone())].into());
+        let stale_exe = cas.put_file(&m.write("old", "old binary")).unwrap();
+        let stale = receipt_with([("exe".to_owned(), stale_exe.clone())].into());
+        let (used_key, stale_key) = (
+            ActionKey::new(SHA256::digest(b"used")),
+            ActionKey::new(SHA256::digest(b"stale")),
+        );
+        cache.publish(&used_key, &used).unwrap();
+        cache.publish(&stale_key, &stale).unwrap();
+
+        let disk = &cache.shared.as_ref().unwrap().disk;
+        let mut files = vec![disk.receipts_path(&used_key), disk.receipts_path(&stale_key)];
+        let used_blobs: Vec<_> = cas.blobs(&dist).unwrap().iter().map(|d| cas.blob_path(d)).collect();
+        let stale_blob = cas.blob_path(&stale_exe.file().unwrap().digest);
+        files.extend(used_blobs.iter().cloned());
+        files.push(stale_blob.clone());
+        for file in &files {
+            trim::tests::backdate(file, std::time::Duration::from_secs(10 * 24 * 60 * 60));
+        }
+
+        assert_eq!(cache.lookup(&used_key, any).unwrap(), Some(used));
+        cache.trim();
+
+        assert!(disk.receipts_path(&used_key).is_file());
+        assert!(
+            used_blobs.iter().all(|blob| blob.is_file()),
+            "a tree keeps its manifest and files"
+        );
+        assert!(!disk.receipts_path(&stale_key).exists());
+        assert!(!stale_blob.exists());
+        assert!(cache_dir.join("trim.txt").is_file());
     }
 
     #[test]

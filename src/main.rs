@@ -960,6 +960,8 @@ fn main() {
             process::exit(1);
         }
     }
+    // Last, so the run's output is complete before any trim starts.
+    cache.trim();
 }
 
 fn format_bit_file(path: &std::path::Path) -> anyhow::Result<()> {

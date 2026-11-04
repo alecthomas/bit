@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+use super::trim;
 use crate::sha256::{Hasher, SHA256};
 
 static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
@@ -192,6 +193,9 @@ impl Cas {
         let dest = self.blob_path(digest);
         if dest.is_file() {
             let _ = fs::remove_file(tmp);
+            // The caller is about to reference this blob from a new receipt,
+            // which a trim must not find pointing at a deleted blob.
+            trim::mark_used(&dest);
             return Ok(());
         }
         let renamed = dest
@@ -210,6 +214,19 @@ impl Cas {
                 let _ = fs::remove_file(tmp);
                 Err(e.into())
             }
+        }
+    }
+
+    /// Record that `artifact` was used, so a trim keeps the blobs it needs
+    /// that are in the store. A tree whose manifest is missing or corrupt
+    /// has only the manifest marked; it cannot be restored anyway.
+    pub(super) fn mark_used(&self, artifact: &ArtifactRef) {
+        let blobs = match artifact {
+            ArtifactRef::File(file) => vec![file.digest],
+            ArtifactRef::Tree { manifest, .. } => self.blobs(artifact).unwrap_or_else(|_| vec![*manifest]),
+        };
+        for digest in blobs {
+            trim::mark_used(&self.blob_path(&digest));
         }
     }
 
@@ -677,6 +694,26 @@ mod tests {
         let rb = cas.put_file(&b).unwrap();
         assert_eq!(ra.file().unwrap().digest, rb.file().unwrap().digest);
         assert_eq!(fs::read_dir(cas.root.join("tmp")).unwrap().count(), 0);
+    }
+
+    /// A new receipt may reference a blob nothing has used for days, so
+    /// storing it again must keep a trim from removing it.
+    #[test]
+    fn storing_an_existing_blob_marks_it_used() {
+        let (dir, cas) = temp_cas();
+        let src = dir.path().join("src");
+        fs::write(&src, b"same").unwrap();
+        let artifact = cas.put_file(&src).unwrap();
+        let blob = cas.blob_path(&artifact.file().unwrap().digest);
+        let week = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+        trim::tests::backdate(&blob, week);
+
+        cas.put_file(&src).unwrap();
+
+        let age = std::time::SystemTime::now()
+            .duration_since(trim::tests::mtime(&blob))
+            .unwrap();
+        assert!(age < week);
     }
 
     #[test]

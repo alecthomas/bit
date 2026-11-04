@@ -1377,6 +1377,9 @@ directories. If it holds a symlink the block still runs and succeeds, but bit
 reports that it could not be cached rather than restoring something the
 command never produced.
 
+Cached results that no run has used for five days are removed from the disk
+cache automatically.
+
 To keep a particular output out of the cache, name it in `uncached`:
 
 ```hcl

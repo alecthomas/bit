@@ -670,6 +670,8 @@ After a successful apply, the engine captures the outputs with `capture_artifact
 
 A remote cache can sit behind the local one. A lookup that misses locally reads the remote's receipts and copies them to disk. Before checking a receipt, the engine copies any tree manifests it needs. Before restoring, it copies the artifact blobs, checking each against its digest. Planning never downloads artifact contents. Results are published to the remote only when it is writable, blobs before the receipt that references them. A remote failure is a cache miss; the first in a run is shown as a warning message and later ones only in the debug log. An S3 remote stores objects under its prefix with the disk cache's layout.
 
+The disk cache is trimmed by age, as Go's build cache is. A lookup that finds a receipt refreshes the mtime of its receipts file and of every blob the receipt needs that is on disk. Storing a blob that is already present refreshes it too. A refresh is skipped when the mtime is under an hour old. When a run completes without error, bit reads `trim.txt` in the cache directory, which holds the time of the last trim. If a day has passed, bit takes a non-blocking exclusive lock on it, checks again, and writes the new time before removing anything. A process that finds the lock held skips the trim. The trim removes every file under `actions/` and `cas/` whose mtime is more than five days and one hour old, leaving directories in place. Nothing is locked against removal: a reader that loses a receipt or blob sees a miss and runs the block. A remote is never trimmed.
+
 ## 9. Tests
 
 Tests are blocks whose resource has `kind = "test"`. There is no `test` keyword in the language.

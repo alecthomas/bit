@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use super::backend::{Backend, BackendError};
 use super::cas::Cas;
-use super::receipt::ActionKey;
+use super::receipt::{ActionKey, Receipt};
+use super::trim;
 use crate::sha256::SHA256;
 
 /// The cache on local disk: one JSON file of receipts per action key, and a
@@ -33,8 +34,27 @@ impl Disk {
         &self.receipts
     }
 
-    fn receipts_path(&self, key: &ActionKey) -> PathBuf {
+    pub(super) fn receipts_path(&self, key: &ActionKey) -> PathBuf {
         self.receipts.join(format!("{key}.json"))
+    }
+
+    /// Record that `receipt`, published under `key`, was used, so a trim
+    /// keeps it and the blobs it needs. Each blob is marked on its own
+    /// rather than through the receipts file, because that file holds other
+    /// variants whose use says nothing about this one's blobs.
+    pub fn mark_used(&self, key: &ActionKey, receipt: &Receipt) {
+        trim::mark_used(&self.receipts_path(key));
+        for artifact in receipt.artifacts.values() {
+            self.cas.mark_used(artifact);
+        }
+    }
+
+    /// Remove receipts and blobs that no run has used for days; see
+    /// [`trim`]. Covers what [`Backend::clean`] removes, including older
+    /// layout versions, which no run uses.
+    pub fn trim(&self) {
+        let dirs = ["actions", "cas"].map(|sub| self.dir.join(sub));
+        trim::trim(&self.dir.join("trim.txt"), &dirs.each_ref().map(PathBuf::as_path));
     }
 }
 
