@@ -147,7 +147,7 @@ bit --cache s3://bucket/prefix  # also use a remote build cache (or set BIT_CACH
 bit --cache disk:// --clean  # delete every cached receipt and artifact
 bit --long       # disable live scrolling regions and stream every output line
 bit --quiet      # suppress output unless an error occurs (also -q)
-NO_COLOR=1 bit   # disable colour (output is also plain when not a terminal)
+NO_COLOR=1 bit   # disable colour (output is plain and --long when not a terminal or TERM=dumb)
 bit --since origin/master  # apply blocks affected since the branch point
 bit --since      # same, using the remote default branch (origin/HEAD)
 bit --ci github > .github/workflows/bit.yml  # generate a GitHub Actions workflow

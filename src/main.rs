@@ -640,7 +640,7 @@ fn warning_label() -> String {
 
 fn main() {
     // Every styled stdout write goes through yansi, so one global switch
-    // keeps pipes and NO_COLOR free of escape codes.
+    // keeps pipes, TERM=dumb and NO_COLOR free of escape codes.
     if !bit::output::colors_enabled(&std::io::stdout()) {
         yansi::disable();
     }

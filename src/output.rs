@@ -36,11 +36,22 @@ macro_rules! debug {
     }};
 }
 
-/// Whether text written to `stream` should carry ANSI styles: only on a
-/// terminal, and never when `NO_COLOR` is set to a non-empty value
-/// (<https://no-color.org>).
+/// Whether `stream` accepts terminal control codes such as styles and
+/// cursor movement: only on a terminal whose `TERM` isn't `dumb`, the
+/// convention for terminals that can't interpret them.
+pub fn terminal_codes_enabled(stream: &impl IsTerminal) -> bool {
+    stream.is_terminal() && !dumb_terminal(std::env::var_os("TERM").as_deref())
+}
+
+fn dumb_terminal(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| v == "dumb")
+}
+
+/// Whether text written to `stream` should carry ANSI styles: only when it
+/// accepts [terminal codes](terminal_codes_enabled), and never when
+/// `NO_COLOR` is set to a non-empty value (<https://no-color.org>).
 pub fn colors_enabled(stream: &impl IsTerminal) -> bool {
-    stream.is_terminal() && !no_color_requested(std::env::var_os("NO_COLOR").as_deref())
+    terminal_codes_enabled(stream) && !no_color_requested(std::env::var_os("NO_COLOR").as_deref())
 }
 
 fn no_color_requested(value: Option<&std::ffi::OsStr>) -> bool {
@@ -325,7 +336,8 @@ fn format_elapsed(d: Duration) -> String {
 impl Output {
     pub fn new(block_names: &[&str]) -> Self {
         let max_name_len = block_names.iter().map(|n| n.len()).max().unwrap_or(0);
-        let live = io::stdout().is_terminal();
+        // Without terminal codes, behave exactly as `--long`.
+        let live = terminal_codes_enabled(&io::stdout());
         let (term_height, term_width) = if live {
             let (rows, columns) = console::Term::stdout().size();
             (rows as usize, columns as usize)
@@ -1178,6 +1190,14 @@ mod tests {
         assert!(!no_color_requested(Some("".as_ref())));
         assert!(no_color_requested(Some("1".as_ref())));
         assert!(no_color_requested(Some("0".as_ref())));
+    }
+
+    #[test]
+    fn only_term_dumb_is_a_dumb_terminal() {
+        assert!(!dumb_terminal(None));
+        assert!(!dumb_terminal(Some("".as_ref())));
+        assert!(!dumb_terminal(Some("xterm-256color".as_ref())));
+        assert!(dumb_terminal(Some("dumb".as_ref())));
     }
 
     #[test]
