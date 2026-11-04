@@ -915,7 +915,7 @@ Positional arguments name targets or blocks, followed by `name=value` target arg
 | `bit [target...]` | resolve → plan → apply | Apply targets (`default` target if defined, else every non-`explicit` block; `...` for every non-`explicit` block) |
 | `bit --plan [target...]` | resolve → plan | Show what would change without applying |
 | `bit --clean [target...]` | destroy | Destroy targets and their dependents in reverse dependency order |
-| `bit --graph [target...]` | — | Render the dependency graph; with `--plan`, colour nodes by planned action |
+| `bit --graph [target...]` | — | Render the dependency graph; with `--plan`, colour nodes by planned action. With `--json`, print an object mapping each selected block to the selected blocks that must run before it, including phase ordering; `--json` cannot be combined with `--plan --graph` |
 | `bit --dump [target...]` | — | Show evaluated inputs and stored outputs |
 | `bit --list` | — | List targets; `-ll` lists all blocks as a dependency tree |
 | `bit --info` | — | Show parameters, targets, and outputs |

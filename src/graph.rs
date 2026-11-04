@@ -7,7 +7,7 @@
 //! columns. The canvas is then rasterised with Unicode box-drawing
 //! characters.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ast::Phase;
 use crate::dag::Dag;
@@ -108,6 +108,29 @@ pub fn render(dag: &Dag, names: &[String], styles: &HashMap<String, NodeStyle>) 
         out.push('\n');
     }
     out.trim_end_matches('\n').to_owned()
+}
+
+/// Render the selected blocks as a JSON object mapping each block name to
+/// the sorted names of the selected blocks that must run before it.
+///
+/// Every edge counts, whatever created it, including the synthetic edges
+/// that order phases, so the map alone is the complete run-time graph.
+pub fn render_json(dag: &Dag, names: &[String]) -> String {
+    let selected: HashSet<&str> = names.iter().map(String::as_str).collect();
+    let graph: BTreeMap<&str, Vec<String>> = names
+        .iter()
+        .map(|name| {
+            let mut deps: Vec<String> = dag
+                .deps(name)
+                .into_iter()
+                .filter(|p| selected.contains(p.as_str()))
+                .collect();
+            deps.sort();
+            deps.dedup();
+            (name.as_str(), deps)
+        })
+        .collect();
+    serde_json::to_string_pretty(&graph).expect("JSON serialization failed")
 }
 
 fn render_phase(dag: &Dag, names: &[String], styles: &HashMap<String, NodeStyle>) -> Vec<(String, usize)> {

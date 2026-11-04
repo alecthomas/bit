@@ -75,6 +75,7 @@ bit --list       # list explicitly defined targets
 bit -ll          # list all blocks
 bit --graph      # render the DAG as an ASCII graph
 bit --plan --graph  # …and colour each node by its planned action
+bit --graph --json  # print the DAG as JSON mapping each block to its deps
 bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
 bit --help       # show CLI options and a BUILD.bit language overview

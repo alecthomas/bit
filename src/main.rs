@@ -158,7 +158,7 @@ struct Cli {
     #[arg(long, value_name = "TOPIC", num_args = 0..=1, default_missing_value = "")]
     docs: Option<String>,
 
-    /// Output in JSON format (currently applies to --schema)
+    /// Output in JSON format (applies to --schema and --graph)
     #[arg(long)]
     json: bool,
 
@@ -652,6 +652,12 @@ fn main() {
         );
         process::exit(1);
     };
+    // The JSON graph is a pure adjacency map, so it has nowhere to put
+    // planned actions.
+    if cli.json && cli.graph && cli.plan {
+        eprintln!("{} --json cannot be combined with --plan --graph", error_label());
+        process::exit(1);
+    }
 
     // Without a cache directory, executables are still fingerprinted, just
     // read on every run.
@@ -856,7 +862,11 @@ fn main() {
             std::collections::HashMap::new()
         };
         if !cli.quiet {
-            println!("{}", bit::graph::render(&dag, &names, &styles));
+            if cli.json {
+                println!("{}", bit::graph::render_json(&dag, &names));
+            } else {
+                println!("{}", bit::graph::render(&dag, &names, &styles));
+            }
         }
     } else if matches!(operation, Operation::Plan) {
         let (_module, mut dag, base, _store, targets) = load_module(&registry, &params, &invocations);

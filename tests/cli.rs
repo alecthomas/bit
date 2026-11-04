@@ -217,6 +217,43 @@ target show(value : string) = [job(value = value)]
 }
 
 #[test]
+fn graph_json_maps_each_block_to_all_its_deps() {
+    let project = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    fs::write(
+        project.path().join("BUILD.bit"),
+        r#"
+pre setup = exec { command = "true" }
+lib = exec { command = "true" }
+docs = exec { command = "true" }
+app = exec {
+  command = "true"
+  depends_on = [lib]
+  after = [docs]
+}
+"#,
+    )
+    .unwrap();
+
+    let output = run_bit_with_cache(project.path(), cache.path(), &["--graph", "--json", "app", "setup"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let graph: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        graph,
+        serde_json::json!({
+            "setup": [],
+            "lib": ["setup"],
+            "docs": ["setup"],
+            "app": ["docs", "lib", "setup"],
+        })
+    );
+
+    let output = run_bit_with_cache(project.path(), cache.path(), &["--plan", "--graph", "--json", "app"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
 fn quiet_suppresses_success_output_across_modes() {
     let project = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
@@ -233,6 +270,7 @@ fn quiet_suppresses_success_output_across_modes() {
         vec!["-q", "--list"],
         vec!["-q", "-ll"],
         vec!["-q", "--graph"],
+        vec!["-q", "--graph", "--json"],
         vec!["-q", "--dump"],
         vec!["-q", "--info"],
         vec!["-q", "--schema", "go"],
