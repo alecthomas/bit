@@ -27,6 +27,49 @@ fn run_git(project: &std::path::Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn docs_prints_the_embedded_readme_as_plain_markdown_when_piped() {
+    let project = tempfile::tempdir().unwrap();
+    let output = run_bit(project.path(), &["--docs"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), include_str!("../README.md"));
+}
+
+#[test]
+fn docs_topic_prints_one_section_without_escape_codes() {
+    let project = tempfile::tempdir().unwrap();
+    let output = run_bit(project.path(), &["--docs", "ci"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let docs = String::from_utf8(output.stdout).unwrap();
+    assert!(docs.starts_with("### CI workflows\n"), "{docs}");
+    assert!(docs.contains("[`large`](#blocks)"));
+    assert!(!docs.contains('\x1b'));
+    assert!(!docs.contains("## Language"));
+}
+
+#[test]
+fn docs_unknown_topic_lists_the_available_topics() {
+    let project = tempfile::tempdir().unwrap();
+    let output = run_bit(project.path(), &["--docs", "no-such-topic"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("unknown docs topic 'no-such-topic'; available topics:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("\n  ci-workflows\n"), "{stderr}");
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn help_points_to_docs() {
+    let project = tempfile::tempdir().unwrap();
+    let output = run_bit(project.path(), &["--help"]);
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("Use --docs to read the full documentation"), "{help}");
+    assert!(help.contains("See `bit --docs ci`"), "{help}");
+}
+
+#[test]
 fn help_explains_build_file_and_points_to_schema() {
     let project = tempfile::tempdir().unwrap();
     let output = run_bit(project.path(), &["--help"]);

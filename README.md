@@ -78,6 +78,7 @@ bit --plan --graph  # …and colour each node by its planned action
 bit --dump       # show evaluated inputs/stored outputs
 bit --info       # show parameters, targets, and outputs
 bit --help       # show CLI options and a BUILD.bit language overview
+bit --docs [topic]  # print this README, or one section such as `ci`, offline
 bit --schema [name]  # show built-in functions and provider resource/function schemas
 bit --schema --json  # group schemas by builtins, provider, or imported module
 bit --update [repo...]  # re-resolve imports and rewrite BUILD.bit.lock

@@ -918,6 +918,7 @@ Positional arguments name targets or blocks, followed by `name=value` target arg
 | `bit --list` | — | List targets; `-ll` lists all blocks as a dependency tree |
 | `bit --info` | — | Show parameters, targets, and outputs |
 | `bit --schema [name]` | — | Show built-in functions and provider schemas |
+| `bit --docs [topic]` | — | Print the README embedded at build time, or the section whose heading matches `topic` by anchor slug or leading words (`ci` for "CI workflows"); styled for a terminal, plain Markdown otherwise |
 | `bit --update [repo...]` | — | Re-resolve git imports and rewrite `BUILD.bit.lock` |
 | `bit --fmt [file]` | — | Format `BUILD.bit`, or the named `.bit` file, in place |
 | `bit --cache <uri> --clean` | — | Delete everything in that build cache; disk only |

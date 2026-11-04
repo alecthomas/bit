@@ -81,7 +81,8 @@ BUILD.bit example (illustrative):
 
   output artifact = binary["amd64"].path      # Export a value from a module.
 
-Use --schema to list all available resources and functions."##,
+Use --schema to list all available resources and functions.
+Use --docs to read the full documentation, or --docs <TOPIC> for one section."##,
     version = env!("CARGO_PKG_VERSION")
 )]
 struct Cli {
@@ -107,7 +108,8 @@ struct Cli {
 
     /// Build cache to use: disk:// (default), disk://PATH, s3://BUCKET/PREFIX
     /// (read-only), or s3+rw://BUCKET/PREFIX. Defaults to $BIT_CACHE. With
-    /// --clean, delete everything in it instead (disk only)
+    /// --clean, delete everything in it instead (disk only). See `bit --docs
+    /// shared-build-cache`
     #[arg(long, value_name = "URI")]
     cache: Option<String>,
 
@@ -147,9 +149,14 @@ struct Cli {
 
     /// Render a CI configuration that runs the selection, with large blocks in
     /// separate jobs, from a built-in template ("github") or a template file
-    /// path containing "/"
+    /// path containing "/". See `bit --docs ci`
     #[arg(long, value_name = "TEMPLATE")]
     ci: Option<String>,
+
+    /// Print bit's documentation, or only the section on TOPIC (e.g. "ci",
+    /// "blocks"); styled on a terminal, plain Markdown otherwise
+    #[arg(long, value_name = "TOPIC", num_args = 0..=1, default_missing_value = "")]
+    docs: Option<String>,
 
     /// Output in JSON format (currently applies to --schema)
     #[arg(long)]
@@ -465,6 +472,28 @@ fn ci_template(name: &str) -> Result<String, String> {
     })
 }
 
+/// `bit --docs [topic]`: styled for a terminal, plain Markdown for pipes.
+fn print_docs(topic: &str) {
+    use std::io::{IsTerminal, Write};
+    let docs = bit::docs::Docs::new(bit::docs::README);
+    let markdown = match docs.select((!topic.is_empty()).then_some(topic)) {
+        Ok(markdown) => markdown,
+        Err(e) => {
+            eprintln!("{} {e}", "error:".red().bold());
+            process::exit(1);
+        }
+    };
+    let stdout = std::io::stdout();
+    let text = if stdout.is_terminal() {
+        let (_, columns) = console::Term::stdout().size();
+        bit::docs::render(markdown, columns.into())
+    } else {
+        markdown.to_owned()
+    };
+    // A reader such as `head` may close the pipe early; that is not an error.
+    let _ = stdout.lock().write_all(text.as_bytes());
+}
+
 #[derive(Clone, Copy)]
 enum SelectionMode {
     Targets,
@@ -477,6 +506,7 @@ enum Operation {
     CleanCache,
     Ci,
     Clean,
+    Docs,
     Dump,
     Fmt,
     Graph,
@@ -506,6 +536,7 @@ impl Cli {
             self.dump.then_some(Operation::Dump),
             self.fmt.then_some(Operation::Fmt),
             self.ci.is_some().then_some(Operation::Ci),
+            self.docs.is_some().then_some(Operation::Docs),
         ]
         .into_iter()
         .flatten()
@@ -636,6 +667,11 @@ fn main() {
     if cli.since.is_some() && cli.list == 1 {
         eprintln!("{} --since requires -ll when listing blocks", "error:".red().bold());
         process::exit(1);
+    }
+
+    if let Some(topic) = cli.docs.as_deref() {
+        print_docs(topic);
+        return;
     }
 
     if matches!(operation, Operation::Fmt) {
