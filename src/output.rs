@@ -36,6 +36,17 @@ macro_rules! debug {
     }};
 }
 
+/// Whether text written to `stream` should carry ANSI styles: only on a
+/// terminal, and never when `NO_COLOR` is set to a non-empty value
+/// (<https://no-color.org>).
+pub fn colors_enabled(stream: &impl IsTerminal) -> bool {
+    stream.is_terminal() && !no_color_requested(std::env::var_os("NO_COLOR").as_deref())
+}
+
+fn no_color_requested(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
+}
+
 /// Extension trait for conditionally dimming styled output.
 trait DimIf {
     fn dim_if(self, condition: bool) -> Self;
@@ -1160,6 +1171,14 @@ impl Write for BlockWriteAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_color_requires_a_non_empty_value() {
+        assert!(!no_color_requested(None));
+        assert!(!no_color_requested(Some("".as_ref())));
+        assert!(no_color_requested(Some("1".as_ref())));
+        assert!(no_color_requested(Some("0".as_ref())));
+    }
 
     #[test]
     fn color_deterministic() {

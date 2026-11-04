@@ -197,7 +197,7 @@ fn parse_params(raw: &[String]) -> Map {
     let mut params = Map::new();
     for item in raw {
         let Some((key, val)) = item.split_once('=') else {
-            eprintln!("{} invalid param (expected key=value): {item}", "error:".red().bold());
+            eprintln!("{} invalid param (expected key=value): {item}", error_label());
             process::exit(1);
         };
         let value = if val == "true" {
@@ -265,13 +265,13 @@ fn parse_invocations(raw: &[String]) -> Result<Vec<bit::invocation::Invocation>,
 /// `project_dir()` reads it. Pass other directories to child processes.
 fn find_and_chdir_project_root() {
     let mut dir = std::env::current_dir().unwrap_or_else(|e| {
-        eprintln!("{} cannot determine current directory: {e}", "error:".red().bold());
+        eprintln!("{} cannot determine current directory: {e}", error_label());
         process::exit(1);
     });
     loop {
         if dir.join("BUILD.bit").is_file() {
             std::env::set_current_dir(&dir).unwrap_or_else(|e| {
-                eprintln!("{} cannot chdir to {}: {e}", "error:".red().bold(), dir.display());
+                eprintln!("{} cannot chdir to {}: {e}", error_label(), dir.display());
                 process::exit(1);
             });
             return;
@@ -282,7 +282,7 @@ fn find_and_chdir_project_root() {
     }
     eprintln!(
         "{} cannot find BUILD.bit in current or parent directories",
-        "error:".red().bold()
+        error_label()
     );
     process::exit(1);
 }
@@ -292,14 +292,14 @@ fn parse_build_bit() -> bit::ast::Module {
     let source = match fs::read_to_string("BUILD.bit") {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{} cannot read BUILD.bit: {e}", "error:".red().bold());
+            eprintln!("{} cannot read BUILD.bit: {e}", error_label());
             process::exit(1);
         }
     };
     match bit::parser::parse(&source, "BUILD.bit") {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     }
@@ -311,14 +311,14 @@ fn resolve_imports_or_exit(module: &bit::ast::Module, mode: bit::import::UpdateM
     let cache_root = match bit::import::default_cache_root() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     };
     match bit::import::resolve_imports(module, std::path::Path::new("."), &cache_root, mode) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     }
@@ -339,7 +339,7 @@ fn load_module(
     let store = match state::default_store(root) {
         Ok(s) => Box::new(s),
         Err(e) => {
-            eprintln!("{} cannot open state store: {e}", "error:".red().bold());
+            eprintln!("{} cannot open state store: {e}", error_label());
             process::exit(1);
         }
     };
@@ -349,7 +349,7 @@ fn load_module(
         match loader::load_selected(&module, params, registry, store.as_ref(), &imports.roots, invocations) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("{} {e}", "error:".red().bold());
+                eprintln!("{} {e}", error_label());
                 process::exit(1);
             }
         };
@@ -368,7 +368,7 @@ fn cache_location(cli: &Cli) -> Location {
     match uri.map(|uri| uri.parse::<Location>()).transpose() {
         Ok(location) => location.unwrap_or_default(),
         Err(e) => {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     }
@@ -379,7 +379,7 @@ fn cache_location(cli: &Cli) -> Location {
 fn clean_cache(location: &Location) {
     let cleaned = bit::cache::backend(location).and_then(|backend| Ok(backend.clean()?));
     if let Err(e) = cleaned {
-        eprintln!("{} cannot clean {location}: {e}", "error:".red().bold());
+        eprintln!("{} cannot clean {location}: {e}", error_label());
         process::exit(1);
     }
 }
@@ -393,7 +393,7 @@ fn open_build_cache(location: &Location, quiet: bool) -> BuildCache {
         Ok(cache) => cache,
         Err(e) => {
             if !quiet {
-                eprintln!("{} build cache {location} unavailable: {e}", "warning:".yellow().bold());
+                eprintln!("{} build cache {location} unavailable: {e}", warning_label());
             }
             BuildCache::local_only(root)
         }
@@ -472,19 +472,20 @@ fn ci_template(name: &str) -> Result<String, String> {
     })
 }
 
-/// `bit --docs [topic]`: styled for a terminal, plain Markdown for pipes.
+/// `bit --docs [topic]`: styled for a terminal, plain Markdown for pipes or
+/// `NO_COLOR`.
 fn print_docs(topic: &str) {
-    use std::io::{IsTerminal, Write};
+    use std::io::Write;
     let docs = bit::docs::Docs::new(bit::docs::README);
     let markdown = match docs.select((!topic.is_empty()).then_some(topic)) {
         Ok(markdown) => markdown,
         Err(e) => {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     };
     let stdout = std::io::stdout();
-    let text = if stdout.is_terminal() {
+    let text = if bit::output::colors_enabled(&stdout) {
         let (_, columns) = console::Term::stdout().size();
         bit::docs::render(markdown, columns.into())
     } else {
@@ -604,7 +605,7 @@ fn selected_order_or_exit(
     let order = match selected_order(dag, base, cache, targets, since, mode, tracker) {
         Ok(order) => order,
         Err(error) => {
-            eprintln!("{} {error}", "error:".red().bold());
+            eprintln!("{} {error}", error_label());
             process::exit(1);
         }
     };
@@ -618,13 +619,36 @@ fn selected_order_or_exit(
     }
 }
 
+/// Style a stderr diagnostic label. yansi's global switch follows stdout, so
+/// stderr styling is decided separately and the codes are written directly.
+fn stderr_label(text: &str, style: yansi::Style) -> String {
+    if bit::output::colors_enabled(&std::io::stderr()) {
+        format!("{}{text}{}", style.prefix(), style.suffix())
+    } else {
+        text.to_owned()
+    }
+}
+
+fn error_label() -> String {
+    stderr_label("error:", yansi::Style::new().red().bold())
+}
+
+fn warning_label() -> String {
+    stderr_label("warning:", yansi::Style::new().yellow().bold())
+}
+
 fn main() {
+    // Every styled stdout write goes through yansi, so one global switch
+    // keeps pipes and NO_COLOR free of escape codes.
+    if !bit::output::colors_enabled(&std::io::stdout()) {
+        yansi::disable();
+    }
     let matches = Cli::command().get_matches();
     let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     let Some(operation) = cli.selected() else {
         eprintln!(
             "{} operation modes are mutually exclusive (except --plan --graph)",
-            "error:".red().bold()
+            error_label()
         );
         process::exit(1);
     };
@@ -638,20 +662,17 @@ fn main() {
     let tracker = Arc::new(tracker);
 
     if cli.force && !operation.allows_force() {
-        eprintln!(
-            "{} --force can only be used for builds or with --clean",
-            "error:".red().bold()
-        );
+        eprintln!("{} --force can only be used for builds or with --clean", error_label());
         process::exit(1);
     }
 
     if cli.since.is_some() && !operation.allows_since() {
-        eprintln!("{} --since is not supported for this operation", "error:".red().bold());
+        eprintln!("{} --since is not supported for this operation", error_label());
         process::exit(1);
     }
     // Generated jobs run plain `bit`, so parameters would not reach them.
     if operation == Operation::Ci && !cli.params.is_empty() {
-        eprintln!("{} --ci does not accept -P parameters", "error:".red().bold());
+        eprintln!("{} --ci does not accept -P parameters", error_label());
         process::exit(1);
     }
     // A template path is relative to where bit runs, so read it before
@@ -660,12 +681,12 @@ fn main() {
         None => None,
         Some(Ok(source)) => Some(source),
         Some(Err(e)) => {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     };
     if cli.since.is_some() && cli.list == 1 {
-        eprintln!("{} --since requires -ll when listing blocks", "error:".red().bold());
+        eprintln!("{} --since requires -ll when listing blocks", error_label());
         process::exit(1);
     }
 
@@ -676,7 +697,7 @@ fn main() {
 
     if matches!(operation, Operation::Fmt) {
         if cli.targets.len() > 1 || cli.targets.first().is_some_and(|path| !path.ends_with(".bit")) {
-            eprintln!("{} --fmt accepts zero or one .bit file path", "error:".red().bold());
+            eprintln!("{} --fmt accepts zero or one .bit file path", error_label());
             process::exit(1);
         }
         let path = if let Some(path) = cli.targets.first() {
@@ -686,7 +707,7 @@ fn main() {
             std::path::Path::new("BUILD.bit")
         };
         if let Err(error) = format_bit_file(path) {
-            eprintln!("{} {}: {error}", "error:".red().bold(), path.display());
+            eprintln!("{} {}: {error}", error_label(), path.display());
             process::exit(1);
         }
         return;
@@ -728,7 +749,7 @@ fn main() {
         let res = resolve_imports_or_exit(&module, bit::import::UpdateMode::Update(filter));
         if !cli.quiet {
             for f in &res.unmatched_filters {
-                eprintln!("{} --update filter {f:?} matched no repos", "warning:".yellow().bold());
+                eprintln!("{} --update filter {f:?} matched no repos", warning_label());
             }
             if res.changes.is_empty() {
                 println!("no changes");
@@ -747,7 +768,7 @@ fn main() {
     let location = cache_location(&cli);
     if matches!(operation, Operation::CleanCache) {
         if !cli.targets.is_empty() {
-            eprintln!("{} --cache --clean does not accept targets", "error:".red().bold());
+            eprintln!("{} --cache --clean does not accept targets", error_label());
             process::exit(1);
         }
         clean_cache(&location);
@@ -761,7 +782,7 @@ fn main() {
     let invocations = match parse_invocations(&cli.targets) {
         Ok(invocations) => invocations,
         Err(error) => {
-            eprintln!("{} {error}", "error:".red().bold());
+            eprintln!("{} {error}", error_label());
             process::exit(1);
         }
     };
@@ -777,13 +798,13 @@ fn main() {
         let jobs = match jobs {
             Ok(jobs) => jobs,
             Err(e) => {
-                eprintln!("{} {e}", "error:".red().bold());
+                eprintln!("{} {e}", error_label());
                 process::exit(1);
             }
         };
         let project = std::path::Path::new(".");
         let Some(prefix) = bit::git::prefix(project) else {
-            eprintln!("{} --ci requires a Git repository", "error:".red().bold());
+            eprintln!("{} --ci requires a Git repository", error_label());
             process::exit(1);
         };
         let default_branch = bit::git::default_branch(project);
@@ -805,7 +826,7 @@ fn main() {
             Ok(rendered) if !cli.quiet => print!("{rendered}"),
             Ok(_) => {}
             Err(e) => {
-                eprintln!("{} {e}", "error:".red().bold());
+                eprintln!("{} {e}", error_label());
                 process::exit(1);
             }
         }
@@ -827,7 +848,7 @@ fn main() {
             match plan_styles(&mut dag, &base, &cache, &names, &tracker) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("{} {e}", "error:".red().bold());
+                    eprintln!("{} {e}", error_label());
                     process::exit(1);
                 }
             }
@@ -853,14 +874,14 @@ fn main() {
         };
         let output = output_for_names(&names, cli.debug, cli.long, cli.quiet);
         if let Err(e) = engine::plan_selected(&mut dag, &base, &cache, &output, &names, &tracker) {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     } else if matches!(operation, Operation::Clean) {
         let (_module, mut dag, _base, store, targets) = load_module(&registry, &params, &invocations);
         let output = make_output(&dag, &targets, cli.debug, cli.long, cli.quiet);
         if let Err(e) = engine::destroy(&mut dag, store.as_ref(), &output, &targets, cli.force) {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     } else if matches!(operation, Operation::List) {
@@ -890,7 +911,7 @@ fn main() {
                 Ok(names) if !cli.quiet => print_block_tree(&dag, &names),
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("{} {e}", "error:".red().bold());
+                    eprintln!("{} {e}", error_label());
                     process::exit(1);
                 }
             }
@@ -910,7 +931,7 @@ fn main() {
             return;
         };
         if let Err(e) = engine::dump_selected(&mut dag, &base, &names, cli.quiet) {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     } else {
@@ -935,7 +956,7 @@ fn main() {
             engine::apply_selected(&mut dag, &base, store.as_ref(), &cache, &output, &names, jobs, &tracker)
         };
         if let Err(e) = result {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     }
@@ -1067,14 +1088,14 @@ fn print_info(quiet: bool) {
     let source = match fs::read_to_string("BUILD.bit") {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{} cannot read BUILD.bit: {e}", "error:".red().bold());
+            eprintln!("{} cannot read BUILD.bit: {e}", error_label());
             process::exit(1);
         }
     };
     let module = match bit::parser::parse(&source, "BUILD.bit") {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("{} {e}", "error:".red().bold());
+            eprintln!("{} {e}", error_label());
             process::exit(1);
         }
     };
@@ -1233,7 +1254,7 @@ fn collect_schema_entries(
     if entries.is_empty()
         && let Some(f) = filter
     {
-        eprintln!("{} unknown resource/function: {f}", "error:".red().bold());
+        eprintln!("{} unknown resource/function: {f}", error_label());
         process::exit(1);
     }
 

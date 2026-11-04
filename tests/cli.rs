@@ -47,6 +47,21 @@ fn docs_topic_prints_one_section_without_escape_codes() {
 }
 
 #[test]
+fn piped_output_and_errors_have_no_escape_codes() {
+    let project = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("BUILD.bit"), "").unwrap();
+    let schema = run_bit(project.path(), &["--schema"]);
+    assert!(schema.status.success(), "{}", String::from_utf8_lossy(&schema.stderr));
+    let stdout = String::from_utf8(schema.stdout).unwrap();
+    assert!(stdout.contains("Builtins"), "{stdout}");
+    assert!(!stdout.contains('\x1b'), "{stdout:?}");
+
+    let failure = run_bit(project.path(), &["--docs", "no-such-topic"]);
+    let stderr = String::from_utf8(failure.stderr).unwrap();
+    assert!(stderr.starts_with("error: "), "{stderr:?}");
+}
+
+#[test]
 fn docs_unknown_topic_lists_the_available_topics() {
     let project = tempfile::tempdir().unwrap();
     let output = run_bit(project.path(), &["--docs", "no-such-topic"]);
