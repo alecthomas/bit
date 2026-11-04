@@ -28,7 +28,7 @@ pub struct GoTestInputs {
     /// Extra flags passed to go test. The profiles `-coverprofile`, `-cpuprofile`, `-memprofile`, `-blockprofile`, `-mutexprofile` and `-trace` write, under `-outputdir`, are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. go runs in the directory `-C` names.
     #[serde(default)]
     pub flags: Vec<String>,
-    /// Input file glob patterns, relative to `dir` (in addition to Go sources, and every file in each tested package's directory and its `testdata/`)
+    /// Input file glob patterns, relative to `dir` (in addition to Go sources, and every file in each tested package's directory and its `testdata/`). Add files tests read from elsewhere
     #[serde(default)]
     pub inputs: Vec<String>,
     /// What to show: a line per package (`suites`), a line per test

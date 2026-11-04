@@ -94,7 +94,8 @@ struct Cli {
     #[arg(short = 'P', long = "param", value_name = "KEY=VALUE")]
     params: Vec<String>,
 
-    /// Limit blocks to those affected since merge-base(REF, HEAD); REF defaults to origin/HEAD
+    /// Limit blocks to those affected since merge-base(REF, HEAD); REF defaults
+    /// to origin/HEAD, and a REF that is not a commit is read as a target
     #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = DEFAULT_SINCE)]
     since: Option<String>,
 

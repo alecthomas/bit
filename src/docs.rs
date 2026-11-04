@@ -681,9 +681,9 @@ Cache.
     #[test]
     fn readme_ci_topic_is_the_ci_workflows_section() {
         let section = Docs::new(README).select(Some("ci")).unwrap();
-        assert!(section.starts_with("### CI workflows\n"), "{section}");
+        assert!(section.starts_with("## CI workflows\n"), "{section}");
         assert!(section.contains("A template sees:"));
-        assert!(!section.contains("## Language"));
+        assert!(!section.contains("## Providers"));
     }
 
     #[test]

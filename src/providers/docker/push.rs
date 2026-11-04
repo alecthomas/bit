@@ -12,7 +12,8 @@ use crate::provider::{
 };
 use crate::sha256::SHA256;
 
-/// Push a Docker image to a registry
+/// Push a Docker image to a registry. Pushes again only when the image
+/// changes, not when the registry copy was deleted or overwritten.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct PushInputs {
     /// Source image reference (e.g. from a docker.image block's ref)

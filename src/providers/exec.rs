@@ -23,9 +23,12 @@ use crate::value::Value;
 /// Run a shell command, track inputs and outputs
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct ExecInputs {
-    /// Shell command to execute
+    /// Shell command, run with `bash -eo pipefail`. `BIT_CHANGED_FILES` lists
+    /// the inputs changed since the last success, one absolute path per line,
+    /// and is unset on a full run
     pub command: String,
-    /// Output file or list of output files, relative to `dir`
+    /// Output file or list of output files, relative to `dir`. They are stored
+    /// in the shared cache, unless `resolve` or `values` is set
     #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub outputs: Vec<String>,
@@ -440,7 +443,9 @@ impl Resource for ExecResource {
 /// Run a command as a test (pass/fail by exit code and any failures reported via `results`)
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct ExecTestInputs {
-    /// Shell command to execute
+    /// Shell command, run with `bash -eo pipefail`. `BIT_CHANGED_FILES` lists
+    /// the inputs changed since the last success, one absolute path per line,
+    /// and is unset on a full run
     pub command: String,
     /// Input file glob patterns, relative to `dir`. A directory names every file beneath it
     #[serde(default)]

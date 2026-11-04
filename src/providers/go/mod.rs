@@ -339,7 +339,7 @@ fn packages(pattern: String, dir: Option<String>) -> Result<Vec<String>, BoxErro
 
 /// List Go modules at or below a directory.
 ///
-/// Returns each `go.mod` directory relative to bit's working directory, skipping
+/// Returns each `go.mod` directory relative to `bit`'s working directory, skipping
 /// `vendor`, `testdata`, and directories starting with `.` or `_`, as `./...` does.
 #[bit_derive::provider_function]
 fn modules(dir: Option<String>) -> Result<Vec<String>, BoxError> {

@@ -16,7 +16,8 @@ use crate::sha256::SHA256;
 
 use super::scanner::Tests;
 
-/// Run golangci-lint
+/// Run golangci-lint. Defaults to `concurrency = 1`, because golangci-lint
+/// refuses to start while another instance is running.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct GoLintInputs {
     /// Go package pattern or list of patterns

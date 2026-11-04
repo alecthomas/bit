@@ -2,9 +2,9 @@
 
 A declarative build tool with dependency tracking, content-based caching, and parallel execution.
 
-bit reads a `BUILD.bit` file, resolves dependencies between blocks, detects what changed, and only rebuilds what's needed. Language-aware providers (e.g. Go, Rust, Docker) automatically discover inputs from source files, so in most cases you don't need to specify them manually.
+`bit` reads a `BUILD.bit` file, resolves dependencies between blocks, detects what changed, and only rebuilds what's needed. Language-aware providers (e.g. Go, Rust, Docker) automatically discover inputs from source files, so in most cases you don't need to specify them manually.
 
-Like Terraform, bit tracks the state of each block between runs. It detects drift (e.g. a deleted Docker image or stopped container), determines what actions are needed (create, update, destroy), and applies only the minimum changes. `bit --plan` shows what would change; `bit` makes it so; `bit --clean` tears it down.
+Like Terraform, `bit` tracks the state of each block between runs. It detects drift (e.g. a deleted Docker image or stopped container), determines what actions are needed (create, update, destroy), and applies only the minimum changes. `bit --plan` shows what would change; `bit` makes it so; `bit --clean` tears it down.
 
 ## Install
 
@@ -19,6 +19,12 @@ cargo install --path .
 ```
 
 ## Quick Start
+
+Put a `BUILD.bit` file at the root of your project. Each block names a
+resource from a provider, such as `go.exe`, and sets its fields.
+
+This one builds a Go server, tests and lints it, packages a Linux build into a
+Docker image, and runs that image as a container:
 
 ```hcl
 # Go inputs are auto-detected from source files
@@ -57,15 +63,67 @@ app = docker.container {
   healthcheck = "curl -sf http://localhost:8080/health"
 }
 
-target build = [server]
+# Build the server binary
+target default = [server]
+# Run the tests and linter
 target test = [unit-test, lint]
+# Build the image and run it as a container
 target deploy = [app]
 ```
+
+`bit -l` lists the targets:
+
+```console
+$ bit -l
+default — Build the server binary
+deploy — Build the image and run it as a container
+test — Run the tests and linter
+```
+
+`bit` runs the `default` target. A second run skips blocks that haven't
+changed:
+
+```console
+$ bit
+server ▶ go build -o dist/server -trimpath ./cmd/server
+server ✔ ok
+$ bit
+server · no changes
+```
+
+### Overview
+
+Blocks depend on each other through `depends_on` or by referencing another
+block's outputs, such as `image.ref`. Targets name groups of blocks to run
+together, and a comment above a target describes it. The `default` target runs
+when `bit` is given no arguments. `bit` runs independent blocks in parallel.
+
+Providers discover a block's inputs and outputs themselves, and many resources
+also accept `inputs` and `outputs` for files they can't discover.
+
+`bit` hashes each block's fields, input files, outputs, the tools it runs, and
+the blocks it depends on. A block whose hash hasn't changed since it last
+succeeded is skipped. A change reruns that block and the blocks that depend on
+it.
+
+When a block reruns, its provider sees which files changed and can narrow the
+work to them. For example, `go.test` and `go.lint` run only on the packages
+that changed files affect, and `exec` passes the changed files to its command
+in `BIT_CHANGED_FILES`.
+
+Successful results also go into a [shared build cache](#shared-build-cache).
+Another checkout of the project with the same sources reuses them, restoring
+build outputs instead of rebuilding. Point `--cache` at an S3 bucket to share
+results between machines, such as CI and developers.
+
+### Usage
+
+Run `bit` in the project directory:
 
 ```sh
 bit              # apply the default target (or every non-`explicit` block if no default)
 bit ...          # apply every non-`explicit` block regardless of the default target
-bit build        # apply a specific target or block
+bit test         # apply a specific target or block
 bit publish tag=v1  # pass a named argument to a target
 bit --force      # rebuild selected blocks without change detection or cache
 bit --plan       # show what would change
@@ -95,189 +153,6 @@ bit --since      # same, using the remote default branch (origin/HEAD)
 bit --ci github > .github/workflows/bit.yml  # generate a GitHub Actions workflow
 bit --ci ./buildkite.yml.tmpl  # render a CI configuration from a template
 ```
-
-`bit -ll` renders blocks as a dependency tree. A block's prerequisites are
-indented beneath it; shared prerequisites name their other dependents with an
-`also:` suffix.
-
-`exec.test`, `go.test`, and `rust.test` take a `report` field: `suites` (the
-default) prints a line per suite, `tests` a line per test, and `verbose` also
-streams the tool's output. `rust.test` names unit test suites by crate. It
-prints Cargo compiler diagnostics when `cargo test` fails, including when
-another workspace suite has already passed.
-
-When only Go files changed since `go.test` last passed, it tests just the
-packages whose sources, tests, other files, `testdata/` or local imports
-include a changed file. It tests the whole pattern on its first run, with
-`--force`, or when its fields, toolchain, dependencies or extra `inputs`
-changed, or a tracked file was deleted. `go.lint` narrows its run the same
-way. It lints the whole pattern when the golangci-lint config changed, or
-when a changed package is
-excluded by build constraints without extra build tags. `go.fmt` and
-`go.fmt-l` format or check only the changed `.go` files of the packages they
-name, not of the packages those import.
-
-Go blocks track the files the go command compiles in each package: `.go`
-files, assembly, cgo and SWIG sources and headers, `.syso` objects, and
-`default.pgo`. They also track the files `//go:embed` names. `go.test` also
-tracks every file in each tested package's directory and its `testdata/`,
-which tests read at run time. It cannot see files tests read from other
-directories or the environment variables they read. Add those files to
-`inputs`.
-
-Go blocks follow local imports into every module the go command builds from
-local directories: the modules a `go.work` file uses, and the targets of
-`replace` directives that name a directory. They track each of those modules'
-`go.mod` and `go.sum`, and the `go.work` and `go.work.sum` in use. When the
-workspace or main module has a `vendor/modules.txt`, they track every file in
-`vendor/`.
-
-`docker.image` tracks the Dockerfile and the context files its `COPY`, `ADD`
-and `RUN --mount=type=bind` instructions read, less those its ignore file
-excludes. It expands variables in their paths as Docker does, and takes
-`TARGETARCH` and the other target platform arguments from `platform`. It
-cannot see changes that only a registry or network request would reveal:
-
-- a base image tag, such as `FROM node:latest`, that now names another image
-- a file that `ADD` downloads from a URL
-- the frontend a `# syntax=` line names
-
-Pin base images and frontends by digest so that a change to them changes the
-Dockerfile. `docker.push` does not check the registry either. It pushes again
-only when the image changes, not when the registry copy was deleted or
-overwritten.
-
-`buf.generate` fingerprints the local plugins its template runs, but not
-remote plugins, which run on the Buf Schema Registry. A remote plugin named
-without a version, such as `buf.build/protocolbuffers/go`, runs its latest
-release, so a new release does not rerun the block. Pin remote plugins to a
-version, such as `buf.build/protocolbuffers/go:v1.36.6`. A `buf.lint`,
-`buf.format` or `buf.format-check` block whose input is a Git repository, BSR
-module or URL keeps its result in this worktree, since bit cannot hash what
-buf reads.
-
-`exec.test` can report individual tests from any runner with JSON or JSONL
-output. Its `results` field is a jq filter that maps each JSON value to test
-and suite results. Records without a `name` describe the suite, so a runner
-that reports when each suite starts and ends gets its summaries as each suite
-finishes. For example, this maps `go test -json` events, using package events
-as suite markers:
-
-```hcl
-unit = exec.test {
-  command = "go test -json ./..."
-  results = <<-EOF
-    {suite: .Package} + (if .Test then {name: .Test} else {} end) +
-      if .Action == "start" or .Action == "run" then {event: "start"}
-      elif .Action == "output" and (.Output | test("^(=== |--- )") | not) then {output: .Output}
-      elif .Action == "pass" or .Action == "fail" or .Action == "skip" then {status: .Action, duration: .Elapsed}
-      else empty end
-  EOF
-}
-```
-
-The JSON schema output is an object whose keys are `builtins` and the names of
-providers or imported modules. Each section has a `functions` array and, when
-applicable, a `resources` array.
-
-`--fmt` separates top-level declarations with one empty line, except consecutive
-`param` or `let` directives of the same kind, which stay together. It puts each
-block field on its own line. It retains comments and their attachment to
-declarations, as well as expression spelling such as heredocs and quoted strings.
-
-All block/target-taking modes (`bit`, `--plan`, `--clean`, `--graph`, `--dump`)
-accept the same positional selector: no argument uses the `default` target
-(or every non-`explicit` block if none), `...` forces every non-`explicit`
-block, or name one or more targets/blocks to scope the operation. `--clean
-<name>` destroys that block plus anything that depends on it, in reverse
-topological order. A `protected` block is destroyed only when its exact block
-name is one of these positional selectors. Bulk cleanup and target expansion
-skip protected blocks.
-
-`--force` (`-f`) rebuilds every block selected by a normal apply, ignoring
-change detection and the shared cache. With `--clean`, it instead continues
-cleanup past errors.
-
-`--since <ref>` limits apply, plan, graph, dump, and block-list operations to
-blocks affected by changes between `merge-base(<ref>, HEAD)` and the current
-worktree. Committed, staged, unstaged, and untracked changes are included. A
-block is affected when a changed path is one of its provider-resolved inputs,
-or when it content-depends on an affected block. Required prerequisites are
-included. `bit -ll --since <ref>` prints affected blocks across the full DAG;
-positional targets optionally narrow that list. `-l --since` is rejected
-because `-l` lists target definitions rather than blocks.
-
-A bare `--since` uses `origin/HEAD`, the remote's default branch. If the
-argument after `--since` is not a Git commit, it is treated as a target, so
-`bit --since build` builds the affected blocks of `build`.
-
-Blocks without source paths are always included because Git cannot prove them
-unaffected. Git cannot see ignored files or files outside the repository, so a
-block is also affected when such an input, or a tool it runs, has changed since
-the block last ran. A changed `.bit` build definition selects the full requested target
-set. An unowned deleted path also selects the full set when prior state cannot
-identify its block. `--since` requires the ref and its merge base to exist
-locally, and cannot be combined with `--clean`.
-
-### CI workflows
-
-`bit --ci <template> [target...]` renders a CI configuration that applies the
-same blocks as `bit [target...]`. It splits the work so that
-[`large`](#blocks) blocks run in their own jobs:
-
-- Each large block gets a job. Blocks that depend on it run in that job too.
-- Large blocks share a job when one depends on another, or when a block
-  depends on both.
-- Every other block runs in a job named `default`.
-
-Each job runs `bit` with the blocks that nothing else in the job depends on,
-such as `bit test clippy`, and bit runs everything they depend on. A matrix
-block whose slices all run in the job is selected by its name. A
-parameterized block is selected with its arguments, as in `bit publish
-name=web`, leaving out arguments that equal their default. That selects every slice of a parameterized matrix block, so its
-slices share a job. `--ci` does not accept `-P`, because the jobs would run
-without it.
-
-Jobs share no results. A block that a large block needs runs again in the
-large block's job, and `pre` blocks run in every job. A `post` block depends on
-every block, so it puts every large block in one job.
-
-`--ci github` renders the built-in GitHub Actions template. Each job checks out
-the repository and runs `bit` in the project directory, and pushes to the
-remote's default branch and pull requests trigger the workflow. `bit` must be
-on the `PATH`. Regenerate the workflow after changing `BUILD.bit`.
-
-For anything else, such as another CI system, setup steps, or a larger runner
-for large jobs, give the path of a [MiniJinja](https://docs.rs/minijinja)
-template instead. A name containing `/` is a path, so write `./ci.yml.tmpl`
-for a file in the current directory:
-
-```yaml
-# buildkite.yml.tmpl, rendered with `bit --ci ./buildkite.yml.tmpl`
-steps:
-{% for job in jobs %}
-  - label: {{ job.name | tojson }}
-    key: {{ job.id | tojson }}
-    command: {{ job.command | tojson }}
-{% endfor %}
-```
-
-A template sees:
-
-| Variable            | Description                                                                |
-| ------------------- | -------------------------------------------------------------------------- |
-| `jobs`              | The jobs, in order                                                         |
-| `job.id`            | An identifier made of letters, digits, `_` and `-`, unique among the jobs  |
-| `job.name`          | The job's large blocks, or `default`                                       |
-| `job.large`         | Whether the job runs large blocks                                          |
-| `job.command`       | The shell command the job runs, such as `bit test clippy`                  |
-| `job.selection`     | The arguments of `bit` in that command, as a list                          |
-| `command`           | The `bit --ci` command that rendered the template                          |
-| `working_directory` | The project directory relative to the repository root, or none at the root |
-| `default_branch`    | The remote's default branch, or none if unknown                            |
-
-Block tags on their own line leave no blank line, and using an undefined
-variable is an error. `tojson` quotes a value for YAML or JSON.
 
 ## Language
 
@@ -336,12 +211,12 @@ Special fields:
 
 - `depends_on = [block, ...]` — content-coupled dependency (changes propagate)
 - `after = [block, ...]` — ordering-only dependency
-- `concurrency = N` — maximum number of this block's matrix slices that may run at once (`go.lint` defaults to 1)
+- `concurrency = N` — maximum number of this block's matrix slices that may run at once
 - `uncached = [output, ...]` — outputs to keep out of the [shared build cache](#shared-build-cache)
-- `dir = path` — directory the block's commands run in, relative to the project root (defaults to the project root). Relative paths in the block's other fields are relative to `dir`, and a Dockerfile is relative to its build `context`. `bit --clean` runs in the `dir` the block last ran in
-- `env = { NAME = "value", ... }` — environment variables set for every command the block runs. Changing one reruns the block. For `docker` resources they apply to the docker CLI, not the container
+- `dir = path` — directory the block's commands run in, relative to the project root (defaults to the project root). Relative paths in the block's other fields are relative to `dir`. `bit --clean` runs in the `dir` the block last ran in
+- `env = { NAME = "value", ... }` — environment variables set for every command the block runs. Changing one reruns the block
 
-Every other field must be an input of the block's resource, as listed under [Providers](#providers) or by `bit --schema`. bit checks fields when it loads `BUILD.bit` and rejects unknown fields, missing required fields, and values of the wrong type. A value taken from another block's outputs is checked against that output's declared type, and checked again just before the block runs.
+Every other field must be an input of the block's resource, as listed under [Providers](#providers) or by `bit --schema`. `bit` checks fields when it loads `BUILD.bit` and rejects unknown fields, missing required fields, and values of the wrong type. A value taken from another block's outputs is checked against that output's declared type, and checked again just before the block runs.
 
 Prefix with `protected` to prevent destruction, `explicit` to exclude from `...`, `large` to mark a long-running or resource-heavy block, or any combination (in any order):
 
@@ -471,10 +346,6 @@ Set `concurrency` to a positive integer to cap simultaneous slices from that
 matrix block without reducing parallelism for unrelated blocks. The global
 `-j` limit still caps the total number of running blocks.
 
-`go.lint` blocks default to `concurrency = 1`, because golangci-lint refuses
-to start while another instance is running. Set `concurrency` explicitly to
-override this.
-
 ### Strings
 
 Double-quoted with `#{expr}` interpolation, single-quoted raw strings, and heredocs:
@@ -553,7 +424,7 @@ its unqualified name, for example `bit --schema env`.
 
 **`replace(value: string | [string], pattern: string, replacement: string) -> string | [string]`** — Replace every regular expression match in a string or each string in a list. The replacement may reference capture groups as `$1` or `${name}`.
 
-**`secret(name: string) -> string`** — Read a secret by name. bit shows the secret as this call, never its value. A secret cannot be passed as a block or target argument.
+**`secret(name: string) -> string`** — Read a secret by name. `bit` shows the secret as this call, never its value. A secret cannot be passed as a block or target argument.
 
 **`sha256(value: string) -> string`** — Hash a string with SHA-256.
 
@@ -588,9 +459,7 @@ tests[package] = go.test {
 ```
 
 Provider functions can also return typed block references for dependency
-fields. `rust.dependencies` returns immediate local non-development
-dependencies; each `$` in its optional template is replaced with the
-dependency package name:
+fields, such as one matrix slice per local dependency:
 
 ```bit
 let package = rust.packages()
@@ -667,18 +536,18 @@ import "git.sr.ht/~user/repo"                        # arbitrary host
 import "github.com/alecthomas/bit-modules" as bm     # override the auto-derived provider name
 ```
 
-For deep paths like `github.com/foo/bar/waz`, bit needs to know where the repo ends and the subpath begins. Hardcoded forges (`github.com`, `gitlab.com`, `bitbucket.org`) split at segment 3 (`host/owner/repo`). For other hosts, an import under a repo already pinned in `BUILD.bit.lock` uses that repo without contacting the host. Otherwise bit probes via `git ls-remote` from the longest prefix down — the first one that responds is the repo, the rest is the subpath.
+For deep paths like `github.com/foo/bar/waz`, `bit` needs to know where the repo ends and the subpath begins. Hardcoded forges (`github.com`, `gitlab.com`, `bitbucket.org`) split at segment 3 (`host/owner/repo`). For other hosts, an import under a repo already pinned in `BUILD.bit.lock` uses that repo without contacting the host. Otherwise `bit` probes via `git ls-remote` from the longest prefix down — the first one that responds is the repo, the rest is the subpath.
 
 Use `as <ident>` to override the auto-derived provider name — useful when two imports would otherwise collide on the last path segment.
 
-Git URLs are always cloned as `https://<url>`; for SSH or custom auth, add `insteadOf` rules to your `~/.gitconfig` (bit shells out to `git clone`, which respects them). A trailing `.git` is optional and stripped from the lock key.
+Git URLs are always cloned as `https://<url>`; for SSH or custom auth, add `insteadOf` rules to your `~/.gitconfig` (`bit` shells out to `git clone`, which respects them). A trailing `.git` is optional and stripped from the lock key.
 
 ##### Recursive resolution and `BUILD.bit.lock`
 
 Every project — the root and every imported project — has its own `BUILD.bit` listing **its** direct imports, and its own `BUILD.bit.lock` pinning those git deps. Resolution walks the graph: root's imports first, then each imported project's `BUILD.bit` imports, transitively.
 
 - The **root** project's lock is writable: new git imports are auto-pinned to the current default-branch HEAD, and `bit --update` re-resolves entries.
-- **Child** projects' locks are read-only. Every git import a child declares **must** have a matching entry in that child's `BUILD.bit.lock`, or bit errors. A child with no `BUILD.bit` is a leaf — no further deps to resolve.
+- **Child** projects' locks are read-only. Every git import a child declares **must** have a matching entry in that child's `BUILD.bit.lock`, or `bit` errors. A child with no `BUILD.bit` is a leaf — no further deps to resolve.
 - Imports of imports become providers in the root project's scope, so any module can use any transitively imported provider.
 - Conflicts are hard errors:
   - same git repo resolved to two different SHAs anywhere in the graph;
@@ -699,11 +568,71 @@ target build = [app, lib]
 output version = app.version
 ```
 
+## CI workflows
+
+`bit --ci <template> [target...]` renders a CI configuration that applies the
+same blocks as `bit [target...]`. It splits the work so that
+[`large`](#blocks) blocks run in their own jobs:
+
+- Each large block gets a job. Blocks that depend on it run in that job too.
+- Large blocks share a job when one depends on another, or when a block
+  depends on both.
+- Every other block runs in a job named `default`.
+
+Each job runs `bit` with the blocks that nothing else in the job depends on,
+such as `bit test clippy`, and `bit` runs everything they depend on. A matrix
+block whose slices all run in the job is selected by its name. A
+parameterized block is selected with its arguments, as in `bit publish
+name=web`, leaving out arguments that equal their default. That selects every slice of a parameterized matrix block, so its
+slices share a job. `--ci` does not accept `-P`, because the jobs would run
+without it.
+
+Jobs share no results. A block that a large block needs runs again in the
+large block's job, and `pre` blocks run in every job. A `post` block depends on
+every block, so it puts every large block in one job.
+
+`--ci github` renders the built-in GitHub Actions template. Each job checks out
+the repository and runs `bit` in the project directory, and pushes to the
+remote's default branch and pull requests trigger the workflow. `bit` must be
+on the `PATH`. Regenerate the workflow after changing `BUILD.bit`.
+
+For anything else, such as another CI system, setup steps, or a larger runner
+for large jobs, give the path of a [MiniJinja](https://docs.rs/minijinja)
+template instead. A name containing `/` is a path, so write `./ci.yml.tmpl`
+for a file in the current directory:
+
+```yaml
+# buildkite.yml.tmpl, rendered with `bit --ci ./buildkite.yml.tmpl`
+steps:
+{% for job in jobs %}
+  - label: {{ job.name | tojson }}
+    key: {{ job.id | tojson }}
+    command: {{ job.command | tojson }}
+{% endfor %}
+```
+
+A template sees:
+
+| Variable            | Description                                                                |
+| ------------------- | -------------------------------------------------------------------------- |
+| `jobs`              | The jobs, in order                                                         |
+| `job.id`            | An identifier made of letters, digits, `_` and `-`, unique among the jobs  |
+| `job.name`          | The job's large blocks, or `default`                                       |
+| `job.large`         | Whether the job runs large blocks                                          |
+| `job.command`       | The shell command the job runs, such as `bit test clippy`                  |
+| `job.selection`     | The arguments of `bit` in that command, as a list                          |
+| `command`           | The `bit --ci` command that rendered the template                          |
+| `working_directory` | The project directory relative to the repository root, or none at the root |
+| `default_branch`    | The remote's default branch, or none if unknown                            |
+
+Block tags on their own line leave no blank line, and using an undefined
+variable is an error. `tojson` quotes a value for YAML or JSON.
+
 ## Providers
 
 ### buf
 
-**`buf.generate`** (build) — Generate code from Protobuf files with buf generate. The sources, outputs, and plugins are discovered from the buf workspace and generation template.
+**`buf.generate`** (build) — Generate code from Protobuf files with buf generate. The sources, outputs, and plugins are discovered from the buf workspace and generation template. A remote plugin without a version, such as `buf.build/protocolbuffers/go`, does not rerun on a new release, so pin it, as in `buf.build/protocolbuffers/go:v1.36.6`.
 
 ```bit
 block = buf.generate {
@@ -776,7 +705,7 @@ block = buf.breaking {
 
 ### docker
 
-**`docker.image`** (build) — Build a Docker image (auto-detects inputs from Dockerfile)
+**`docker.image`** (build) — Build a Docker image (auto-detects inputs from Dockerfile). Changes to a base image tag, a file `ADD` downloads, or a `# syntax=` frontend are not detected, so pin them by digest.
 
 ```bit
 block = docker.image {
@@ -795,7 +724,7 @@ block = docker.image {
 | `ref`      | `string` | Locally pinned tag or registry digest reference                      |
 | `image_id` | `string` | Docker image ID or multi-platform manifest digest, without `sha256:` |
 
-**`docker.push`** (build) — Push a Docker image to a registry
+**`docker.push`** (build) — Push a Docker image to a registry. Pushes again only when the image changes, not when the registry copy was deleted or overwritten.
 
 ```bit
 block = docker.push {
@@ -881,8 +810,8 @@ block = docker.network_attach {
 
 ```bit
 block = exec {
-  command = string                # Shell command to execute
-  outputs = (string | [string])?  # Output file or list of output files, relative to `dir`
+  command = string                # Shell command, run with `bash -eo pipefail`. `BIT_CHANGED_FILES` lists the inputs changed since the last success, one absolute path per line, and is unset on a full run
+  outputs = (string | [string])?  # Output file or list of output files, relative to `dir`. They are stored in the shared cache, unless `resolve` or `values` is set
   inputs = [string]?              # Input file glob patterns, relative to `dir`. A directory names every file beneath it
   clean = string?                 # Shell command to run on `bit --clean` (replaces the default removal of outputs)
   resolve = string?               # Shell command whose stdout is captured as state. Used to detect whether the resource exists and whether it has drifted.
@@ -901,7 +830,7 @@ block = exec {
 
 ```bit
 block = exec.test {
-  command = string                      # Shell command to execute
+  command = string                      # Shell command, run with `bash -eo pipefail`. `BIT_CHANGED_FILES` lists the inputs changed since the last success, one absolute path per line, and is unset on a full run
   inputs = [string]?                    # Input file glob patterns, relative to `dir`. A directory names every file beneath it
   outputs = [string]?                   # Output files to track, relative to `dir`
   clean = string?                       # Shell command to run on `bit --clean`
@@ -971,7 +900,7 @@ block = go.generate {
 block = go.test {
   package = string | [string]           # Go package pattern or list of patterns (e.g. "./...")
   flags = [string]?                     # Extra flags passed to go test. The profiles `-coverprofile`, `-cpuprofile`, `-memprofile`, `-blockprofile`, `-mutexprofile` and `-trace` write, under `-outputdir`, are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. go runs in the directory `-C` names.
-  inputs = [string]?                    # Input file glob patterns, relative to `dir` (in addition to Go sources, and every file in each tested package's directory and its `testdata/`)
+  inputs = [string]?                    # Input file glob patterns, relative to `dir` (in addition to Go sources, and every file in each tested package's directory and its `testdata/`). Add files tests read from elsewhere
   report = ("suites" | "tests" | "verbose")?  # What to show: a line per package (`suites`), a line per test (`tests`), or a line per test plus go's output as it arrives (`verbose`). Outside `verbose`, go's output is shown only on failure.
   goos = string?                        # Target OS
   goarch = string?                      # Target architecture
@@ -985,7 +914,7 @@ block = go.test {
 | -------- | ------ | ------------------------ |
 | `passed` | `bool` | Whether all tests passed |
 
-**`go.lint`** (test) — Run golangci-lint
+**`go.lint`** (test) — Run golangci-lint. Defaults to `concurrency = 1`, because golangci-lint refuses to start while another instance is running.
 
 ```bit
 block = go.lint {
@@ -1025,7 +954,7 @@ block = go.fmt-l {
 
 **`go.packages(pattern: string, dir: string?) -> [string]`** — List Go packages matching a package pattern.
 
-**`go.modules(dir: string?) -> [string]`** — List Go modules at or below a directory. Returns each `go.mod` directory relative to bit's working directory, skipping `vendor`, `testdata`, and directories starting with `.` or `_`, as `./...` does.
+**`go.modules(dir: string?) -> [string]`** — List Go modules at or below a directory. Returns each `go.mod` directory relative to `bit`'s working directory, skipping `vendor`, `testdata`, and directories starting with `.` or `_`, as `./...` does.
 
 ### pnpm
 
@@ -1216,84 +1145,20 @@ block = rust.fmt-check {
 
 ## How It Works
 
-1. Parse `BUILD.bit` and build a dependency DAG
-   - Module blocks (from `.bit/modules/`) are expanded into namespaced inner blocks
-   - Phase modifiers (`pre`/`post`) add synthetic ordering edges between phases
-2. For each block in topological order:
-   - Evaluate field expressions (with upstream outputs in scope)
-   - Resolve input files via the provider
-   - Fingerprint the tools the resource runs alongside its input files, so a tool upgrade or toolchain switch reruns the blocks that use it and changes their shared cache key (see below)
-   - Compute a content hash (file contents + dependency hashes). A symlinked input also hashes each link target in its chain, so a stable Hermit stub such as `bin/tsk` reruns blocks when the tool is upgraded. Making a file executable, or no longer executable, also changes its hash; other permission bits do not
-   - Hash the block's declared outputs as well, so editing or deleting one reruns the block. Every file under a directory output is hashed
-   - Skip if nothing changed; apply if inputs differ
-3. Persist state to the user's cache directory (e.g. `~/Library/Caches/bit/<hash>/state/` on macOS, `~/.cache/bit/<hash>/state/` on Linux, one file per block), partitioned by a hash of the project's absolute path
+1. Parse `BUILD.bit` and build a dependency DAG. Module instances expand into
+   namespaced blocks, and `pre`/`post` phases add ordering edges.
+2. For each block in dependency order, running up to `-j N` at once (defaults
+   to the CPU count):
+   - Evaluate its fields, with upstream outputs in scope.
+   - Ask the provider for the block's input files, its outputs, and the tools
+     and environment variables its result depends on.
+   - Hash those together with the hashes of the block's dependencies.
+   - Skip the block if the hash is unchanged, otherwise apply it.
+3. Save each block's state in the user's cache directory.
 
-Parallel execution with `-j N` (defaults to CPU count).
-
-Rust resources with a `package` select that package and its transitive local
-dependencies for change detection, as cargo resolves them. Local dependencies
-include path dependencies and `[patch]` paths outside the workspace. Without
-`package`, they track every local package. `-p`, `--package`, `--workspace`
-and `--manifest-path` in `flags` widen the tracked packages to the ones cargo
-builds. A package's inputs are every file
-in its directory that Git does not ignore, apart from the target directory and
-nested packages, because builds also read `include_str!` data, files a build
-script reads, and test fixtures. All Rust resources also track the workspace
-root's `Cargo.toml` and `Cargo.lock`, and every Cargo config file cargo
-merges: `.cargo/config.toml` or `.cargo/config` where cargo runs, in each
-parent directory, and in `CARGO_HOME`. `rust.clippy` also tracks
-`.clippy.toml` and `clippy.toml` in each linted package's directory and its
-parents, or from `CLIPPY_CONF_DIR` when that is set. `rust.fmt` and
-`rust.fmt-check` track `.rustfmt.toml` and `rustfmt.toml` in each package's
-directory and its parents, in the home directory, and in the user's `rustfmt`
-config directory.
-
-Each resource also fingerprints the ambient state its result depends on:
-the tools it runs and the environment variables it reads. bit records it
-in one of three ways:
-
-- A tool's version command, run where and how the resource runs the tool.
-  Through a proxy such as rustup or the go command, this reports the
-  toolchain the proxy selects, for example from `rust-toolchain.toml` or a
-  `go.mod` `toolchain` line.
-- A tool's executable content, for plugins without reliable version output.
-  bit reuses a hash while the file's symlink chain, size, timestamps, and
-  inode are unchanged, so large executables are not read on every run.
-- An environment variable that no version command reports, such as
-  `RUSTFLAGS`.
-
-| Provider | Fingerprints                                                                                                                                                                                                                                                                                                  |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `exec`   | `bash --version`; name any program a command depends on in `inputs`                                                                                                                                                                                                                                           |
-| `docker` | `docker --version` for `docker.image` and `docker.push`. Containers and networks track none, so a CLI upgrade never recreates them                                                                                                                                                                            |
-| `go`     | `go env GOVERSION GOOS GOARCH …` with the block's target; `golangci-lint version` for `go.lint`; the `gofmt` executable for `go.fmt`                                                                                                                                                                          |
-| `rust`   | `rustc -vV`; `CARGO_HOME`; for building, testing, and linting, `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTC` and wrapper variables, every `CARGO_PROFILE_*` and `CARGO_TARGET_*` variable, and variables crates and build scripts read; `cargo clippy --version` for `rust.clippy`; `rustfmt --version` for formatting |
-| `pnpm`   | `pnpm --version` and `node --version` in the workspace; for `pnpm.install`, `NODE_ENV` and every `npm_config_*` and `pnpm_config_*` variable                                                                                                                                                                  |
-| `buf`    | `buf --version`; the content of local plugins in `buf.gen.yaml` and check plugins in `buf.yaml`                                                                                                                                                                                                               |
-| `protoc` | `protoc --version`; the content of each `protoc-gen-*` plugin and `--plugin` path                                                                                                                                                                                                                             |
-
-A tool that cannot be found or run is recorded as missing, so installing it
-later reruns the blocks that use it.
-
-`protoc.generate` tracks its sources and the files they transitively import.
-It removes generated files the latest run no longer writes. `--clean` removes
-only generated files, so anything else kept in an output directory survives.
-With `incremental = true`, it compiles only the changed sources and the
-sources that import them. It runs a full compile after a configuration or
-tool change, a removed source, or an output that moved. When a recompiled
-source stops writing an output without writing a new one, the old output
-remains until the next full compile.
-
-`buf` resources find their sources the way buf does. From a local input,
-bit walks up to the workspace that controls it: a v2 `buf.yaml` whose
-modules contain the input, or a `buf.work.yaml` that lists it. bit then
-tracks every module in that workspace, along with its `buf.yaml` and
-`buf.lock` files. Without a workspace, bit uses the nearest v1 module or the
-input directory itself. Local image and archive inputs are tracked as files.
-Git and BSR inputs have no local sources. `buf.generate` without an `input`
-uses the `inputs` listed in its template. Its outputs are the template's
-plugin `out` paths, prefixed by any `--output` flag. `buf.breaking` tracks a
-local baseline the same way as its input.
+So editing a source file, deleting an output, upgrading a tool or switching
+toolchain reruns exactly the blocks affected. Where a provider cannot see an
+input, its schema says so; declare the input in `inputs` or pin it.
 
 ### Messages
 
@@ -1318,65 +1183,15 @@ instead of "ok". Messages don't affect whether a block passes; only its exit
 status does. Skipped and cached blocks don't run their command, so they
 don't repeat its messages.
 
-`exec` and `exec.test` commands run under `bash -eo pipefail`, so a script
-stops and fails at its first failing line, including a failure anywhere in a
-pipeline. A trailing `echo "::success::..."` can't hide an earlier failure.
-Append `|| true` to a line whose failure should be ignored.
-
-`exec` and `exec.test` set `BIT_CHANGED_FILES` to the `inputs` that changed
-since the block last succeeded, one absolute path per line. A command can use
-it to process only those files:
-
-```hcl
-lint = exec.test {
-  command = "eslint ${BIT_CHANGED_FILES:-.}"
-  inputs  = ["src/**/*.ts"]
-}
-```
-
-The variable is unset when the command must do a full run: on the first run,
-with `--force`, when the block's fields, tools or dependencies changed, when
-the block reruns without a changed input, or when the list is too long to
-pass.
-
 ### Shared build cache
 
-Successful results of some resources are also recorded in a shared cache so
-that other checkouts can reuse them, even after the checkout that produced
-them has been deleted:
-
-- `rust.build`, `rust.test`, `rust.clippy`, `rust.fmt`, `rust.fmt-check`,
-  `go.build`, `go.test`, `go.lint`, `go.fmt`, `go.fmt-l`, `buf.lint`,
-  `buf.format`, and `buf.format-check` record that the
-  action succeeded for a given set of sources, inputs, dependencies, and
-  toolchain. A worktree with identical sources skips the action. It gets no
-  build artifacts, so `rust.build` leaves `target/` as it was; a block that
-  needs a built binary should use `rust.exe`.
-- `go.exe` and `rust.exe` additionally store the built binary. A worktree
-  with identical sources restores it to its own output path (for `rust.exe`,
-  the same path under its own `target/` directory) instead of building.
-  `bit --plan` reports this as a restore (`⇣`) without writing anything.
-- Single-platform `docker.image` builds store the members of a Docker image
-  archive separately, so image versions that share layers also share their
-  cached bytes. If the image has been removed, an identical action restores it
-  with `docker image load` instead of rebuilding it. Multi-platform builds are
-  pushed directly to their registry and remain in worktree-local state because
-  they cannot be restored through the local image store.
-- `exec` and `exec.test` store whatever they declare in `outputs`. A directory
-  is stored whole, as the set of files it contained, and is restored to
-  exactly that — anything already at the path is replaced, not merged. An
-  `exec` block that sets `resolve` or `values` is never shared: those fields
-  describe state outside the worktree, which a result recorded elsewhere
-  cannot speak for. An `exec` block with no `outputs` is never shared either:
-  it runs for its side effects, such as a deploy, so every worktree runs it
-  itself. If a file is both in `inputs` and `outputs`, its current
-  contents participate in cache lookup. After the command runs, bit hashes
-  the new contents before storing the result.
-
-A directory captured this way must contain only ordinary files and
-directories. If it holds a symlink the block still runs and succeeds, but bit
-reports that it could not be cached rather than restoring something the
-command never produced.
+Successful builds, tests and lint runs are also recorded in a shared cache, so
+another checkout with the same sources, dependencies and toolchain reuses them,
+even after the checkout that produced them is deleted. A test or lint result
+lets the other checkout skip the run. A build that produces files also stores
+them, and the other checkout restores them instead of rebuilding; `bit --plan`
+shows this as `⇣`. Failed runs are never shared, and neither are blocks that
+act outside the checkout, such as deploys and containers.
 
 Cached results that no run has used for five days are removed from the disk
 cache automatically.
@@ -1396,17 +1211,8 @@ block is considered up to date, only what is stored, so a worktree that reuses
 this result gets `dist/` and no `node_modules/`. Exclude an output when it is
 large and reproducible by other means, not when later blocks need it.
 
-So that binaries built in different checkouts are interchangeable, they embed
-paths relative to the repository root, or to `~` outside it, rather than
-absolute ones. bit builds `go.exe` with `-trimpath` unless `flags` set it, and
-compiles Rust workspace crates with `--remap-path-prefix` through Cargo's
-workspace wrapper, so `.cargo/config.toml` rustflags are untouched and
-dependencies are compiled exactly as before. Workspace crates are recompiled
-when switching between bit and plain `cargo` commands in the same checkout.
-
 Checkouts share an entry when the action is the same in each, including the
-paths of its files relative to the repository root. Failed tests
-and lint runs are never shared. Restored files are independent copies, so
+paths of its files relative to the repository root. Restored files are independent copies, so
 editing or deleting one cannot affect the cache. `bit --clean` removes only
 the worktree's own outputs and state.
 
@@ -1425,7 +1231,7 @@ Credentials, region, and endpoint come from the usual `AWS_*` variables and
 `~/.aws` files, including `AWS_PROFILE`, `credential_process`, and
 `AWS_ENDPOINT_URL`. Grant `s3:ListBucket` as well as read access, or S3
 reports a result that isn't there as access denied rather than missing. If
-the bucket can't be reached, bit warns once and builds without it.
+the bucket can't be reached, `bit` warns once and builds without it.
 
 `bit --cache <uri> --clean` deletes everything in that cache, for every
-project. bit does not delete S3 caches; use the bucket's expiry rules.
+project. `bit` does not delete S3 caches; use the bucket's expiry rules.

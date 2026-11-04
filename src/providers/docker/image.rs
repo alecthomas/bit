@@ -22,7 +22,9 @@ use super::parse;
 
 const MANIFEST_ROLE: &str = "manifest.json";
 
-/// Build a Docker image (auto-detects inputs from Dockerfile)
+/// Build a Docker image (auto-detects inputs from Dockerfile). Changes to a
+/// base image tag, a file `ADD` downloads, or a `# syntax=` frontend are not
+/// detected, so pin them by digest.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct ImageInputs {
     /// Image tag

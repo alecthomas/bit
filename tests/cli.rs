@@ -40,10 +40,10 @@ fn docs_topic_prints_one_section_without_escape_codes() {
     let output = run_bit(project.path(), &["--docs", "ci"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let docs = String::from_utf8(output.stdout).unwrap();
-    assert!(docs.starts_with("### CI workflows\n"), "{docs}");
+    assert!(docs.starts_with("## CI workflows\n"), "{docs}");
     assert!(docs.contains("[`large`](#blocks)"));
     assert!(!docs.contains('\x1b'));
-    assert!(!docs.contains("## Language"));
+    assert!(!docs.contains("## Providers"));
 }
 
 #[test]

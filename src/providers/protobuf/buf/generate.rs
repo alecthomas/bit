@@ -16,7 +16,9 @@ use super::{BufTarget, PluginCommand, Sources};
 const DEFAULT_TEMPLATE: &str = "buf.gen.yaml";
 
 /// Generate code from Protobuf files with buf generate. The sources, outputs, and
-/// plugins are discovered from the buf workspace and generation template.
+/// plugins are discovered from the buf workspace and generation template. A
+/// remote plugin without a version, such as `buf.build/protocolbuffers/go`, does
+/// not rerun on a new release, so pin it, as in `buf.build/protocolbuffers/go:v1.36.6`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
 pub struct BufGenerateInputs {
     #[serde(flatten)]

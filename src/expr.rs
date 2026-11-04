@@ -530,7 +530,7 @@ fn project_dir() -> Result<String, EvalError> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
-/// Read a secret by name. bit shows the secret as this call, never its value. A secret cannot be passed as a block or target argument.
+/// Read a secret by name. `bit` shows the secret as this call, never its value. A secret cannot be passed as a block or target argument.
 #[bit_derive::provider_function]
 fn secret(name: String) -> Result<String, EvalError> {
     // Fall back to env var for now
