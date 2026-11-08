@@ -1,3 +1,4 @@
 [build]
-rustc-wrapper = "kache"
+# The kache rustc wrapper is set in bin/hermit.hcl, not here, so cargo
+# still runs where Hermit isn't active, such as Renovate's lock file updates.
 rustflags = ["-D", "warnings"]

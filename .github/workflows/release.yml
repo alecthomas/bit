@@ -42,8 +42,9 @@ jobs:
             cargo build --release --target "${TARGET}"
           else
             # kache is installed on the host by Hermit but is unavailable
-            # inside cross's Linux build containers.
-            cross build --config 'build.rustc-wrapper=""' --release --target "${TARGET}"
+            # inside cross's Linux build containers. Hermit sets it through
+            # RUSTC_WRAPPER, which overrides any cargo config, so clear that.
+            RUSTC_WRAPPER= cross build --release --target "${TARGET}"
           fi
           export TARGET_PATH="target/${TARGET}/release/bit-${TARGET}"
           mv "target/${TARGET}"/release/bit "${TARGET_PATH}"
