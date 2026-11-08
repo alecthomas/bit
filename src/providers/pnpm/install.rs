@@ -51,26 +51,41 @@ fn default_modules_dir() -> String {
 
 /// The files besides manifests and the lockfile that change what `pnpm
 /// install` in `dir` installs, where they exist: the `.npmrc` files in
-/// `dir` and the workspace root, the user and global config files `config`
-/// names, the pnpmfile, and the patches `patchedDependencies` applies.
+/// `dir` and the workspace root, the user and global config files, the
+/// pnpmfile, and the patches `patchedDependencies` applies.
 fn install_config_files(
     ws: &workspace::Workspace,
     dir: &Path,
     config: &serde_json::Value,
+    env: &BTreeMap<String, String>,
 ) -> Result<Vec<PathBuf>, BoxError> {
     let mut files = vec![dir.join(".npmrc"), ws.root.join(".npmrc")];
     for key in ["userconfig", "globalconfig", "npm-globalconfig"] {
         files.extend(config[key].as_str().map(PathBuf::from));
     }
+    // pnpm 12 names neither its user `.npmrc`, which it reads auth settings
+    // from, nor the `auth.ini` it keeps beside its global `config.yaml`.
+    if config["userconfig"].is_null() {
+        let home = env.get("HOME").map(Into::into).or_else(|| std::env::var_os("HOME"));
+        match workspace::setting(config, "npmrc-auth-file").as_str() {
+            Some(file) => files.push(ws.root.join(file)),
+            None => files.extend(home.map(|home| Path::new(&home).join(".npmrc"))),
+        }
+    }
+    if let Some(global) = config["globalconfig"].as_str().map(Path::new)
+        && global.file_name().is_some_and(|name| name == "config.yaml")
+    {
+        files.extend(global.parent().map(|dir| dir.join("auth.ini")));
+    }
     // The pnpmfile is relative to the lockfile's directory, the root.
-    match config["pnpmfile"].as_str() {
+    match workspace::setting(config, "pnpmfile").as_str() {
         Some(pnpmfile) => files.push(ws.root.join(pnpmfile)),
         None => files.extend([".pnpmfile.cjs", ".pnpmfile.mjs"].map(|name| ws.root.join(name))),
     }
     // pnpm reports the patches `pnpm-workspace.yaml` lists as absolute paths,
     // but not those in the root manifest's `pnpm` field, which are relative
     // to the root.
-    let patches = config["patched-dependencies"]
+    let patches = workspace::setting(config, "patched-dependencies")
         .as_object()
         .into_iter()
         .flat_map(|p| p.values());
@@ -142,7 +157,7 @@ impl Resource for PnpmInstallResource {
         }
         let manifests: Vec<PathBuf> = ws.projects.iter().map(|p| p.dir.join("package.json")).collect();
         files.extend(tracker.hash_files(&manifests)?);
-        files.extend(tracker.hash_files(&install_config_files(&ws, dir, &config)?)?);
+        files.extend(tracker.hash_files(&install_config_files(&ws, dir, &config, &inputs.env)?)?);
         Ok(files)
     }
 
@@ -260,8 +275,11 @@ impl PnpmInstallResource {
         let root = workspace::workspace(&self.tracker, dir, &inputs.env)
             .map_or_else(|_| dir.to_path_buf(), |ws| ws.root.clone());
         let config = workspace::config(&self.tracker, dir, &inputs.env).unwrap_or_default();
-        let modules_dir = config["modules-dir"].as_str().unwrap_or("node_modules").to_owned();
-        let virtual_store_dir = match config["virtual-store-dir"].as_str() {
+        let modules_dir = workspace::setting(&config, "modules-dir")
+            .as_str()
+            .unwrap_or("node_modules")
+            .to_owned();
+        let virtual_store_dir = match workspace::setting(&config, "virtual-store-dir").as_str() {
             Some(virtual_store_dir) => root.join(virtual_store_dir),
             None => root.join(&modules_dir).join(".pnpm"),
         };
@@ -394,7 +412,12 @@ mod tests {
             keys(&root.join("app")),
             [path("node_modules/.modules.yaml"), path("node_modules/.pnpm/lock.yaml")]
         );
-        std::fs::write(root.join(".npmrc"), "modules-dir=nm\nvirtual-store-dir=.store\n").unwrap();
+        // pnpm 12 reads these from `pnpm-workspace.yaml` but not `.npmrc`.
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - app\nmodulesDir: nm\nvirtualStoreDir: .store\n",
+        )
+        .unwrap();
         assert_eq!(keys(&root), [path("nm/.modules.yaml"), path(".store/lock.yaml")]);
     }
 }

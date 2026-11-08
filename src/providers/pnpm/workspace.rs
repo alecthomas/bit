@@ -111,9 +111,12 @@ pub fn workspace(tracker: &FileTracker, dir: &Path, env: &Env) -> Result<Arc<Wor
 struct Configs(DashMap<(PathBuf, Env), Arc<serde_json::Value>>);
 
 /// The settings pnpm uses when run in `dir` with `env`, as `pnpm config
-/// list` reports them from every `.npmrc`, `pnpm-workspace.yaml` and
-/// environment variable it reads, with the paths of the config files
-/// themselves.
+/// list` reports them from every config file and environment variable it
+/// reads. Read them with [`setting`].
+///
+/// pnpm 10 lists the paths of the user and global config files too. pnpm
+/// 12 lists neither, so the global config file's path, which `pnpm config
+/// get` still reports, is added as `globalconfig`.
 pub fn config(tracker: &FileTracker, dir: &Path, env: &Env) -> Result<Arc<serde_json::Value>, BoxError> {
     let dir = dir
         .canonicalize()
@@ -124,23 +127,58 @@ pub fn config(tracker: &FileTracker, dir: &Path, env: &Env) -> Result<Arc<serde_
         return Ok(Arc::clone(&config));
     }
     let dir = &key.0;
+    let output = pnpm(dir, env, &["config", "list", "--json"])?;
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&output).map_err(|e| format!("pnpm: parsing `pnpm config list` output: {e}"))?;
+    if let Some(settings) = config.as_object_mut()
+        && !settings.contains_key("globalconfig")
+    {
+        let output = pnpm(dir, env, &["config", "get", "globalconfig"])?;
+        let path = String::from_utf8_lossy(&output).trim().to_owned();
+        // pnpm prints `undefined` for a setting without a value.
+        if !path.is_empty() && path != "undefined" {
+            settings.insert("globalconfig".to_owned(), path.into());
+        }
+    }
+    Ok(configs.0.entry(key).or_insert(Arc::new(config)).value().clone())
+}
+
+/// The setting `name`, in kebab case, from `config`. pnpm 10 reports
+/// settings in kebab case, and pnpm 12 in camel case.
+pub fn setting<'a>(config: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    let value = &config[name];
+    if !value.is_null() {
+        return value;
+    }
+    let mut camel = String::with_capacity(name.len());
+    let mut words = name.split('-');
+    camel.extend(words.next());
+    for word in words {
+        let mut chars = word.chars();
+        camel.extend(chars.next().map(|c| c.to_ascii_uppercase()));
+        camel.push_str(chars.as_str());
+    }
+    &config[camel.as_str()]
+}
+
+/// The standard output of `pnpm <args>` run in `dir` with `env`.
+fn pnpm(dir: &Path, env: &Env, args: &[&str]) -> Result<Vec<u8>, BoxError> {
+    let command = format!("pnpm {}", args.join(" "));
     let output = std::process::Command::new("pnpm")
-        .args(["config", "list", "--json"])
+        .args(args)
         .current_dir(dir)
         .envs(env)
         .logged_output()
-        .map_err(|e| format!("pnpm: failed to execute `pnpm config list`: {e}"))?;
+        .map_err(|e| format!("pnpm: failed to execute `{command}`: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "pnpm: `pnpm config list` in {} failed: {}",
+            "pnpm: `{command}` in {} failed: {}",
             dir.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         )
         .into());
     }
-    let config =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("pnpm: parsing `pnpm config list` output: {e}"))?;
-    Ok(configs.0.entry(key).or_insert(Arc::new(config)).value().clone())
+    Ok(output.stdout)
 }
 
 /// The workspace pnpm uses when run in `dir` with `env`, loaded without a
@@ -264,21 +302,8 @@ fn list_projects(root: &Path, env: &Env) -> Result<Vec<Project>, BoxError> {
 
 /// The projects `pnpm <args>` lists in `root`.
 fn pnpm_ls(root: &Path, env: &Env, args: &[&str]) -> Result<Vec<ListedProject>, BoxError> {
-    let output = std::process::Command::new("pnpm")
-        .args(args)
-        .current_dir(root)
-        .envs(env)
-        .logged_output()
-        .map_err(|e| format!("pnpm: failed to execute `pnpm ls`: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "pnpm: `pnpm ls` in {} failed: {}",
-            root.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-        .into());
-    }
-    Ok(serde_json::from_slice(&output.stdout).map_err(|e| format!("pnpm: parsing `pnpm ls` output: {e}"))?)
+    let output = pnpm(root, env, args)?;
+    Ok(serde_json::from_slice(&output).map_err(|e| format!("pnpm: parsing `pnpm ls` output: {e}"))?)
 }
 
 /// Add the local paths `dependency` and its own dependencies resolve to.
@@ -442,6 +467,25 @@ mod tests {
         // the root as a project.
         let names: Vec<_> = ws.projects.iter().map(|p| p.name.as_deref()).collect();
         assert_eq!(names, [Some("root"), Some("bff"), Some("frontend")]);
+    }
+
+    #[test]
+    fn settings_are_read_in_either_case() {
+        let pnpm_10 = serde_json::json!({ "modules-dir": "a", "pnpmfile": "p.cjs" });
+        let pnpm_12 = serde_json::json!({ "modulesDir": "b", "npmrcAuthFile": "c" });
+        assert_eq!(setting(&pnpm_10, "modules-dir"), "a");
+        assert_eq!(setting(&pnpm_10, "pnpmfile"), "p.cjs");
+        assert_eq!(setting(&pnpm_12, "modules-dir"), "b");
+        assert_eq!(setting(&pnpm_12, "npmrc-auth-file"), "c");
+        assert!(setting(&pnpm_12, "virtual-store-dir").is_null());
+    }
+
+    #[test]
+    fn the_global_config_file_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("package.json"), r#"{ "name": "solo" }"#).unwrap();
+        let config = config(&FileTracker::new(), dir.path(), &Env::new()).unwrap();
+        assert!(config["globalconfig"].is_string(), "{config}");
     }
 
     #[test]
