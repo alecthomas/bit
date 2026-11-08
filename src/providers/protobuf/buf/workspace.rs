@@ -191,7 +191,7 @@ fn find(dir: &Path, names: &[&str]) -> Option<PathBuf> {
 
 /// Parse a configuration file. One that cannot be read or parsed is treated
 /// as absent here, and the buf command reports the error itself.
-fn read<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
+fn read<T: for<'de> Deserialize<'de> + 'static>(path: &Path) -> Option<T> {
     serde_yml::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 

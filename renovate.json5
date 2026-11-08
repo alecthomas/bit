@@ -10,6 +10,14 @@
 	// example/ is a demo project, not something bit depends on. This replaces
 	// config:recommended's list, which matched no dependency files here.
 	ignorePaths: ["example/**"],
+	// master requires the ci job, so even breaking updates merge only once
+	// they build and pass the tests.
+	automerge: true,
+	"github-actions": {
+		// ci.yml is generated from this template, so its actions must be
+		// updated there too, or `bit sync-ci` reverts the update.
+		managerFilePatterns: ["/^\\.github/ci\\.yml\\.tmpl$/"],
+	},
 	packageRules: [
 		{
 			// group:allNonMajor, but leaving out breaking updates such as a 0.x
@@ -38,6 +46,13 @@
 			matchDepNames: ["rust"],
 			groupName: "Rust",
 			minimumReleaseAge: "3 days",
+		},
+		{
+			// hmac is generic over digest's traits, so it only builds with a
+			// sha2 on the same digest release.
+			matchDatasources: ["crate"],
+			matchPackageNames: ["sha2", "hmac"],
+			groupName: "RustCrypto",
 		},
 	],
 }

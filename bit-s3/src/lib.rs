@@ -8,7 +8,7 @@ mod config;
 mod sigv4;
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -189,8 +189,16 @@ impl Client {
             path: src.to_owned(),
             source,
         };
+        let mut file = File::open(src).map_err(transfer)?;
         let mut hasher = Sha256::new();
-        io::copy(&mut File::open(src).map_err(transfer)?, &mut hasher).map_err(transfer)?;
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(transfer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
         let payload = sigv4::hex(&hasher.finalize());
 
         let location = self.locate(bucket, key);
