@@ -136,7 +136,10 @@ fn objects_round_trip_by_path_under_the_endpoint() {
     assert_eq!(put.path, "/base/cache/actions/k.json");
     assert_eq!(
         put.headers["x-amz-content-sha256"],
-        format!("{:x}", Sha256::digest(b"receipts")),
+        Sha256::digest(b"receipts")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
         "the payload is signed"
     );
     let authorization = &put.headers["authorization"];

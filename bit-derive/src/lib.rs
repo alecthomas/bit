@@ -25,7 +25,7 @@ fn expand_provider_function(function: ItemFn) -> syn::Result<TokenStream2> {
     let name = &function.sig.ident;
     if function.sig.asyncness.is_some()
         || function.sig.constness.is_some()
-        || function.sig.unsafety.is_some()
+        || !matches!(function.sig.safety, syn::Safety::Default)
         || function.sig.abi.is_some()
         || function.sig.variadic.is_some()
     {

@@ -16,14 +16,14 @@ parse-dockerfile = { version = "0.1.5", default-features = false }
 petgraph = "0.8.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["arbitrary_precision"] }
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 thiserror = "2.0.18"
 winnow = "1.0.0"
 yansi = "1.0.1"
 dirs = "7.0.0"
 console = "0.16.3"
 indexmap = "2.14.0"
-serde_yml = "0.0.12"
+serde_yml = "0.0.13"
 toml = { version = "1.1.2", default-features = false, features = ["parse", "display", "serde"] }
 tempfile = "3.27.0"
 tar = "0.4.46"
@@ -36,6 +36,3 @@ dashmap = "6.2.1"
 minijinja = { version = "3.0.5", features = ["json", "serde"] }
 bit-s3 = { version = "0.1.0", path = "bit-s3" }
 pulldown-cmark = { version = "0.13.6", default-features = false }
-
-[target.'cfg(target_arch = "aarch64")'.dependencies]
-sha2 = { version = "0.10.9", features = ["asm"] }
