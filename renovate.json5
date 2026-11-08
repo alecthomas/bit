@@ -8,6 +8,9 @@
 		"group:allNonMajor",
 		"schedule:earlyMondays", // Run once a week.
 	],
+	// example/ is a demo project, not something bit depends on. This replaces
+	// config:recommended's list, which matched no dependency files here.
+	ignorePaths: ["example/**"],
 	packageRules: [
 		{
 			// The Dockerfile's builder image must match rust-toolchain.toml, or
