@@ -13,6 +13,14 @@
 	ignorePaths: ["example/**"],
 	packageRules: [
 		{
+			// Renovate 44.220.0 fails to commit changed bin/ symlinks
+			// (renovatebot/renovate#47834). Keep Hermit updates apart so the
+			// failure doesn't block other updates. Remove once that is fixed.
+			matchManagers: ["hermit"],
+			matchUpdateTypes: ["minor", "patch"],
+			groupName: "Hermit packages",
+		},
+		{
 			// The Dockerfile's builder image must match rust-toolchain.toml, or
 			// rustup downloads the pinned toolchain on every image build. The
 			// rust image is published some time after the Rust release, so wait
