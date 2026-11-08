@@ -8,4 +8,16 @@
 		"group:allNonMajor",
 		"schedule:earlyMondays", // Run once a week.
 	],
+	packageRules: [
+		{
+			// The Dockerfile's builder image must match rust-toolchain.toml, or
+			// rustup downloads the pinned toolchain on every image build. The
+			// rust image is published some time after the Rust release, so wait
+			// for both to exist before proposing the bump.
+			matchManagers: ["rust-toolchain", "dockerfile"],
+			matchDepNames: ["rust"],
+			groupName: "Rust",
+			minimumReleaseAge: "3 days",
+		},
+	],
 }
