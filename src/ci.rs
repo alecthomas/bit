@@ -15,6 +15,12 @@ use crate::invocation::Invocation;
 /// Job ID for blocks that need no large block.
 pub const DEFAULT_JOB: &str = "default";
 
+/// Job ID no block's job takes, so a template can add a job with it that
+/// succeeds only when every other job does. Rulesets require checks by name,
+/// and the other jobs change with `BUILD.bit`, so this one check is the stable
+/// name to require.
+pub const GATE_JOB: &str = "ci";
+
 /// One CI job.
 #[derive(Debug, PartialEq)]
 pub struct Job {
@@ -105,7 +111,7 @@ pub fn partition(dag: &Dag, order: &[String]) -> Result<Vec<Job>, CiError> {
         members.push(name.clone());
     }
 
-    let mut ids = HashSet::from([DEFAULT_JOB.to_owned()]);
+    let mut ids = HashSet::from([DEFAULT_JOB.to_owned(), GATE_JOB.to_owned()]);
     let mut jobs = Vec::new();
     let mut covered = HashSet::new();
     for (large, members) in large_jobs {
@@ -582,10 +588,11 @@ lint = exec { command = "lint" }
 let arch = ["amd64", "arm64"]
 large build[arch] = exec { command = "build #{arch}" }
 large default = exec { command = "default" }
+large ci = exec { command = "ci" }
 "#,
         );
         let ids: Vec<_> = jobs.iter().map(|job| job.id.as_str()).collect();
-        assert_eq!(ids, vec!["build-amd64", "build-arm64", "default-2"]);
+        assert_eq!(ids, vec!["build-amd64", "build-arm64", "ci-2", "default-2"]);
         assert_eq!(jobs[0].selection, vec![r#"build["amd64"]"#]);
     }
 
@@ -746,6 +753,11 @@ large build[arch] = exec { command = "build #{arch}" }
         assert_eq!(job["steps"][1]["run"], "bit publish name='web app'");
         assert_eq!(job["steps"][1]["working-directory"], "app");
         assert_eq!(workflow["jobs"]["default"]["name"], "default");
+        let gate = &workflow["jobs"]["ci"];
+        assert_eq!(gate["name"], "ci");
+        assert_eq!(gate["if"], "always()");
+        assert_eq!(gate["needs"], serde_yml::to_value(["default", "publish"]).unwrap());
+        assert_eq!(gate["steps"][0]["run"], "exit 1");
     }
 
     fn words(words: &[&str]) -> Vec<String> {

@@ -35,3 +35,13 @@ jobs:
           cache: true
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit test"
+  # The one check for rulesets to require. It runs even when a job fails,
+  # because GitHub counts a skipped required check as passing.
+  ci:
+    name: "ci"
+    if: always()
+    needs: ["default", "release", "test"]
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1

@@ -594,7 +594,9 @@ every block, so it puts every large block in one job.
 `--ci github` renders the built-in GitHub Actions template. Each job checks out
 the repository and runs `bit` in the project directory, and pushes to the
 remote's default branch and pull requests trigger the workflow. `bit` must be
-on the `PATH`. Regenerate the workflow after changing `BUILD.bit`.
+on the `PATH`. Regenerate the workflow after changing `BUILD.bit`. A job named
+`ci` passes only when every other job does, so a branch ruleset can require
+that one check however the jobs change.
 
 For anything else, such as another CI system, setup steps, or a larger runner
 for large jobs, give the path of a [MiniJinja](https://docs.rs/minijinja)
@@ -616,7 +618,7 @@ A template sees:
 | Variable            | Description                                                                |
 | ------------------- | -------------------------------------------------------------------------- |
 | `jobs`              | The jobs, in order                                                         |
-| `job.id`            | An identifier made of letters, digits, `_` and `-`, unique among the jobs  |
+| `job.id`            | An identifier made of letters, digits, `_` and `-`, unique and never `ci`  |
 | `job.name`          | The job's large blocks, or `default`                                       |
 | `job.large`         | Whether the job runs large blocks                                          |
 | `job.command`       | The shell command the job runs, such as `bit test clippy`                  |
