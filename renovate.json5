@@ -5,13 +5,22 @@
 		":semanticCommits",
 		":semanticCommitTypeAll(chore)",
 		":semanticCommitScope(deps)",
-		"group:allNonMajor",
 		"schedule:earlyMondays", // Run once a week.
 	],
 	// example/ is a demo project, not something bit depends on. This replaces
 	// config:recommended's list, which matched no dependency files here.
 	ignorePaths: ["example/**"],
 	packageRules: [
+		{
+			// group:allNonMajor, but leaving out breaking updates such as a 0.x
+			// crate's minor bump, so one of those can't hold back the rest. It
+			// comes first so the groups below take their updates from it.
+			matchPackageNames: ["*"],
+			matchUpdateTypes: ["minor", "patch"],
+			matchIsBreaking: false,
+			groupName: "all non-major dependencies",
+			groupSlug: "all-minor-patch",
+		},
 		{
 			// Renovate 44.220.0 fails to commit changed bin/ symlinks
 			// (renovatebot/renovate#47834). Keep Hermit updates apart so the
