@@ -152,6 +152,9 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// to the same `bin/hermit` script, and only the link targets name the
 /// version. Targets are hashed as stored by readlink, not resolved, so the
 /// hash is the same across checkouts.
+///
+/// Absolute targets are skipped because they differ between machines, such
+/// as a Hermit link farm entry; the content they lead to is still hashed.
 pub fn hash_file(path: &Path) -> Result<SHA256, BoxError> {
     let chain = LinkChain::of(path)?;
     chain.hash()
@@ -206,7 +209,7 @@ impl LinkChain {
 
     fn content_hash(&self) -> Result<SHA256, BoxError> {
         let mut hasher = Hasher::new();
-        for target in &self.targets {
+        for target in self.targets.iter().filter(|target| target.is_relative()) {
             hasher.update(target.as_os_str().as_encoded_bytes());
             hasher.update(b"\0");
         }
@@ -244,10 +247,8 @@ pub fn find_executable(program: &str) -> Option<PathBuf> {
 /// Fingerprint the ambient state a resource declares, as sources. See
 /// [`crate::provider::Resource::ambient`].
 ///
-/// An executable found on disk is keyed by its path, so a Git change to it,
-/// such as a Hermit upgrade, maps to the blocks that run it. Every other
-/// fingerprint is keyed by an [`AMBIENT_KEY_PREFIXES`] prefix, which no path
-/// has.
+/// Executables are keyed as [`executable_fingerprint`] describes; every other
+/// fingerprint by an [`AMBIENT_KEY_PREFIXES`] prefix, which no path has.
 ///
 /// A tool that cannot be found or run is recorded as such rather than
 /// failing the block: running it fails anyway, and recording it means
@@ -277,14 +278,10 @@ pub fn hash_ambient(
                 };
                 hashes.insert(key, hash);
             }
-            Ambient::Executable(name) => match find_executable(name) {
-                Some(path) => {
-                    hashes.insert(path.to_string_lossy().into_owned(), tracker.hash_executable(&path)?);
-                }
-                None => {
-                    hashes.insert(format!("executable:{name}"), SHA256::digest(b"missing"));
-                }
-            },
+            Ambient::Executable(name) => {
+                let (key, hash) = executable_fingerprint(name, find_executable(name).as_deref(), tracker, paths)?;
+                hashes.insert(key, hash);
+            }
             Ambient::Variable(name) | Ambient::RecordedVariable(name) => {
                 if let Some(value) = std::env::var_os(name) {
                     hashes.insert(format!("env:{name}"), hash_value(&value, paths));
@@ -300,6 +297,35 @@ pub fn hash_ambient(
         }
     }
     Ok(hashes)
+}
+
+/// The source key and fingerprint of the executable `name`, found at `found`.
+///
+/// A path in the repository is the key, so a Git change such as a Hermit
+/// upgrade maps to the blocks that run it.
+///
+/// Elsewhere the path varies (Hermit's link farm directory is named by a
+/// hash), so the key is `name`. Only the directory is resolved, not the link.
+fn executable_fingerprint(
+    name: &str,
+    found: Option<&Path>,
+    tracker: &FileTracker,
+    paths: &PortablePaths,
+) -> Result<(String, SHA256), BoxError> {
+    let Some(path) = found else {
+        return Ok((format!("executable:{name}"), SHA256::digest(b"missing")));
+    };
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let in_repo = dir.canonicalize().is_ok_and(|dir| dir.starts_with(paths.repo()));
+    let key = if in_repo {
+        path.to_string_lossy().into_owned()
+    } else {
+        format!("executable:{name}")
+    };
+    Ok((key, tracker.hash_executable(path)?))
 }
 
 /// Hash an environment variable's value in its portable form.
@@ -494,6 +520,58 @@ mod tests {
             hash_file(&a.path().join("bin/tsk")).unwrap(),
             hash_file(&b.path().join("bin/tsk")).unwrap()
         );
+    }
+
+    /// A Hermit link farm entry under `cache`: an absolute link from a farm
+    /// directory named `farm` to a package holding `content`.
+    fn farm_entry(cache: &Path, farm: &str, content: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let package = cache.join("pkg/tool-1.0");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("tool"), content).unwrap();
+        fs::set_permissions(package.join("tool"), fs::Permissions::from_mode(0o755)).unwrap();
+        let farm = cache.join("environments").join(farm);
+        fs::create_dir_all(&farm).unwrap();
+        symlink(package.join("tool"), farm.join("tool")).unwrap();
+        farm.join("tool")
+    }
+
+    #[test]
+    fn hash_file_ignores_where_absolute_link_targets_point() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let a_entry = farm_entry(&a.path().join("home/a/.cache/hermit"), "env-1", "binary");
+        let b_entry = farm_entry(&b.path().join("home/b/Library/Caches/hermit"), "env-1", "binary");
+        assert_eq!(hash_file(&a_entry).unwrap(), hash_file(&b_entry).unwrap());
+
+        fs::write(fs::canonicalize(&b_entry).unwrap(), "upgraded").unwrap();
+        assert_ne!(hash_file(&a_entry).unwrap(), hash_file(&b_entry).unwrap());
+    }
+
+    #[test]
+    fn executable_outside_the_repository_is_keyed_by_name() {
+        let (_project, paths) = temp_paths();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let tracker = FileTracker::default();
+        let fingerprint = |entry: &Path| executable_fingerprint("tool", Some(entry), &tracker, &paths).unwrap();
+        let a_entry = farm_entry(a.path(), "project-0d556e1f/30cf9629", "binary");
+        let b_entry = farm_entry(b.path(), "project-0d556e1f/8f2c1a07", "binary");
+        let (key, hash) = fingerprint(&a_entry);
+        assert_eq!(key, "executable:tool");
+        assert_eq!((key, hash), fingerprint(&b_entry));
+    }
+
+    #[test]
+    fn executable_inside_the_repository_is_keyed_by_path() {
+        let (project, paths) = temp_paths();
+        fs::create_dir(project.path().join("bin")).unwrap();
+        fs::write(project.path().join("bin/hermit"), "script").unwrap();
+        let stub = hermit_chain(&project.path().join("bin"), "1.0");
+        let (key, hash) = executable_fingerprint("tsk", Some(&stub), &FileTracker::default(), &paths).unwrap();
+        assert_eq!(key, stub.to_string_lossy());
+        assert_eq!(hash, hash_file(&stub).unwrap());
     }
 
     #[test]

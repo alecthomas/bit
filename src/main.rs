@@ -662,8 +662,10 @@ fn main() {
 
     // Without a cache directory, executables are still fingerprinted, just
     // read on every run.
+    //
+    // Bump the version when `hash_file` changes, or cached tools keep old hashes.
     let tracker = match bit::cache::default_dir() {
-        Ok(root) => FileTracker::with_executable_cache(root.join("executable-hashes-v1.json")),
+        Ok(root) => FileTracker::with_executable_cache(root.join("executable-hashes-v2.json")),
         Err(_) => FileTracker::new(),
     };
     let tracker = Arc::new(tracker);
