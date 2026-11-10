@@ -27,10 +27,10 @@ pub struct Module {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     Import(Import),
-    Block(Block),
+    Target(Target),
     Let(Let),
     Param(Param),
-    Target(Target),
+    Group(Group),
     Output(Output),
 }
 
@@ -44,7 +44,7 @@ pub struct Import {
     pub alias: Option<String>,
 }
 
-/// Execution phase for a block.
+/// Execution phase for a target.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Phase {
     Pre,
@@ -67,14 +67,14 @@ impl std::fmt::Display for Phase {
 /// or `name[key1, key2 = expr] = provider.resource { fields... }` (matrix expansion).
 ///
 /// `protected`, `explicit`, and `large` may appear in any order and are independent:
-/// `protected` blocks must be named directly to destroy; `explicit` blocks are
-/// excluded from the `...` selector and must be named to run; `large` blocks
+/// `protected` targets must be named directly to destroy; `explicit` targets are
+/// excluded from the `...` selector and must be named to run; `large` targets
 /// are long-running or resource-heavy.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Block {
+pub struct Target {
     pub pos: Pos,
     pub name: String,
-    /// Inputs supplied when this block is invoked by a target or the CLI.
+    /// Inputs supplied when this target is invoked by a group or the CLI.
     pub params: Vec<Param>,
     pub doc: Option<String>,
     pub phase: Phase,
@@ -88,7 +88,7 @@ pub struct Block {
     pub fields: Vec<Field>,
 }
 
-impl Block {
+impl Target {
     pub fn matrix_key_names(&self) -> Vec<String> {
         self.matrix_keys.iter().map(|key| key.name.clone()).collect()
     }
@@ -135,19 +135,19 @@ pub struct Param {
     pub default: Option<Expr>,
 }
 
-/// `target name = [block1, block2]`
+/// `group name = [target1, target2]`
 #[derive(Debug, Clone, PartialEq)]
-pub struct Target {
+pub struct Group {
     pub pos: Pos,
     pub name: String,
     pub doc: Option<String>,
     pub params: Vec<Param>,
-    pub blocks: Vec<TargetCall>,
+    pub members: Vec<GroupMember>,
 }
 
-/// A block or target selected from a target definition.
+/// A target or group selected from a group definition.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TargetCall {
+pub struct GroupMember {
     pub name: String,
     pub keys: Option<Vec<Expr>>,
     pub args: Vec<Field>,
@@ -201,7 +201,7 @@ impl std::fmt::Display for Expr {
                 write!(f, "]")
             }
             Expr::Ref(parts) => write!(f, "{}", parts.join(".")),
-            Expr::BlockRef(name) => write!(f, "{name}"),
+            Expr::TargetRef(name) => write!(f, "{name}"),
             Expr::MatrixRef { name, keys, fields } => {
                 write!(f, "{name}[")?;
                 for (index, key) in keys.iter().enumerate() {
@@ -216,7 +216,7 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::BlockCall {
+            Expr::TargetCall {
                 name,
                 keys,
                 args,
@@ -273,18 +273,18 @@ pub enum Expr {
     List(Vec<Expr>),
     /// `{ key = value, typed: type = value, ... }`
     Map(Vec<MapEntry>),
-    /// Variable or block reference: `name` or `block.field`
+    /// Variable or target reference: `name` or `target.field`
     Ref(Vec<String>),
-    /// A typed block-reference value.
-    BlockRef(String),
+    /// A typed target-reference value.
+    TargetRef(String),
     /// A matrix slice selected by typed expressions: `name[key].field`.
     MatrixRef {
         name: String,
         keys: Vec<Expr>,
         fields: Vec<String>,
     },
-    /// A parameterized block reference: `name(arg = value).field`.
-    BlockCall {
+    /// A parameterized target reference: `name(arg = value).field`.
+    TargetCall {
         name: String,
         keys: Option<Vec<Expr>>,
         args: Vec<Field>,
@@ -319,8 +319,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_simple_block() {
-        let block = Block {
+    fn build_simple_target() {
+        let target = Target {
             pos: Pos::default(),
             name: "server".into(),
             params: vec![],
@@ -337,11 +337,11 @@ mod tests {
                 value: Expr::Str(vec![StringPart::Literal("./cmd/server".into())]),
             }],
         };
-        assert_eq!(block.name, "server");
-        assert_eq!(block.provider, "go");
-        assert_eq!(block.resource, "binary");
-        assert!(!block.protected);
-        assert_eq!(block.fields.len(), 1);
+        assert_eq!(target.name, "server");
+        assert_eq!(target.provider, "go");
+        assert_eq!(target.resource, "binary");
+        assert!(!target.protected);
+        assert_eq!(target.fields.len(), 1);
     }
 
     #[test]
@@ -423,18 +423,18 @@ mod tests {
                         vec![Expr::Str(vec![StringPart::Literal("git rev-parse HEAD".into())])],
                     ),
                 }),
-                Statement::Target(Target {
+                Statement::Group(Group {
                     pos: Pos::default(),
                     name: "build".into(),
                     doc: None,
                     params: vec![],
-                    blocks: vec![
-                        TargetCall {
+                    members: vec![
+                        GroupMember {
                             name: "server".into(),
                             keys: None,
                             args: vec![],
                         },
-                        TargetCall {
+                        GroupMember {
                             name: "image".into(),
                             keys: None,
                             args: vec![],

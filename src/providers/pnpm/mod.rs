@@ -9,8 +9,8 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
-use crate::provider::{Ambient, Block, BoxError, DynResource, FuncSignature, Provider};
+use crate::output::TargetWriter;
+use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider, Target};
 use crate::value::Value;
 
 /// List workspace packages that define a script.
@@ -63,9 +63,9 @@ impl Provider for PnpmProvider {
     }
 }
 
-/// The workspace root pnpm runs in: the block's `dir`, or the project root.
-fn workspace_dir<T>(block: &Block<T>) -> &str {
-    block.dir.as_deref().unwrap_or(".")
+/// The workspace root pnpm runs in: the target's `dir`, or the project root.
+fn workspace_dir<T>(target: &Target<T>) -> &str {
+    target.dir.as_deref().unwrap_or(".")
 }
 
 /// pnpm and node versions, run in the workspace: corepack and Node version
@@ -77,14 +77,14 @@ fn ambient(dir: &str) -> Vec<Ambient> {
     ]
 }
 
-/// Run `pnpm <args...>` in the block's workspace with its `env`, streaming
-/// stdout/stderr through the block writer. Returns `Err` on non-zero exit.
+/// Run `pnpm <args...>` in the target's workspace with its `env`, streaming
+/// stdout/stderr through the target writer. Returns `Err` on non-zero exit.
 /// Used by all three pnpm resources.
-pub(crate) fn run_pnpm<T>(args: &[String], block: &Block<T>, writer: &BlockWriter) -> Result<(), BoxError> {
+pub(crate) fn run_pnpm<T>(args: &[String], target: &Target<T>, writer: &TargetWriter) -> Result<(), BoxError> {
     let mut cmd = Command::new("pnpm");
     cmd.args(args)
-        .current_dir(workspace_dir(block))
-        .envs(&block.env)
+        .current_dir(workspace_dir(target))
+        .envs(&target.env)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 

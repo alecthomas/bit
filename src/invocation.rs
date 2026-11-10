@@ -1,8 +1,8 @@
-//! Bind target and block arguments before the graph is wired.
+//! Bind group and target arguments before the graph is wired.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Block, Expr, Field, Module, Param, Statement, Target};
+use crate::ast::{Expr, Field, Group, Module, Param, Statement, Target};
 use crate::dag::{Dag, DagNode};
 use crate::expr::{self, Scope, SymbolKind};
 use crate::loader::LoadError;
@@ -26,9 +26,9 @@ struct Bound {
 }
 
 struct Instantiator<'a> {
-    blocks: HashMap<String, Block>,
     targets: HashMap<String, Target>,
-    matrix_blocks: &'a mut HashMap<String, Vec<String>>,
+    groups: HashMap<String, Group>,
+    matrix_targets: &'a mut HashMap<String, Vec<String>>,
     scope: &'a mut Scope,
     dag: &'a mut Dag,
     registry: &'a ProviderRegistry,
@@ -39,24 +39,24 @@ struct Instantiator<'a> {
 pub(crate) fn materialize(
     module: &Module,
     invocations: &[Invocation],
-    concrete_blocks: &mut [Block],
-    matrix_blocks: &mut HashMap<String, Vec<String>>,
+    concrete_targets: &mut [Target],
+    matrix_targets: &mut HashMap<String, Vec<String>>,
     environment: &mut module::ExpandContext<'_>,
 ) -> Result<Vec<String>, LoadError> {
-    let mut blocks = environment.dag.block_declarations().clone();
-    blocks.extend(module.statements.iter().filter_map(|stmt| match stmt {
-        Statement::Block(block) => Some((block.name.clone(), block.clone())),
-        _ => None,
-    }));
     let mut targets = environment.dag.target_declarations().clone();
     targets.extend(module.statements.iter().filter_map(|stmt| match stmt {
         Statement::Target(target) => Some((target.name.clone(), target.clone())),
         _ => None,
     }));
+    let mut groups = environment.dag.group_declarations().clone();
+    groups.extend(module.statements.iter().filter_map(|stmt| match stmt {
+        Statement::Group(group) => Some((group.name.clone(), group.clone())),
+        _ => None,
+    }));
     let mut context = Instantiator {
-        blocks,
         targets,
-        matrix_blocks,
+        groups,
+        matrix_targets,
         scope: environment.scope,
         dag: environment.dag,
         registry: environment.registry,
@@ -64,65 +64,70 @@ pub(crate) fn materialize(
         import_roots: environment.import_roots,
     };
 
-    // Blocks already present in the DAG include ordinary blocks, matrix
+    // Targets already present in the DAG include ordinary targets, matrix
     // slices, and expanded module nodes. Resolve calls in all of them before
-    // dependency discovery so the syntax works in every block field.
-    let existing = context.dag.block_names();
+    // dependency discovery so the syntax works in every target field.
+    let existing = context.dag.target_names();
     for name in existing {
-        let fields = context.dag.get_node(&name).expect("listed block exists").fields.clone();
+        let fields = context
+            .dag
+            .get_node(&name)
+            .expect("listed target exists")
+            .fields
+            .clone();
         let caller = context.scope.clone();
         let rewritten = context.materialize_fields(&fields, &caller, &mut Vec::new())?;
-        context.dag.get_node_mut(&name).expect("listed block exists").fields = rewritten;
+        context.dag.get_node_mut(&name).expect("listed target exists").fields = rewritten;
     }
-    for block in concrete_blocks {
-        if !block.matrix_keys.is_empty() {
+    for target in concrete_targets {
+        if !target.matrix_keys.is_empty() {
             continue;
         }
         let caller = context.scope.clone();
-        block.fields = context.materialize_fields(&block.fields, &caller, &mut Vec::new())?;
+        target.fields = context.materialize_fields(&target.fields, &caller, &mut Vec::new())?;
     }
 
-    // Preserve existing validation and listing for targets with no parameters.
-    let mut plain_targets: Vec<_> = context
-        .targets
+    // Preserve existing validation and listing for groups with no parameters.
+    let mut plain_groups: Vec<_> = context
+        .groups
         .values()
-        .filter(|target| target.params.is_empty())
-        .map(|target| target.name.clone())
+        .filter(|group| group.params.is_empty())
+        .map(|group| group.name.clone())
         .collect();
-    plain_targets.sort();
-    for name in plain_targets {
-        context.instantiate_target(&name, &[], &context.scope.clone(), &mut Vec::new())?;
+    plain_groups.sort();
+    for name in plain_groups {
+        context.instantiate_group(&name, &[], &context.scope.clone(), &mut Vec::new())?;
     }
 
     if invocations.is_empty()
-        && let Some(default) = context.targets.get("default").cloned()
+        && let Some(default) = context.groups.get("default").cloned()
         && !default.params.is_empty()
     {
-        let blocks = context.instantiate_target("default", &[], &context.scope.clone(), &mut Vec::new())?;
-        context.dag.add_target("default".into(), blocks, default.doc);
+        let targets = context.instantiate_group("default", &[], &context.scope.clone(), &mut Vec::new())?;
+        context.dag.add_group("default".into(), targets, default.doc);
     }
 
     let mut selected = Vec::new();
     for invocation in invocations {
-        if let Some(target) = context.targets.get(&invocation.name).cloned() {
-            let args = cli_args(&target.params, &invocation.args, &target.name, &target.pos)?;
-            let name = context.target_name(&target, &args, &context.scope.clone())?;
-            context.instantiate_target(&target.name, &args, &context.scope.clone(), &mut Vec::new())?;
+        if let Some(group) = context.groups.get(&invocation.name).cloned() {
+            let args = cli_args(&group.params, &invocation.args, &group.name, &group.pos)?;
+            let name = context.group_name(&group, &args, &context.scope.clone())?;
+            context.instantiate_group(&group.name, &args, &context.scope.clone(), &mut Vec::new())?;
             selected.push(name);
-        } else if let Some(block) = context.blocks.get(&invocation.name).cloned() {
-            let args = cli_args(&block.params, &invocation.args, &block.name, &block.pos)?;
-            let name = context.instantiate_block(&block, &args, &context.scope.clone(), &mut Vec::new())?;
-            if block.matrix_keys.is_empty() {
+        } else if let Some(target) = context.targets.get(&invocation.name).cloned() {
+            let args = cli_args(&target.params, &invocation.args, &target.name, &target.pos)?;
+            let name = context.instantiate_target(&target, &args, &context.scope.clone(), &mut Vec::new())?;
+            if target.matrix_keys.is_empty() {
                 selected.push(name);
             } else {
-                selected.extend(matrix::group_slices(&name, context.scope).unwrap_or_default());
+                selected.extend(matrix::instance_slices(&name, context.scope).unwrap_or_default());
             }
         } else {
             if !invocation.args.is_empty() {
                 return Err(invalid(
                     &crate::ast::Pos::default(),
                     &invocation.name,
-                    "unknown target or block",
+                    "unknown group or target",
                 ));
             }
             selected.push(context.cli_matrix_slice(&invocation.name));
@@ -137,13 +142,13 @@ impl Instantiator<'_> {
     /// has no scope in which a bare word could name a binding, so a bare
     /// identifier key is a string and every other key must be a literal.
     fn cli_matrix_slice(&self, selector: &str) -> String {
-        if self.dag.has_block(selector) || self.dag.targets().contains_key(selector) {
+        if self.dag.has_target(selector) || self.dag.groups().contains_key(selector) {
             return selector.to_owned();
         }
         let Ok(Expr::MatrixRef { name, keys, fields }) = crate::parser::parse_expr(selector, "<selector>") else {
             return selector.to_owned();
         };
-        if !fields.is_empty() || !self.matrix_blocks.contains_key(&name) {
+        if !fields.is_empty() || !self.matrix_targets.contains_key(&name) {
             return selector.to_owned();
         }
         let values: Option<Vec<Value>> = keys
@@ -157,151 +162,155 @@ impl Instantiator<'_> {
             return selector.to_owned();
         };
         let slice = matrix::matrix_key(&name, &values.iter().collect::<Vec<_>>());
-        if self.dag.has_block(&slice) {
+        if self.dag.has_target(&slice) {
             slice
         } else {
             selector.to_owned()
         }
     }
 
-    fn target_name(&self, target: &Target, args: &[Field], caller: &Scope) -> Result<String, LoadError> {
-        let bound = bind(&target.name, &target.pos, &target.params, args, caller)?;
-        Ok(instance_name(&target.name, &target.params, &bound.values))
+    fn group_name(&self, group: &Group, args: &[Field], caller: &Scope) -> Result<String, LoadError> {
+        let bound = bind(&group.name, &group.pos, &group.params, args, caller)?;
+        Ok(instance_name(&group.name, &group.params, &bound.values))
     }
 
-    fn instantiate_target(
+    fn instantiate_group(
         &mut self,
         name: &str,
         args: &[Field],
         caller: &Scope,
         stack: &mut Vec<String>,
     ) -> Result<Vec<String>, LoadError> {
-        let Some(target) = self.targets.get(name).cloned() else {
+        let Some(group) = self.groups.get(name).cloned() else {
             if !args.is_empty() {
                 return Err(invalid(
                     &crate::ast::Pos::default(),
                     name,
-                    "this target does not accept arguments",
+                    "this group does not accept arguments",
                 ));
             }
             return self
                 .dag
-                .targets()
+                .groups()
                 .get(name)
-                .map(|target| target.blocks.clone())
-                .ok_or_else(|| invalid(&crate::ast::Pos::default(), name, "unknown target"));
+                .map(|group| group.targets.clone())
+                .ok_or_else(|| invalid(&crate::ast::Pos::default(), name, "unknown group"));
         };
-        let bound = bind(name, &target.pos, &target.params, args, caller)?;
-        let instance = instance_name(name, &target.params, &bound.values);
-        if let Some(existing) = self.dag.targets().get(&instance) {
-            return Ok(existing.blocks.clone());
+        let bound = bind(name, &group.pos, &group.params, args, caller)?;
+        let instance = instance_name(name, &group.params, &bound.values);
+        if let Some(existing) = self.dag.groups().get(&instance) {
+            return Ok(existing.targets.clone());
         }
         if stack.iter().any(|entry| entry == name) {
-            return Err(invalid(&target.pos, name, "recursive target invocation"));
+            return Err(invalid(&group.pos, name, "recursive group invocation"));
         }
         stack.push(name.to_owned());
-        let mut blocks = Vec::new();
-        for call in &target.blocks {
-            if self.targets.contains_key(&call.name) || self.dag.targets().contains_key(&call.name) {
+        let mut targets = Vec::new();
+        for call in &group.members {
+            if self.groups.contains_key(&call.name) || self.dag.groups().contains_key(&call.name) {
                 if call.keys.is_some() {
-                    return Err(invalid(&target.pos, &call.name, "a target cannot have matrix keys"));
+                    return Err(invalid(&group.pos, &call.name, "a group cannot have matrix keys"));
                 }
-                blocks.extend(self.instantiate_target(&call.name, &call.args, &bound.scope, stack)?);
-            } else if let Some(block) = self.blocks.get(&call.name).cloned() {
+                targets.extend(self.instantiate_group(&call.name, &call.args, &bound.scope, stack)?);
+            } else if let Some(target) = self.targets.get(&call.name).cloned() {
                 if let Some(keys) = &call.keys {
-                    blocks.push(self.select_matrix_slice(&block, keys, &call.args, &bound.scope, &mut Vec::new())?);
+                    targets.push(self.select_matrix_slice(&target, keys, &call.args, &bound.scope, &mut Vec::new())?);
                 } else {
-                    let name = self.instantiate_block(&block, &call.args, &bound.scope, &mut Vec::new())?;
-                    if block.matrix_keys.is_empty() {
-                        blocks.push(name);
+                    let name = self.instantiate_target(&target, &call.args, &bound.scope, &mut Vec::new())?;
+                    if target.matrix_keys.is_empty() {
+                        targets.push(name);
                     } else {
-                        blocks.extend(matrix::group_slices(&name, self.scope).unwrap_or_default());
+                        targets.extend(matrix::instance_slices(&name, self.scope).unwrap_or_default());
                     }
                 }
             } else {
                 if !call.args.is_empty() || call.keys.is_some() {
-                    return Err(invalid(&target.pos, &call.name, "unknown block or target"));
+                    return Err(invalid(&group.pos, &call.name, "unknown target or group"));
                 }
-                blocks.push(call.name.clone());
+                targets.push(call.name.clone());
             }
         }
         stack.pop();
-        self.dag.add_target(instance, blocks.clone(), target.doc);
-        Ok(blocks)
+        self.dag.add_group(instance, targets.clone(), group.doc);
+        Ok(targets)
     }
 
     fn select_matrix_slice(
         &mut self,
-        block: &Block,
+        target: &Target,
         keys: &[Expr],
         args: &[Field],
         caller: &Scope,
         stack: &mut Vec<String>,
     ) -> Result<String, LoadError> {
-        if block.matrix_keys.is_empty() || keys.len() != block.matrix_keys.len() {
-            return Err(invalid(&block.pos, &block.name, "invalid matrix slice"));
+        if target.matrix_keys.is_empty() || keys.len() != target.matrix_keys.len() {
+            return Err(invalid(&target.pos, &target.name, "invalid matrix slice"));
         }
         let rewritten_keys: Vec<_> = keys
             .iter()
             .map(|key| self.materialize_expr(key, caller, stack))
             .collect::<Result<_, _>>()?;
         let rewritten_args = self.materialize_fields(args, caller, stack)?;
-        let group = self.instantiate_block(block, &rewritten_args, caller, stack)?;
+        let instance = self.instantiate_target(target, &rewritten_args, caller, stack)?;
         let values: Vec<_> = rewritten_keys
             .iter()
             .map(|key| {
                 expr::eval(key, caller).map_err(|source| LoadError::Eval {
-                    pos: block.pos.clone(),
+                    pos: target.pos.clone(),
                     source,
                 })
             })
             .collect::<Result<_, _>>()?;
         let value_refs: Vec<_> = values.iter().collect();
-        let slice = matrix::slice_name(&block.name, &value_refs, &group[block.name.len()..]);
-        if !self.dag.has_block(&slice) {
+        let slice = matrix::slice_name(&target.name, &value_refs, &instance[target.name.len()..]);
+        if !self.dag.has_target(&slice) {
             return Err(invalid(
-                &block.pos,
-                &block.name,
+                &target.pos,
+                &target.name,
                 &format!("unknown matrix slice '{slice}'"),
             ));
         }
         Ok(slice)
     }
 
-    fn instantiate_block(
+    fn instantiate_target(
         &mut self,
-        block: &Block,
+        target: &Target,
         args: &[Field],
         caller: &Scope,
         stack: &mut Vec<String>,
     ) -> Result<String, LoadError> {
-        if block.params.is_empty() {
+        if target.params.is_empty() {
             if !args.is_empty() {
-                return Err(invalid(&block.pos, &block.name, "this block does not accept arguments"));
+                return Err(invalid(
+                    &target.pos,
+                    &target.name,
+                    "this target does not accept arguments",
+                ));
             }
-            return Ok(block.name.clone());
+            return Ok(target.name.clone());
         }
-        let bound = bind(&block.name, &block.pos, &block.params, args, caller)?;
-        let instance_args = instance_args(&block.params, &bound.values);
-        let name = format!("{}{instance_args}", block.name);
-        if self.dag.has_block(&name) || self.matrix_blocks.contains_key(&name) {
+        let bound = bind(&target.name, &target.pos, &target.params, args, caller)?;
+        let instance_args = instance_args(&target.params, &bound.values);
+        let name = format!("{}{instance_args}", target.name);
+        if self.dag.has_target(&name) || self.matrix_targets.contains_key(&name) {
             return Ok(name);
         }
-        if stack.iter().any(|entry| entry == &block.name) {
-            return Err(invalid(&block.pos, &block.name, "recursive block invocation"));
+        if stack.iter().any(|entry| entry == &target.name) {
+            return Err(invalid(&target.pos, &target.name, "recursive target invocation"));
         }
-        stack.push(block.name.clone());
-        let mut concrete = block.clone();
+        stack.push(target.name.clone());
+        let mut concrete = target.clone();
         concrete.name = name.clone();
         concrete.params.clear();
-        concrete.explicit = block.explicit;
+        concrete.explicit = target.explicit;
         let substitutions: HashMap<_, _> = bound
             .substitutions
             .iter()
-            .filter(|(key, _)| !block.matrix_keys.iter().any(|matrix_key| &matrix_key.name == *key))
+            .filter(|(key, _)| !target.matrix_keys.iter().any(|matrix_key| &matrix_key.name == *key))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        let substituted: Vec<Field> = block
+        let substituted: Vec<Field> = target
             .fields
             .iter()
             .map(|field| Field {
@@ -309,13 +318,13 @@ impl Instantiator<'_> {
                 value: module::rewrite_expr(&field.value, &HashSet::new(), &substitutions, ""),
             })
             .collect();
-        if !block.matrix_keys.is_empty() {
-            concrete.name = block.name.clone();
+        if !target.matrix_keys.is_empty() {
+            concrete.name = target.name.clone();
             concrete.fields = substituted;
-            // Matrix keys may be bound block parameters. Expand in that scope,
+            // Matrix keys may be bound target parameters. Expand in that scope,
             // then publish only the resulting nodes to the module scope.
             let mut expansion_scope = bound.scope.clone();
-            let before: HashSet<_> = self.dag.block_names().into_iter().collect();
+            let before: HashSet<_> = self.dag.target_names().into_iter().collect();
             matrix::expand_matrix(
                 &concrete,
                 &instance_args,
@@ -323,59 +332,59 @@ impl Instantiator<'_> {
                 self.registry,
                 self.store,
                 self.dag,
-                self.matrix_blocks,
+                self.matrix_targets,
             )?;
-            let group = expansion_scope.get(&name).cloned().ok_or_else(|| {
+            let value = expansion_scope.get(&name).cloned().ok_or_else(|| {
                 invalid(
-                    &block.pos,
-                    &block.name,
+                    &target.pos,
+                    &target.name,
                     "matrix expansion did not register its instance",
                 )
             })?;
             self.scope
-                .define(&name, SymbolKind::Block, group)
+                .define(&name, SymbolKind::Target, value)
                 .map_err(|existing| LoadError::DuplicateName {
-                    pos: block.pos.clone(),
+                    pos: target.pos.clone(),
                     name: name.clone(),
                     existing: existing.as_str(),
                 })?;
             let expanded: Vec<_> = self
                 .dag
-                .block_names()
+                .target_names()
                 .into_iter()
                 .filter(|node_name| !before.contains(node_name))
                 .collect();
-            let invocation = cli_invocation(block, &bound.values, self.scope);
+            let invocation = cli_invocation(target, &bound.values, self.scope);
             for node_name in expanded {
                 // Selecting the instance selects every slice.
                 self.dag.add_invocation(node_name.clone(), invocation.clone());
                 self.scope
-                    .define(&node_name, SymbolKind::Block, Value::strct(Map::new()))
+                    .define(&node_name, SymbolKind::Target, Value::strct(Map::new()))
                     .map_err(|existing| LoadError::DuplicateName {
-                        pos: block.pos.clone(),
+                        pos: target.pos.clone(),
                         name: node_name.clone(),
                         existing: existing.as_str(),
                     })?;
                 let fields = self
                     .dag
                     .get_node(&node_name)
-                    .ok_or_else(|| invalid(&block.pos, &block.name, "matrix slice was not registered"))?
+                    .ok_or_else(|| invalid(&target.pos, &target.name, "matrix slice was not registered"))?
                     .fields
                     .clone();
                 let rewritten = self.materialize_fields(&fields, &expansion_scope, stack)?;
                 self.dag
                     .get_node_mut(&node_name)
-                    .ok_or_else(|| invalid(&block.pos, &block.name, "matrix slice was not registered"))?
+                    .ok_or_else(|| invalid(&target.pos, &target.name, "matrix slice was not registered"))?
                     .fields = rewritten;
             }
-            self.matrix_blocks.insert(name.clone(), block.matrix_key_names());
+            self.matrix_targets.insert(name.clone(), target.matrix_key_names());
             stack.pop();
             return Ok(name);
         }
         concrete.fields = self.materialize_fields(&substituted, &bound.scope, stack)?;
 
-        if let Some(path) = module::resolve_module_path(self.import_roots, &block.provider, &block.resource) {
-            let before: HashSet<_> = self.dag.block_names().into_iter().collect();
+        if let Some(path) = module::resolve_module_path(self.import_roots, &target.provider, &target.resource) {
+            let before: HashSet<_> = self.dag.target_names().into_iter().collect();
             let mut context = module::ExpandContext {
                 scope: self.scope,
                 registry: self.registry,
@@ -387,12 +396,12 @@ impl Instantiator<'_> {
                 &name,
                 &path,
                 &concrete.fields,
-                module::InstanceModifiers::of(block),
+                module::InstanceModifiers::of(target),
                 &mut context,
             )?;
             let expanded: Vec<_> = self
                 .dag
-                .block_names()
+                .target_names()
                 .into_iter()
                 .filter(|node_name| !before.contains(node_name))
                 .collect();
@@ -400,51 +409,54 @@ impl Instantiator<'_> {
                 let fields = self
                     .dag
                     .get_node(&node_name)
-                    .expect("expanded block exists")
+                    .expect("expanded target exists")
                     .fields
                     .clone();
                 let rewritten = self.materialize_fields(&fields, &bound.scope, stack)?;
-                self.dag.get_node_mut(&node_name).expect("expanded block exists").fields = rewritten;
+                self.dag
+                    .get_node_mut(&node_name)
+                    .expect("expanded target exists")
+                    .fields = rewritten;
             }
             // Internal nodes belong to the same explicit invocation.
-            for node_name in self.dag.block_names() {
+            for node_name in self.dag.target_names() {
                 if (node_name == name || node_name.starts_with(&format!("{name}.")))
                     && let Some(node) = self.dag.get_node_mut(&node_name)
                 {
-                    node.explicit = block.explicit;
+                    node.explicit = target.explicit;
                 }
             }
         } else {
             let resource = self
                 .registry
-                .get_resource(&block.provider, &block.resource)
+                .get_resource(&target.provider, &target.resource)
                 .ok_or_else(|| LoadError::UnknownResource {
-                    pos: block.pos.clone(),
-                    provider: block.provider.clone(),
-                    resource: block.resource.clone(),
+                    pos: target.pos.clone(),
+                    provider: target.provider.clone(),
+                    resource: target.resource.clone(),
                 })?;
             let prior_state = self.store.load(&name)?;
             self.dag.add_node(DagNode {
-                pos: block.pos.clone(),
+                pos: target.pos.clone(),
                 name: name.clone(),
-                doc: block.doc.clone(),
-                phase: block.phase,
-                provider: block.provider.clone(),
-                resource_name: block.resource.clone(),
-                protected: block.protected,
-                explicit: block.explicit,
-                large: block.large,
-                concurrency_group: block.name.clone(),
+                doc: target.doc.clone(),
+                phase: target.phase,
+                provider: target.provider.clone(),
+                resource_name: target.resource.clone(),
+                protected: target.protected,
+                explicit: target.explicit,
+                large: target.large,
+                concurrency_group: target.name.clone(),
                 fields: concrete.fields.clone(),
                 resource,
                 prior_state,
             })?;
             self.dag
-                .add_invocation(name.clone(), cli_invocation(block, &bound.values, self.scope));
+                .add_invocation(name.clone(), cli_invocation(target, &bound.values, self.scope));
             self.scope
-                .define(&name, SymbolKind::Block, Value::strct(Map::new()))
+                .define(&name, SymbolKind::Target, Value::strct(Map::new()))
                 .map_err(|existing| LoadError::DuplicateName {
-                    pos: block.pos.clone(),
+                    pos: target.pos.clone(),
                     name: name.clone(),
                     existing: existing.as_str(),
                 })?;
@@ -477,25 +489,25 @@ impl Instantiator<'_> {
         stack: &mut Vec<String>,
     ) -> Result<Expr, LoadError> {
         Ok(match expression {
-            Expr::BlockCall {
+            Expr::TargetCall {
                 name,
                 keys,
                 args,
                 fields,
             } => {
-                let block = self
-                    .blocks
+                let target = self
+                    .targets
                     .get(name)
                     .cloned()
-                    .ok_or_else(|| invalid(&crate::ast::Pos::default(), name, "unknown parameterized block"))?;
+                    .ok_or_else(|| invalid(&crate::ast::Pos::default(), name, "unknown parameterized target"))?;
                 let instance = if let Some(keys) = keys {
-                    self.select_matrix_slice(&block, keys, args, caller, stack)?
+                    self.select_matrix_slice(&target, keys, args, caller, stack)?
                 } else {
                     let rewritten_args = self.materialize_fields(args, caller, stack)?;
-                    self.instantiate_block(&block, &rewritten_args, caller, stack)?
+                    self.instantiate_target(&target, &rewritten_args, caller, stack)?
                 };
                 if fields.is_empty() {
-                    Expr::BlockRef(instance)
+                    Expr::TargetRef(instance)
                 } else {
                     let mut parts = Vec::with_capacity(fields.len() + 1);
                     parts.push(instance);
@@ -533,11 +545,11 @@ impl Instantiator<'_> {
                     .collect::<Result<_, LoadError>>()?,
             ),
             Expr::MatrixRef { name, keys, fields } => {
-                if self.blocks.get(name).is_some_and(|block| !block.params.is_empty()) {
+                if self.targets.get(name).is_some_and(|target| !target.params.is_empty()) {
                     return Err(invalid(
                         &crate::ast::Pos::default(),
                         name,
-                        "matrix block requires arguments",
+                        "matrix target requires arguments",
                     ));
                 }
                 Expr::MatrixRef {
@@ -576,7 +588,7 @@ impl Instantiator<'_> {
                 Box::new(self.materialize_expr(left, caller, stack)?),
                 Box::new(self.materialize_expr(right, caller, stack)?),
             ),
-            Expr::Ref(_) | Expr::BlockRef(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Duration(_) | Expr::Null => {
+            Expr::Ref(_) | Expr::TargetRef(_) | Expr::Number(_) | Expr::Bool(_) | Expr::Duration(_) | Expr::Null => {
                 expression.clone()
             }
         })
@@ -628,7 +640,7 @@ fn bind(
                 pos,
                 name,
                 &format!(
-                    "parameter '{}' cannot receive a secret; read it with secret(...) inside the block",
+                    "parameter '{}' cannot receive a secret; read it with secret(...) inside the target",
                     param.name
                 ),
             ));
@@ -688,12 +700,12 @@ fn cli_args(
 
 /// The command-line invocation that selects an instance, the inverse of
 /// [`cli_args`]. It leaves out arguments that equal their default.
-fn cli_invocation(block: &Block, values: &[Value], module_scope: &Scope) -> Invocation {
+fn cli_invocation(target: &Target, values: &[Value], module_scope: &Scope) -> Invocation {
     // Evaluate defaults as `bind` does for a command-line invocation, so an
     // argument left out binds to the same value.
     let mut scope = module_scope.clone();
     let mut args = Vec::new();
-    for (param, value) in block.params.iter().zip(values) {
+    for (param, value) in target.params.iter().zip(values) {
         let default = param
             .default
             .as_ref()
@@ -708,7 +720,7 @@ fn cli_invocation(block: &Block, values: &[Value], module_scope: &Scope) -> Invo
         scope.set(&param.name, value.clone());
     }
     Invocation {
-        name: block.name.clone(),
+        name: target.name.clone(),
         args,
     }
 }

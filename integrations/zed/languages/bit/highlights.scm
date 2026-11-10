@@ -7,7 +7,7 @@
   "as"
   "let"
   "param"
-  "target"
+  "group"
   "output"
 ] @keyword
 
@@ -53,14 +53,14 @@
 (parameter
   name: (identifier) @variable)
 
-(target_statement
+(group_statement
   name: (identifier) @function)
 
 (output_statement
   name: (identifier) @variable)
 
-; Blocks: name = provider.resource
-(block
+; Targets: name = provider.resource
+(target
   name: (identifier) @variable
   provider: (identifier) @type
   resource: (identifier) @function)
@@ -79,7 +79,7 @@
   key: (string) @property)
 
 ; Function calls
-(block_call
+(target_call
   name: (identifier) @variable)
 
 (call

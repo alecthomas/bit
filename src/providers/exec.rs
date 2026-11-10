@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use super::ReportMode;
 use crate::file_tracker::FileTracker;
-use crate::output::{BlockWriter, Message};
+use crate::output::{Message, TargetWriter};
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanAction, PlanResult,
-    Provider, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanAction, PlanResult, Provider,
+    Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 use crate::value::Value;
@@ -43,17 +43,17 @@ pub struct ExecInputs {
     #[serde(default)]
     pub resolve: Option<String>,
     /// Shell command whose stdout is parsed as a JSON object. Each key becomes
-    /// a block output.
+    /// a target output.
     #[serde(default)]
     pub values: Option<String>,
 }
 
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct ExecOutputs {
-    /// Output path (single-output blocks)
+    /// Output path (single-output targets)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// Output paths (multi-output blocks)
+    /// Output paths (multi-output targets)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
     /// Dynamic key-value outputs from the `values` command.
@@ -83,7 +83,7 @@ impl ExecOutputs {
     }
 }
 
-/// State persisted between runs for an exec block.
+/// State persisted between runs for an exec target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecState {
     pub command: String,
@@ -109,21 +109,21 @@ pub struct ExecState {
 /// failures. `pipefail` does the same for earlier commands in a pipeline,
 /// which is why this uses bash rather than POSIX `sh`.
 ///
-/// It runs in the block's `dir` with its `env`.
-fn shell<T>(command: &str, block: &Block<T>) -> Command {
+/// It runs in the target's `dir` with its `env`.
+fn shell<T>(command: &str, target: &Target<T>) -> Command {
     let mut cmd = Command::new("bash");
     cmd.args(["-eo", "pipefail", "-c"])
         .arg(command)
-        .envs(&block.env)
+        .envs(&target.env)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(dir) = &block.dir {
+    if let Some(dir) = &target.dir {
         cmd.current_dir(dir);
     }
     cmd
 }
 
-/// Lists the block's inputs that changed since its last success.
+/// Lists the target's inputs that changed since its last success.
 const CHANGED_FILES_VAR: &str = "BIT_CHANGED_FILES";
 
 /// Linux rejects an environment string over 128 KiB (`MAX_ARG_STRLEN`), so a
@@ -155,10 +155,10 @@ fn changed_files(changes: &Changes) -> Option<String> {
     (!list.is_empty() && list.len() <= MAX_CHANGED_FILES_LEN).then_some(list)
 }
 
-/// Run a shell command under `bash -eo pipefail`, piping stdout/stderr through the block
+/// Run a shell command under `bash -eo pipefail`, piping stdout/stderr through the target
 /// writer. Returns `Err` if the command exits non-zero.
-fn run_command<T>(command: &str, block: &Block<T>, changes: &Changes, writer: &BlockWriter) -> Result<(), BoxError> {
-    let mut cmd = shell(command, block);
+fn run_command<T>(command: &str, target: &Target<T>, changes: &Changes, writer: &TargetWriter) -> Result<(), BoxError> {
+    let mut cmd = shell(command, target);
     set_changed_files(&mut cmd, changes);
     let mut child = cmd
         .logged_spawn()
@@ -184,9 +184,9 @@ fn run_command<T>(command: &str, block: &Block<T>, changes: &Changes, writer: &B
 }
 
 /// Run a shell command silently and return its stdout. Used by `resolve` to
-/// capture external resource state without streaming through the block writer.
-fn run_capture<T>(command: &str, block: &Block<T>) -> Result<String, BoxError> {
-    let output = shell(command, block)
+/// capture external resource state without streaming through the target writer.
+fn run_capture<T>(command: &str, target: &Target<T>) -> Result<String, BoxError> {
+    let output = shell(command, target)
         .logged_output()
         .map_err(|e| format!("failed to execute resolve command: {e}"))?;
     if !output.status.success() {
@@ -202,8 +202,8 @@ fn run_capture<T>(command: &str, block: &Block<T>) -> Result<String, BoxError> {
 }
 
 /// Run the values command and parse its stdout as a JSON object.
-fn run_values<T>(command: &str, block: &Block<T>) -> Result<crate::value::Map, BoxError> {
-    let stdout = run_capture(command, block)?;
+fn run_values<T>(command: &str, target: &Target<T>) -> Result<crate::value::Map, BoxError> {
+    let stdout = run_capture(command, target)?;
     let json: serde_json::Value =
         serde_json::from_str(&stdout).map_err(|e| format!("values command produced invalid JSON: {e}"))?;
     let map: crate::value::Map =
@@ -213,33 +213,33 @@ fn run_values<T>(command: &str, block: &Block<T>) -> Result<crate::value::Map, B
 
 /// Hash the files `patterns` name. A directory names every file beneath it;
 /// matched as a glob, it would name only itself, which is not a file, and
-/// the block would track none of what its command reads.
+/// the target would track none of what its command reads.
 ///
 /// An invalid pattern is an error rather than an empty match. A valid one
 /// may match nothing, as an input a dependency has yet to generate does:
 /// files appearing there later change the hash all the same.
 fn hash_inputs<T>(
     tracker: &FileTracker,
-    block: &Block<T>,
+    target: &Target<T>,
     patterns: &[String],
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let mut files = BTreeMap::new();
     for pattern in patterns {
         glob::Pattern::new(pattern).map_err(|e| format!("invalid input pattern `{pattern}`: {e}"))?;
-        let path = block.path(pattern);
+        let path = target.path(pattern);
         if Path::new(&path).is_dir() {
             let path = glob::Pattern::escape(path.trim_end_matches('/'));
             files.extend(tracker.hash_glob(&format!("{path}/**/*"))?);
         } else {
-            files.extend(tracker.hash_glob(&block.glob(pattern))?);
+            files.extend(tracker.hash_glob(&target.glob(pattern))?);
         }
     }
     Ok(files)
 }
 
-/// The block's `outputs`, as bit's process sees them.
-fn output_paths<T>(block: &Block<T>, outputs: &[String]) -> Vec<String> {
-    outputs.iter().map(|output| block.path(output)).collect()
+/// The target's `outputs`, as bit's process sees them.
+fn output_paths<T>(target: &Target<T>, outputs: &[String]) -> Vec<String> {
+    outputs.iter().map(|output| target.path(output)).collect()
 }
 
 /// Provider for running arbitrary shell commands.
@@ -298,15 +298,15 @@ impl Resource for ExecResource {
 
     /// The shell that runs the command. The programs the command itself
     /// runs are unknown, so `inputs` must name any that matter.
-    fn ambient(&self, _inputs: &Block<ExecInputs>) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Target<ExecInputs>) -> Vec<Ambient> {
         vec![crate::providers::version("bash", &["--version"], None)]
     }
 
-    fn resolve(&self, inputs: &Block<ExecInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<ExecInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         hash_inputs(&self.tracker, inputs, &inputs.inputs)
     }
 
-    fn plan(&self, inputs: &Block<ExecInputs>, prior_state: Option<&ExecState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<ExecInputs>, prior_state: Option<&ExecState>) -> Result<PlanResult, BoxError> {
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
                 action: PlanAction::Create,
@@ -353,10 +353,10 @@ impl Resource for ExecResource {
 
     fn apply(
         &self,
-        inputs: &Block<ExecInputs>,
+        inputs: &Target<ExecInputs>,
         _prior_state: Option<&ExecState>,
         changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<ExecState, ExecOutputs>, BoxError> {
         let outputs = output_paths(inputs, &inputs.outputs);
         for output in &outputs {
@@ -399,7 +399,7 @@ impl Resource for ExecResource {
         })
     }
 
-    fn destroy(&self, prior_state: &Block<ExecState>, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Target<ExecState>, writer: &TargetWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         if let Some(clean) = &prior_state.clean {
             writer.event(Event::Starting, clean);
@@ -413,16 +413,16 @@ impl Resource for ExecResource {
         Ok(())
     }
 
-    /// `resolve` and `values` make a block a window onto something outside
+    /// `resolve` and `values` make a target a window onto something outside
     /// the worktree: `resolve` reports whether an external resource exists,
     /// and `values` reads values back out of it. Neither is something a
-    /// receipt written elsewhere can vouch for, so those blocks stay local
+    /// receipt written elsewhere can vouch for, so those targets stay local
     /// and the rest share the files they produce.
     ///
-    /// A block with no `outputs` produces nothing a receipt could restore,
+    /// A target with no `outputs` produces nothing a receipt could restore,
     /// so it runs for its side effects, such as a deploy. Another worktree
     /// skipping it on a shared hit would never perform them.
-    fn cache_policy(&self, inputs: &Block<ExecInputs>) -> CachePolicy {
+    fn cache_policy(&self, inputs: &Target<ExecInputs>) -> CachePolicy {
         if inputs.resolve.is_some() || inputs.values.is_some() || inputs.outputs.is_empty() {
             CachePolicy::Local
         } else {
@@ -430,7 +430,7 @@ impl Resource for ExecResource {
         }
     }
 
-    fn output_keys(&self, inputs: &Block<ExecInputs>) -> Vec<String> {
+    fn output_keys(&self, inputs: &Target<ExecInputs>) -> Vec<String> {
         output_paths(inputs, &inputs.outputs)
             .iter()
             .map(|o| o.trim_end_matches('/').to_owned())
@@ -479,7 +479,7 @@ pub struct ExecTestOutputs {
     pub passed: bool,
 }
 
-/// State for an exec.test block.
+/// State for an exec.test target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecTestState {
     pub command: String,
@@ -495,9 +495,9 @@ pub struct ExecTestState {
 /// test and suite passed.
 fn run_with_results(
     filter: &results::ResultsFilter,
-    inputs: &Block<ExecTestInputs>,
+    inputs: &Target<ExecTestInputs>,
     changes: &Changes,
-    writer: &BlockWriter,
+    writer: &TargetWriter,
 ) -> Result<bool, BoxError> {
     let mut cmd = shell(&inputs.command, inputs);
     set_changed_files(&mut cmd, changes);
@@ -569,17 +569,17 @@ impl Resource for ExecTestResource {
 
     /// The shell that runs the command. The programs the command itself
     /// runs are unknown, so `inputs` must name any that matter.
-    fn ambient(&self, _inputs: &Block<ExecTestInputs>) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Target<ExecTestInputs>) -> Vec<Ambient> {
         vec![crate::providers::version("bash", &["--version"], None)]
     }
 
-    fn resolve(&self, inputs: &Block<ExecTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<ExecTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         hash_inputs(&self.tracker, inputs, &inputs.inputs)
     }
 
     fn plan(
         &self,
-        inputs: &Block<ExecTestInputs>,
+        inputs: &Target<ExecTestInputs>,
         prior_state: Option<&ExecTestState>,
     ) -> Result<PlanResult, BoxError> {
         // Surface filter syntax errors at plan time rather than after the tests run.
@@ -611,10 +611,10 @@ impl Resource for ExecTestResource {
 
     fn apply(
         &self,
-        inputs: &Block<ExecTestInputs>,
+        inputs: &Target<ExecTestInputs>,
         _prior_state: Option<&ExecTestState>,
         changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<ExecTestState, ExecTestOutputs>, BoxError> {
         let passed = match &inputs.results {
             Some(code) => run_with_results(&results::ResultsFilter::compile(code)?, inputs, changes, writer)?,
@@ -631,7 +631,7 @@ impl Resource for ExecTestResource {
         })
     }
 
-    fn destroy(&self, prior_state: &Block<ExecTestState>, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Target<ExecTestState>, writer: &TargetWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         if let Some(clean) = &prior_state.clean {
             writer.event(Event::Starting, clean);
@@ -640,11 +640,11 @@ impl Resource for ExecTestResource {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &Block<ExecTestInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<ExecTestInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 
-    fn output_keys(&self, inputs: &Block<ExecTestInputs>) -> Vec<String> {
+    fn output_keys(&self, inputs: &Target<ExecTestInputs>) -> Vec<String> {
         output_paths(inputs, &inputs.outputs)
             .iter()
             .map(|o| o.trim_end_matches('/').to_owned())
@@ -672,7 +672,7 @@ mod tests {
         let out_file = dir.path().join("out");
         fs::write(&out_file, "output").unwrap();
 
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "echo".into(),
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "echo hi".into(),
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "echo hi".into(),
@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_command_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "echo bye".into(),
@@ -775,7 +775,7 @@ mod tests {
     fn apply_runs_command() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("result.txt");
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: format!("echo hello > {}", output.display()),
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn apply_fails_on_bad_command() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "false".into(),
@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn apply_fails_when_an_earlier_line_fails() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "false\necho \"::success::done\"".into(),
@@ -857,7 +857,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        Resource::destroy(&resource, &Block::new(None, state), &writer).unwrap();
+        Resource::destroy(&resource, &Target::new(None, state), &writer).unwrap();
         assert!(!output.exists());
     }
 
@@ -935,8 +935,8 @@ mod tests {
         assert!(!apply_test(&test_inputs(command, Some(JSONL_RESULTS))).unwrap());
     }
 
-    fn test_inputs(command: &str, results: Option<&str>) -> Block<ExecTestInputs> {
-        Block::new(
+    fn test_inputs(command: &str, results: Option<&str>) -> Target<ExecTestInputs> {
+        Target::new(
             None,
             ExecTestInputs {
                 command: command.into(),
@@ -949,7 +949,7 @@ mod tests {
         )
     }
 
-    fn apply_test(inputs: &Block<ExecTestInputs>) -> Result<bool, BoxError> {
+    fn apply_test(inputs: &Target<ExecTestInputs>) -> Result<bool, BoxError> {
         let resource = ExecTestResource {
             tracker: test_tracker(),
         };
@@ -990,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn command_runs_with_block_env_under_changed_files() {
+    fn command_runs_with_target_env_under_changed_files() {
         let env = BTreeMap::from([
             ("FOO".to_owned(), "bar".to_owned()),
             (CHANGED_FILES_VAR.to_owned(), "/stale".to_owned()),
@@ -1067,8 +1067,8 @@ mod tests {
         assert_eq!(result.action, PlanAction::Update);
     }
 
-    fn exec_inputs(outputs: Vec<String>) -> Block<ExecInputs> {
-        Block::new(
+    fn exec_inputs(outputs: Vec<String>) -> Target<ExecInputs> {
+        Target::new(
             None,
             ExecInputs {
                 command: "make".into(),
@@ -1153,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn blocks_producing_files_are_shared() {
+    fn targets_producing_files_are_shared() {
         let resource = ExecResource {
             tracker: test_tracker(),
         };
@@ -1166,7 +1166,7 @@ mod tests {
     /// `resolve` and `values` read state that lives outside the worktree, so
     /// no other worktree can act on what this one observed.
     #[test]
-    fn blocks_watching_external_state_stay_local() {
+    fn targets_watching_external_state_stay_local() {
         let resource = ExecResource {
             tracker: test_tracker(),
         };
@@ -1181,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn blocks_without_outputs_stay_local() {
+    fn targets_without_outputs_stay_local() {
         let resource = ExecResource {
             tracker: test_tracker(),
         };
@@ -1204,7 +1204,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let canon = dir.path().canonicalize().unwrap();
         let output = canon.join("result.txt");
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(canon.to_string_lossy().into_owned()),
             ExecInputs {
                 command: format!("pwd > {}", output.display()),
@@ -1264,7 +1264,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        Resource::destroy(&resource, &Block::new(None, state), &writer).unwrap();
+        Resource::destroy(&resource, &Target::new(None, state), &writer).unwrap();
 
         assert!(marker.exists(), "clean command must have run");
         assert!(output.exists(), "outputs should NOT be removed when clean is set");
@@ -1286,12 +1286,12 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        assert!(Resource::destroy(&resource, &Block::new(None, state), &writer).is_err());
+        assert!(Resource::destroy(&resource, &Target::new(None, state), &writer).is_err());
     }
 
     #[test]
     fn plan_update_when_clean_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "echo hi".into(),
@@ -1332,7 +1332,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        Resource::destroy(&resource, &Block::new(None, state), &writer).unwrap();
+        Resource::destroy(&resource, &Target::new(None, state), &writer).unwrap();
         assert!(marker.exists());
     }
 
@@ -1348,12 +1348,12 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        Resource::destroy(&resource, &Block::new(None, state), &writer).unwrap();
+        Resource::destroy(&resource, &Target::new(None, state), &writer).unwrap();
     }
 
     #[test]
     fn plan_create_when_resolve_fails() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "echo create".into(),
@@ -1382,7 +1382,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_resolve_output_drifted() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "echo create".into(),
@@ -1411,7 +1411,7 @@ mod tests {
 
     #[test]
     fn plan_none_when_resolve_output_matches() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "echo create".into(),
@@ -1440,7 +1440,7 @@ mod tests {
 
     #[test]
     fn apply_captures_resolve_output() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "true".into(),
@@ -1465,7 +1465,7 @@ mod tests {
     fn apply_no_resolve_output_without_resolve() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("result.txt");
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: format!("echo hello > {}", output.display()),
@@ -1495,7 +1495,7 @@ mod tests {
 
     #[test]
     fn apply_captures_json_values() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             ExecInputs {
                 command: "true".into(),
@@ -1533,7 +1533,7 @@ mod tests {
 
     #[test]
     fn run_capture_includes_stderr_on_failure() {
-        let err = run_capture("echo 'something went wrong' >&2; exit 1", &Block::new(None, ())).unwrap_err();
+        let err = run_capture("echo 'something went wrong' >&2; exit 1", &Target::new(None, ())).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("something went wrong"),
@@ -1543,7 +1543,7 @@ mod tests {
 
     #[test]
     fn run_capture_omits_stderr_when_empty() {
-        let err = run_capture("exit 1", &Block::new(None, ())).unwrap_err();
+        let err = run_capture("exit 1", &Target::new(None, ())).unwrap_err();
         let msg = err.to_string();
         assert_eq!(msg, "resolve command exited with exit status: 1");
     }

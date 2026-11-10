@@ -1,6 +1,6 @@
 //! Canonical source formatting from the parser's semantic AST and comments.
 
-use crate::ast::{Block, Module, Phase, Pos, Statement};
+use crate::ast::{Module, Phase, Pos, Statement, Target};
 use crate::parser::{self, Comment, ParseError, StatementSource};
 
 #[derive(Debug, thiserror::Error)]
@@ -114,9 +114,9 @@ pub fn format(source: &str, filename: &str) -> Result<String, FormatError> {
 
 fn statement_doc(statement: &Statement) -> Option<&str> {
     match statement {
-        Statement::Block(value) => value.doc.as_deref(),
-        Statement::Param(value) => value.doc.as_deref(),
         Statement::Target(value) => value.doc.as_deref(),
+        Statement::Param(value) => value.doc.as_deref(),
+        Statement::Group(value) => value.doc.as_deref(),
         Statement::Output(value) => value.doc.as_deref(),
         Statement::Import(_) | Statement::Let(_) => None,
     }
@@ -180,22 +180,22 @@ fn render_statement(
                 result.push_str(syntax.expression.trim_end());
             }
         }
-        Statement::Target(value) => {
+        Statement::Group(value) => {
             if !value.params.is_empty()
                 || value
-                    .blocks
+                    .members
                     .iter()
                     .any(|call| call.keys.is_some() || !call.args.is_empty())
             {
                 result.push_str(source[syntax.start..syntax.end].trim_end());
                 return;
             }
-            result.push_str("target ");
+            result.push_str("group ");
             result.push_str(&value.name);
             result.push_str(" = [");
             result.push_str(
                 &value
-                    .blocks
+                    .members
                     .iter()
                     .map(|call| call.name.as_str())
                     .collect::<Vec<_>>()
@@ -209,31 +209,37 @@ fn render_statement(
             result.push_str(" = ");
             result.push_str(syntax.expression.trim_end());
         }
-        Statement::Block(value) if !value.params.is_empty() => {
+        Statement::Target(value) if !value.params.is_empty() => {
             result.push_str(source[syntax.start..syntax.end].trim_end());
         }
-        Statement::Block(value) => render_block(result, value, syntax, comments, source),
+        Statement::Target(value) => render_target(result, value, syntax, comments, source),
     }
 }
 
-fn render_block(result: &mut String, block: &Block, syntax: &StatementSource, comments: &[Comment<'_>], source: &str) {
-    match block.phase {
+fn render_target(
+    result: &mut String,
+    target: &Target,
+    syntax: &StatementSource,
+    comments: &[Comment<'_>],
+    source: &str,
+) {
+    match target.phase {
         Phase::Pre => result.push_str("pre "),
         Phase::Post => result.push_str("post "),
         Phase::Default => {}
     }
-    if block.protected {
+    if target.protected {
         result.push_str("protected ");
     }
-    if block.explicit {
+    if target.explicit {
         result.push_str("explicit ");
     }
-    if block.large {
+    if target.large {
         result.push_str("large ");
     }
-    result.push_str(&block.name);
-    if !block.matrix_keys.is_empty() {
-        let keys: Vec<_> = block
+    result.push_str(&target.name);
+    if !target.matrix_keys.is_empty() {
+        let keys: Vec<_> = target
             .matrix_keys
             .iter()
             .zip(&syntax.matrix_keys)
@@ -247,19 +253,19 @@ fn render_block(result: &mut String, block: &Block, syntax: &StatementSource, co
         result.push(']');
     }
     result.push_str(" = ");
-    result.push_str(&block.provider);
-    if block.resource != block.provider {
+    result.push_str(&target.provider);
+    if target.resource != target.provider {
         result.push('.');
-        result.push_str(&block.resource);
+        result.push_str(&target.resource);
     }
-    if block.fields.is_empty() && comments.is_empty() {
+    if target.fields.is_empty() && comments.is_empty() {
         result.push_str(" {}");
         return;
     }
     result.push_str(" {\n");
 
     let mut comment_index = 0;
-    for (index, field) in block.fields.iter().enumerate() {
+    for (index, field) in target.fields.iter().enumerate() {
         let field_start = syntax.fields[index].start;
         while comment_index < comments.len() && comments[comment_index].offset < field_start {
             let comment = comments[comment_index];
@@ -277,7 +283,7 @@ fn render_block(result: &mut String, block: &Block, syntax: &StatementSource, co
         result.push('\n');
     }
     for comment in &comments[comment_index..] {
-        if !block.fields.is_empty() && is_inline(source, comment.offset) {
+        if !target.fields.is_empty() && is_inline(source, comment.offset) {
             push_inline_comment(result, *comment);
         } else {
             push_comment(result, *comment, 2);
@@ -290,10 +296,10 @@ fn clear_positions(module: &mut Module) {
     for statement in &mut module.statements {
         let position = match statement {
             Statement::Import(value) => &mut value.pos,
-            Statement::Block(value) => &mut value.pos,
+            Statement::Target(value) => &mut value.pos,
             Statement::Let(value) => &mut value.pos,
             Statement::Param(value) => &mut value.pos,
-            Statement::Target(value) => &mut value.pos,
+            Statement::Group(value) => &mut value.pos,
             Statement::Output(value) => &mut value.pos,
         };
         *position = Pos::default();
@@ -305,9 +311,10 @@ mod tests {
     use super::format;
 
     #[test]
-    fn formats_comments_and_block_spacing() {
-        let source = "# Heading\n\n# Block docs\njob=exec{\n  # Field docs\ncommand='echo' # inline\n}\nother=exec{}\n";
-        let expected = "# Heading\n\n# Block docs\njob = exec {\n  # Field docs\n  command = 'echo'  # inline\n}\n\nother = exec {}\n";
+    fn formats_comments_and_target_spacing() {
+        let source =
+            "# Heading\n\n# Target docs\njob=exec{\n  # Field docs\ncommand='echo' # inline\n}\nother=exec{}\n";
+        let expected = "# Heading\n\n# Target docs\njob = exec {\n  # Field docs\n  command = 'echo'  # inline\n}\n\nother = exec {}\n";
         assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
         assert_eq!(format(expected, "BUILD.bit").unwrap(), expected);
     }
@@ -352,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_comment_adjacent_to_let_after_a_block() {
+    fn keeps_comment_adjacent_to_let_after_a_target() {
         let source = "job=exec{}\n# Explains the binding.\nlet tree_sitter_rev=exec('git')|trim\n";
         let expected = "job = exec {}\n\n# Explains the binding.\nlet tree_sitter_rev = exec('git')|trim\n";
         assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
@@ -360,9 +367,9 @@ mod tests {
     }
 
     #[test]
-    fn moves_attached_comment_after_block_before_next_statement() {
-        let source = "first=exec{} # next block\nsecond=exec{}\n";
-        let expected = "first = exec {}\n\n# next block\nsecond = exec {}\n";
+    fn moves_attached_comment_after_target_before_next_statement() {
+        let source = "first=exec{} # next target\nsecond=exec{}\n";
+        let expected = "first = exec {}\n\n# next target\nsecond = exec {}\n";
         assert_eq!(format(source, "BUILD.bit").unwrap(), expected);
         assert_eq!(format(expected, "BUILD.bit").unwrap(), expected);
     }
@@ -375,7 +382,7 @@ mod tests {
 
     #[test]
     fn formats_all_statement_and_expression_forms() {
-        let source = "import 'example.com/mod' as mod\nparam names:[string]=['one','two']\nlet selected=if true then [1]+[2] else [3]\noutput chosen=selected[0].name\npre protected explicit job[names]=exec{config={answer=42}, command=\"#{mod.value | trim}\"}\ntarget default=[job]\n";
+        let source = "import 'example.com/mod' as mod\nparam names:[string]=['one','two']\nlet selected=if true then [1]+[2] else [3]\noutput chosen=selected[0].name\npre protected explicit job[names]=exec{config={answer=42}, command=\"#{mod.value | trim}\"}\ngroup default=[job]\n";
         let formatted = format(source, "BUILD.bit").unwrap();
         assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
     }
@@ -409,17 +416,21 @@ mod tests {
     }
 
     #[test]
-    fn formats_repository_build_files_without_changing_their_meaning() {
-        for source in [include_str!("../BUILD.bit"), include_str!("../example/BUILD.bit")] {
+    fn formats_example_build_files_without_changing_their_meaning() {
+        for source in [
+            include_str!("../example/BUILD.bit"),
+            include_str!("../tests/smoke/BUILD.bit"),
+        ] {
             let formatted = format(source, "BUILD.bit").unwrap();
             assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
         }
     }
 
     #[test]
-    fn repository_build_file_keeps_heredocs_and_let_comment() {
-        let formatted = format(include_str!("../BUILD.bit"), "BUILD.bit").unwrap();
-        assert!(formatted.contains("command = <<-EOF\n"));
-        assert!(formatted.contains("# extension's grammar revision.\nlet tree_sitter_rev"));
+    fn keeps_heredocs_and_let_comment() {
+        let source = "# Latest commit touching the\n# grammar.\nlet rev = exec(\"git log -1\") | trim\n\njob = exec {\n  command = <<-EOF\n    echo #{rev}\n  EOF\n}\n";
+        let formatted = format(source, "BUILD.bit").unwrap();
+        assert!(formatted.contains("command = <<-EOF\n"), "{formatted}");
+        assert!(formatted.contains("# grammar.\nlet rev"), "{formatted}");
     }
 }

@@ -58,7 +58,7 @@ impl Machine {
         output
     }
 
-    /// The blocks whose commands ran on this machine.
+    /// The targets whose commands ran on this machine.
     fn runs(&self) -> String {
         fs::read_to_string(self.dir.join("runs.log")).unwrap_or_default()
     }
@@ -111,7 +111,7 @@ fn a_read_only_remote_is_not_published_to() {
 }
 
 /// A remote that rejects every request costs its results, not the build,
-/// and says so once rather than once per block.
+/// and says so once rather than once per target.
 #[test]
 fn a_failing_remote_warns_once_and_the_build_succeeds() {
     let Some((bucket, prefix)) = bucket_and_prefix("failing") else {

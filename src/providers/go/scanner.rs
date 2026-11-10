@@ -51,14 +51,14 @@ struct Module {
 /// What the scanner has read, shared across all go resource resolve() calls.
 ///
 /// The file tracker owns it as a [`FileTracker::derived`] cache, which it
-/// drops whenever a block may have written files: a block such as
+/// drops whenever a target may have written files: a target such as
 /// `go.generate` can add sources to a package scanned before it ran, and
 /// unlike file hashes a scan cannot tell it is stale.
 ///
-/// Blocks resolve concurrently and may belong to different modules, so each
+/// Targets resolve concurrently and may belong to different modules, so each
 /// module keeps its own cache rather than one cache being swapped between
 /// them. The maps are sharded and locked only to copy an entry in or out,
-/// never while a directory is read, so two blocks that miss on the same
+/// never while a directory is read, so two targets that miss on the same
 /// directory may both scan it.
 ///
 /// [`FileTracker::derived`]: crate::file_tracker::FileTracker::derived
@@ -66,7 +66,7 @@ struct Module {
 pub struct Scans {
     /// Scanned modules keyed by canonical root.
     modules: DashMap<PathBuf, Arc<Module>>,
-    /// Local module sets by canonical working directory and the block's
+    /// Local module sets by canonical working directory and the target's
     /// `env`, since `go.work` discovery depends on where the go command runs
     /// and the environment can set `GOWORK` or `GOFLAGS`.
     local_modules: DashMap<(PathBuf, BTreeMap<String, String>), Arc<LocalModules>>,
@@ -224,14 +224,14 @@ fn collect_tests(
 
 /// Scan a Go package pattern and return all source files (local deps, embeds, go.mod/go.sum).
 ///
-/// Results are cached per package directory so that multiple blocks sharing
+/// Results are cached per package directory so that multiple targets sharing
 /// transitive imports only scan each directory once.
 ///
 /// `base_dir` is the directory from which module-root discovery begins (walking
-/// upward looking for `go.mod`). Pass `Some(dir)` when the calling block runs
-/// `go` from a non-project-root directory — e.g. a `go.exe` block with a `dir`
+/// upward looking for `go.mod`). Pass `Some(dir)` when the calling target runs
+/// `go` from a non-project-root directory — e.g. a `go.exe` target with a `dir`
 /// pointing at a separate-module subdirectory. `None` starts from bit's CWD.
-/// `env` is the block's `env`, which the go commands run here see.
+/// `env` is the target's `env`, which the go commands run here see.
 pub fn scan(
     scans: &Scans,
     patterns: &[String],
@@ -1507,7 +1507,7 @@ func Hello() { fmt.Println("hello") }
 
     #[test]
     fn scan_base_dir_selects_correct_module() {
-        // Regression: when a block sets `dir = "subpath"` pointing at a
+        // Regression: when a target sets `dir = "subpath"` pointing at a
         // separate-module subdirectory, scan() must locate that submodule's
         // `go.mod` rather than the outer module's. Without `base_dir` it
         // walked up from bit's CWD and grabbed the wrong module.

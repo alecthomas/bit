@@ -17,8 +17,8 @@ pub enum EvalError {
     UndefinedField(String),
     #[error("unknown function: {0}")]
     UnknownFunc(String),
-    #[error("parameterized block call was not materialized: {0}")]
-    UnmaterializedBlockCall(String),
+    #[error("parameterized target call was not materialized: {0}")]
+    UnmaterializedTargetCall(String),
     #[error("provider function '{name}' failed: {message}")]
     ProviderFunction { name: String, message: String },
     #[error("type error: {0}")]
@@ -42,7 +42,7 @@ pub enum EvalError {
 pub enum SymbolKind {
     Param,
     Let,
-    Block,
+    Target,
 }
 
 impl SymbolKind {
@@ -50,7 +50,7 @@ impl SymbolKind {
         match self {
             SymbolKind::Param => "param",
             SymbolKind::Let => "variable",
-            SymbolKind::Block => "block",
+            SymbolKind::Target => "target",
         }
     }
 }
@@ -64,7 +64,7 @@ impl std::fmt::Display for SymbolKind {
 /// Scope for variable lookups during expression evaluation.
 ///
 /// Each name carries a [`SymbolKind`] so the loader can detect collisions
-/// between params, let bindings, and blocks that share a flat namespace.
+/// between params, let bindings, and targets that share a flat namespace.
 #[derive(Clone)]
 pub struct Scope {
     vars: HashMap<String, (SymbolKind, Value)>,
@@ -98,10 +98,10 @@ impl Scope {
     }
 
     /// Overwrite an existing symbol's value without conflict checking.
-    /// Used by the engine to fill block placeholders with real outputs.
+    /// Used by the engine to fill target placeholders with real outputs.
     pub fn set(&mut self, name: impl Into<String>, value: Value) {
         let name = name.into();
-        let kind = self.vars.get(&name).map(|(k, _)| *k).unwrap_or(SymbolKind::Block);
+        let kind = self.vars.get(&name).map(|(k, _)| *k).unwrap_or(SymbolKind::Target);
         self.vars.insert(name, (kind, value));
     }
 
@@ -135,7 +135,7 @@ pub fn eval(expr: &Expr, scope: &Scope) -> Result<Value, EvalError> {
 }
 
 /// Evaluate an expression in lenient mode — unresolved field references
-/// produce `#{block.field}` placeholder strings instead of errors.
+/// produce `#{target.field}` placeholder strings instead of errors.
 pub fn eval_lenient(expr: &Expr, scope: &Scope) -> Result<Value, EvalError> {
     eval_inner(expr, scope, EvalMode::Lenient)
 }
@@ -153,7 +153,7 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
         }
         Expr::Map(fields) => eval_map(fields, scope, mode),
         Expr::Ref(parts) => eval_ref(parts, scope, mode),
-        Expr::BlockRef(name) => Ok(Value::BlockRef(name.clone())),
+        Expr::TargetRef(name) => Ok(Value::TargetRef(name.clone())),
         Expr::MatrixRef { name, keys, fields } => {
             let root = eval_matrix_ref_name_inner(name, keys, scope, mode)?;
             let mut parts = Vec::with_capacity(fields.len() + 1);
@@ -161,7 +161,7 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
             parts.extend(fields.iter().cloned());
             eval_ref(&parts, scope, mode)
         }
-        Expr::BlockCall { name, .. } => Err(EvalError::UnmaterializedBlockCall(name.clone())),
+        Expr::TargetCall { name, .. } => Err(EvalError::UnmaterializedTargetCall(name.clone())),
         Expr::Call(name, args) => {
             let values: Result<Vec<_>, _> = args.iter().map(|e| eval_inner(e, scope, mode)).collect();
             let values = values?;
@@ -278,7 +278,7 @@ fn eval_ref(parts: &[String], scope: &Scope, mode: EvalMode) -> Result<Value, Ev
     let first = &parts[0];
     let root = scope.get(first).ok_or_else(|| EvalError::UndefinedVar(first.clone()))?;
 
-    // Navigate nested map fields: block.field.subfield
+    // Navigate nested map fields: target.field.subfield
     let mut current = root.clone();
     for part in &parts[1..] {
         match current {
@@ -530,7 +530,7 @@ fn project_dir() -> Result<String, EvalError> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
-/// Read a secret by name. `bit` shows the secret as this call, never its value. A secret cannot be passed as a block or target argument.
+/// Read a secret by name. `bit` shows the secret as this call, never its value. A secret cannot be passed as a target or group argument.
 #[bit_derive::provider_function]
 fn secret(name: String) -> Result<String, EvalError> {
     // Fall back to env var for now
@@ -828,9 +828,9 @@ mod tests {
     }
 
     #[test]
-    fn eval_matrix_ref_preserves_block_ref_key() {
+    fn eval_matrix_ref_preserves_target_ref_key() {
         let mut scope = Scope::new();
-        scope.set("dependency", Value::BlockRef(r#"crate["core"]"#.into()));
+        scope.set("dependency", Value::TargetRef(r#"crate["core"]"#.into()));
         scope.set(r#"consumer[crate["core"]]"#, Value::strct(Map::new()));
         let expression = Expr::MatrixRef {
             name: "consumer".into(),
@@ -1272,7 +1272,7 @@ mod tests {
             .unwrap(),
             precise
         );
-        let reference = Value::BlockRef("build[core]".into());
+        let reference = Value::TargetRef("build[core]".into());
         assert_eq!(
             call_builtin(
                 "env",
@@ -1296,10 +1296,10 @@ mod tests {
         assert_eq!(
             call_builtin(
                 "uniq",
-                &[Value::List(Type::BlockRef, vec![reference.clone(), reference.clone()])]
+                &[Value::List(Type::TargetRef, vec![reference.clone(), reference.clone()])]
             )
             .unwrap(),
-            Value::List(Type::BlockRef, vec![reference])
+            Value::List(Type::TargetRef, vec![reference])
         );
     }
 

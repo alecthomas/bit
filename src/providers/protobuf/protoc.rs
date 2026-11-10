@@ -5,10 +5,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanAction, PlanResult,
-    Provider, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanAction, PlanResult, Provider,
+    Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 use crate::value::Value;
@@ -112,7 +112,7 @@ impl ProtocGenerateInputs {
     }
 }
 
-impl Block<ProtocGenerateInputs> {
+impl Target<ProtocGenerateInputs> {
     /// Source files matching `sources`, relative to `dir` as protoc expects.
     fn source_files(&self) -> Result<Vec<String>, BoxError> {
         let dir = self.dir.as_deref().unwrap_or("");
@@ -277,7 +277,7 @@ impl Block<ProtocGenerateInputs> {
     }
 }
 
-/// The block's sources and everything they import.
+/// The target's sources and everything they import.
 struct Compilation {
     /// Source files relative to `dir`, as protoc is given them.
     files: Vec<String>,
@@ -304,7 +304,7 @@ struct Batches {
 /// What an incremental run must compile, or `None` when only a full run
 /// is correct.
 fn incremental_batches(
-    inputs: &Block<ProtocGenerateInputs>,
+    inputs: &Target<ProtocGenerateInputs>,
     prior: &ProtocGenerateState,
     compilation: &Compilation,
     hashes: &Hashes,
@@ -338,7 +338,7 @@ fn incremental_batches(
         .affected(&compilation.paths, &changed)
         .into_iter()
         .collect();
-    // With no changed sources the block re-runs because its outputs changed
+    // With no changed sources the target re-runs because its outputs changed
     // or were deleted, which only a full run repairs.
     if affected.is_empty() {
         return None;
@@ -395,7 +395,7 @@ impl Staged {
 
 /// Run protoc on `files` with every generator writing into a staging
 /// directory.
-fn stage(inputs: &Block<ProtocGenerateInputs>, files: &[String], writer: &BlockWriter) -> Result<Staged, BoxError> {
+fn stage(inputs: &Target<ProtocGenerateInputs>, files: &[String], writer: &TargetWriter) -> Result<Staged, BoxError> {
     let dir = inputs.dir.as_deref();
     // Staging inside `dir` keeps the final moves on one filesystem, and the
     // hidden name keeps it out of `.proto` globs.
@@ -473,7 +473,7 @@ fn files_under(dir: &Path) -> Result<Vec<PathBuf>, BoxError> {
 /// Remove generated `files`, then the directories this empties below the
 /// output `roots`. Only files a generator wrote are removed, so anything
 /// else kept in an output directory survives.
-fn remove_generated(files: &[String], roots: &[PathBuf], writer: &BlockWriter) -> Result<(), BoxError> {
+fn remove_generated(files: &[String], roots: &[PathBuf], writer: &TargetWriter) -> Result<(), BoxError> {
     for file in files {
         let path = Path::new(file);
         crate::providers::remove_path(path, writer)?;
@@ -490,14 +490,14 @@ fn remove_generated(files: &[String], roots: &[PathBuf], writer: &BlockWriter) -
     Ok(())
 }
 
-/// Outputs from a `protoc.generate` block.
+/// Outputs from a `protoc.generate` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct ProtocGenerateOutputs {
     /// Generator output directories
     pub paths: Vec<String>,
 }
 
-/// Persisted state for a `protoc.generate` block.
+/// Persisted state for a `protoc.generate` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocGenerateState {
     #[serde(flatten)]
@@ -553,11 +553,11 @@ fn command_line(inputs: &ProtocGenerateInputs, sources: &[String]) -> String {
 /// Compile only `batches`. Returns every generated file, or `None` when the
 /// run showed that a full run is needed.
 fn run_incremental(
-    inputs: &Block<ProtocGenerateInputs>,
+    inputs: &Target<ProtocGenerateInputs>,
     prior: &ProtocGenerateState,
     batches: &Batches,
     total: usize,
-    writer: &BlockWriter,
+    writer: &TargetWriter,
 ) -> Result<Option<Vec<String>>, BoxError> {
     // One start line covers both batches, though each runs its own protoc.
     let sources: Vec<String> = batches.changed.iter().chain(&batches.added).cloned().collect();
@@ -586,10 +586,10 @@ fn run_incremental(
 /// Compile every source and remove generated files the run no longer
 /// writes.
 fn run_full(
-    inputs: &Block<ProtocGenerateInputs>,
+    inputs: &Target<ProtocGenerateInputs>,
     prior: Option<&ProtocGenerateState>,
     files: &[String],
-    writer: &BlockWriter,
+    writer: &TargetWriter,
 ) -> Result<Vec<String>, BoxError> {
     let generated = stage(inputs, files, writer)?.install()?;
     if let Some(prior) = prior {
@@ -602,7 +602,7 @@ fn run_full(
             .collect();
         // The prior run's `dir` is not known here, so outputs it left after
         // `dir` changed are removed but their emptied directories remain.
-        let prior_inputs = Block::new(inputs.dir.clone(), prior.inputs.clone());
+        let prior_inputs = Target::new(inputs.dir.clone(), prior.inputs.clone());
         remove_generated(&stale, &prior_inputs.outputs(), writer)?;
     }
     Ok(generated)
@@ -623,19 +623,19 @@ impl Resource for ProtocGenerateResource {
 
     /// Tracks the sources, the files they transitively import, and the
     /// files flags and generator options name.
-    fn resolve(&self, inputs: &Block<ProtocGenerateInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<ProtocGenerateInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut files = inputs.compilation()?.graph.files();
         files.extend(inputs.option_files());
         self.tracker.hash_files(&files)
     }
 
-    fn ambient(&self, inputs: &Block<ProtocGenerateInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<ProtocGenerateInputs>) -> Vec<Ambient> {
         inputs.ambient()
     }
 
     fn plan(
         &self,
-        inputs: &Block<ProtocGenerateInputs>,
+        inputs: &Target<ProtocGenerateInputs>,
         prior_state: Option<&ProtocGenerateState>,
     ) -> Result<PlanResult, BoxError> {
         let mut plan = super::plan(
@@ -654,10 +654,10 @@ impl Resource for ProtocGenerateResource {
 
     fn apply(
         &self,
-        inputs: &Block<ProtocGenerateInputs>,
+        inputs: &Target<ProtocGenerateInputs>,
         prior_state: Option<&ProtocGenerateState>,
         changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<ProtocGenerateState, ProtocGenerateOutputs>, BoxError> {
         if inputs.out.is_empty() {
             return Err("`out` must name at least one generator".into());
@@ -713,8 +713,8 @@ impl Resource for ProtocGenerateResource {
         })
     }
 
-    fn destroy(&self, prior_state: &Block<ProtocGenerateState>, writer: &BlockWriter) -> Result<(), BoxError> {
-        let inputs = Block::new(prior_state.dir.clone(), prior_state.inputs.clone());
+    fn destroy(&self, prior_state: &Target<ProtocGenerateState>, writer: &TargetWriter) -> Result<(), BoxError> {
+        let inputs = Target::new(prior_state.dir.clone(), prior_state.inputs.clone());
         remove_generated(&prior_state.generated, &inputs.outputs(), writer)
     }
 
@@ -726,11 +726,11 @@ impl Resource for ProtocGenerateResource {
     /// Generators other than protoc's built-in ones are `protoc-gen-*`
     /// executables, and incremental runs depend on the prior local state, so
     /// results stay in this worktree.
-    fn cache_policy(&self, _inputs: &Block<ProtocGenerateInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<ProtocGenerateInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 
-    fn output_keys(&self, inputs: &Block<ProtocGenerateInputs>) -> Vec<String> {
+    fn output_keys(&self, inputs: &Target<ProtocGenerateInputs>) -> Vec<String> {
         let mut keys = super::removable_outputs(&inputs.outputs()).unwrap_or_default();
         keys.extend(
             inputs
@@ -782,7 +782,7 @@ mod tests {
 
     /// A project where `proto/acme/v1/a.proto` imports `b.proto`, which
     /// imports `c.proto`, and `d.proto` stands alone.
-    fn project() -> (tempfile::TempDir, Block<ProtocGenerateInputs>) {
+    fn project() -> (tempfile::TempDir, Target<ProtocGenerateInputs>) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("proto/acme/v1")).unwrap();
@@ -790,7 +790,7 @@ mod tests {
         std::fs::write(root.join("proto/acme/v1/b.proto"), r#"import "acme/v1/c.proto";"#).unwrap();
         std::fs::write(root.join("proto/acme/v1/c.proto"), "").unwrap();
         std::fs::write(root.join("proto/acme/v1/d.proto"), "").unwrap();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             ProtocGenerateInputs {
                 sources: vec!["proto/acme/v1/a.proto".into()],
@@ -806,7 +806,7 @@ mod tests {
 
     /// `project()` compiling every file incrementally, with the state a
     /// successful full run would have recorded.
-    fn incremental_project() -> (tempfile::TempDir, Block<ProtocGenerateInputs>, ProtocGenerateState) {
+    fn incremental_project() -> (tempfile::TempDir, Target<ProtocGenerateInputs>, ProtocGenerateState) {
         let (dir, mut inputs) = project();
         inputs.sources = vec!["proto/**/*.proto".into()];
         inputs.incremental = true;
@@ -855,7 +855,7 @@ mod tests {
         assert_eq!(plan(&unrecorded).action, PlanAction::None, "older state is not checked");
     }
 
-    fn batches(inputs: &Block<ProtocGenerateInputs>, prior: &ProtocGenerateState) -> Option<Batches> {
+    fn batches(inputs: &Target<ProtocGenerateInputs>, prior: &ProtocGenerateState) -> Option<Batches> {
         let compilation = inputs.compilation().unwrap();
         let hashes = inputs.hashes(&compilation, &FileTracker::default()).unwrap();
         incremental_batches(inputs, prior, &compilation, &hashes)
@@ -1100,7 +1100,7 @@ mod tests {
             generated_hashes: BTreeMap::new(),
         };
         let output = crate::output::Output::new(&[]);
-        let state = Block::new(inputs.dir.clone(), state);
+        let state = Target::new(inputs.dir.clone(), state);
         Resource::destroy(&test_resource(), &state, &output.writer("generate")).unwrap();
         assert!(!out.join("acme").exists());
         assert!(out.join("go.mod").exists());

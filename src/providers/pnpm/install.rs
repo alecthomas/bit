@@ -5,9 +5,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -25,14 +25,14 @@ pub struct PnpmInstallInputs {
     pub frozen: bool,
 }
 
-/// Outputs from a `pnpm.install` block.
+/// Outputs from a `pnpm.install` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct PnpmInstallOutputs {
     /// Absolute path to the installed `node_modules` directory
     pub path: String,
 }
 
-/// Persisted state for a `pnpm.install` block.
+/// Persisted state for a `pnpm.install` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PnpmInstallState {
     pub frozen: bool,
@@ -130,7 +130,7 @@ impl Resource for PnpmInstallResource {
     /// pnpm reads settings from `npm_config_*` and `pnpm_config_*`
     /// variables in either case, and `NODE_ENV=production` skips
     /// devDependencies.
-    fn ambient(&self, inputs: &Block<PnpmInstallInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<PnpmInstallInputs>) -> Vec<Ambient> {
         let mut ambient = super::ambient(workspace_dir(inputs));
         ambient.push(Ambient::Variable("NODE_ENV".to_owned()));
         for prefix in ["npm_config_", "NPM_CONFIG_", "pnpm_config_", "PNPM_CONFIG_"] {
@@ -139,7 +139,7 @@ impl Resource for PnpmInstallResource {
         ambient
     }
 
-    fn resolve(&self, inputs: &Block<PnpmInstallInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<PnpmInstallInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = Path::new(workspace_dir(inputs));
         let ws = workspace::workspace(tracker, dir, &inputs.env)?;
@@ -163,7 +163,7 @@ impl Resource for PnpmInstallResource {
 
     fn plan(
         &self,
-        inputs: &Block<PnpmInstallInputs>,
+        inputs: &Target<PnpmInstallInputs>,
         prior_state: Option<&PnpmInstallState>,
     ) -> Result<PlanResult, BoxError> {
         let description = if inputs.frozen {
@@ -193,10 +193,10 @@ impl Resource for PnpmInstallResource {
 
     fn apply(
         &self,
-        inputs: &Block<PnpmInstallInputs>,
+        inputs: &Target<PnpmInstallInputs>,
         _prior_state: Option<&PnpmInstallState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<PnpmInstallState, PnpmInstallOutputs>, BoxError> {
         let mut args = vec!["install".to_owned()];
         if inputs.frozen {
@@ -226,7 +226,7 @@ impl Resource for PnpmInstallResource {
         })
     }
 
-    fn destroy(&self, prior_state: &Block<PnpmInstallState>, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Target<PnpmInstallState>, writer: &TargetWriter) -> Result<(), BoxError> {
         for dir in &prior_state.node_modules_dirs {
             let nm: PathBuf = Path::new(dir).join(&prior_state.modules_dir);
             crate::providers::remove_path(&nm, writer)?;
@@ -236,7 +236,7 @@ impl Resource for PnpmInstallResource {
 
     /// The result of an install is a set of `node_modules` trees. The CAS
     /// stores single files, so there is nothing here it could capture.
-    fn cache_policy(&self, _inputs: &Block<PnpmInstallInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<PnpmInstallInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 
@@ -245,7 +245,7 @@ impl Resource for PnpmInstallResource {
     /// `.modules.yaml` records the layout and `lock.yaml` the packages the
     /// virtual store holds, so an install by hand, or a deleted or
     /// re-created tree, changes one of them.
-    fn output_keys(&self, inputs: &Block<PnpmInstallInputs>) -> Vec<String> {
+    fn output_keys(&self, inputs: &Target<PnpmInstallInputs>) -> Vec<String> {
         let layout = self.layout(inputs);
         [
             layout.root.join(&layout.modules_dir).join(".modules.yaml"),
@@ -268,9 +268,9 @@ struct Layout {
 }
 
 impl PnpmInstallResource {
-    /// The block's install layout, from the settings `pnpm config list`
+    /// The target's install layout, from the settings `pnpm config list`
     /// reports. Without them, pnpm's defaults in `dir`.
-    fn layout(&self, inputs: &Block<PnpmInstallInputs>) -> Layout {
+    fn layout(&self, inputs: &Target<PnpmInstallInputs>) -> Layout {
         let dir = Path::new(workspace_dir(inputs));
         let root = workspace::workspace(&self.tracker, dir, &inputs.env)
             .map_or_else(|_| dir.to_path_buf(), |ws| ws.root.clone());
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(None, PnpmInstallInputs { frozen: true });
+        let inputs = Target::new(None, PnpmInstallInputs { frozen: true });
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "pnpm install --frozen-lockfile");
@@ -332,7 +332,7 @@ mod tests {
         for file in [".npmrc", ".pnpmfile.cjs", "patches/a.patch", "patches/b.patch"] {
             std::fs::write(root.join(file), "").unwrap();
         }
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             PnpmInstallInputs { frozen: true },
         );
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_frozen_changed() {
-        let inputs = Block::new(None, PnpmInstallInputs { frozen: false });
+        let inputs = Target::new(None, PnpmInstallInputs { frozen: false });
         let prior = PnpmInstallState {
             frozen: true,
             node_modules_dirs: vec![],
@@ -379,7 +379,7 @@ mod tests {
         };
         let out = crate::output::Output::new(&[]);
         let writer = out.writer("test");
-        let state = Block::new(Some(root.to_string_lossy().into_owned()), state);
+        let state = Target::new(Some(root.to_string_lossy().into_owned()), state);
         Resource::destroy(&test_resource(), &state, &writer).unwrap();
         assert!(!root.join("nm").exists());
         assert!(!root.join("pkg/nm").exists());
@@ -400,7 +400,7 @@ mod tests {
         std::fs::create_dir_all(root.join("app")).unwrap();
         std::fs::write(root.join("app/package.json"), r#"{ "name": "app" }"#).unwrap();
         let keys = |dir: &Path| {
-            let inputs = Block::new(
+            let inputs = Target::new(
                 Some(dir.to_string_lossy().into_owned()),
                 PnpmInstallInputs { frozen: true },
             );

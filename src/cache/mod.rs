@@ -74,8 +74,8 @@ pub struct ActionKeyInput<'a> {
     pub provider: &'a str,
     pub resource: &'a str,
     pub cache_version: u32,
-    /// Expanded block name, including any matrix suffix.
-    pub block: &'a str,
+    /// Expanded target name, including any matrix suffix.
+    pub target: &'a str,
     pub os: &'static str,
     pub arch: &'static str,
     /// Hash of the normalized evaluated inputs.
@@ -180,7 +180,7 @@ pub struct BuildCache {
     paths: PortablePaths,
     shared: Option<Shared>,
     /// Set once the remote has failed, so a run reports that once rather
-    /// than for every block.
+    /// than for every target.
     remote_failed: AtomicBool,
 }
 
@@ -440,7 +440,7 @@ mod tests {
             provider: "go",
             resource: "exe",
             cache_version: 1,
-            block: "app",
+            target: "app",
             os: "linux",
             arch: "x86_64",
             inputs: SHA256::digest(b"inputs"),

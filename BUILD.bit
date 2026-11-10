@@ -32,13 +32,16 @@ clippy = rust.clippy {
   flags = ["--workspace", "--", "-D", "warnings"]
 }
 
-# End-to-end smoke test of the debug binary.
+# End-to-end smoke test of the debug binary against the project in
+# tests/smoke.
 large integration-test = exec.test {
   depends_on = [debug]
+  dir = "tests/smoke"
   inputs = ["BUILD.bit"]
   command = <<-EOF
   #{debug.path} --version
   #{debug.path} --plan ...
+  #{debug.path} --plan release name=b
   EOF
 }
 
@@ -145,7 +148,7 @@ sync-readme = exec {
             (if (.inputs.fields | length) > 0 then
               ([(.inputs.fields | map("  \(.name) = \(.type)" | length) | max + 2), 40] | min) as $col |
               "```bit",
-              "block = \($res.name) {",
+              "target = \($res.name) {",
               (.inputs.fields[] |
                 ("  \(.name) = \(.type)" | pad($col)) as $left |
                 [(.description // ""), (if .default then "default: \(.default)" else "" end)]
@@ -178,13 +181,13 @@ sync-readme = exec {
   resolve = '#{debug.path} --schema | sha256'
 }
 
-# Regenerate the GitHub Actions workflow from the `ci` target. The jobs run
-# the Hermit-pinned `bin/bit`, but the debug build renders the workflow.
+# Regenerate the GitHub Actions workflow from the `ci` target with the
+# Hermit-pinned `bin/bit`, which also runs the jobs and reads this file.
 # Ratchet pins any action the template leaves unpinned.
 sync-ci = exec {
-  inputs = [".github/ci.yml.tmpl", "BUILD.bit"]
+  inputs = [".github/ci.yml.tmpl", "BUILD.bit", "bin/bit"]
   command = <<-EOF
-    #{debug.path} --ci ./.github/ci.yml.tmpl ci > .github/workflows/ci.yml
+    bin/bit --ci ./.github/ci.yml.tmpl ci > .github/workflows/ci.yml
     ratchet pin .github/workflows/ci.yml
   EOF
   outputs = ".github/workflows/ci.yml"

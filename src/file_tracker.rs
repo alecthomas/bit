@@ -15,18 +15,18 @@ use crate::sha256::SHA256;
 
 /// Shared cache for filesystem operations within a single engine run.
 ///
-/// Caches glob expansion and file content hashes so that multiple blocks
+/// Caches glob expansion and file content hashes so that multiple targets
 /// referencing the same files avoid redundant I/O.
 ///
-/// Every block resolves its inputs through one shared tracker, so it is
+/// Every target resolves its inputs through one shared tracker, so it is
 /// safe to use concurrently and never holds a lock while reading or hashing
 /// a file. The maps are sharded and locked only to copy an entry in or out.
-/// Two blocks that miss on the same file may both hash it; that costs less
+/// Two targets that miss on the same file may both hash it; that costs less
 /// than making one wait for the other.
 ///
 /// Cached hashes are never invalidated explicitly. Each lookup compares the
 /// file's current symlink chain and metadata with those it was hashed under,
-/// so a file a block produces or rewrites is rehashed on its next lookup.
+/// so a file a target produces or rewrites is rehashed on its next lookup.
 pub struct FileTracker {
     hashes: DashMap<PathBuf, FileHash>,
     globs: DashMap<String, Arc<[PathBuf]>>,
@@ -141,7 +141,7 @@ impl FileTracker {
     /// Hash a list of discovered files, returning entries keyed by path.
     ///
     /// A file that no longer exists is skipped rather than failing the
-    /// block: discovery and hashing are not atomic, and another block may
+    /// target: discovery and hashing are not atomic, and another target may
     /// remove a file in between, such as a temporary file a cache restore
     /// renames into place.
     pub fn hash_files(&self, paths: &[PathBuf]) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -173,7 +173,7 @@ impl FileTracker {
 
     /// Drop the caches that cannot revalidate themselves against the
     /// filesystem, glob expansions and [`FileTracker::derived`] caches,
-    /// because a block may have written files since they were filled.
+    /// because a target may have written files since they were filled.
     pub fn invalidate(&self) {
         self.globs.clear();
         self.derived.clear();

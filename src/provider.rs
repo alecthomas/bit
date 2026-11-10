@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cache::{ArtifactRef, Cas};
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::schema::Schema;
 use crate::sha256::SHA256;
 use crate::value::{Map, Value};
@@ -30,7 +30,7 @@ fn function_json_value(value: &Value) -> Result<serde_json::Value, BoxError> {
         // BigDecimal's normal serde representation is a string; dynamic
         // arguments must keep the original numeric kind.
         Value::Number(number) => Ok(serde_json::Value::Number(number.to_string().parse()?)),
-        Value::BlockRef(name) => Ok(serde_json::to_value(crate::value::BlockRef::new(name))?),
+        Value::TargetRef(name) => Ok(serde_json::to_value(crate::value::TargetRef::new(name))?),
         Value::List(_, items) => Ok(serde_json::Value::Array(
             items.iter().map(function_json_value).collect::<Result<_, _>>()?,
         )),
@@ -54,7 +54,7 @@ pub fn serialize_function_value<T: Serialize>(value: &T, typ: &crate::value::Typ
     Ok(value)
 }
 
-/// What may have changed since a block last ran successfully.
+/// What may have changed since a target last ran successfully.
 ///
 /// A failed test run does not count, so its changes are reported again.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,7 +128,7 @@ pub type MaterializeResult<S, O> = Result<Option<ApplyResult<S, O>>, BoxError>;
 /// same string in every checkout of a repository,
 /// so a receipt written by one is legible to the others. `path` is where that
 /// file lives for this process, which is what any filesystem access must use.
-/// The two differ whenever a block names an output by absolute path.
+/// The two differ whenever a target names an output by absolute path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputFile {
     pub role: String,
@@ -187,7 +187,7 @@ pub fn restore_output_files(
     outputs: &[OutputFile],
     artifacts: &BTreeMap<String, ArtifactRef>,
     cas: &Cas,
-    writer: &BlockWriter,
+    writer: &TargetWriter,
 ) -> Result<(), BoxError> {
     for output in outputs {
         let artifact = artifacts
@@ -204,7 +204,7 @@ pub fn restore_output_files(
 }
 
 /// Ambient state a resource's result depends on: what the machine and
-/// process provide rather than what the block declares. Files the provider
+/// process provide rather than what the target declares. Files the provider
 /// discovers, wherever they live, belong in [`Resource::resolve`] instead.
 /// See [`Resource::ambient`].
 #[derive(Debug, Clone, PartialEq)]
@@ -246,12 +246,12 @@ pub struct VersionCommand {
     pub dir: Option<String>,
     /// Environment variables set for the command.
     pub env: Vec<(String, String)>,
-    /// The block's `env`, which the engine adds so the probe sees the
+    /// The target's `env`, which the engine adds so the probe sees the
     /// toolchain the action will, for example through `GOTOOLCHAIN`. `env`
     /// overrides it. It stays out of [`VersionCommand::display`] because the
-    /// values already reach the key through the block's input hash, and may
+    /// values already reach the key through the target's input hash, and may
     /// be secrets.
-    pub block_env: BTreeMap<String, String>,
+    pub target_env: BTreeMap<String, String>,
 }
 
 impl VersionCommand {
@@ -261,7 +261,7 @@ impl VersionCommand {
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             dir: None,
             env: Vec::new(),
-            block_env: BTreeMap::new(),
+            target_env: BTreeMap::new(),
         }
     }
 
@@ -280,10 +280,10 @@ impl VersionCommand {
     }
 
     /// Shell-like rendering without the working directory, which identifies
-    /// the fingerprint among a block's sources. The directory is left out
+    /// the fingerprint among a target's sources. The directory is left out
     /// because it is usually absolute: worktrees of one repository must
     /// produce the same source key for the shared cache to match, and a
-    /// block always runs its command in the same directory anyway.
+    /// target always runs its command in the same directory anyway.
     pub fn display(&self) -> String {
         let mut parts: Vec<String> = self.env.iter().map(|(name, value)| format!("{name}={value}")).collect();
         parts.push(self.program.clone());
@@ -292,16 +292,16 @@ impl VersionCommand {
     }
 
     /// Identity of this command's output within one process. Unlike
-    /// [`VersionCommand::display`] it includes the directory and the block's
-    /// `env`, since two blocks may run the same command where different
+    /// [`VersionCommand::display`] it includes the directory and the target's
+    /// `env`, since two targets may run the same command where different
     /// toolchains apply.
     pub fn probe_key(&self) -> String {
         let mut key = self.display();
         if let Some(dir) = &self.dir {
             key.push_str(&format!(" (in {dir})"));
         }
-        if !self.block_env.is_empty() {
-            key.push_str(&format!(" (with {:?})", self.block_env));
+        if !self.target_env.is_empty() {
+            key.push_str(&format!(" (with {:?})", self.target_env));
         }
         key
     }
@@ -309,7 +309,7 @@ impl VersionCommand {
     pub fn command(&self) -> std::process::Command {
         let mut cmd = std::process::Command::new(&self.program);
         cmd.args(&self.args);
-        cmd.envs(&self.block_env);
+        cmd.envs(&self.target_env);
         cmd.envs(self.env.iter().map(|(name, value)| (name, value)));
         if let Some(dir) = &self.dir {
             cmd.current_dir(dir);
@@ -351,24 +351,24 @@ pub trait Provider: Send + Sync {
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError>;
 }
 
-/// A resource's inputs or state together with the block's `dir` and `env`,
-/// which the engine manages for every block rather than each resource
+/// A resource's inputs or state together with the target's `dir` and `env`,
+/// which the engine manages for every target rather than each resource
 /// declaring its own.
 ///
-/// The command runs in `dir`, and every relative path in the block's fields
+/// The command runs in `dir`, and every relative path in the target's fields
 /// is relative to it. `dir` itself is relative to the project root, which
 /// is bit's working directory. Dereferences to the wrapped value.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Block<T> {
+pub struct Target<T> {
     pub dir: Option<String>,
-    /// Variables set for every process the resource runs for the block,
+    /// Variables set for every process the resource runs for the target,
     /// including the commands that discover its inputs, so they see what
-    /// the action will. The engine hashes them with the block's inputs.
+    /// the action will. The engine hashes them with the target's inputs.
     pub env: BTreeMap<String, String>,
     pub value: T,
 }
 
-impl<T> Block<T> {
+impl<T> Target<T> {
     pub fn new(dir: Option<String>, value: T) -> Self {
         Self {
             dir,
@@ -396,7 +396,7 @@ impl<T> Block<T> {
     }
 }
 
-impl<T> std::ops::Deref for Block<T> {
+impl<T> std::ops::Deref for Target<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -404,14 +404,14 @@ impl<T> std::ops::Deref for Block<T> {
     }
 }
 
-impl<T> std::ops::DerefMut for Block<T> {
+impl<T> std::ops::DerefMut for Target<T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.value
     }
 }
 
 /// The glob `pattern` joined onto `dir` when it is relative. See
-/// [`Block::glob`].
+/// [`Target::glob`].
 pub fn glob_in_dir(dir: Option<&str>, pattern: &str) -> String {
     match dir {
         Some(dir) if Path::new(pattern).is_relative() => {
@@ -421,7 +421,7 @@ pub fn glob_in_dir(dir: Option<&str>, pattern: &str) -> String {
     }
 }
 
-/// `path` joined onto `dir` when it is relative. See [`Block::path`].
+/// `path` joined onto `dir` when it is relative. See [`Target::path`].
 pub fn in_dir(dir: Option<&str>, path: &str) -> String {
     match dir {
         Some(dir) if Path::new(path).is_relative() => Path::new(dir).join(path).to_string_lossy().into_owned(),
@@ -450,31 +450,31 @@ pub trait Resource {
     /// Derive tracked source inputs from the seed inputs and return their
     /// path -> SHA256 hashes. An output that is also an input belongs here;
     /// the engine hashes declared outputs separately for local change detection.
-    fn resolve(&self, inputs: &Block<Self::Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError>;
+    fn resolve(&self, inputs: &Target<Self::Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError>;
 
     /// The ambient state the result depends on: the tools the resource runs
     /// and the environment variables it reads. Each is fingerprinted as a
     /// source alongside [`Resource::resolve`], so a tool upgrade or changed
-    /// variable reruns the block and changes its shared action key. See
+    /// variable reruns the target and changes its shared action key. See
     /// [`Ambient`].
-    fn ambient(&self, _inputs: &Block<Self::Inputs>) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Target<Self::Inputs>) -> Vec<Ambient> {
         vec![]
     }
 
-    fn plan(&self, inputs: &Block<Self::Inputs>, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
+    fn plan(&self, inputs: &Target<Self::Inputs>, prior_state: Option<&Self::State>) -> Result<PlanResult, BoxError>;
     fn apply(
         &self,
-        inputs: &Block<Self::Inputs>,
+        inputs: &Target<Self::Inputs>,
         prior_state: Option<&Self::State>,
         changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
-    /// `prior_state.dir` and `prior_state.env` are what the block had when
+    /// `prior_state.dir` and `prior_state.env` are what the target had when
     /// it last ran.
-    fn destroy(&self, prior_state: &Block<Self::State>, writer: &BlockWriter) -> Result<(), BoxError>;
+    fn destroy(&self, prior_state: &Target<Self::State>, writer: &TargetWriter) -> Result<(), BoxError>;
 
     /// Whether `apply` prints its own start line through
-    /// [`BlockWriter::starting`] rather than the engine printing the plan
+    /// [`TargetWriter::starting`] rather than the engine printing the plan
     /// description. Return true when what `apply` runs depends on the
     /// changes, which `plan` cannot see, so the line shows the command that
     /// actually runs.
@@ -482,7 +482,7 @@ pub trait Resource {
         false
     }
 
-    /// Concurrency limit for a block's matrix slices when the block sets no
+    /// Concurrency limit for a target's matrix slices when the target sets no
     /// `concurrency` field. Use it for tools that cannot run alongside
     /// another instance of themselves.
     fn default_concurrency(&self) -> Option<usize> {
@@ -504,7 +504,7 @@ pub trait Resource {
     /// The answer may depend on the inputs. A resource that usually produces
     /// files but can also be pointed at external state returns `Local` for
     /// the latter, rather than publishing receipts nothing can use.
-    fn cache_policy(&self, inputs: &Block<Self::Inputs>) -> CachePolicy;
+    fn cache_policy(&self, inputs: &Target<Self::Inputs>) -> CachePolicy;
 
     /// Paths of produced outputs. The engine hashes existing files for local
     /// change detection, so a deleted output triggers a rebuild. Output hashes
@@ -517,8 +517,8 @@ pub trait Resource {
     /// A shared resource must name every file its consumers depend on. An
     /// omitted output is not a missed optimisation: the receipt is published
     /// as if complete, so another worktree restores a partial result and the
-    /// block reports success over it.
-    fn output_keys(&self, _inputs: &Block<Self::Inputs>) -> Vec<String> {
+    /// target reports success over it.
+    fn output_keys(&self, _inputs: &Target<Self::Inputs>) -> Vec<String> {
         vec![]
     }
 
@@ -530,7 +530,7 @@ pub trait Resource {
     /// artifacts that do not live on disk, such as a container image.
     fn capture_artifacts(
         &self,
-        _inputs: &Block<Self::Inputs>,
+        _inputs: &Target<Self::Inputs>,
         _state: &Self::State,
         outputs: &[OutputFile],
         cas: &Cas,
@@ -544,7 +544,7 @@ pub trait Resource {
     /// declares none, which is correct for validation-only resources.
     fn check_receipt(
         &self,
-        _inputs: &Block<Self::Inputs>,
+        _inputs: &Target<Self::Inputs>,
         _state: &Self::State,
         outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
@@ -564,12 +564,12 @@ pub trait Resource {
     /// override to recreate the files.
     fn materialize(
         &self,
-        _inputs: &Block<Self::Inputs>,
+        _inputs: &Target<Self::Inputs>,
         _state: &Self::State,
         outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
         cas: &Cas,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> MaterializeResult<Self::State, Self::Outputs> {
         restore_output_files(outputs, artifacts, cas, writer)?;
         Ok(None)
@@ -592,9 +592,9 @@ pub trait DynResource: Send + Sync {
         inputs: &Map,
         prior_state: Option<&serde_json::Value>,
         changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError>;
-    fn destroy(&self, prior_state: &Block<serde_json::Value>, writer: &BlockWriter) -> Result<(), BoxError>;
+    fn destroy(&self, prior_state: &Target<serde_json::Value>, writer: &TargetWriter) -> Result<(), BoxError>;
     fn announces_start(&self) -> bool {
         false
     }
@@ -603,7 +603,7 @@ pub trait DynResource: Send + Sync {
     }
 
     /// Returns [`CachePolicy::Local`] when the inputs cannot be deserialized
-    /// for this resource, so an unusable block is never published.
+    /// for this resource, so an unusable target is never published.
     fn cache_policy(&self, inputs: &Map) -> CachePolicy;
 
     // The remaining defaults describe a resource with no cached outputs.
@@ -640,26 +640,26 @@ pub trait DynResource: Send + Sync {
         _outputs: &[OutputFile],
         _artifacts: &BTreeMap<String, ArtifactRef>,
         _cas: &Cas,
-        _writer: &BlockWriter,
+        _writer: &TargetWriter,
     ) -> MaterializeResult<serde_json::Value, Map> {
         Ok(None)
     }
 }
 
-/// Deserialize a block's evaluated fields into its `dir`, `env` and the
+/// Deserialize a target's evaluated fields into its `dir`, `env` and the
 /// resource's typed inputs. The inputs ignore the engine's fields.
-fn deserialize_inputs<T: DeserializeOwned>(map: &Map) -> Result<Block<T>, BoxError> {
+fn deserialize_inputs<T: DeserializeOwned>(map: &Map) -> Result<Target<T>, BoxError> {
     let dir = map
         .get(crate::dag::DIR_FIELD)
         .and_then(Value::as_str)
         .map(str::to_owned);
     let json = serde_json::to_value(map)?;
     let value: T = serde_json::from_value(json)?;
-    Ok(Block::new(dir, value).with_env(block_env(map)))
+    Ok(Target::new(dir, value).with_env(target_env(map)))
 }
 
-/// The block's `env` field.
-pub fn block_env(inputs: &Map) -> BTreeMap<String, String> {
+/// The target's `env` field.
+pub fn target_env(inputs: &Map) -> BTreeMap<String, String> {
     let Some(env) = inputs.get(crate::dag::ENV_FIELD).and_then(Value::as_map) else {
         return BTreeMap::new();
     };
@@ -690,17 +690,17 @@ impl<R: Resource + Send + Sync> DynResource for R {
     }
 
     fn resolve(&self, inputs: &Map) -> Result<BTreeMap<String, SHA256>, BoxError> {
-        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
+        let typed: Target<R::Inputs> = deserialize_inputs(inputs)?;
         Resource::resolve(self, &typed)
     }
 
     fn ambient(&self, inputs: &Map) -> Result<Vec<Ambient>, BoxError> {
-        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
+        let typed: Target<R::Inputs> = deserialize_inputs(inputs)?;
         Ok(Resource::ambient(self, &typed))
     }
 
     fn plan(&self, inputs: &Map, prior_state: Option<&serde_json::Value>) -> Result<PlanResult, BoxError> {
-        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
+        let typed: Target<R::Inputs> = deserialize_inputs(inputs)?;
         // Discard prior state if it can't be deserialized (e.g. resource type changed).
         let state = prior_state.and_then(|v| serde_json::from_value(v.clone()).ok());
         Resource::plan(self, &typed, state.as_ref())
@@ -711,9 +711,9 @@ impl<R: Resource + Send + Sync> DynResource for R {
         inputs: &Map,
         prior_state: Option<&serde_json::Value>,
         changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
-        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
+        let typed: Target<R::Inputs> = deserialize_inputs(inputs)?;
         // Discard prior state if it can't be deserialized (e.g. resource type changed).
         let state = prior_state.and_then(|v| serde_json::from_value(v.clone()).ok());
         let result = Resource::apply(self, &typed, state.as_ref(), changes, writer)?;
@@ -723,10 +723,10 @@ impl<R: Resource + Send + Sync> DynResource for R {
         })
     }
 
-    fn destroy(&self, prior_state: &Block<serde_json::Value>, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Target<serde_json::Value>, writer: &TargetWriter) -> Result<(), BoxError> {
         let state: R::State = serde_json::from_value(prior_state.value.clone())?;
-        let block = Block::new(prior_state.dir.clone(), state).with_env(prior_state.env.clone());
-        Resource::destroy(self, &block, writer)
+        let target = Target::new(prior_state.dir.clone(), state).with_env(prior_state.env.clone());
+        Resource::destroy(self, &target, writer)
     }
 
     fn announces_start(&self) -> bool {
@@ -745,7 +745,7 @@ impl<R: Resource + Send + Sync> DynResource for R {
     }
 
     fn output_keys(&self, inputs: &Map) -> Result<Vec<String>, BoxError> {
-        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
+        let typed: Target<R::Inputs> = deserialize_inputs(inputs)?;
         Ok(Resource::output_keys(self, &typed))
     }
 
@@ -756,7 +756,7 @@ impl<R: Resource + Send + Sync> DynResource for R {
         outputs: &[OutputFile],
         cas: &Cas,
     ) -> Result<BTreeMap<String, ArtifactRef>, BoxError> {
-        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
+        let typed: Target<R::Inputs> = deserialize_inputs(inputs)?;
         let state: R::State = serde_json::from_value(state.clone())?;
         Resource::capture_artifacts(self, &typed, &state, outputs, cas)
     }
@@ -769,7 +769,7 @@ impl<R: Resource + Send + Sync> DynResource for R {
         artifacts: &BTreeMap<String, ArtifactRef>,
         cas: &Cas,
     ) -> Result<ReceiptCheck, BoxError> {
-        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
+        let typed: Target<R::Inputs> = deserialize_inputs(inputs)?;
         let Ok(state) = serde_json::from_value::<R::State>(state.clone()) else {
             return Ok(ReceiptCheck::Unusable);
         };
@@ -783,9 +783,9 @@ impl<R: Resource + Send + Sync> DynResource for R {
         outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
         cas: &Cas,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> MaterializeResult<serde_json::Value, Map> {
-        let typed: Block<R::Inputs> = deserialize_inputs(inputs)?;
+        let typed: Target<R::Inputs> = deserialize_inputs(inputs)?;
         let state: R::State = serde_json::from_value(state.clone())?;
         let Some(result) = Resource::materialize(self, &typed, &state, outputs, artifacts, cas, writer)? else {
             return Ok(None);
@@ -876,11 +876,11 @@ mod tests {
     }
 
     #[bit_derive::provider_function]
-    fn typed_block_refs(empty: bool) -> Result<Vec<crate::value::BlockRef>, BoxError> {
+    fn typed_target_refs(empty: bool) -> Result<Vec<crate::value::TargetRef>, BoxError> {
         Ok(if empty {
             Vec::new()
         } else {
-            vec![crate::value::BlockRef::new("build[core]")]
+            vec![crate::value::TargetRef::new("build[core]")]
         })
     }
 
@@ -917,11 +917,11 @@ mod tests {
             ResourceKind::Build
         }
 
-        fn resolve(&self, _inputs: &Block<StubInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+        fn resolve(&self, _inputs: &Target<StubInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
             Ok(BTreeMap::new())
         }
 
-        fn plan(&self, _inputs: &Block<StubInputs>, prior_state: Option<&StubState>) -> Result<PlanResult, BoxError> {
+        fn plan(&self, _inputs: &Target<StubInputs>, prior_state: Option<&StubState>) -> Result<PlanResult, BoxError> {
             let action = if prior_state.is_some() {
                 PlanAction::Update
             } else {
@@ -936,10 +936,10 @@ mod tests {
 
         fn apply(
             &self,
-            _inputs: &Block<StubInputs>,
+            _inputs: &Target<StubInputs>,
             _prior_state: Option<&StubState>,
             _changes: &Changes,
-            _writer: &BlockWriter,
+            _writer: &TargetWriter,
         ) -> Result<ApplyResult<StubState, StubOutputs>, BoxError> {
             Ok(ApplyResult {
                 outputs: StubOutputs {},
@@ -947,11 +947,11 @@ mod tests {
             })
         }
 
-        fn destroy(&self, _prior_state: &Block<StubState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+        fn destroy(&self, _prior_state: &Target<StubState>, _writer: &TargetWriter) -> Result<(), BoxError> {
             Ok(())
         }
 
-        fn cache_policy(&self, _inputs: &Block<StubInputs>) -> CachePolicy {
+        fn cache_policy(&self, _inputs: &Target<StubInputs>) -> CachePolicy {
             CachePolicy::Local
         }
     }
@@ -996,29 +996,29 @@ mod tests {
     }
 
     #[test]
-    fn provider_function_macro_preserves_block_reference_type() {
-        let signature = __bit_signature_typed_block_refs();
+    fn provider_function_macro_preserves_target_reference_type() {
+        let signature = __bit_signature_typed_target_refs();
         assert_eq!(
             signature.returns,
-            crate::value::Type::List(Box::new(crate::value::Type::BlockRef))
+            crate::value::Type::List(Box::new(crate::value::Type::TargetRef))
         );
         assert_eq!(
-            __bit_call_typed_block_refs(&[Value::Bool(false)]).unwrap(),
+            __bit_call_typed_target_refs(&[Value::Bool(false)]).unwrap(),
             Value::List(
-                crate::value::Type::BlockRef,
-                vec![Value::BlockRef("build[core]".into())]
+                crate::value::Type::TargetRef,
+                vec![Value::TargetRef("build[core]".into())]
             )
         );
         assert_eq!(
-            __bit_call_typed_block_refs(&[Value::Bool(true)]).unwrap(),
-            Value::List(crate::value::Type::BlockRef, Vec::new())
+            __bit_call_typed_target_refs(&[Value::Bool(true)]).unwrap(),
+            Value::List(crate::value::Type::TargetRef, Vec::new())
         );
     }
 
     #[test]
     fn resource_plan_create() {
         let resource = StubResource;
-        let result = Resource::plan(&resource, &Block::new(None, StubInputs {}), None).unwrap();
+        let result = Resource::plan(&resource, &Target::new(None, StubInputs {}), None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
     }
 
@@ -1026,7 +1026,7 @@ mod tests {
     fn resource_plan_update() {
         let resource = StubResource;
         let state = StubState { version: 1 };
-        let result = Resource::plan(&resource, &Block::new(None, StubInputs {}), Some(&state)).unwrap();
+        let result = Resource::plan(&resource, &Target::new(None, StubInputs {}), Some(&state)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
     }
 
@@ -1037,7 +1037,7 @@ mod tests {
         let writer = output.writer("test");
         let result = Resource::apply(
             &resource,
-            &Block::new(None, StubInputs {}),
+            &Target::new(None, StubInputs {}),
             None,
             &Changes::All,
             &writer,
@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     /// Create `dir/name` as a declared output: recorded under its bare name,
-    /// living at an absolute path, as a block naming an absolute output would
+    /// living at an absolute path, as a target naming an absolute output would
     /// produce.
     fn write_output(dir: &std::path::Path, name: &str, content: &str) -> OutputFile {
         let path = dir.join(name);
@@ -1160,7 +1160,7 @@ mod tests {
         );
 
         let output = crate::output::Output::new(&[]);
-        restore_output_files(std::slice::from_ref(&here), &artifacts, &cas, &output.writer("block")).unwrap();
+        restore_output_files(std::slice::from_ref(&here), &artifacts, &cas, &output.writer("target")).unwrap();
 
         assert_eq!(std::fs::read_to_string(&here.path).unwrap(), "one");
         assert_eq!(check_output_files(&[here], &artifacts, &cas), ReceiptCheck::Valid);
@@ -1201,7 +1201,13 @@ mod tests {
 
         std::fs::remove_dir_all(&tree).unwrap();
         let writer = crate::output::Output::new(&[]);
-        restore_output_files(std::slice::from_ref(&output), &artifacts, &cas, &writer.writer("block")).unwrap();
+        restore_output_files(
+            std::slice::from_ref(&output),
+            &artifacts,
+            &cas,
+            &writer.writer("target"),
+        )
+        .unwrap();
 
         assert_eq!(std::fs::read_to_string(tree.join("index.js")).unwrap(), "main");
         assert_eq!(std::fs::read_to_string(tree.join("assets/app.css")).unwrap(), "body{}");
@@ -1268,7 +1274,13 @@ mod tests {
         std::fs::remove_file(&output.path).unwrap();
 
         let writer = crate::output::Output::new(&[]);
-        restore_output_files(std::slice::from_ref(&output), &artifacts, &cas, &writer.writer("block")).unwrap();
+        restore_output_files(
+            std::slice::from_ref(&output),
+            &artifacts,
+            &cas,
+            &writer.writer("target"),
+        )
+        .unwrap();
 
         assert_eq!(std::fs::read_to_string(&output.path).unwrap(), "one");
         let mode = std::fs::metadata(&output.path).unwrap().permissions().mode();
@@ -1282,7 +1294,7 @@ mod tests {
         let output = write_output(dir.path(), "a.txt", "one");
         let writer = crate::output::Output::new(&[]);
 
-        let err = restore_output_files(&[output], &BTreeMap::new(), &cas, &writer.writer("block"))
+        let err = restore_output_files(&[output], &BTreeMap::new(), &cas, &writer.writer("target"))
             .unwrap_err()
             .to_string();
 

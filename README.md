@@ -2,9 +2,9 @@
 
 A declarative build tool with dependency tracking, content-based caching, and parallel execution.
 
-`bit` reads a `BUILD.bit` file, resolves dependencies between blocks, detects what changed, and only rebuilds what's needed. Language-aware providers (e.g. Go, Rust, Docker) automatically discover inputs from source files, so in most cases you don't need to specify them manually.
+`bit` reads a `BUILD.bit` file, resolves dependencies between targets, detects what changed, and only rebuilds what's needed. Language-aware providers (e.g. Go, Rust, Docker) automatically discover inputs from source files, so in most cases you don't need to specify them manually.
 
-Like Terraform, `bit` tracks the state of each block between runs. It detects drift (e.g. a deleted Docker image or stopped container), determines what actions are needed (create, update, destroy), and applies only the minimum changes. `bit --plan` shows what would change; `bit` makes it so; `bit --clean` tears it down.
+Like Terraform, `bit` tracks the state of each target between runs. It detects drift (e.g. a deleted Docker image or stopped container), determines what actions are needed (create, update, destroy), and applies only the minimum changes. `bit --plan` shows what would change; `bit` makes it so; `bit --clean` tears it down.
 
 ## Install
 
@@ -20,7 +20,7 @@ cargo install --path .
 
 ## Quick Start
 
-Put a `BUILD.bit` file at the root of your project. Each block names a
+Put a `BUILD.bit` file at the root of your project. Each target names a
 resource from a provider, such as `go.exe`, and sets its fields.
 
 This one builds a Go server, tests and lints it, packages a Linux build into a
@@ -64,14 +64,14 @@ app = docker.container {
 }
 
 # Build the server binary
-target default = [server]
+group default = [server]
 # Run the tests and linter
-target test = [unit-test, lint]
+group test = [unit-test, lint]
 # Build the image and run it as a container
-target deploy = [app]
+group deploy = [app]
 ```
 
-`bit -l` lists the targets:
+`bit -l` lists the groups:
 
 ```console
 $ bit -l
@@ -80,7 +80,7 @@ deploy — Build the image and run it as a container
 test — Run the tests and linter
 ```
 
-`bit` runs the `default` target. A second run skips blocks that haven't
+`bit` runs the `default` group. A second run skips targets that haven't
 changed:
 
 ```console
@@ -93,20 +93,20 @@ server · no changes
 
 ### Overview
 
-Blocks depend on each other through `depends_on` or by referencing another
-block's outputs, such as `image.ref`. Targets name groups of blocks to run
-together, and a comment above a target describes it. The `default` target runs
-when `bit` is given no arguments. `bit` runs independent blocks in parallel.
+Targets depend on each other through `depends_on` or by referencing another
+target's outputs, such as `image.ref`. Groups name targets to run
+together, and a comment above a group describes it. The `default` group runs
+when `bit` is given no arguments. `bit` runs independent targets in parallel.
 
-Providers discover a block's inputs and outputs themselves, and many resources
+Providers discover a target's inputs and outputs themselves, and many resources
 also accept `inputs` and `outputs` for files they can't discover.
 
-`bit` hashes each block's fields, input files, outputs, the tools it runs, and
-the blocks it depends on. A block whose hash hasn't changed since it last
-succeeded is skipped. A change reruns that block and the blocks that depend on
+`bit` hashes each target's fields, input files, outputs, the tools it runs, and
+the targets it depends on. A target whose hash hasn't changed since it last
+succeeded is skipped. A change reruns that target and the targets that depend on
 it.
 
-When a block reruns, its provider sees which files changed and can narrow the
+When a target reruns, its provider sees which files changed and can narrow the
 work to them. For example, `go.test` and `go.lint` run only on the packages
 that changed files affect, and `exec` passes the changed files to its command
 in `BIT_CHANGED_FILES`.
@@ -121,21 +121,21 @@ results between machines, such as CI and developers.
 Run `bit` in the project directory:
 
 ```sh
-bit              # apply the default target (or every non-`explicit` block if no default)
-bit ...          # apply every non-`explicit` block regardless of the default target
-bit test         # apply a specific target or block
-bit publish tag=v1  # pass a named argument to a target
-bit --force      # rebuild selected blocks without change detection or cache
+bit              # apply the default group (or every non-`explicit` target if no default)
+bit ...          # apply every non-`explicit` target regardless of the default group
+bit test         # apply a specific group or target
+bit publish tag=v1  # pass a named argument to a group
+bit --force      # rebuild selected targets without change detection or cache
 bit --plan       # show what would change
 bit --clean      # destroy targets and their dependents in reverse topological order
-bit --clean db   # explicitly destroy a protected block
-bit --list       # list explicitly defined targets
-bit -ll          # list all blocks
+bit --clean db   # explicitly destroy a protected target
+bit --list       # list groups
+bit -ll          # list all targets
 bit --graph      # render the DAG as an ASCII graph
 bit --plan --graph  # …and colour each node by its planned action
-bit --graph --json  # print the DAG as JSON mapping each block to its deps
+bit --graph --json  # print the DAG as JSON mapping each target to its deps
 bit --dump       # show evaluated inputs/stored outputs
-bit --info       # show parameters, targets, and outputs
+bit --info       # show parameters, groups, and outputs
 bit --help       # show CLI options and a BUILD.bit language overview
 bit --docs [topic]  # print this README, or one section such as `ci`, offline
 bit --schema [name]  # show built-in functions and provider resource/function schemas
@@ -148,7 +148,7 @@ bit --cache disk:// --clean  # delete every cached receipt and artifact
 bit --long       # disable live scrolling regions and stream every output line
 bit --quiet      # suppress output unless an error occurs (also -q)
 NO_COLOR=1 bit   # disable colour (output is plain and --long when not a terminal or TERM=dumb)
-bit --since origin/master  # apply blocks affected since the branch point
+bit --since origin/master  # apply targets affected since the branch point
 bit --since      # same, using the remote default branch (origin/HEAD)
 bit --ci github > .github/workflows/bit.yml  # generate a GitHub Actions workflow
 bit --ci ./buildkite.yml.tmpl  # render a CI configuration from a template
@@ -169,7 +169,7 @@ param replicas : int = 1
 Top-level `param` declarations are inputs to the `.bit` module. Supply them
 with `-P`, for example `bit -P environment=production deploy`.
 
-### Blocks
+### Targets
 
 ```hcl
 name = provider.resource {
@@ -178,9 +178,9 @@ name = provider.resource {
 }
 ```
 
-Blocks can declare typed parameters. A parameter may have a default, in which
+Targets can declare typed parameters. A parameter may have a default, in which
 case its type can be inferred. Defaults may also refer to earlier `let` or
-`param` declarations, or to earlier parameters in the same block or target:
+`param` declarations, or to earlier parameters in the same target or group:
 
 ```hcl
 package(name : string, profile = "release") = exec {
@@ -188,11 +188,11 @@ package(name : string, profile = "release") = exec {
 }
 ```
 
-Parameterized blocks are instantiated by a target call or by naming the block
+Parameterized targets are instantiated by a group or by naming the target
 on the command line. The bound values form part of the instance identity, so
 equal calls share one graph node while different values have independent state.
 
-A parameterized block can also be referenced anywhere an ordinary block can.
+A parameterized target can also be referenced anywhere an ordinary target can.
 Pass named arguments before selecting an output, or use the call directly in
 `depends_on` and `after`:
 
@@ -209,16 +209,16 @@ a call with equal bound values refers to the same graph node.
 
 Special fields:
 
-- `depends_on = [block, ...]` — content-coupled dependency (changes propagate)
-- `after = [block, ...]` — ordering-only dependency
-- `concurrency = N` — maximum number of this block's matrix slices that may run at once
+- `depends_on = [target, ...]` — content-coupled dependency (changes propagate)
+- `after = [target, ...]` — ordering-only dependency
+- `concurrency = N` — maximum number of this target's matrix slices that may run at once
 - `uncached = [output, ...]` — outputs to keep out of the [shared build cache](#shared-build-cache)
-- `dir = path` — directory the block's commands run in, relative to the project root (defaults to the project root). Relative paths in the block's other fields are relative to `dir`. `bit --clean` runs in the `dir` the block last ran in
-- `env = { NAME = "value", ... }` — environment variables set for every command the block runs. Changing one reruns the block
+- `dir = path` — directory the target's commands run in, relative to the project root (defaults to the project root). Relative paths in the target's other fields are relative to `dir`. `bit --clean` runs in the `dir` the target last ran in
+- `env = { NAME = "value", ... }` — environment variables set for every command the target runs. Changing one reruns the target
 
-Every other field must be an input of the block's resource, as listed under [Providers](#providers) or by `bit --schema`. `bit` checks fields when it loads `BUILD.bit` and rejects unknown fields, missing required fields, and values of the wrong type. A value taken from another block's outputs is checked against that output's declared type, and checked again just before the block runs.
+Every other field must be an input of the target's resource, as listed under [Providers](#providers) or by `bit --schema`. `bit` checks fields when it loads `BUILD.bit` and rejects unknown fields, missing required fields, and values of the wrong type. A value taken from another target's outputs is checked against that output's declared type, and checked again just before the target runs.
 
-Prefix with `protected` to prevent destruction, `explicit` to exclude from `...`, `large` to mark a long-running or resource-heavy block, or any combination (in any order):
+Prefix with `protected` to prevent destruction, `explicit` to exclude from `...`, `large` to mark a long-running or resource-heavy target, or any combination (in any order):
 
 ```hcl
 protected db = docker.container { ... }
@@ -227,25 +227,25 @@ protected explicit prod_db = aws.aurora { ... }
 large image = docker.image { ... }
 ```
 
-Blocks without `large` are small. Modifiers on a module instance apply to every block it expands to: a `protected`, `explicit`, or `large` instance makes all of its blocks so, and a `pre` or `post` instance puts all of its blocks in that phase. A block inside a `pre` instance cannot be declared `post`, or vice versa.
+Targets without `large` are small. Modifiers on a module instance apply to every target it expands to: a `protected`, `explicit`, or `large` instance makes all of its targets so, and a `pre` or `post` instance puts all of its targets in that phase. A target inside a `pre` instance cannot be declared `post`, or vice versa.
 
-`explicit` blocks are skipped by the `...` selector (and the no-target/no-`default` fallback) for every action, including `--clean ...`. They still run when named directly or pulled in as a dependency of another selected block.
+`explicit` targets are skipped by the `...` selector (and the no-target/no-`default` fallback) for every action, including `--clean ...`. They still run when named directly or pulled in as a dependency of another selected target.
 
-If a `default` target is defined, `bit` with no arguments runs only that target. Pass explicit targets or block names (`bit build release`) to run a specific subset, or `bit ...` to run every non-`explicit` block regardless of the default.
-Params, variables, blocks, and targets must have distinct names within a `.bit` file.
-
-```hcl
-target default = [server, test]
-```
-
-Targets can also declare parameters and pass them explicitly to blocks or
-other targets:
+If a `default` group is defined, `bit` with no arguments runs only that group. Pass group or target names (`bit build release`) to run a specific subset, or `bit ...` to run every non-`explicit` target regardless of the default.
+Params, variables, targets, and groups must have distinct names within a `.bit` file.
 
 ```hcl
-target publish(name : string, profile = "release") = [package(name = name, profile = profile)]
+group default = [server, test]
 ```
 
-Invoke a parameterized target with named `name=value` arguments immediately
+Groups can also declare parameters and pass them explicitly to targets or
+other groups:
+
+```hcl
+group publish(name : string, profile = "release") = [package(name = name, profile = profile)]
+```
+
+Invoke a parameterized group with named `name=value` arguments immediately
 after its name:
 
 ```sh
@@ -254,14 +254,14 @@ bit --plan publish name=server profile=debug
 bit publish name=server test package=api
 ```
 
-An argument belongs to the preceding target or block. A bare word begins the
+An argument belongs to the preceding group or target. A bare word begins the
 next selection, so existing multi-target invocations such as `bit build test`
 retain their meaning. Required arguments must be supplied. Defaults may refer
 to parameters declared earlier in the same parameter list.
 
 ### Phases
 
-Blocks can be assigned to a phase with `pre` or `post` modifiers. All `pre` blocks complete before any default block starts; all default blocks complete before any `post` block starts. Within each phase, normal dependency ordering applies.
+Targets can be assigned to a phase with `pre` or `post` modifiers. All `pre` targets complete before any default target starts; all default targets complete before any `post` target starts. Within each phase, normal dependency ordering applies.
 
 ```hcl
 pre fmt = rust.fmt {}       # runs before everything
@@ -273,7 +273,7 @@ test = rust.test {}         # default phase, waits for fmt
 
 ### Matrix Expansion
 
-Expand a block over list values with `name[key]`:
+Expand a target over list values with `name[key]`:
 
 ```hcl
 let arch = ["amd64", "arm64"]
@@ -291,10 +291,10 @@ container[arch] = docker.container {
 ```
 
 Creates `binary["amd64"]`, `binary["arm64"]`, etc. Matrix keys retain their
-`.bit` types, so strings are quoted while numbers, booleans, and block
+`.bit` types, so strings are quoted while numbers, booleans, and target
 references keep their respective literal forms.
-Multiple keys produce a cartesian product. Non-matrix blocks depending on a
-matrix block wait for all slices. Targets can name a matrix block to include
+Multiple keys produce a cartesian product. Non-matrix targets depending on a
+matrix target wait for all slices. Groups can name a matrix target to include
 all of its slices.
 
 A key can compute its own list with `key = expr`. The expression runs once for
@@ -321,7 +321,7 @@ On the command line, string keys may be unquoted: `bit 'binary[arm64]'` selects
 `binary["arm64"]`. Only identifier keys are read as strings; other keys are
 literals, so quote string values such as `"1.2"`.
 
-A matrix block can also declare parameters after its matrix keys. The keys
+A matrix target can also declare parameters after its matrix keys. The keys
 select slices; named arguments configure an instance of the whole matrix:
 
 ```hcl
@@ -331,20 +331,20 @@ binary[arch](tag : string) = exec {
   command = "build #{arch} with tag #{tag}"
 }
 
-target release = [binary(tag = "1.2.3")]
-target arm_release = [binary["arm64"](tag = "1.2.3")]
+group release = [binary(tag = "1.2.3")]
+group arm_release = [binary["arm64"](tag = "1.2.3")]
 ```
 
 `binary(tag = "1.2.3")` selects every slice for that argument set. A slice
 call such as `binary["arm64"](tag = "1.2.3")` selects one slice. Both forms can
-be used in targets, `depends_on`, and `after`, and a slice call can also be
+be used in groups, `depends_on`, and `after`, and a slice call can also be
 used in expressions. Equal argument sets share the same slices; different
 values create independent instances. Matrix key lists can come from module
-bindings or list-valued block parameters.
+bindings or list-valued target parameters.
 
 Set `concurrency` to a positive integer to cap simultaneous slices from that
-matrix block without reducing parallelism for unrelated blocks. The global
-`-j` limit still caps the total number of running blocks.
+matrix target without reducing parallelism for unrelated targets. The global
+`-j` limit still caps the total number of running targets.
 
 ### Strings
 
@@ -382,9 +382,9 @@ a == b                  # equality / inequality
 expr | trim             # pipes
 if cond then a else b   # conditionals
 func(arg1, arg2)        # function calls
-block.field             # block output references
-block(name = value)     # parameterized block references
-block(name = value).out # parameterized block output references
+target.field             # target output references
+target(name = value)     # parameterized target references
+target(name = value).out # parameterized target output references
 ```
 
 ### Durations
@@ -424,7 +424,7 @@ its unqualified name, for example `bit --schema env`.
 
 **`replace(value: string | [string], pattern: string, replacement: string) -> string | [string]`** — Replace every regular expression match in a string or each string in a list. The replacement may reference capture groups as `$1` or `${name}`.
 
-**`secret(name: string) -> string`** — Read a secret by name. `bit` shows the secret as this call, never its value. A secret cannot be passed as a block or target argument.
+**`secret(name: string) -> string`** — Read a secret by name. `bit` shows the secret as this call, never its value. A secret cannot be passed as a target or group argument.
 
 **`sha256(value: string) -> string`** — Hash a string with SHA-256.
 
@@ -448,7 +448,7 @@ its unqualified name, for example `bit --schema env`.
 
 Providers can expose functions for configuration-time discovery. Their results
 can feed matrix expansion so each discovered package becomes an independent
-block:
+target:
 
 ```bit
 let package = go.packages("./...")
@@ -458,7 +458,7 @@ tests[package] = go.test {
 }
 ```
 
-Provider functions can also return typed block references for dependency
+Provider functions can also return typed target references for dependency
 fields, such as one matrix slice per local dependency:
 
 ```bit
@@ -498,7 +498,7 @@ service = docker.container {
 
 output endpoint = service.endpoint
 
-target deploy = [service]
+group deploy = [service]
 ```
 
 Use it like any other provider:
@@ -518,7 +518,7 @@ production = app {
 }
 
 # Access outputs: staging.endpoint, production.endpoint
-# Inner blocks are private: staging.server, staging.image are not accessible
+# Inner targets are private: staging.server, staging.image are not accessible
 ```
 
 A `<provider>.bit` file at the root of the import directory is the **default** resource — callable bare (just `app { ... }`). All other `<name>.bit` files are addressable as `<provider>.<name>` (e.g. `app.staging`). Two instances of the same module produce independent subgraphs. Modules nest arbitrarily.
@@ -561,35 +561,35 @@ Lock file format (commit to version control):
 
 A normal `bit` run honours the root lock and only contacts the network when a new direct import has no entry yet. `bit --update [repo...]` re-resolves matching entries against the default branch and rewrites the root lock; child locks aren't touched. Each resolved commit is extracted into an immutable per-commit cache directory (`~/Library/Caches/bit/` on macOS, `~/.cache/bit/` on Linux), so re-using a pinned commit is fully offline.
 
-### Targets and Outputs
+### Groups and Outputs
 
 ```hcl
-target build = [app, lib]
+group build = [app, lib]
 output version = app.version
 ```
 
 ## CI workflows
 
 `bit --ci <template> [target...]` renders a CI configuration that applies the
-same blocks as `bit [target...]`. It splits the work so that
-[`large`](#blocks) blocks run in their own jobs:
+same targets as `bit [target...]`. It splits the work so that
+[`large`](#targets) targets run in their own jobs:
 
-- Each large block gets a job. Blocks that depend on it run in that job too.
-- Large blocks share a job when one depends on another, or when a block
+- Each large target gets a job. Targets that depend on it run in that job too.
+- Large targets share a job when one depends on another, or when a target
   depends on both.
-- Every other block runs in a job named `default`.
+- Every other target runs in a job named `default`.
 
-Each job runs `bit` with the blocks that nothing else in the job depends on,
+Each job runs `bit` with the targets that nothing else in the job depends on,
 such as `bit test clippy`, and `bit` runs everything they depend on. A matrix
-block whose slices all run in the job is selected by its name. A
-parameterized block is selected with its arguments, as in `bit publish
-name=web`, leaving out arguments that equal their default. That selects every slice of a parameterized matrix block, so its
+target whose slices all run in the job is selected by its name. A
+parameterized target is selected with its arguments, as in `bit publish
+name=web`, leaving out arguments that equal their default. That selects every slice of a parameterized matrix target, so its
 slices share a job. `--ci` does not accept `-P`, because the jobs would run
 without it.
 
-Jobs share no results. A block that a large block needs runs again in the
-large block's job, and `pre` blocks run in every job. A `post` block depends on
-every block, so it puts every large block in one job.
+Jobs share no results. A target that a large target needs runs again in the
+large target's job, and `pre` targets run in every job. A `post` target depends on
+every target, so it puts every large target in one job.
 
 `--ci github` renders the built-in GitHub Actions template. Each job checks out
 the repository and runs `bit` in the project directory, and pushes to the
@@ -619,8 +619,8 @@ A template sees:
 | ------------------- | -------------------------------------------------------------------------- |
 | `jobs`              | The jobs, in order                                                         |
 | `job.id`            | An identifier made of letters, digits, `_` and `-`, unique and never `ci`  |
-| `job.name`          | The job's large blocks, or `default`                                       |
-| `job.large`         | Whether the job runs large blocks                                          |
+| `job.name`          | The job's large targets, or `default`                                      |
+| `job.large`         | Whether the job runs large targets                                         |
 | `job.command`       | The shell command the job runs, such as `bit test clippy`                  |
 | `job.selection`     | The arguments of `bit` in that command, as a list                          |
 | `command`           | The `bit --ci` command that rendered the template                          |
@@ -637,7 +637,7 @@ variable is an error. `tojson` quotes a value for YAML or JSON.
 **`buf.generate`** (build) — Generate code from Protobuf files with buf generate. The sources, outputs, and plugins are discovered from the buf workspace and generation template. A remote plugin without a version, such as `buf.build/protocolbuffers/go`, does not rerun on a new release, so pin it, as in `buf.build/protocolbuffers/go:v1.36.6`.
 
 ```bit
-block = buf.generate {
+target = buf.generate {
   input = string?     # Buf input, relative to `dir` (defaults to the workspace in `dir`)
   template = string?  # Generation template path relative to `dir`, or inline YAML or JSON (defaults to "buf.gen.yaml")
   flags = [string]?   # Extra flags passed to buf generate. A config file `--config` names is tracked as an input.
@@ -653,7 +653,7 @@ block = buf.generate {
 **`buf.lint`** (test) — Lint Protobuf files with buf lint
 
 ```bit
-block = buf.lint {
+target = buf.lint {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
   flags = [string]?  # Extra flags passed to buf lint. A config file `--config` names is tracked as an input.
 }
@@ -668,7 +668,7 @@ block = buf.lint {
 **`buf.format`** (build) — Format Protobuf files with buf format
 
 ```bit
-block = buf.format {
+target = buf.format {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
   flags = [string]?  # Extra flags passed to buf format. A config file `--config` names is tracked as an input.
 }
@@ -677,7 +677,7 @@ block = buf.format {
 **`buf.format-check`** (test) — Format Protobuf files with buf format
 
 ```bit
-block = buf.format-check {
+target = buf.format-check {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
   flags = [string]?  # Extra flags passed to buf format. A config file `--config` names is tracked as an input.
 }
@@ -692,7 +692,7 @@ block = buf.format-check {
 **`buf.breaking`** (test) — Check Protobuf files for breaking changes with buf breaking
 
 ```bit
-block = buf.breaking {
+target = buf.breaking {
   input = string?    # Buf input, relative to `dir` (defaults to the workspace in `dir`)
   against = string   # Baseline input to compare against (e.g. ".git#branch=main")
   flags = [string]?  # Extra flags passed to buf breaking. A config file `--config` names is tracked as an input.
@@ -710,7 +710,7 @@ block = buf.breaking {
 **`docker.image`** (build) — Build a Docker image (auto-detects inputs from Dockerfile). Changes to a base image tag, a file `ADD` downloads, or a `# syntax=` frontend are not detected, so pin them by digest.
 
 ```bit
-block = docker.image {
+target = docker.image {
   tag = string                     # Image tag
   context = string?                # Build context directory, relative to `dir`
   dockerfile = string?             # Dockerfile path, relative to `context`
@@ -729,8 +729,8 @@ block = docker.image {
 **`docker.push`** (build) — Push a Docker image to a registry. Pushes again only when the image changes, not when the registry copy was deleted or overwritten.
 
 ```bit
-block = docker.push {
-  image = string  # Source image reference (e.g. from a docker.image block's ref)
+target = docker.push {
+  image = string  # Source image reference (e.g. from a docker.image target's ref)
   tag = string    # Destination tag including registry (e.g. "localhost:5000/app:abc123")
 }
 ```
@@ -744,12 +744,12 @@ block = docker.push {
 **`docker.container`** (build) — Run a Docker container (tracks state like Terraform)
 
 ```bit
-block = docker.container {
+target = docker.container {
   image = string                        # Docker image reference
   name = string                         # Container name
   ports = [string]?                     # Port mappings (e.g. "8080:80")
   volumes = [string]?                   # Volume mounts; relative host paths are relative to `dir`
-  environment = {string = string}?      # Environment variables set inside the container. The block's `env` configures the docker CLI instead.
+  environment = {string = string}?      # Environment variables set inside the container. The target's `env` configures the docker CLI instead.
   command = string?                     # Override CMD
   entrypoint = string?                  # Override ENTRYPOINT
   restart = string?                     # Restart policy
@@ -770,7 +770,7 @@ block = docker.container {
 **`docker.network`** (build) — Create a Docker network (Terraform-style: tracked state, drift detection)
 
 ```bit
-block = docker.network {
+target = docker.network {
   name = string     # Network name (must be unique per daemon)
   driver = string?  # Network driver (bridge, host, overlay, ...). Defaults to `bridge`.
 }
@@ -783,10 +783,10 @@ block = docker.network {
 | `name` | `string` | Network name      |
 | `id`   | `string` | Docker network ID |
 
-**`docker.network_attach`** (build) — Attach a container to a Docker network (equivalent of `docker network connect`). Mirrors every flag of the underlying CLI so this block fully replaces a hand-rolled `exec` wrapper. The attachment is idempotent and is tracked in state so drift detection works across runs.
+**`docker.network_attach`** (build) — Attach a container to a Docker network (equivalent of `docker network connect`). Mirrors every flag of the underlying CLI so this target fully replaces a hand-rolled `exec` wrapper. The attachment is idempotent and is tracked in state so drift detection works across runs.
 
 ```bit
-block = docker.network_attach {
+target = docker.network_attach {
   network = string                  # Network name or ID
   container = string                # Container name or ID
   aliases = [string]?               # Network-scoped aliases for the container (`--alias`)
@@ -811,27 +811,27 @@ block = docker.network_attach {
 **`exec`** (build) — Run a shell command, track inputs and outputs
 
 ```bit
-block = exec {
+target = exec {
   command = string                # Shell command, run with `bash -eo pipefail`. `BIT_CHANGED_FILES` lists the inputs changed since the last success, one absolute path per line, and is unset on a full run
   outputs = (string | [string])?  # Output file or list of output files, relative to `dir`. They are stored in the shared cache, unless `resolve` or `values` is set
   inputs = [string]?              # Input file glob patterns, relative to `dir`. A directory names every file beneath it
   clean = string?                 # Shell command to run on `bit --clean` (replaces the default removal of outputs)
   resolve = string?               # Shell command whose stdout is captured as state. Used to detect whether the resource exists and whether it has drifted.
-  values = string?                # Shell command whose stdout is parsed as a JSON object. Each key becomes a block output.
+  values = string?                # Shell command whose stdout is parsed as a JSON object. Each key becomes a target output.
 }
 ```
 
 **Outputs:**
 
-| Field   | Type        | Description                        |
-| ------- | ----------- | ---------------------------------- |
-| `path`  | `string?`   | Output path (single-output blocks) |
-| `paths` | `[string]?` | Output paths (multi-output blocks) |
+| Field   | Type        | Description                         |
+| ------- | ----------- | ----------------------------------- |
+| `path`  | `string?`   | Output path (single-output targets) |
+| `paths` | `[string]?` | Output paths (multi-output targets) |
 
 **`exec.test`** (test) — Run a command as a test (pass/fail by exit code and any failures reported via `results`)
 
 ```bit
-block = exec.test {
+target = exec.test {
   command = string                      # Shell command, run with `bash -eo pipefail`. `BIT_CHANGED_FILES` lists the inputs changed since the last success, one absolute path per line, and is unset on a full run
   inputs = [string]?                    # Input file glob patterns, relative to `dir`. A directory names every file beneath it
   outputs = [string]?                   # Output files to track, relative to `dir`
@@ -852,7 +852,7 @@ block = exec.test {
 **`go.exe`** (build) — Build a Go binary
 
 ```bit
-block = go.exe {
+target = go.exe {
   package = string    # Go package to build (e.g. "./cmd/myapp")
   output = string?    # Output binary path, relative to `dir` (defaults to the name `go build` gives it: the last element of the package's import path)
   flags = [string]?   # Extra flags passed to go build, except `-o`, which `output` sets. The files `-modfile`, `-overlay` and `-pgo` name are tracked as inputs. go runs in the directory `-C` names.
@@ -872,7 +872,7 @@ block = go.exe {
 **`go.build`** (build) — Compile Go packages without producing a binary
 
 ```bit
-block = go.build {
+target = go.build {
   package = string | [string]  # Go package pattern or list of patterns (e.g. "./...")
   flags = [string]?            # Extra flags passed to go build. The files `-o` writes are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. go runs in the directory `-C` names.
   inputs = [string]?           # Input file glob patterns, relative to `dir` (in addition to Go sources)
@@ -885,7 +885,7 @@ block = go.build {
 **`go.generate`** (build) — Run go generate
 
 ```bit
-block = go.generate {
+target = go.generate {
   package = string | [string]  # Go package pattern or list of patterns (e.g. "./...")
   flags = [string]?            # Extra flags passed to go generate. The files `-modfile`, `-overlay` and `-pgo` name are tracked as inputs. go runs in the directory `-C` names.
   inputs = [string]?           # Input file glob patterns, relative to `dir` (in addition to Go sources)
@@ -899,7 +899,7 @@ block = go.generate {
 **`go.test`** (test) — Run Go tests
 
 ```bit
-block = go.test {
+target = go.test {
   package = string | [string]           # Go package pattern or list of patterns (e.g. "./...")
   flags = [string]?                     # Extra flags passed to go test. The profiles `-coverprofile`, `-cpuprofile`, `-memprofile`, `-blockprofile`, `-mutexprofile` and `-trace` write, under `-outputdir`, are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. go runs in the directory `-C` names.
   inputs = [string]?                    # Input file glob patterns, relative to `dir` (in addition to Go sources, and every file in each tested package's directory and its `testdata/`). Add files tests read from elsewhere
@@ -919,7 +919,7 @@ block = go.test {
 **`go.lint`** (test) — Run golangci-lint. Defaults to `concurrency = 1`, because golangci-lint refuses to start while another instance is running.
 
 ```bit
-block = go.lint {
+target = go.lint {
   package = (string | [string])?  # Go package pattern or list of patterns
   flags = [string]?               # Extra flags passed to golangci-lint run. The config `--config` names is tracked as an input instead of the one golangci-lint would find.
   inputs = [string]?              # Input file glob patterns, relative to `dir` (in addition to Go sources)
@@ -935,7 +935,7 @@ block = go.lint {
 **`go.fmt`** (build) — Format Go source files
 
 ```bit
-block = go.fmt {
+target = go.fmt {
   package = (string | [string])?  # Go package pattern or list of patterns
 }
 ```
@@ -943,7 +943,7 @@ block = go.fmt {
 **`go.fmt-l`** (test) — Format Go source files
 
 ```bit
-block = go.fmt-l {
+target = go.fmt-l {
   package = (string | [string])?  # Go package pattern or list of patterns
 }
 ```
@@ -963,7 +963,7 @@ block = go.fmt-l {
 **`pnpm.install`** (build) — Install the dependencies of the pnpm workspace in `dir`.
 
 ```bit
-block = pnpm.install {
+target = pnpm.install {
   frozen = bool?  # Pass `--frozen-lockfile` (reproducible installs, default `true`)
 }
 ```
@@ -977,7 +977,7 @@ block = pnpm.install {
 **`pnpm.run`** (build) — Run a script defined in `package.json`.
 
 ```bit
-block = pnpm.run {
+target = pnpm.run {
   script = string                 # Script name from `package.json` (e.g. "build")
   package = string?               # Package name from its `package.json`. Omit to run the script of the project in `dir`; at the workspace root, the script may touch any package, so every project's sources are tracked.
   args = [string]?                # Additional arguments passed to the script after `--`
@@ -996,7 +996,7 @@ block = pnpm.run {
 **`pnpm.test`** (test) — Run a test script via pnpm.
 
 ```bit
-block = pnpm.test {
+target = pnpm.test {
   script = string?    # Script name from `package.json` (defaults to "test")
   package = string?   # Package name from its `package.json`. Omit to run the script of the project in `dir`; at the workspace root, the script may touch any package, so every project's sources are tracked.
   args = [string]?    # Additional arguments passed to the script after `--`
@@ -1017,7 +1017,7 @@ block = pnpm.test {
 **`protoc.generate`** (build) — Generate code from Protobuf files with protoc
 
 ```bit
-block = protoc.generate {
+target = protoc.generate {
   sources = [string]        # Protobuf files or glob patterns to compile, relative to `dir`
   include = [string]?       # Import paths passed as `-I` (defaults to `dir`)
   out = {string = string}   # Output directory for each generator (e.g. `{ go = "gen/go" }` passes `--go_out=gen/go`), optionally preceded by generator options and `:`, as in `paths=source_relative:gen/go`
@@ -1035,10 +1035,10 @@ block = protoc.generate {
 
 ### rust
 
-**`rust.build`** (build) — Compile Rust packages. A result shared from another worktree restores nothing into `target/`, so use `rust.exe` for a binary other blocks need.
+**`rust.build`** (build) — Compile Rust packages. A result shared from another worktree restores nothing into `target/`, so use `rust.exe` for a binary other targets need.
 
 ```bit
-block = rust.build {
+target = rust.build {
   package = string?     # Package to build (-p flag)
   flags = [string]?     # Extra flags passed to cargo build
   features = [string]?  # Features to enable
@@ -1052,7 +1052,7 @@ block = rust.build {
 **`rust.exe`** (build) — Build a Rust binary
 
 ```bit
-block = rust.exe {
+target = rust.exe {
   bin = string?         # Binary target name (inferred if omitted)
   package = string?     # Package containing the binary (-p flag)
   flags = [string]?     # Extra flags passed to cargo build
@@ -1073,7 +1073,7 @@ block = rust.exe {
 **`rust.test`** (test) — Run Rust tests
 
 ```bit
-block = rust.test {
+target = rust.test {
   package = string?                     # Package to test (-p flag)
   flags = [string]?                     # Extra flags passed to cargo test
   report = ("suites" | "tests" | "verbose")?  # What to show: a line per test binary (`suites`), a line per test (`tests`), or a line per test plus cargo's output as it arrives (`verbose`). Outside `verbose`, cargo's diagnostics are shown only on failure.
@@ -1094,7 +1094,7 @@ block = rust.test {
 **`rust.clippy`** (test) — Run Clippy linter
 
 ```bit
-block = rust.clippy {
+target = rust.clippy {
   package = string?     # Package to lint (-p flag)
   flags = [string]?     # Extra flags passed to cargo clippy
   features = [string]?  # Features to enable
@@ -1114,7 +1114,7 @@ block = rust.clippy {
 **`rust.fmt`** (build) — Format Rust source files
 
 ```bit
-block = rust.fmt {
+target = rust.fmt {
   package = string?    # Package to format (-p flag)
   flags = [string]?    # Extra flags passed to cargo fmt
   target = string?     # Target triple (e.g. "x86_64-unknown-linux-musl")
@@ -1126,7 +1126,7 @@ block = rust.fmt {
 **`rust.fmt-check`** (test) — Format Rust source files
 
 ```bit
-block = rust.fmt-check {
+target = rust.fmt-check {
   package = string?    # Package to format (-p flag)
   flags = [string]?    # Extra flags passed to cargo fmt
   target = string?     # Target triple (e.g. "x86_64-unknown-linux-musl")
@@ -1143,28 +1143,28 @@ block = rust.fmt-check {
 
 **`rust.packages() -> [string]`** — List Cargo workspace packages.
 
-**`rust.dependencies(package: string, template: string?) -> [block]`** — List a Cargo workspace package's immediate local non-development dependencies. `package` names the Cargo workspace package. When `template` is set, every `$` in it is replaced with the dependency package name. For example, `crate[$]` returns matrix block references. Development dependencies are excluded because Cargo does not build them for `cargo build` and permits cycles through them.
+**`rust.dependencies(package: string, template: string?) -> [target]`** — List a Cargo workspace package's immediate local non-development dependencies. `package` names the Cargo workspace package. When `template` is set, every `$` in it is replaced with the dependency package name. For example, `crate[$]` returns matrix target references. Development dependencies are excluded because Cargo does not build them for `cargo build` and permits cycles through them.
 
 ## How It Works
 
 1. Parse `BUILD.bit` and build a dependency DAG. Module instances expand into
-   namespaced blocks, and `pre`/`post` phases add ordering edges.
-2. For each block in dependency order, running up to `-j N` at once (defaults
+   namespaced targets, and `pre`/`post` phases add ordering edges.
+2. For each target in dependency order, running up to `-j N` at once (defaults
    to the CPU count):
    - Evaluate its fields, with upstream outputs in scope.
-   - Ask the provider for the block's input files, its outputs, and the tools
+   - Ask the provider for the target's input files, its outputs, and the tools
      and environment variables its result depends on.
-   - Hash those together with the hashes of the block's dependencies.
-   - Skip the block if the hash is unchanged, otherwise apply it.
-3. Save each block's state in the user's cache directory.
+   - Hash those together with the hashes of the target's dependencies.
+   - Skip the target if the hash is unchanged, otherwise apply it.
+3. Save each target's state in the user's cache directory.
 
 So editing a source file, deleting an output, upgrading a tool or switching
-toolchain reruns exactly the blocks affected. Where a provider cannot see an
+toolchain reruns exactly the targets affected. Where a provider cannot see an
 input, its schema says so; declare the input in `inputs` or pin it.
 
 ### Messages
 
-A command's output is collapsed when its block succeeds. To keep a line
+A command's output is collapsed when its target succeeds. To keep a line
 visible, print it to stdout as a message, using the same syntax as GitHub
 Actions workflow commands:
 
@@ -1180,9 +1180,9 @@ echo "::error::tag v$version already exists"
 `%0A` for a newline and `%25` for a literal `%`.
 
 Messages appear as soon as they are printed, and stay on screen after the
-block finishes. A block that succeeds after printing messages ends with them
-instead of "ok". Messages don't affect whether a block passes; only its exit
-status does. Skipped and cached blocks don't run their command, so they
+target finishes. A target that succeeds after printing messages ends with them
+instead of "ok". Messages don't affect whether a target passes; only its exit
+status does. Skipped and cached targets don't run their command, so they
 don't repeat its messages.
 
 ### Shared build cache
@@ -1192,7 +1192,7 @@ another checkout with the same sources, dependencies and toolchain reuses them,
 even after the checkout that produced them is deleted. A test or lint result
 lets the other checkout skip the run. A build that produces files also stores
 them, and the other checkout restores them instead of rebuilding; `bit --plan`
-shows this as `⇣`. Failed runs are never shared, and neither are blocks that
+shows this as `⇣`. Failed runs are never shared, and neither are targets that
 act outside the checkout, such as deploys and containers.
 
 Cached results that no run has used for five days are removed from the disk
@@ -1208,10 +1208,10 @@ build = exec {
 }
 ```
 
-The block still caches `dist/`. Excluding an output does not change when the
-block is considered up to date, only what is stored, so a worktree that reuses
+The target still caches `dist/`. Excluding an output does not change when the
+target is considered up to date, only what is stored, so a worktree that reuses
 this result gets `dist/` and no `node_modules/`. Exclude an output when it is
-large and reproducible by other means, not when later blocks need it.
+large and reproducible by other means, not when later targets need it.
 
 Checkouts share an entry when the action is the same in each, including the
 paths of its files relative to the repository root. Restored files are independent copies, so

@@ -5,9 +5,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -46,7 +46,7 @@ impl BufGenerateInputs {
     }
 }
 
-impl Block<BufGenerateInputs> {
+impl Target<BufGenerateInputs> {
     /// The template file, when `template` names one rather than holding
     /// the template itself. buf decides by extension.
     fn template_file(&self) -> Option<PathBuf> {
@@ -222,14 +222,14 @@ impl TemplatePlugin {
     }
 }
 
-/// Outputs from a `buf.generate` block.
+/// Outputs from a `buf.generate` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct BufGenerateOutputs {
     /// Output paths named by the generation template's plugins
     pub paths: Vec<String>,
 }
 
-/// Persisted state for a `buf.generate` block.
+/// Persisted state for a `buf.generate` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BufGenerateState {
     #[serde(flatten)]
@@ -262,17 +262,17 @@ impl Resource for BufGenerateResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, inputs: &Block<BufGenerateInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<BufGenerateInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         inputs.sources()?.hash(&self.tracker)
     }
 
-    fn ambient(&self, inputs: &Block<BufGenerateInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<BufGenerateInputs>) -> Vec<Ambient> {
         inputs.ambient()
     }
 
     fn plan(
         &self,
-        inputs: &Block<BufGenerateInputs>,
+        inputs: &Target<BufGenerateInputs>,
         prior_state: Option<&BufGenerateState>,
     ) -> Result<PlanResult, BoxError> {
         Ok(super::super::plan(
@@ -284,10 +284,10 @@ impl Resource for BufGenerateResource {
 
     fn apply(
         &self,
-        inputs: &Block<BufGenerateInputs>,
+        inputs: &Target<BufGenerateInputs>,
         _prior_state: Option<&BufGenerateState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<BufGenerateState, BufGenerateOutputs>, BoxError> {
         let outputs = inputs.outputs()?;
         let status = inputs.target.run(inputs, &inputs.args(), writer)?;
@@ -305,7 +305,7 @@ impl Resource for BufGenerateResource {
         })
     }
 
-    fn destroy(&self, prior_state: &Block<BufGenerateState>, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Target<BufGenerateState>, writer: &TargetWriter) -> Result<(), BoxError> {
         for output in &prior_state.outputs {
             crate::providers::remove_path(Path::new(output), writer)?;
         }
@@ -315,11 +315,11 @@ impl Resource for BufGenerateResource {
     /// Plugins are either remote, run on the Buf Schema Registry, or local
     /// executables on `PATH`. Neither is part of the action key, so the key
     /// cannot describe what produced the generated files.
-    fn cache_policy(&self, _inputs: &Block<BufGenerateInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<BufGenerateInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 
-    fn output_keys(&self, inputs: &Block<BufGenerateInputs>) -> Vec<String> {
+    fn output_keys(&self, inputs: &Target<BufGenerateInputs>) -> Vec<String> {
         inputs
             .outputs()
             .and_then(|outputs| super::super::removable_outputs(&outputs))
@@ -337,8 +337,8 @@ mod tests {
     }
 
     /// Inputs run in `dir`.
-    fn in_dir(dir: &Path, template: Option<&str>) -> Block<BufGenerateInputs> {
-        Block::new(
+    fn in_dir(dir: &Path, template: Option<&str>) -> Target<BufGenerateInputs> {
+        Target::new(
             Some(dir.to_string_lossy().into_owned()),
             BufGenerateInputs {
                 target: BufTarget::default(),
@@ -349,7 +349,7 @@ mod tests {
     }
 
     /// Inputs reading `template` from a fresh directory.
-    fn with_template(template: &str) -> (tempfile::TempDir, Block<BufGenerateInputs>) {
+    fn with_template(template: &str) -> (tempfile::TempDir, Target<BufGenerateInputs>) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(DEFAULT_TEMPLATE), template).unwrap();
         let inputs = in_dir(dir.path(), None);
@@ -404,7 +404,7 @@ mod tests {
     fn plan_describes_template_and_input() {
         let inputs: BufGenerateInputs =
             serde_json::from_str(r#"{"input": "proto", "template": "buf.gen.go.yaml"}"#).unwrap();
-        let inputs = Block::new(None, inputs);
+        let inputs = Target::new(None, inputs);
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "buf generate --template buf.gen.go.yaml proto");
@@ -417,7 +417,7 @@ mod tests {
             inputs: inputs.clone(),
             outputs: vec!["gen".into()],
         };
-        let inputs = Block::new(None, inputs);
+        let inputs = Target::new(None, inputs);
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::None);
     }
@@ -459,7 +459,7 @@ mod tests {
         std::fs::create_dir_all(root.join("other")).unwrap();
         std::fs::write(root.join("proto/a.proto"), "").unwrap();
         std::fs::write(root.join("other/b.proto"), "").unwrap();
-        let names = |inputs: &Block<BufGenerateInputs>| -> Vec<String> {
+        let names = |inputs: &Target<BufGenerateInputs>| -> Vec<String> {
             let mut names: Vec<_> = Resource::resolve(&test_resource(), inputs)
                 .unwrap()
                 .into_keys()
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn reads_inline_template() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             BufGenerateInputs {
                 target: BufTarget::default(),
@@ -522,7 +522,7 @@ mod tests {
             outputs: vec![output_dir.to_string_lossy().into_owned()],
         };
         let output = crate::output::Output::new(&[]);
-        Resource::destroy(&test_resource(), &Block::new(None, state), &output.writer("generate")).unwrap();
+        Resource::destroy(&test_resource(), &Target::new(None, state), &output.writer("generate")).unwrap();
         assert!(!output_dir.exists());
     }
 }

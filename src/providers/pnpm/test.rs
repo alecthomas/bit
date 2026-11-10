@@ -4,9 +4,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -34,14 +34,14 @@ pub struct PnpmTestInputs {
     pub inputs: Vec<String>,
 }
 
-/// Outputs from a `pnpm.test` block.
+/// Outputs from a `pnpm.test` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct PnpmTestOutputs {
     /// Whether the test command exited zero
     pub passed: bool,
 }
 
-/// Persisted state for a `pnpm.test` block.
+/// Persisted state for a `pnpm.test` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PnpmTestState {
     pub script: String,
@@ -66,18 +66,18 @@ impl Resource for PnpmTestResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &Block<PnpmTestInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<PnpmTestInputs>) -> Vec<Ambient> {
         super::ambient(workspace_dir(inputs))
     }
 
-    fn resolve(&self, inputs: &Block<PnpmTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<PnpmTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         resolve_inputs(inputs, inputs.package.as_deref(), &[], &inputs.inputs, tracker)
     }
 
     fn plan(
         &self,
-        inputs: &Block<PnpmTestInputs>,
+        inputs: &Target<PnpmTestInputs>,
         prior_state: Option<&PnpmTestState>,
     ) -> Result<PlanResult, BoxError> {
         let description = describe(&inputs.script, inputs.package.as_deref(), &inputs.args);
@@ -102,10 +102,10 @@ impl Resource for PnpmTestResource {
 
     fn apply(
         &self,
-        inputs: &Block<PnpmTestInputs>,
+        inputs: &Target<PnpmTestInputs>,
         _prior_state: Option<&PnpmTestState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<PnpmTestState, PnpmTestOutputs>, BoxError> {
         let args = pnpm_args(&inputs.script, inputs.package.as_deref(), &inputs.args);
         let passed = run_pnpm(&args, inputs, writer).is_ok();
@@ -120,13 +120,13 @@ impl Resource for PnpmTestResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<PnpmTestState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<PnpmTestState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
     /// Local for the same reason as `pnpm.run`: nothing in the action key
     /// describes the tools the test script runs.
-    fn cache_policy(&self, _inputs: &Block<PnpmTestInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<PnpmTestInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 }
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             PnpmTestInputs {
                 script: "test".into(),
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_args_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             PnpmTestInputs {
                 script: "test".into(),

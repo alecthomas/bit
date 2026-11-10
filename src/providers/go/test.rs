@@ -8,9 +8,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -40,14 +40,14 @@ pub struct GoTestInputs {
     pub go_env: GoEnv,
 }
 
-/// Outputs from a `go.test` block.
+/// Outputs from a `go.test` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct GoTestOutputs {
     /// Whether all tests passed
     pub passed: bool,
 }
 
-/// Persisted state for a `go.test` block.
+/// Persisted state for a `go.test` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoTestState {
     /// A string in state written before `package` took a list.
@@ -98,7 +98,7 @@ struct PackageResults {
 /// tested module's path, which result lines elide.
 fn process_go_test_json(
     reader: impl BufRead,
-    writer: &BlockWriter,
+    writer: &TargetWriter,
     mode: ReportMode,
     module: Option<&str>,
 ) -> TestJsonResult {
@@ -241,7 +241,7 @@ struct Affected {
 /// whole pattern.
 fn affected_packages(
     tracker: &FileTracker,
-    inputs: &Block<GoTestInputs>,
+    inputs: &Target<GoTestInputs>,
     changes: &Changes,
 ) -> Result<Option<Affected>, BoxError> {
     // A profile covers only the packages a run tests, so a narrowed run
@@ -276,7 +276,7 @@ fn test_args(inputs: &GoTestInputs, packages: &[String]) -> Vec<String> {
 }
 
 /// The directory `go test` runs in.
-fn go_dir(inputs: &Block<GoTestInputs>) -> Option<String> {
+fn go_dir(inputs: &Target<GoTestInputs>) -> Option<String> {
     super::run_dir(inputs.dir.as_deref(), &inputs.flags)
 }
 
@@ -342,11 +342,11 @@ impl Resource for GoTestResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &Block<GoTestInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<GoTestInputs>) -> Vec<Ambient> {
         vec![super::toolchain(&inputs.go_env, go_dir(inputs).as_deref())]
     }
 
-    fn resolve(&self, inputs: &Block<GoTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<GoTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         super::resolve_go_inputs(
             &inputs.package,
             inputs.dir.as_deref(),
@@ -358,7 +358,7 @@ impl Resource for GoTestResource {
         )
     }
 
-    fn plan(&self, inputs: &Block<GoTestInputs>, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<GoTestInputs>, prior_state: Option<&GoTestState>) -> Result<PlanResult, BoxError> {
         let description = super::display_command("go", &test_args(inputs, &inputs.package), go_dir(inputs).as_deref());
 
         let Some(prior) = prior_state else {
@@ -385,10 +385,10 @@ impl Resource for GoTestResource {
 
     fn apply(
         &self,
-        inputs: &Block<GoTestInputs>,
+        inputs: &Target<GoTestInputs>,
         _prior_state: Option<&GoTestState>,
         changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<GoTestState, GoTestOutputs>, BoxError> {
         let state = GoTestState {
             package: inputs.package.clone(),
@@ -485,7 +485,7 @@ impl Resource for GoTestResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<GoTestState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<GoTestState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
@@ -494,11 +494,11 @@ impl Resource for GoTestResource {
         true
     }
 
-    fn cache_policy(&self, _inputs: &Block<GoTestInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<GoTestInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 
-    fn output_keys(&self, inputs: &Block<GoTestInputs>) -> Vec<String> {
+    fn output_keys(&self, inputs: &Target<GoTestInputs>) -> Vec<String> {
         profile_outputs(go_dir(inputs).as_deref(), &inputs.flags)
     }
 }
@@ -529,7 +529,7 @@ mod tests {
         // Outside every package directory, so only `inputs` tracks it.
         std::fs::create_dir_all(root.join("schemas")).unwrap();
         std::fs::write(root.join("schemas/schema.json"), "{}\n").unwrap();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             GoTestInputs {
                 package: vec!["./...".into()],
@@ -565,7 +565,7 @@ mod tests {
             "package main\nimport \"example.com/m/lib\"\n",
         )
         .unwrap();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             GoTestInputs {
                 package: vec!["./...".into()],
@@ -611,7 +611,7 @@ mod tests {
         let flags: Vec<String> = ["-outputdir", "prof", "-trace=trace.out"].map(String::from).into();
         assert_eq!(profile_outputs(Some("svc"), &flags), ["svc/prof/trace.out"]);
 
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some("svc".into()),
             GoTestInputs {
                 package: vec!["./...".into()],
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoTestInputs {
                 package: vec!["./...".into()],
@@ -681,7 +681,7 @@ mod tests {
     fn package_accepts_a_list() {
         let inputs: GoTestInputs = serde_json::from_str(r#"{"package": ["./a/...", "./b"]}"#).unwrap();
         assert_eq!(inputs.package, ["./a/...", "./b"]);
-        let result = Resource::plan(&test_resource(), &Block::new(None, inputs), None).unwrap();
+        let result = Resource::plan(&test_resource(), &Target::new(None, inputs), None).unwrap();
         assert_eq!(result.description, "go test -json ./a/... ./b");
 
         assert!(serde_json::from_str::<GoTestInputs>(r#"{"package": []}"#).is_err());
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoTestInputs {
                 package: vec!["./...".into()],

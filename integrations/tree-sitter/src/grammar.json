@@ -31,7 +31,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "target_statement"
+          "name": "group_statement"
         },
         {
           "type": "SYMBOL",
@@ -39,7 +39,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "block"
+          "name": "target"
         }
       ]
     },
@@ -215,12 +215,12 @@
         }
       ]
     },
-    "target_statement": {
+    "group_statement": {
       "type": "SEQ",
       "members": [
         {
           "type": "STRING",
-          "value": "target"
+          "value": "group"
         },
         {
           "type": "FIELD",
@@ -262,7 +262,7 @@
               "members": [
                 {
                   "type": "SYMBOL",
-                  "name": "target_call"
+                  "name": "group_member"
                 },
                 {
                   "type": "REPEAT",
@@ -275,7 +275,7 @@
                       },
                       {
                         "type": "SYMBOL",
-                        "name": "target_call"
+                        "name": "group_member"
                       }
                     ]
                   }
@@ -414,7 +414,7 @@
         }
       ]
     },
-    "target_call": {
+    "group_member": {
       "type": "SEQ",
       "members": [
         {
@@ -567,7 +567,7 @@
         }
       ]
     },
-    "block_argument_list": {
+    "target_argument_list": {
       "type": "SEQ",
       "members": [
         {
@@ -641,7 +641,7 @@
         }
       ]
     },
-    "block": {
+    "target": {
       "type": "SEQ",
       "members": [
         {
@@ -708,7 +708,7 @@
               "name": "matrix_keys",
               "content": {
                 "type": "SYMBOL",
-                "name": "block_matrix_keys"
+                "name": "target_matrix_keys"
               }
             },
             {
@@ -811,7 +811,7 @@
       "type": "STRING",
       "value": "large"
     },
-    "block_matrix_keys": {
+    "target_matrix_keys": {
       "type": "SEQ",
       "members": [
         {
@@ -820,7 +820,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "_block_matrix_key"
+          "name": "_target_matrix_key"
         },
         {
           "type": "REPEAT",
@@ -833,7 +833,7 @@
               },
               {
                 "type": "SYMBOL",
-                "name": "_block_matrix_key"
+                "name": "_target_matrix_key"
               }
             ]
           }
@@ -844,7 +844,7 @@
         }
       ]
     },
-    "_block_matrix_key": {
+    "_target_matrix_key": {
       "type": "CHOICE",
       "members": [
         {
@@ -1353,7 +1353,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "block_call"
+          "name": "target_call"
         },
         {
           "type": "SYMBOL",
@@ -1744,7 +1744,7 @@
         }
       ]
     },
-    "block_call": {
+    "target_call": {
       "type": "SEQ",
       "members": [
         {
@@ -1766,7 +1766,7 @@
                   "name": "arguments",
                   "content": {
                     "type": "SYMBOL",
-                    "name": "block_argument_list"
+                    "name": "target_argument_list"
                   }
                 }
               ]

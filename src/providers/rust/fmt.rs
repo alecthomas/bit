@@ -4,9 +4,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -46,7 +46,7 @@ pub struct RustFmtCheckOutputs {
 }
 
 /// Build a cargo fmt CargoCommand. `cargo fmt` only respects toolchain, not --target/--profile.
-fn base_fmt_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
+fn base_fmt_command(inputs: &Target<RustFmtInputs>) -> CargoCommand {
     let program = if let Some(tc) = &inputs.rust_env.toolchain {
         format!("cargo+{tc}")
     } else {
@@ -61,17 +61,17 @@ fn base_fmt_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
     cargo
 }
 
-fn fmt_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
+fn fmt_command(inputs: &Target<RustFmtInputs>) -> CargoCommand {
     base_fmt_command(inputs)
 }
 
-fn fmt_check_command(inputs: &Block<RustFmtInputs>) -> CargoCommand {
+fn fmt_check_command(inputs: &Target<RustFmtInputs>) -> CargoCommand {
     let mut cargo = base_fmt_command(inputs);
     cargo.arg("--check");
     cargo
 }
 
-fn resolve(inputs: &Block<RustFmtInputs>, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+fn resolve(inputs: &Target<RustFmtInputs>, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let selection = super::Selection {
         dir: inputs.dir.as_deref(),
         env: &inputs.env,
@@ -101,7 +101,7 @@ fn rustfmt_config(selection: &super::Selection) -> Result<Vec<std::path::PathBuf
     Ok(files)
 }
 
-fn plan_action(inputs: &Block<RustFmtInputs>, prior_state: Option<&RustFmtState>) -> PlanAction {
+fn plan_action(inputs: &Target<RustFmtInputs>, prior_state: Option<&RustFmtState>) -> PlanAction {
     let Some(prior) = prior_state else {
         return PlanAction::Create;
     };
@@ -112,7 +112,7 @@ fn plan_action(inputs: &Block<RustFmtInputs>, prior_state: Option<&RustFmtState>
     }
 }
 
-fn save_state(inputs: &Block<RustFmtInputs>) -> RustFmtState {
+fn save_state(inputs: &Target<RustFmtInputs>) -> RustFmtState {
     RustFmtState {
         package: inputs.package.clone(),
         flags: inputs.flags.clone(),
@@ -139,16 +139,16 @@ impl Resource for RustFmtResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &Block<RustFmtInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<RustFmtInputs>) -> Vec<Ambient> {
         super::toolchain(&inputs.rust_env, inputs.dir.as_deref(), &[&["rustfmt", "--version"]])
     }
 
-    fn resolve(&self, inputs: &Block<RustFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<RustFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         resolve(inputs, tracker)
     }
 
-    fn plan(&self, inputs: &Block<RustFmtInputs>, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<RustFmtInputs>, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
         Ok(PlanResult {
             action: plan_action(inputs, prior_state),
             description: fmt_command(inputs).display(),
@@ -158,10 +158,10 @@ impl Resource for RustFmtResource {
 
     fn apply(
         &self,
-        inputs: &Block<RustFmtInputs>,
+        inputs: &Target<RustFmtInputs>,
         _prior_state: Option<&RustFmtState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<RustFmtState, RustFmtOutputs>, BoxError> {
         fmt_command(inputs).run(writer)?;
         Ok(ApplyResult {
@@ -170,11 +170,11 @@ impl Resource for RustFmtResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<RustFmtState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<RustFmtState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &Block<RustFmtInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<RustFmtInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -198,16 +198,16 @@ impl Resource for RustFmtCheckResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &Block<RustFmtInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<RustFmtInputs>) -> Vec<Ambient> {
         super::toolchain(&inputs.rust_env, inputs.dir.as_deref(), &[&["rustfmt", "--version"]])
     }
 
-    fn resolve(&self, inputs: &Block<RustFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<RustFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         resolve(inputs, tracker)
     }
 
-    fn plan(&self, inputs: &Block<RustFmtInputs>, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<RustFmtInputs>, prior_state: Option<&RustFmtState>) -> Result<PlanResult, BoxError> {
         Ok(PlanResult {
             action: plan_action(inputs, prior_state),
             description: fmt_check_command(inputs).display(),
@@ -217,10 +217,10 @@ impl Resource for RustFmtCheckResource {
 
     fn apply(
         &self,
-        inputs: &Block<RustFmtInputs>,
+        inputs: &Target<RustFmtInputs>,
         _prior_state: Option<&RustFmtState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<RustFmtState, RustFmtCheckOutputs>, BoxError> {
         let passed = fmt_check_command(inputs).run(writer).is_ok();
         Ok(ApplyResult {
@@ -229,11 +229,11 @@ impl Resource for RustFmtCheckResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<RustFmtState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<RustFmtState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &Block<RustFmtInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<RustFmtInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn fmt_plan_create() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustFmtInputs {
                 package: None,
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn fmt_check_plan_create() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustFmtInputs {
                 package: None,
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn fmt_plan_with_package() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustFmtInputs {
                 package: Some("my-crate".into()),
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn fmt_check_plan_with_toolchain() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustFmtInputs {
                 package: None,
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustFmtInputs {
                 package: None,
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustFmtInputs {
                 package: None,

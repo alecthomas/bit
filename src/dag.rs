@@ -6,29 +6,29 @@ use petgraph::algo::{tarjan_scc, toposort};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 
-use crate::ast::{Block, Expr, Field, Phase, StringPart, Target};
+use crate::ast::{Expr, Field, Group, Phase, StringPart, Target};
 use crate::expr::{self, EvalError, Scope};
 use crate::invocation::Invocation;
 use crate::provider::DynResource;
 use crate::value::{Type, Value};
 
-/// Content-coupled dependencies of a block.
+/// Content-coupled dependencies of a target.
 pub const DEPENDS_ON_FIELD: &str = "depends_on";
-/// Ordering-only dependencies of a block.
+/// Ordering-only dependencies of a target.
 pub const AFTER_FIELD: &str = "after";
-/// Maximum number of a block's matrix slices that may run at once.
+/// Maximum number of a target's matrix slices that may run at once.
 pub const CONCURRENCY_FIELD: &str = "concurrency";
 /// Outputs the shared cache must not store.
 pub const UNCACHED_FIELD: &str = "uncached";
-/// The directory a block's command runs in, which its relative paths are
-/// relative to. See [`crate::provider::Block`].
+/// The directory a target's command runs in, which its relative paths are
+/// relative to. See [`crate::provider::Target`].
 pub const DIR_FIELD: &str = "dir";
-/// Environment variables set for the processes a block runs. See
-/// [`crate::provider::Block`].
+/// Environment variables set for the processes a target runs. See
+/// [`crate::provider::Target`].
 pub const ENV_FIELD: &str = "env";
 
-/// Block fields the engine reads itself. They are valid on every resource
-/// block even though no resource schema declares them.
+/// Target fields the engine reads itself. They are valid on every resource
+/// target even though no resource schema declares them.
 pub const ENGINE_FIELDS: [&str; 6] = [
     DEPENDS_ON_FIELD,
     AFTER_FIELD,
@@ -38,7 +38,7 @@ pub const ENGINE_FIELDS: [&str; 6] = [
     ENV_FIELD,
 ];
 
-/// The type of edge between two blocks.
+/// The type of edge between two targets.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EdgeKind {
     /// Content-coupled: parent state is part of child's content hash.
@@ -49,14 +49,14 @@ pub enum EdgeKind {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DagError {
-    #[error("duplicate block name: {0}")]
-    DuplicateBlock(String),
-    #[error("unknown block: {0}")]
-    UnknownBlock(String),
+    #[error("duplicate target name: {0}")]
+    DuplicateTarget(String),
+    #[error("unknown target: {0}")]
+    UnknownTarget(String),
     #[error("dependency cycle detected: {}", .0.join(" -> "))]
     Cycle(Vec<String>),
-    #[error("target '{0}' references unknown block '{1}'")]
-    UnknownTargetBlock(String, String),
+    #[error("group '{0}' references unknown target '{1}'")]
+    UnknownGroupMember(String, String),
 }
 
 /// A node in the dependency graph.
@@ -68,14 +68,14 @@ pub struct DagNode {
     pub provider: String,
     pub resource_name: String,
     pub protected: bool,
-    /// When true, this block is excluded from the `...` selector and must be
+    /// When true, this target is excluded from the `...` selector and must be
     /// named explicitly to run. Independent of `protected`.
     pub explicit: bool,
-    /// When true, this block is long-running or resource-heavy.
-    /// Blocks inside a `large` module instance inherit it.
+    /// When true, this target is long-running or resource-heavy.
+    /// Targets inside a `large` module instance inherit it.
     pub large: bool,
-    /// Expanded nodes from the same source block share this identity so the
-    /// scheduler can enforce that block's concurrency limit across all slices.
+    /// Expanded nodes from the same source target share this identity so the
+    /// scheduler can enforce that target's concurrency limit across all slices.
     pub concurrency_group: String,
     /// Raw field expressions — evaluated at execution time when upstream
     /// outputs are available.
@@ -86,19 +86,19 @@ pub struct DagNode {
     pub prior_state: Option<serde_json::Value>,
 }
 
-/// A named target with optional documentation.
-pub struct DagTarget {
-    pub blocks: Vec<String>,
+/// A named group with optional documentation.
+pub struct DagGroup {
+    pub targets: Vec<String>,
     pub doc: Option<String>,
 }
 
-/// The dependency graph of blocks, ready for the engine.
+/// The dependency graph of targets, ready for the engine.
 pub struct Dag {
     graph: DiGraph<DagNode, EdgeKind>,
     indices: HashMap<String, NodeIndex>,
-    targets: HashMap<String, DagTarget>,
-    block_declarations: HashMap<String, Block>,
+    groups: HashMap<String, DagGroup>,
     target_declarations: HashMap<String, Target>,
+    group_declarations: HashMap<String, Group>,
     invocations: HashMap<String, Invocation>,
 }
 
@@ -107,30 +107,30 @@ impl Dag {
         Self {
             graph: DiGraph::new(),
             indices: HashMap::new(),
-            targets: HashMap::new(),
-            block_declarations: HashMap::new(),
+            groups: HashMap::new(),
             target_declarations: HashMap::new(),
+            group_declarations: HashMap::new(),
             invocations: HashMap::new(),
         }
     }
 
-    /// Record the command-line invocation that selects the block instance
+    /// Record the command-line invocation that selects the target instance
     /// `name`, whose name the command line cannot take. Every slice of a
     /// matrix instance shares its instance's invocation.
     pub(crate) fn add_invocation(&mut self, name: String, invocation: Invocation) {
         self.invocations.insert(name, invocation);
     }
 
-    /// The command-line invocation that selects the block instance `name`,
+    /// The command-line invocation that selects the target instance `name`,
     /// if it has one.
     pub fn invocation(&self, name: &str) -> Option<&Invocation> {
         self.invocations.get(name)
     }
 
-    /// Add a block node to the graph.
+    /// Add a target node to the graph.
     pub fn add_node(&mut self, node: DagNode) -> Result<(), DagError> {
         if self.indices.contains_key(&node.name) {
-            return Err(DagError::DuplicateBlock(node.name.clone()));
+            return Err(DagError::DuplicateTarget(node.name.clone()));
         }
         let name = node.name.clone();
         let idx = self.graph.add_node(node);
@@ -154,8 +154,8 @@ impl Dag {
         let from_idx = self
             .indices
             .get(from)
-            .ok_or_else(|| DagError::UnknownBlock(from.into()))?;
-        let to_idx = self.indices.get(to).ok_or_else(|| DagError::UnknownBlock(to.into()))?;
+            .ok_or_else(|| DagError::UnknownTarget(from.into()))?;
+        let to_idx = self.indices.get(to).ok_or_else(|| DagError::UnknownTarget(to.into()))?;
         if !self
             .graph
             .edges_connecting(*from_idx, *to_idx)
@@ -166,32 +166,32 @@ impl Dag {
         Ok(())
     }
 
-    /// Register a target.
-    pub fn add_target(&mut self, name: String, blocks: Vec<String>, doc: Option<String>) {
-        self.targets.insert(name, DagTarget { blocks, doc });
+    /// Register a group.
+    pub fn add_group(&mut self, name: String, targets: Vec<String>, doc: Option<String>) {
+        self.groups.insert(name, DagGroup { targets, doc });
     }
 
-    /// Register a parameterized block declaration discovered in an imported module.
-    pub(crate) fn add_block_declaration(&mut self, block: Block) {
-        self.block_declarations.insert(block.name.clone(), block);
-    }
-
-    pub(crate) fn block_declarations(&self) -> &HashMap<String, Block> {
-        &self.block_declarations
-    }
-
-    /// Register a target declaration discovered in an imported module.
+    /// Register a parameterized target declaration discovered in an imported module.
     pub(crate) fn add_target_declaration(&mut self, target: Target) {
         self.target_declarations.insert(target.name.clone(), target);
     }
 
-    pub fn target_declarations(&self) -> &HashMap<String, Target> {
+    pub(crate) fn target_declarations(&self) -> &HashMap<String, Target> {
         &self.target_declarations
     }
 
+    /// Register a group declaration discovered in an imported module.
+    pub(crate) fn add_group_declaration(&mut self, group: Group) {
+        self.group_declarations.insert(group.name.clone(), group);
+    }
+
+    pub fn group_declarations(&self) -> &HashMap<String, Group> {
+        &self.group_declarations
+    }
+
     /// Add synthetic ordering edges between phases.
-    /// Every default block gets an ordering edge from each pre block,
-    /// and every post block gets an ordering edge from each default block.
+    /// Every default target gets an ordering edge from each pre target,
+    /// and every post target gets an ordering edge from each default target.
     pub fn wire_phase_edges(&mut self) {
         let mut pre = Vec::new();
         let mut default = Vec::new();
@@ -224,21 +224,21 @@ impl Dag {
         }
     }
 
-    /// Validate the graph: no cycles, all target references are valid.
+    /// Validate the graph: no cycles, all group references are valid.
     pub fn validate(&self) -> Result<(), DagError> {
         toposort(&self.graph, None).map_err(|_| self.cycle_error())?;
-        for (name, target) in &self.targets {
-            for block in &target.blocks {
-                if !self.indices.contains_key(block) {
-                    return Err(DagError::UnknownTargetBlock(name.clone(), block.clone()));
+        for (name, group) in &self.groups {
+            for target in &group.targets {
+                if !self.indices.contains_key(target) {
+                    return Err(DagError::UnknownGroupMember(name.clone(), target.clone()));
                 }
             }
         }
         Ok(())
     }
 
-    /// Return block names in topological order (dependencies first).
-    /// Ties between independent nodes are broken alphabetically on block
+    /// Return target names in topological order (dependencies first).
+    /// Ties between independent nodes are broken alphabetically on target
     /// name, so the order is deterministic across runs.
     pub fn topo_order(&self) -> Result<Vec<String>, DagError> {
         let mut in_degree: HashMap<NodeIndex, usize> = HashMap::with_capacity(self.graph.node_count());
@@ -246,7 +246,7 @@ impl Dag {
             in_degree.insert(idx, self.graph.neighbors_directed(idx, Direction::Incoming).count());
         }
 
-        // Min-heap keyed on block name for deterministic tie-breaking.
+        // Min-heap keyed on target name for deterministic tie-breaking.
         let mut ready: BinaryHeap<Reverse<(String, NodeIndex)>> = BinaryHeap::new();
         for (&idx, &deg) in &in_degree {
             if deg == 0 {
@@ -337,12 +337,12 @@ impl Dag {
         false
     }
 
-    /// Topological order with `explicit` blocks filtered out.
+    /// Topological order with `explicit` targets filtered out.
     ///
     /// This is the canonical expansion of the `...` selector (and of the
-    /// no-target/no-default fallback): "every block that is selectable
-    /// without being named." `explicit` blocks remain reachable by name or
-    /// as transitive dependencies of named targets, but never participate in
+    /// no-selection/no-default fallback): "every target that is selectable
+    /// without being named." `explicit` targets remain reachable by name or
+    /// as transitive dependencies of named groups, but never participate in
     /// a bulk "run everything" sweep.
     pub fn select_all(&self) -> Result<Vec<String>, DagError> {
         Ok(self
@@ -399,20 +399,20 @@ impl Dag {
             .or_else(|| ord_children.into_iter().next())
     }
 
-    /// Return block names for a target in topological order.
+    /// Return target names for a group in topological order.
     /// Includes all transitive dependencies.
-    pub fn target_order(&self, target: &str) -> Result<Vec<String>, DagError> {
-        // Try as a named target first, then fall back to a block name.
-        let block_names: Vec<String> = if let Some(t) = self.targets.get(target) {
-            t.blocks.clone()
-        } else if self.indices.contains_key(target) {
-            vec![target.to_owned()]
+    pub fn selection_order(&self, selector: &str) -> Result<Vec<String>, DagError> {
+        // Try as a named group first, then fall back to a target name.
+        let target_names: Vec<String> = if let Some(t) = self.groups.get(selector) {
+            t.targets.clone()
+        } else if self.indices.contains_key(selector) {
+            vec![selector.to_owned()]
         } else {
-            return Err(DagError::UnknownBlock(target.into()));
+            return Err(DagError::UnknownTarget(selector.into()));
         };
 
         let mut needed = HashSet::new();
-        for name in &block_names {
+        for name in &target_names {
             if let Some(&idx) = self.indices.get(name) {
                 collect_transitive_deps(&self.graph, idx, &mut needed);
             }
@@ -432,36 +432,36 @@ impl Dag {
         self.indices.get(name).copied().map(|idx| &mut self.graph[idx])
     }
 
-    /// Get all targets with their docs.
-    pub fn targets(&self) -> &HashMap<String, DagTarget> {
-        &self.targets
+    /// Get all groups with their docs.
+    pub fn groups(&self) -> &HashMap<String, DagGroup> {
+        &self.groups
     }
 
-    /// Return block names for a target (or single block) plus all of their
-    /// transitive dependents (the blocks that depend on them), in topological
+    /// Return target names for a group (or single target) plus all of their
+    /// transitive dependents (the targets that depend on them), in topological
     /// order (dependencies first — callers typically reverse this for teardown).
     ///
     /// # Arguments
     ///
-    /// * `target` - A target name or a block name.
+    /// * `selector` - A group name or a target name.
     ///
     /// # Errors
     ///
-    /// Returns [`DagError::UnknownBlock`] if `target` is neither a known target
-    /// nor a known block name, and [`DagError::Cycle`] if the graph contains a
+    /// Returns [`DagError::UnknownTarget`] if `selector` is neither a known group
+    /// nor a known target name, and [`DagError::Cycle`] if the graph contains a
     /// cycle.
-    pub fn transitive_dependents(&self, target: &str) -> Result<Vec<String>, DagError> {
-        // Resolve either a named target (set of blocks) or a single block.
-        let block_names: Vec<String> = if let Some(t) = self.targets.get(target) {
-            t.blocks.clone()
-        } else if self.indices.contains_key(target) {
-            vec![target.to_owned()]
+    pub fn transitive_dependents(&self, selector: &str) -> Result<Vec<String>, DagError> {
+        // Resolve either a named group (set of targets) or a single target.
+        let target_names: Vec<String> = if let Some(t) = self.groups.get(selector) {
+            t.targets.clone()
+        } else if self.indices.contains_key(selector) {
+            vec![selector.to_owned()]
         } else {
-            return Err(DagError::UnknownBlock(target.into()));
+            return Err(DagError::UnknownTarget(selector.into()));
         };
 
         let mut needed = HashSet::new();
-        for name in &block_names {
+        for name in &target_names {
             if let Some(&idx) = self.indices.get(name) {
                 collect_transitive_dependents(&self.graph, idx, &mut needed);
             }
@@ -471,17 +471,17 @@ impl Dag {
         Ok(all.into_iter().filter(|n| needed.contains(n)).collect())
     }
 
-    /// Get all block names.
-    pub fn block_names(&self) -> Vec<String> {
+    /// Get all target names.
+    pub fn target_names(&self) -> Vec<String> {
         self.indices.keys().cloned().collect()
     }
 
-    /// Check whether a block exists.
-    pub fn has_block(&self, name: &str) -> bool {
+    /// Check whether a target exists.
+    pub fn has_target(&self, name: &str) -> bool {
         self.indices.contains_key(name)
     }
 
-    /// Get all parent block names (both dependency and ordering edges).
+    /// Get all parent target names (both dependency and ordering edges).
     pub fn deps(&self, name: &str) -> Vec<String> {
         let Some(&idx) = self.indices.get(name) else {
             return vec![];
@@ -492,7 +492,7 @@ impl Dag {
             .collect()
     }
 
-    /// Get parent block names that are content-coupled (dependency edges only).
+    /// Get parent target names that are content-coupled (dependency edges only).
     /// These are included in the content hash computation.
     pub fn content_deps(&self, name: &str) -> Vec<String> {
         let Some(&idx) = self.indices.get(name) else {
@@ -507,7 +507,7 @@ impl Dag {
         result
     }
 
-    /// Get child block names connected by content-coupled dependency edges.
+    /// Get child target names connected by content-coupled dependency edges.
     pub fn content_dependents(&self, name: &str) -> Vec<String> {
         let Some(&idx) = self.indices.get(name) else {
             return vec![];
@@ -521,7 +521,7 @@ impl Dag {
         result
     }
 
-    /// Get all child block names (blocks that depend on this one).
+    /// Get all child target names (targets that depend on this one).
     pub fn dependents(&self, name: &str) -> Vec<String> {
         let Some(&idx) = self.indices.get(name) else {
             return vec![];
@@ -561,9 +561,9 @@ fn collect_transitive_deps(graph: &DiGraph<DagNode, EdgeKind>, node: NodeIndex, 
     }
 }
 
-/// Walk outgoing edges from `node`, inserting every reachable block (inclusive)
-/// into `result`. These are the blocks that depend, directly or transitively,
-/// on `node` — i.e. blocks that must be destroyed before `node` can be.
+/// Walk outgoing edges from `node`, inserting every reachable target (inclusive)
+/// into `result`. These are the targets that depend, directly or transitively,
+/// on `node` — i.e. targets that must be destroyed before `node` can be.
 fn collect_transitive_dependents(graph: &DiGraph<DagNode, EdgeKind>, node: NodeIndex, result: &mut HashSet<String>) {
     let name = &graph[node].name;
     if !result.insert(name.clone()) {
@@ -574,9 +574,9 @@ fn collect_transitive_dependents(graph: &DiGraph<DagNode, EdgeKind>, node: NodeI
     }
 }
 
-/// Extract block names referenced in field expressions via dotted refs.
+/// Extract target names referenced in field expressions via dotted refs.
 /// Returns only the root name (e.g., "server" from "server.path").
-pub fn collect_block_refs(fields: &[Field], scope: &Scope) -> Result<HashSet<String>, EvalError> {
+pub fn collect_target_refs(fields: &[Field], scope: &Scope) -> Result<HashSet<String>, EvalError> {
     let mut refs = HashSet::new();
     for field in fields {
         if field.name == DEPENDS_ON_FIELD || field.name == AFTER_FIELD || field.name == CONCURRENCY_FIELD {
@@ -597,7 +597,7 @@ pub fn collect_depends_on(fields: &[Field]) -> Vec<String> {
                 .iter()
                 .filter_map(|e| match e {
                     Expr::Ref(parts) => Some(parts[0].clone()),
-                    Expr::BlockRef(name) => Some(name.clone()),
+                    Expr::TargetRef(name) => Some(name.clone()),
                     Expr::MatrixRef { .. } => Some(e.to_string()),
                     _ => None,
                 })
@@ -607,15 +607,15 @@ pub fn collect_depends_on(fields: &[Field]) -> Vec<String> {
     vec![]
 }
 
-/// Resolve a dependency field that is either a literal list of block
-/// references or a configuration-time expression returning `[block]`.
+/// Resolve a dependency field that is either a literal list of target
+/// references or a configuration-time expression returning `[target]`.
 pub fn collect_dependency_refs(fields: &[Field], field_name: &str, scope: &Scope) -> Result<Vec<String>, EvalError> {
     let Some(field) = fields.iter().find(|field| field.name == field_name) else {
         return Ok(Vec::new());
     };
 
     if let Expr::List(items) = &field.value {
-        if items.iter().any(|item| matches!(item, Expr::BlockCall { .. })) {
+        if items.iter().any(|item| matches!(item, Expr::TargetCall { .. })) {
             // Parameterized calls are resolved by the materialization pass.
             return Ok(Vec::new());
         }
@@ -623,7 +623,7 @@ pub fn collect_dependency_refs(fields: &[Field], field_name: &str, scope: &Scope
         for item in items {
             let reference = match item {
                 Expr::Ref(parts) => Some(parts[0].clone()),
-                Expr::BlockRef(name) => Some(name.clone()),
+                Expr::TargetRef(name) => Some(name.clone()),
                 Expr::MatrixRef { name, keys, fields } if fields.is_empty() => {
                     Some(expr::eval_matrix_ref_name(name, keys, scope)?)
                 }
@@ -642,21 +642,21 @@ pub fn collect_dependency_refs(fields: &[Field], field_name: &str, scope: &Scope
 
     let value = match expr::eval(&field.value, scope) {
         Ok(value) => value,
-        Err(EvalError::UnmaterializedBlockCall(_)) => return Ok(Vec::new()),
+        Err(EvalError::UnmaterializedTargetCall(_)) => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
     match value {
-        Value::List(Type::BlockRef, references) => references
+        Value::List(Type::TargetRef, references) => references
             .into_iter()
             .map(|reference| match reference {
-                Value::BlockRef(name) => Ok(name),
+                Value::TargetRef(name) => Ok(name),
                 value => Err(EvalError::Type(format!(
-                    "{field_name} must return block references, got {value}"
+                    "{field_name} must return target references, got {value}"
                 ))),
             })
             .collect(),
         value => Err(EvalError::Type(format!(
-            "{field_name} must be a list of block references, got {value}"
+            "{field_name} must be a list of target references, got {value}"
         ))),
     }
 }
@@ -671,7 +671,7 @@ pub fn collect_after(fields: &[Field]) -> Vec<String> {
                 .iter()
                 .filter_map(|e| match e {
                     Expr::Ref(parts) => Some(parts[0].clone()),
-                    Expr::BlockRef(name) => Some(name.clone()),
+                    Expr::TargetRef(name) => Some(name.clone()),
                     Expr::MatrixRef { .. } => Some(e.to_string()),
                     _ => None,
                 })
@@ -681,7 +681,7 @@ pub fn collect_after(fields: &[Field]) -> Vec<String> {
     vec![]
 }
 
-/// Collect ALL variable/block root names referenced in field expressions,
+/// Collect ALL variable/target root names referenced in field expressions,
 /// including single-part refs. Used for static validation.
 pub fn collect_all_refs(fields: &[Field]) -> HashSet<String> {
     let mut refs = HashSet::new();
@@ -699,7 +699,7 @@ fn collect_all_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
         Expr::Ref(parts) => {
             refs.insert(parts[0].clone());
         }
-        Expr::BlockRef(name) => {
+        Expr::TargetRef(name) => {
             refs.insert(name.clone());
         }
         Expr::MatrixRef { name, keys, .. } => {
@@ -708,7 +708,7 @@ fn collect_all_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
                 collect_all_expr_refs(key, refs);
             }
         }
-        Expr::BlockCall { name, keys, args, .. } => {
+        Expr::TargetCall { name, keys, args, .. } => {
             refs.insert(name.clone());
             if let Some(keys) = keys {
                 for key in keys {
@@ -765,7 +765,7 @@ fn collect_expr_refs(expr: &Expr, scope: &Scope, refs: &mut HashSet<String>) -> 
         Expr::Ref(parts) if parts.len() > 1 => {
             refs.insert(parts[0].clone());
         }
-        Expr::BlockRef(name) => {
+        Expr::TargetRef(name) => {
             refs.insert(name.clone());
         }
         Expr::MatrixRef { name, keys, fields: _ } => {
@@ -774,7 +774,7 @@ fn collect_expr_refs(expr: &Expr, scope: &Scope, refs: &mut HashSet<String>) -> 
                 collect_expr_refs(key, scope, refs)?;
             }
         }
-        Expr::BlockCall { name, keys, args, .. } => {
+        Expr::TargetCall { name, keys, args, .. } => {
             refs.insert(name.clone());
             if let Some(keys) = keys {
                 for key in keys {

@@ -2,7 +2,7 @@
 //!
 //! The README is embedded at build time so the text always matches the
 //! installed binary. Topics are README headings, addressed by their GitHub
-//! anchor slug, so `[large](#blocks)` in the README and `bit --docs blocks`
+//! anchor slug, so `[large](#targets)` in the README and `bit --docs targets`
 //! name the same section.
 
 use std::ops::Range;
@@ -601,15 +601,15 @@ Run it.
 
 ## CI workflows
 
-See [large](#blocks).
+See [large](#targets).
 
 ### Templates
 
 Jinja.
 
-## Blocks
+## Targets
 
-Blocks text.
+Targets text.
 
 ## CI caching
 
@@ -624,9 +624,9 @@ Cache.
     #[test]
     fn topic_matches_heading_text_or_slug_case_insensitively() {
         let docs = Docs::new(DOC);
-        let section = "## Blocks\n\nBlocks text.\n\n";
-        assert_eq!(docs.select(Some("blocks")).unwrap(), section);
-        assert_eq!(docs.select(Some("BLOCKS")).unwrap(), section);
+        let section = "## Targets\n\nTargets text.\n\n";
+        assert_eq!(docs.select(Some("targets")).unwrap(), section);
+        assert_eq!(docs.select(Some("TARGETS")).unwrap(), section);
         assert_eq!(
             docs.select(Some("CI Workflows")).unwrap(),
             docs.select(Some("ci-workflows")).unwrap()
@@ -638,7 +638,7 @@ Cache.
         let section = Docs::new(DOC).select(Some("ci-workflows")).unwrap();
         assert!(section.starts_with("## CI workflows\n"));
         assert!(section.contains("### Templates\n\nJinja."));
-        assert!(!section.contains("## Blocks"));
+        assert!(!section.contains("## Targets"));
     }
 
     #[test]
@@ -674,7 +674,7 @@ Cache.
         let error = Docs::new(DOC).select(Some("nope")).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "unknown docs topic 'nope'; available topics:\n  install-bit\n  ci-workflows\n  templates\n  blocks\n  ci-caching"
+            "unknown docs topic 'nope'; available topics:\n  install-bit\n  ci-workflows\n  templates\n  targets\n  ci-caching"
         );
     }
 
@@ -730,10 +730,10 @@ Cache.
 
     #[test]
     fn renders_anchor_links_with_their_topic() {
-        let out = render("Mark it [`large`](#blocks).\n", 80);
+        let out = render("Mark it [`large`](#targets).\n", 80);
         assert_eq!(
             out,
-            "Mark it \x1b[33mlarge\x1b[0m \x1b[2m(bit\x1b[0m \x1b[2m--docs\x1b[0m \x1b[2mblocks)\x1b[0m.\n"
+            "Mark it \x1b[33mlarge\x1b[0m \x1b[2m(bit\x1b[0m \x1b[2m--docs\x1b[0m \x1b[2mtargets)\x1b[0m.\n"
         );
     }
 

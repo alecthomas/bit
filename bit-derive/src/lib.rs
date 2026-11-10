@@ -577,7 +577,7 @@ fn get_schema_type(attrs: &[syn::Attribute]) -> syn::Result<Option<Expr>> {
 /// named types become optional.
 fn rust_type_to_schema_type(ty: &Type, has_default: bool) -> TokenStream2 {
     let typ = required_schema_type(ty);
-    // serde fills in a defaulted field, so a block may omit it.
+    // serde fills in a defaulted field, so a target may omit it.
     if has_default && !is_option(ty) {
         quote! { crate::value::Type::Optional(Box::new(#typ)) }
     } else {
@@ -598,7 +598,7 @@ fn required_schema_type(ty: &Type) -> TokenStream2 {
 
             match ident.as_str() {
                 "String" => quote! { crate::value::Type::String },
-                "BlockRef" => quote! { crate::value::Type::BlockRef },
+                "TargetRef" => quote! { crate::value::Type::TargetRef },
                 "bool" => quote! { crate::value::Type::Bool },
                 "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "usize" | "isize" => {
                     quote! { crate::value::Type::Number }

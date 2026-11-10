@@ -1,13 +1,13 @@
-//! Checks block fields against the input schema of the block's resource.
+//! Checks target fields against the input schema of the target's resource.
 //!
 //! serde ignores unknown keys when it turns evaluated fields into a
-//! resource's typed inputs, and reports other mismatches only once the block
-//! runs. The loader therefore checks every block's field expressions against
+//! resource's typed inputs, and reports other mismatches only once the target
+//! runs. The loader therefore checks every target's field expressions against
 //! the schema, without evaluating them, because evaluation can run commands.
 //! Literals and `let` or `param` values are checked exactly. A value that is
-//! only known once upstream blocks run is checked against the type its source
+//! only known once upstream targets run is checked against the type its source
 //! declares, if any, so the engine checks the evaluated inputs again just
-//! before the block runs.
+//! before the target runs.
 
 use std::collections::HashMap;
 
@@ -17,7 +17,7 @@ use crate::expr::{self, Scope, SymbolKind};
 use crate::loader::LoadError;
 use crate::value::{Map, StructType, Type, parse_duration_literal};
 
-/// A block field that does not fit its resource's input schema. Each `path`
+/// A target field that does not fit its resource's input schema. Each `path`
 /// names the field, with nested keys and list indices, as in `flags[0]`.
 #[derive(Debug, thiserror::Error)]
 pub enum InputError {
@@ -50,10 +50,10 @@ impl InputError {
     }
 }
 
-/// Check the fields of every resource block in a loaded graph.
+/// Check the fields of every resource target in a loaded graph.
 pub(crate) fn check_dag(dag: &Dag, scope: &Scope) -> Result<(), LoadError> {
     // Sorted so the same configuration always reports the same error.
-    let mut names = dag.block_names();
+    let mut names = dag.target_names();
     names.sort();
     let nodes: Vec<_> = names
         .iter()
@@ -68,17 +68,17 @@ pub(crate) fn check_dag(dag: &Dag, scope: &Scope) -> Result<(), LoadError> {
     let checker = Checker { scope, outputs };
     for (node, schema) in &nodes {
         checker
-            .check_block(&node.fields, &schema.inputs)
+            .check_target(&node.fields, &schema.inputs)
             .map_err(|source| LoadError::InvalidInputs {
                 pos: node.pos.clone(),
-                block: node.name.clone(),
+                target: node.name.clone(),
                 source: Box::new(source),
             })?;
     }
     Ok(())
 }
 
-/// Check a block's evaluated inputs just before it runs.
+/// Check a target's evaluated inputs just before it runs.
 pub fn check_values(inputs: &Map, schema: &StructType) -> Result<(), InputError> {
     let fields: Vec<Field> = inputs
         .iter()
@@ -91,7 +91,7 @@ pub fn check_values(inputs: &Map, schema: &StructType) -> Result<(), InputError>
         scope: &Scope::new(),
         outputs: HashMap::new(),
     };
-    checker.check_block(&fields, schema)
+    checker.check_target(&fields, schema)
 }
 
 /// The type the engine expects of one of its own fields.
@@ -109,13 +109,13 @@ fn engine_field_type(name: &str) -> Type {
 struct Checker<'a> {
     /// Params and let bindings, which are known at load time.
     scope: &'a Scope,
-    /// Output schemas of resource blocks, by graph name. Module instances
+    /// Output schemas of resource targets, by graph name. Module instances
     /// are absent because their output types are not declared.
     outputs: HashMap<String, StructType>,
 }
 
 impl Checker<'_> {
-    fn check_block(&self, fields: &[Field], schema: &StructType) -> Result<(), InputError> {
+    fn check_target(&self, fields: &[Field], schema: &StructType) -> Result<(), InputError> {
         let entries: Vec<_> = fields.iter().map(|field| (field.name.as_str(), &field.value)).collect();
         self.check_struct(&entries, schema, "", &ENGINE_FIELDS)
     }
@@ -193,7 +193,7 @@ impl Checker<'_> {
             Expr::Number(_) if matches!(expected, Type::Number) => Ok(()),
             Expr::Bool(_) if matches!(expected, Type::Bool) => Ok(()),
             Expr::Duration(_) if matches!(expected, Type::Duration) => Ok(()),
-            Expr::BlockRef(_) if matches!(expected, Type::BlockRef) => Ok(()),
+            Expr::TargetRef(_) if matches!(expected, Type::TargetRef) => Ok(()),
             Expr::List(items) => match expected {
                 Type::List(inner) => items
                     .iter()
@@ -216,11 +216,11 @@ impl Checker<'_> {
             },
             Expr::Ref(parts) => self.check_ref(parts, expected, path),
             Expr::MatrixRef { name, keys, fields } => match expr::eval_matrix_ref_name(name, keys, self.scope) {
-                Ok(_) if fields.is_empty() => check_type(&Type::BlockRef, expected, path),
+                Ok(_) if fields.is_empty() => check_type(&Type::TargetRef, expected, path),
                 Ok(slice) => self.check_output(&slice, fields, expected, path),
                 Err(_) => Ok(()),
             },
-            Expr::BlockCall { fields, .. } if fields.is_empty() => check_type(&Type::BlockRef, expected, path),
+            Expr::TargetCall { fields, .. } if fields.is_empty() => check_type(&Type::TargetRef, expected, path),
             Expr::Call(name, _) | Expr::Pipe(_, name, _) => match expr::function_return_type(name, self.scope) {
                 Some(returns) => check_type(&returns, expected, path),
                 None => Ok(()),
@@ -234,8 +234,8 @@ impl Checker<'_> {
                 self.check(lhs, expected, path)?;
                 self.check(rhs, expected, path)
             }
-            Expr::BlockCall { .. } => Ok(()),
-            Expr::Number(_) | Expr::Bool(_) | Expr::Duration(_) | Expr::BlockRef(_) => mismatch(),
+            Expr::TargetCall { .. } => Ok(()),
+            Expr::Number(_) | Expr::Bool(_) | Expr::Duration(_) | Expr::TargetRef(_) => mismatch(),
         }
     }
 
@@ -269,26 +269,26 @@ impl Checker<'_> {
             return Ok(());
         }
         // Looking up a binding has no side effects. A param without a value
-        // fails here and is reported when a block that uses it runs.
+        // fails here and is reported when a target that uses it runs.
         match expr::eval(&Expr::Ref(parts.to_vec()), self.scope) {
             Ok(value) => self.check(&value.to_expr(), expected, path),
             Err(_) => Ok(()),
         }
     }
 
-    /// Check a block output against the type its resource declares for it.
-    fn check_output(&self, block: &str, fields: &[String], expected: &Type, path: &str) -> Result<(), InputError> {
-        match self.output_type(block, fields) {
+    /// Check a target output against the type its resource declares for it.
+    fn check_output(&self, target: &str, fields: &[String], expected: &Type, path: &str) -> Result<(), InputError> {
+        match self.output_type(target, fields) {
             Some(actual) => check_type(&actual, expected, path),
             None => Ok(()),
         }
     }
 
-    /// The declared type of `block.fields...`. `None` when the resource does
+    /// The declared type of `target.fields...`. `None` when the resource does
     /// not declare it, as with exec's outputs from its `outputs` command.
-    fn output_type(&self, block: &str, fields: &[String]) -> Option<Type> {
+    fn output_type(&self, target: &str, fields: &[String]) -> Option<Type> {
         let (first, rest) = fields.split_first()?;
-        let mut typ = self.outputs.get(block)?.field(first)?.typ.clone();
+        let mut typ = self.outputs.get(target)?.field(first)?.typ.clone();
         for field in rest {
             typ = match typ {
                 Type::Optional(inner) => *inner,
@@ -317,7 +317,7 @@ fn check_type(actual: &Type, expected: &Type, path: &str) -> Result<(), InputErr
 }
 
 /// Whether a value of type `actual` may fit `expected`. Value-dependent cases
-/// are accepted and left to the check before the block runs.
+/// are accepted and left to the check before the target runs.
 fn compatible(actual: &Type, expected: &Type) -> bool {
     match (actual, expected) {
         (Type::Any, _) | (_, Type::Any) => true,
@@ -371,7 +371,7 @@ fn describe(expr: &Expr) -> String {
         Expr::Null => "null".into(),
         Expr::List(_) => "list".into(),
         Expr::Map(_) => "map".into(),
-        Expr::BlockRef(_) => "block".into(),
+        Expr::TargetRef(_) => "target".into(),
         _ => format!("'{expr}'"),
     }
 }
@@ -464,14 +464,14 @@ mod tests {
 
     fn check_fields(body: &str, schema: &StructType) -> Result<(), InputError> {
         let module = crate::parser::parse(&format!("b = x.y {{ {body} }}"), "<test>").unwrap();
-        let Statement::Block(block) = &module.statements[0] else {
-            panic!("expected a block");
+        let Statement::Target(target) = &module.statements[0] else {
+            panic!("expected a target");
         };
         let checker = Checker {
             scope: &Scope::new(),
             outputs: HashMap::new(),
         };
-        checker.check_block(&block.fields, schema)
+        checker.check_target(&target.fields, schema)
     }
 
     fn message(result: Result<(), InputError>) -> String {
@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn evaluated_inputs_are_checked_before_a_block_runs() {
+    fn evaluated_inputs_are_checked_before_a_target_runs() {
         let flags = schema(vec![("flags", optional(Type::List(Box::new(Type::String))))]);
         let mut inputs = Map::new();
         inputs.insert("flags".into(), Value::list(vec![Value::Str("-v".into())]));

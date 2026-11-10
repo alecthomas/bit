@@ -6,9 +6,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -35,20 +35,20 @@ pub(super) fn describe(script: &str, package: Option<&str>, script_args: &[Strin
     crate::providers::display_command("pnpm", &pnpm_args(script, package, script_args))
 }
 
-/// Resolve input files for a `pnpm.run` or `pnpm.test` block: auto-scan the
+/// Resolve input files for a `pnpm.run` or `pnpm.test` target: auto-scan the
 /// source trees (recursively, excluding common build directories and
 /// declared outputs) of the projects whose script runs and of their local
 /// dependencies, plus the workspace lockfile.
 ///
-/// `outputs` and `extra_globs` are relative to the block's `dir`.
+/// `outputs` and `extra_globs` are relative to the target's `dir`.
 pub(super) fn resolve_inputs<T>(
-    block: &Block<T>,
+    target: &Target<T>,
     package: Option<&str>,
     outputs: &[String],
     extra_globs: &[String],
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let ws = workspace::workspace(tracker, Path::new(workspace_dir(block)), &block.env)?;
+    let ws = workspace::workspace(tracker, Path::new(workspace_dir(target)), &target.env)?;
     let mut files = BTreeMap::new();
 
     if let Some(lf) = &ws.lockfile {
@@ -67,11 +67,11 @@ pub(super) fn resolve_inputs<T>(
             }
             pkg_dirs
         }
-        None => script_projects(&ws, Path::new(workspace_dir(block))),
+        None => script_projects(&ws, Path::new(workspace_dir(target))),
     };
     // Projects nested in another are scanned as projects of their own when
     // they are sources, so their build output is skipped at their top.
-    let mut exclude: Vec<PathBuf> = outputs.iter().map(|output| block.path(output).into()).collect();
+    let mut exclude: Vec<PathBuf> = outputs.iter().map(|output| target.path(output).into()).collect();
     exclude.extend(ws.projects.iter().map(|project| project.dir.clone()));
     // Each project builds from its local dependencies too.
     for source in ws.local_sources(&project_dirs) {
@@ -87,7 +87,7 @@ pub(super) fn resolve_inputs<T>(
     }
 
     for glob in extra_globs {
-        files.extend(tracker.hash_glob(&block.glob(glob))?);
+        files.extend(tracker.hash_glob(&target.glob(glob))?);
     }
     Ok(files)
 }
@@ -128,7 +128,7 @@ pub struct PnpmRunInputs {
     pub inputs: Vec<String>,
 }
 
-/// Outputs from a `pnpm.run` block.
+/// Outputs from a `pnpm.run` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct PnpmRunOutputs {
     /// Single output path, when exactly one was declared
@@ -158,7 +158,7 @@ impl PnpmRunOutputs {
     }
 }
 
-/// Persisted state for a `pnpm.run` block.
+/// Persisted state for a `pnpm.run` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PnpmRunState {
     pub script: String,
@@ -187,11 +187,11 @@ impl Resource for PnpmRunResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &Block<PnpmRunInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<PnpmRunInputs>) -> Vec<Ambient> {
         super::ambient(workspace_dir(inputs))
     }
 
-    fn resolve(&self, inputs: &Block<PnpmRunInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<PnpmRunInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         resolve_inputs(
             inputs,
@@ -202,7 +202,7 @@ impl Resource for PnpmRunResource {
         )
     }
 
-    fn plan(&self, inputs: &Block<PnpmRunInputs>, prior_state: Option<&PnpmRunState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<PnpmRunInputs>, prior_state: Option<&PnpmRunState>) -> Result<PlanResult, BoxError> {
         let description = describe(&inputs.script, inputs.package.as_deref(), &inputs.args);
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -229,10 +229,10 @@ impl Resource for PnpmRunResource {
 
     fn apply(
         &self,
-        inputs: &Block<PnpmRunInputs>,
+        inputs: &Target<PnpmRunInputs>,
         _prior_state: Option<&PnpmRunState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<PnpmRunState, PnpmRunOutputs>, BoxError> {
         let outputs: Vec<String> = inputs.outputs.iter().map(|output| inputs.path(output)).collect();
         for output in &outputs {
@@ -260,7 +260,7 @@ impl Resource for PnpmRunResource {
         })
     }
 
-    fn destroy(&self, prior_state: &Block<PnpmRunState>, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Target<PnpmRunState>, writer: &TargetWriter) -> Result<(), BoxError> {
         for output in &prior_state.outputs {
             crate::providers::remove_path(Path::new(&prior_state.path(output)), writer)?;
         }
@@ -270,11 +270,11 @@ impl Resource for PnpmRunResource {
     /// A package script is an arbitrary command, like `exec`: the action key
     /// names the script but nothing it invokes. Its declared outputs are also
     /// commonly directories, which the CAS cannot store.
-    fn cache_policy(&self, _inputs: &Block<PnpmRunInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<PnpmRunInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 
-    fn output_keys(&self, inputs: &Block<PnpmRunInputs>) -> Vec<String> {
+    fn output_keys(&self, inputs: &Target<PnpmRunInputs>) -> Vec<String> {
         inputs
             .outputs
             .iter()
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             PnpmRunInputs {
                 script: "build".into(),
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_script_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             PnpmRunInputs {
                 script: "test".into(),
@@ -373,7 +373,7 @@ mod tests {
             fs::write(root.join("packages").join(name).join("src/index.ts"), "").unwrap();
         }
         let resolve = |dir: &Path| {
-            let inputs = Block::new(
+            let inputs = Target::new(
                 Some(dir.to_string_lossy().into_owned()),
                 PnpmRunInputs {
                     script: "build".into(),
@@ -412,7 +412,7 @@ mod tests {
         fs::write(root.join("docs/guide.md"), "").unwrap();
         fs::create_dir_all(root.join("packages/a")).unwrap();
         fs::write(root.join("packages/a/package.json"), r#"{ "name": "a" }"#).unwrap();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             PnpmRunInputs {
                 script: "build".into(),
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn outputs_are_relative_to_dir() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some("web".into()),
             PnpmRunInputs {
                 script: "build".into(),
@@ -477,7 +477,7 @@ mod tests {
         };
         let output = crate::output::Output::new(&[]);
 
-        Resource::destroy(&test_resource(), &Block::new(None, state), &output.writer("build")).unwrap();
+        Resource::destroy(&test_resource(), &Target::new(None, state), &output.writer("build")).unwrap();
 
         assert!(!file.exists());
         assert!(!output_dir.exists());

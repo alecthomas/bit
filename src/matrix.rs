@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::ast::{Block, Expr, Field, MatrixKey, StringPart};
-use crate::dag::{AFTER_FIELD, DEPENDS_ON_FIELD, Dag, DagNode, collect_block_refs, collect_dependency_refs};
+use crate::ast::{Expr, Field, MatrixKey, StringPart, Target};
+use crate::dag::{AFTER_FIELD, DEPENDS_ON_FIELD, Dag, DagNode, collect_dependency_refs, collect_target_refs};
 use crate::expr::{self, Scope};
 use crate::loader::LoadError;
 use crate::provider::ProviderRegistry;
@@ -13,20 +13,20 @@ pub(crate) fn matrix_key(name: &str, values: &[&Value]) -> String {
     format!("{name}[{}]", matrix_values_key(values))
 }
 
-/// Name one slice of a matrix block instance. A parameterized instance's
+/// Name one slice of a matrix target instance. A parameterized instance's
 /// arguments follow the keys, mirroring the call syntax `name[keys](args)`.
 pub(crate) fn slice_name(name: &str, values: &[&Value], instance_args: &str) -> String {
     format!("{}{instance_args}", matrix_key(name, values))
 }
 
-/// List the sorted slices of a matrix group, or `None` if `group` is not one.
+/// List the sorted slices of a matrix instance, or `None` if `instance` is not one.
 ///
-/// Block names cannot contain `(`, so the first one starts an instance's arguments.
-pub(crate) fn group_slices(group: &str, scope: &Scope) -> Option<Vec<String>> {
-    let Some(Value::Struct(_, slices)) = scope.get(group) else {
+/// Target names cannot contain `(`, so the first one starts an instance's arguments.
+pub(crate) fn instance_slices(instance: &str, scope: &Scope) -> Option<Vec<String>> {
+    let Some(Value::Struct(_, slices)) = scope.get(instance) else {
         return None;
     };
-    let (name, instance_args) = group.split_at(group.find('(').unwrap_or(group.len()));
+    let (name, instance_args) = instance.split_at(instance.find('(').unwrap_or(instance.len()));
     let mut names: Vec<_> = slices
         .keys()
         .map(|key| format!("{name}[{key}]{instance_args}"))
@@ -46,13 +46,13 @@ fn matrix_values_key(values: &[&Value]) -> String {
 /// Compute every combination of matrix key values, in key declaration order.
 ///
 /// Bare keys form a cartesian product; a values expression is re-evaluated per earlier combination.
-fn matrix_combinations(block: &Block, scope: &Scope) -> Result<Vec<Vec<Value>>, LoadError> {
+fn matrix_combinations(target: &Target, scope: &Scope) -> Result<Vec<Vec<Value>>, LoadError> {
     let mut combos: Vec<Vec<Value>> = vec![vec![]];
-    for (index, key) in block.matrix_keys.iter().enumerate() {
+    for (index, key) in target.matrix_keys.iter().enumerate() {
         let mut next = Vec::new();
         match &key.values {
             None => {
-                let list = scope_key_list(block, key, scope)?;
+                let list = scope_key_list(target, key, scope)?;
                 for combo in &combos {
                     for value in &list {
                         next.push([combo.as_slice(), std::slice::from_ref(value)].concat());
@@ -62,15 +62,15 @@ fn matrix_combinations(block: &Block, scope: &Scope) -> Result<Vec<Vec<Value>>, 
             Some(values) => {
                 for combo in &combos {
                     let mut key_scope = scope.clone();
-                    for (earlier, value) in block.matrix_keys[..index].iter().zip(combo) {
+                    for (earlier, value) in target.matrix_keys[..index].iter().zip(combo) {
                         key_scope.set(earlier.name.clone(), value.clone());
                     }
                     let list = expr::eval(values, &key_scope).map_err(|source| LoadError::Eval {
-                        pos: block.pos.clone(),
+                        pos: target.pos.clone(),
                         source,
                     })?;
                     let list = list.as_list().ok_or_else(|| LoadError::MatrixKeyNotList {
-                        pos: block.pos.clone(),
+                        pos: target.pos.clone(),
                         name: key.name.clone(),
                     })?;
                     for value in list {
@@ -84,58 +84,58 @@ fn matrix_combinations(block: &Block, scope: &Scope) -> Result<Vec<Vec<Value>>, 
     Ok(combos)
 }
 
-fn scope_key_list(block: &Block, key: &MatrixKey, scope: &Scope) -> Result<Vec<Value>, LoadError> {
+fn scope_key_list(target: &Target, key: &MatrixKey, scope: &Scope) -> Result<Vec<Value>, LoadError> {
     let value = scope.get(&key.name).ok_or_else(|| LoadError::MatrixKeyNotFound {
-        pos: block.pos.clone(),
+        pos: target.pos.clone(),
         name: key.name.clone(),
     })?;
     let list = value.as_list().ok_or_else(|| LoadError::MatrixKeyNotList {
-        pos: block.pos.clone(),
+        pos: target.pos.clone(),
         name: key.name.clone(),
     })?;
     Ok(list.to_vec())
 }
 
-/// Expand a matrix block into individual DagNodes — one per combination of
+/// Expand a matrix target into individual DagNodes — one per combination of
 /// its key values.
 ///
-/// Within each expanded block:
+/// Within each expanded target:
 /// - Matrix key variables are substituted with their concrete scalar values
-/// - References to other matrix blocks sharing the same keys are rewritten
+/// - References to other matrix targets sharing the same keys are rewritten
 ///   to point to the matching slice
 ///
 /// `instance_args` is the argument list of a parameterized instance, or empty.
-/// The group is named `name(args)` and each slice `name[keys](args)`.
+/// The instance is named `name(args)` and each slice `name[keys](args)`.
 pub fn expand_matrix(
-    block: &Block,
+    target: &Target,
     instance_args: &str,
     scope: &mut Scope,
     registry: &ProviderRegistry,
     store: &dyn StateStore,
     dag: &mut Dag,
-    matrix_blocks: &HashMap<String, Vec<String>>,
+    matrix_targets: &HashMap<String, Vec<String>>,
 ) -> Result<(), LoadError> {
-    let key_names = block.matrix_key_names();
-    let combos: Vec<Vec<Value>> = matrix_combinations(block, scope)?;
+    let key_names = target.matrix_key_names();
+    let combos: Vec<Vec<Value>> = matrix_combinations(target, scope)?;
     let combos: Vec<Vec<&Value>> = combos.iter().map(|combo| combo.iter().collect()).collect();
 
     // Look up the resource once
     let resource_factory = || {
         registry
-            .get_resource(&block.provider, &block.resource)
+            .get_resource(&target.provider, &target.resource)
             .ok_or_else(|| LoadError::UnknownResource {
-                pos: block.pos.clone(),
-                provider: block.provider.clone(),
-                resource: block.resource.clone(),
+                pos: target.pos.clone(),
+                provider: target.provider.clone(),
+                resource: target.resource.clone(),
             })
     };
 
-    let group = format!("{}{instance_args}", block.name);
-    // Track all expanded node names for this block
+    let instance = format!("{}{instance_args}", target.name);
+    // Track all expanded node names for this target
     let mut expanded_names: Vec<String> = Vec::new();
 
     for combo in &combos {
-        let node_name = slice_name(&block.name, combo, instance_args);
+        let node_name = slice_name(&target.name, combo, instance_args);
 
         // Build substitution map: key_name -> scalar value
         let subs: HashMap<String, Expr> = key_names
@@ -144,25 +144,25 @@ pub fn expand_matrix(
             .map(|(k, v)| (k.clone(), (*v).to_expr()))
             .collect();
 
-        // Build a map of sibling matrix block names to their expanded names
-        // for this combination. Only for blocks sharing the same key set.
-        let mut block_subs: HashMap<String, String> = HashMap::new();
-        for (other_name, other_keys) in matrix_blocks {
-            if other_name == &group {
+        // Build a map of sibling matrix target names to their expanded names
+        // for this combination. Only for targets sharing the same key set.
+        let mut target_subs: HashMap<String, String> = HashMap::new();
+        for (other_name, other_keys) in matrix_targets {
+            if other_name == &instance {
                 continue;
             }
             if other_keys == &key_names {
-                block_subs.insert(other_name.clone(), matrix_key(other_name, combo));
+                target_subs.insert(other_name.clone(), matrix_key(other_name, combo));
             }
         }
 
         // Rewrite field expressions
-        let rewritten_fields: Vec<Field> = block
+        let rewritten_fields: Vec<Field> = target
             .fields
             .iter()
             .map(|f| Field {
                 name: f.name.clone(),
-                value: rewrite_matrix_expr(&f.value, &subs, &block_subs),
+                value: rewrite_matrix_expr(&f.value, &subs, &target_subs),
             })
             .collect();
 
@@ -170,16 +170,16 @@ pub fn expand_matrix(
         let prior_state = store.load(&node_name)?;
 
         dag.add_node(DagNode {
-            pos: block.pos.clone(),
+            pos: target.pos.clone(),
             name: node_name.clone(),
-            doc: block.doc.clone(),
-            phase: block.phase,
-            provider: block.provider.clone(),
-            resource_name: block.resource.clone(),
-            protected: block.protected,
-            explicit: block.explicit,
-            large: block.large,
-            concurrency_group: group.clone(),
+            doc: target.doc.clone(),
+            phase: target.phase,
+            provider: target.provider.clone(),
+            resource_name: target.resource.clone(),
+            protected: target.protected,
+            explicit: target.explicit,
+            large: target.large,
+            concurrency_group: instance.clone(),
             fields: rewritten_fields,
             resource,
             prior_state,
@@ -192,34 +192,34 @@ pub fn expand_matrix(
     for expanded in &expanded_names {
         let node_fields = &dag.get_node(expanded).expect("just added").fields.clone();
 
-        for dep in collect_block_refs(node_fields, scope).map_err(|source| LoadError::Eval {
-            pos: block.pos.clone(),
+        for dep in collect_target_refs(node_fields, scope).map_err(|source| LoadError::Eval {
+            pos: target.pos.clone(),
             source,
         })? {
-            if dag.has_block(&dep) && dep != *expanded {
+            if dag.has_target(&dep) && dep != *expanded {
                 dag.add_dep_edge(&dep, expanded)?;
             }
         }
         for dep in collect_dependency_refs(node_fields, DEPENDS_ON_FIELD, scope).map_err(|source| LoadError::Eval {
-            pos: block.pos.clone(),
+            pos: target.pos.clone(),
             source,
         })? {
-            if dag.has_block(&dep) && dep != *expanded {
+            if dag.has_target(&dep) && dep != *expanded {
                 dag.add_dep_edge(&dep, expanded)?;
             }
         }
         for dep in collect_dependency_refs(node_fields, AFTER_FIELD, scope).map_err(|source| LoadError::Eval {
-            pos: block.pos.clone(),
+            pos: target.pos.clone(),
             source,
         })? {
-            if dag.has_block(&dep) && dep != *expanded {
+            if dag.has_target(&dep) && dep != *expanded {
                 dag.add_ordering_edge(&dep, expanded)?;
             }
         }
     }
 
-    // Register the block name in scope as a map keyed by matrix values,
-    // so non-matrix blocks can reference the matrix block.
+    // Register the target name in scope as a map keyed by matrix values,
+    // so non-matrix targets can reference the matrix target.
     // Each entry is an empty map placeholder (outputs filled in at execution time).
     let mut matrix_map = Map::new();
     for combo in &combos {
@@ -227,18 +227,18 @@ pub fn expand_matrix(
         matrix_map.insert(key, Value::strct(Map::new()));
     }
     scope
-        .define(&group, crate::expr::SymbolKind::Block, Value::strct(matrix_map))
+        .define(&instance, crate::expr::SymbolKind::Target, Value::strct(matrix_map))
         .map_err(|existing| LoadError::DuplicateName {
-            pos: block.pos.clone(),
-            name: group.clone(),
+            pos: target.pos.clone(),
+            name: instance.clone(),
             existing: existing.as_str(),
         })?;
 
     for expanded in &expanded_names {
         scope
-            .define(expanded, crate::expr::SymbolKind::Block, Value::strct(Map::new()))
+            .define(expanded, crate::expr::SymbolKind::Target, Value::strct(Map::new()))
             .map_err(|existing| LoadError::DuplicateName {
-                pos: block.pos.clone(),
+                pos: target.pos.clone(),
                 name: expanded.clone(),
                 existing: existing.as_str(),
             })?;
@@ -250,8 +250,8 @@ pub fn expand_matrix(
 /// Rewrite an expression for a matrix expansion slice.
 ///
 /// - Refs matching matrix key names are substituted with concrete values
-/// - Refs matching sibling matrix blocks are rewritten to the expanded name
-fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs: &HashMap<String, String>) -> Expr {
+/// - Refs matching sibling matrix targets are rewritten to the expanded name
+fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, target_subs: &HashMap<String, String>) -> Expr {
     match expr {
         Expr::Ref(parts) => {
             let first = &parts[0];
@@ -261,40 +261,40 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs
             {
                 return sub.clone();
             }
-            // Rewrite references to sibling matrix blocks
-            if let Some(expanded_name) = block_subs.get(first) {
+            // Rewrite references to sibling matrix targets
+            if let Some(expanded_name) = target_subs.get(first) {
                 let mut new_parts = parts.clone();
                 new_parts[0] = expanded_name.clone();
                 return Expr::Ref(new_parts);
             }
             expr.clone()
         }
-        Expr::BlockRef(_) => expr.clone(),
+        Expr::TargetRef(_) => expr.clone(),
         Expr::MatrixRef { name, keys, fields } => Expr::MatrixRef {
             name: name.clone(),
             keys: keys
                 .iter()
-                .map(|key| rewrite_matrix_expr(key, key_subs, block_subs))
+                .map(|key| rewrite_matrix_expr(key, key_subs, target_subs))
                 .collect(),
             fields: fields.clone(),
         },
-        Expr::BlockCall {
+        Expr::TargetCall {
             name,
             keys,
             args,
             fields,
-        } => Expr::BlockCall {
+        } => Expr::TargetCall {
             name: name.clone(),
             keys: keys.as_ref().map(|keys| {
                 keys.iter()
-                    .map(|key| rewrite_matrix_expr(key, key_subs, block_subs))
+                    .map(|key| rewrite_matrix_expr(key, key_subs, target_subs))
                     .collect()
             }),
             args: args
                 .iter()
                 .map(|arg| Field {
                     name: arg.name.clone(),
-                    value: rewrite_matrix_expr(&arg.value, key_subs, block_subs),
+                    value: rewrite_matrix_expr(&arg.value, key_subs, target_subs),
                 })
                 .collect(),
             fields: fields.clone(),
@@ -305,7 +305,7 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs
                 .map(|p| match p {
                     StringPart::Literal(_) => p.clone(),
                     StringPart::Interpolation(e) => {
-                        StringPart::Interpolation(rewrite_matrix_expr(e, key_subs, block_subs))
+                        StringPart::Interpolation(rewrite_matrix_expr(e, key_subs, target_subs))
                     }
                 })
                 .collect();
@@ -314,7 +314,7 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs
         Expr::List(items) => Expr::List(
             items
                 .iter()
-                .map(|e| rewrite_matrix_expr(e, key_subs, block_subs))
+                .map(|e| rewrite_matrix_expr(e, key_subs, target_subs))
                 .collect(),
         ),
         Expr::Map(fields) => Expr::Map(
@@ -323,36 +323,36 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, block_subs
                 .map(|f| crate::ast::MapEntry {
                     name: f.name.clone(),
                     typ: f.typ.clone(),
-                    value: rewrite_matrix_expr(&f.value, key_subs, block_subs),
+                    value: rewrite_matrix_expr(&f.value, key_subs, target_subs),
                 })
                 .collect(),
         ),
         Expr::Call(name, args) => Expr::Call(
             name.clone(),
             args.iter()
-                .map(|e| rewrite_matrix_expr(e, key_subs, block_subs))
+                .map(|e| rewrite_matrix_expr(e, key_subs, target_subs))
                 .collect(),
         ),
         Expr::Pipe(inner, name, args) => Expr::Pipe(
-            Box::new(rewrite_matrix_expr(inner, key_subs, block_subs)),
+            Box::new(rewrite_matrix_expr(inner, key_subs, target_subs)),
             name.clone(),
             args.iter()
-                .map(|e| rewrite_matrix_expr(e, key_subs, block_subs))
+                .map(|e| rewrite_matrix_expr(e, key_subs, target_subs))
                 .collect(),
         ),
         Expr::If(cond, then_val, else_val) => Expr::If(
-            Box::new(rewrite_matrix_expr(cond, key_subs, block_subs)),
-            Box::new(rewrite_matrix_expr(then_val, key_subs, block_subs)),
-            Box::new(rewrite_matrix_expr(else_val, key_subs, block_subs)),
+            Box::new(rewrite_matrix_expr(cond, key_subs, target_subs)),
+            Box::new(rewrite_matrix_expr(then_val, key_subs, target_subs)),
+            Box::new(rewrite_matrix_expr(else_val, key_subs, target_subs)),
         ),
         Expr::BinOp(lhs, op, rhs) => Expr::BinOp(
-            Box::new(rewrite_matrix_expr(lhs, key_subs, block_subs)),
+            Box::new(rewrite_matrix_expr(lhs, key_subs, target_subs)),
             op.clone(),
-            Box::new(rewrite_matrix_expr(rhs, key_subs, block_subs)),
+            Box::new(rewrite_matrix_expr(rhs, key_subs, target_subs)),
         ),
         Expr::Add(lhs, rhs) => Expr::Add(
-            Box::new(rewrite_matrix_expr(lhs, key_subs, block_subs)),
-            Box::new(rewrite_matrix_expr(rhs, key_subs, block_subs)),
+            Box::new(rewrite_matrix_expr(lhs, key_subs, target_subs)),
+            Box::new(rewrite_matrix_expr(rhs, key_subs, target_subs)),
         ),
         Expr::Number(_) | Expr::Bool(_) | Expr::Duration(_) | Expr::Null => expr.clone(),
     }
@@ -364,10 +364,10 @@ mod tests {
 
     fn combinations(source: &str, scope: &Scope) -> Vec<String> {
         let module = crate::parser::parse(source, "<test>").unwrap();
-        let crate::ast::Statement::Block(block) = &module.statements[0] else {
-            panic!("expected block");
+        let crate::ast::Statement::Target(target) = &module.statements[0] else {
+            panic!("expected target");
         };
-        matrix_combinations(block, scope)
+        matrix_combinations(target, scope)
             .unwrap()
             .iter()
             .map(|combo| matrix_values_key(&combo.iter().collect::<Vec<_>>()))
@@ -423,11 +423,11 @@ mod tests {
     #[test]
     fn values_expression_must_be_a_list() {
         let module = crate::parser::parse(r#"job[item = "x"] = exec {}"#, "<test>").unwrap();
-        let crate::ast::Statement::Block(block) = &module.statements[0] else {
-            panic!("expected block");
+        let crate::ast::Statement::Target(target) = &module.statements[0] else {
+            panic!("expected target");
         };
         assert!(matches!(
-            matrix_combinations(block, &Scope::new()),
+            matrix_combinations(target, &Scope::new()),
             Err(LoadError::MatrixKeyNotList { name, .. }) if name == "item"
         ));
     }
@@ -458,8 +458,8 @@ mod tests {
     }
 
     #[test]
-    fn matrix_key_preserves_block_reference_type() {
-        let reference = Value::BlockRef(r#"crate["core"]"#.into());
+    fn matrix_key_preserves_target_reference_type() {
+        let reference = Value::TargetRef(r#"crate["core"]"#.into());
 
         assert_eq!(matrix_key("consumer", &[&reference]), r#"consumer[crate["core"]]"#);
     }
@@ -467,20 +467,20 @@ mod tests {
     #[test]
     fn rewrite_substitutes_key() {
         let subs = HashMap::from([("arch".to_owned(), Expr::Str(vec![StringPart::Literal("amd64".into())]))]);
-        let block_subs = HashMap::new();
+        let target_subs = HashMap::new();
 
         let expr = Expr::Ref(vec!["arch".into()]);
-        let result = rewrite_matrix_expr(&expr, &subs, &block_subs);
+        let result = rewrite_matrix_expr(&expr, &subs, &target_subs);
         assert_eq!(result, Expr::Str(vec![StringPart::Literal("amd64".into())]));
     }
 
     #[test]
-    fn rewrite_remaps_sibling_block() {
+    fn rewrite_remaps_sibling_target() {
         let subs = HashMap::new();
-        let block_subs = HashMap::from([("image".to_owned(), r#"image["amd64"]"#.to_owned())]);
+        let target_subs = HashMap::from([("image".to_owned(), r#"image["amd64"]"#.to_owned())]);
 
         let expr = Expr::Ref(vec!["image".into(), "ref".into()]);
-        let result = rewrite_matrix_expr(&expr, &subs, &block_subs);
+        let result = rewrite_matrix_expr(&expr, &subs, &target_subs);
         assert_eq!(result, Expr::Ref(vec![r#"image["amd64"]"#.into(), "ref".into()]));
     }
 }

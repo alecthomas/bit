@@ -13,10 +13,10 @@ use crate::file_tracker::FileTracker;
 use crate::provider::{BoxError, DynResource, FuncSignature, Provider};
 use crate::value::Value;
 
-/// A block's `env`.
+/// A target's `env`.
 pub(super) type Env = BTreeMap<String, String>;
 
-/// The `docker` CLI with the block's `env`, which configures the client,
+/// The `docker` CLI with the target's `env`, which configures the client,
 /// for example `DOCKER_HOST` selects the daemon. It never reaches a
 /// container: that is `docker.container`'s `environment`.
 pub(super) fn docker(env: &Env) -> Command {

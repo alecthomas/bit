@@ -1,0 +1,21 @@
+# Project for the end-to-end smoke test of the debug binary, kept apart from
+# the repository's own BUILD.bit so the test doesn't depend on how bit builds.
+
+let names = ["a", "b"]
+
+# Greet each name.
+greet[name = names] = exec {
+  command = "echo hello #{name}"
+}
+
+# Publish one name.
+publish(name : string) = exec {
+  command = "echo publish #{name}"
+  depends_on = [greet]
+}
+
+# Greet everyone.
+group default = [greet]
+
+# Greet everyone and publish a name.
+group release(name : string = "a") = [publish(name = name)]

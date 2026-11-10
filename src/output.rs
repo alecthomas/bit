@@ -17,13 +17,13 @@ const REGION_LINES: usize = 5;
 /// lost to scrollback.
 const TAIL_LINES: usize = 50;
 
-/// Emit a debug message via an `Output` or `BlockWriter`, formatting the
+/// Emit a debug message via an `Output` or `TargetWriter`, formatting the
 /// message only when debug is enabled on the target. Mirrors `log::debug!` /
 /// `tracing::debug!` so argument expressions and the `format!` allocation
 /// are skipped entirely on the common (debug-off) path.
 ///
 /// The target must expose `debug_enabled()` and `debug(&str)` methods —
-/// both [`Output`] and [`BlockWriter`] do.
+/// both [`Output`] and [`TargetWriter`] do.
 #[macro_export]
 macro_rules! debug {
     ($target:expr, $($arg:tt)*) => {{
@@ -82,7 +82,7 @@ pub enum Event {
     Restore,
     NoChange,
     Debug,
-    /// Terminal: block was skipped because it is `protected` (destroy refused).
+    /// Terminal: target was skipped because it is `protected` (destroy refused).
     Protected,
     Info,
     Warning,
@@ -160,7 +160,7 @@ pub struct Message {
 
 impl Message {
     /// A message from bit itself rather than a command, such as a warning
-    /// that must stay visible after the block succeeds.
+    /// that must stay visible after the target succeeds.
     pub fn new(level: MessageLevel, text: impl Into<String>) -> Self {
         Self {
             level,
@@ -235,7 +235,7 @@ impl TaskState {
 }
 
 /// Thread-safe output formatter. All output goes through this to keep
-/// block prefixes aligned and interleaved output readable.
+/// target prefixes aligned and interleaved output readable.
 ///
 /// When stdout is a TTY, each active task gets a fixed-height "live region"
 /// at the bottom of the screen showing its header and most recent output
@@ -268,7 +268,7 @@ struct OutputInner {
     /// Number of terminal rows currently occupied by the live region, used
     /// to know how far up to move the cursor before clearing.
     live_rows: usize,
-    /// Blocks that printed a [`Message`] since they started.
+    /// Targets that printed a [`Message`] since they started.
     messaged: HashSet<String>,
 }
 
@@ -334,8 +334,8 @@ fn format_elapsed(d: Duration) -> String {
 }
 
 impl Output {
-    pub fn new(block_names: &[&str]) -> Self {
-        let max_name_len = block_names.iter().map(|n| n.len()).max().unwrap_or(0);
+    pub fn new(target_names: &[&str]) -> Self {
+        let max_name_len = target_names.iter().map(|n| n.len()).max().unwrap_or(0);
         // Without terminal codes, behave exactly as `--long`.
         let live = terminal_codes_enabled(&io::stdout());
         let (term_height, term_width) = if live {
@@ -392,8 +392,8 @@ impl Output {
         self.debug
     }
 
-    /// Emit an engine-level debug message, padded to align with block-prefixed
-    /// output so it lines up visually with per-block messages. Each line is
+    /// Emit an engine-level debug message, padded to align with target-prefixed
+    /// output so it lines up visually with per-target messages. Each line is
     /// prefixed with the elapsed time since this `Output` was constructed.
     /// No-op when debug is disabled.
     pub fn debug(&self, message: &str) {
@@ -402,13 +402,13 @@ impl Output {
         }
         let stamped = format!("{} {message}", format_elapsed(self.start.elapsed()));
         // Passing an empty name produces a prefix of `<spaces> <symbol>` with
-        // the same width as real block prefixes (right-aligned padding).
+        // the same width as real target prefixes (right-aligned padding).
         self.dispatch_event("", Event::Debug, None, &stamped, /*raw=*/ false);
     }
 
-    /// Create a writer for a specific block.
-    pub fn writer(&self, name: &str) -> BlockWriter {
-        BlockWriter {
+    /// Create a writer for a specific target.
+    pub fn writer(&self, name: &str) -> TargetWriter {
+        TargetWriter {
             output: self.clone(),
             name: name.to_owned(),
             color: color_for_name(name),
@@ -417,9 +417,9 @@ impl Output {
         }
     }
 
-    /// Create a writer for a specific block with left-aligned indentation.
-    pub fn writer_indented(&self, name: &str, indent: usize) -> BlockWriter {
-        BlockWriter {
+    /// Create a writer for a specific target with left-aligned indentation.
+    pub fn writer_indented(&self, name: &str, indent: usize) -> TargetWriter {
+        TargetWriter {
             output: self.clone(),
             name: name.to_owned(),
             color: color_for_name(name),
@@ -504,8 +504,8 @@ impl Output {
 }
 
 impl OutputInner {
-    /// Return the lines to print for a block's terminal event and stop
-    /// tracking its messages. A bare "ok" is dropped when the block printed
+    /// Return the lines to print for a target's terminal event and stop
+    /// tracking its messages. A bare "ok" is dropped when the target printed
     /// messages, because they say more.
     fn finish_messages(&mut self, name: &str, event: Event, message: &str, lines: Vec<String>) -> Vec<String> {
         let messaged = self.messaged.remove(name);
@@ -520,7 +520,7 @@ impl OutputInner {
         format!("{} {sep}", self.label(name, indent))
     }
 
-    /// The block name, indented (plan mode) or right-aligned (apply mode).
+    /// The target name, indented (plan mode) or right-aligned (apply mode).
     fn label(&self, name: &str, indent: Option<usize>) -> String {
         match indent {
             Some(n) => {
@@ -531,9 +531,9 @@ impl OutputInner {
         }
     }
 
-    /// Painted head and continuation prefixes for an event. The block name
+    /// Painted head and continuation prefixes for an event. The target name
     /// takes its own colour and the event's sigil takes the event's colour.
-    /// A dim event fades only its sigil, so the block name reads the same on
+    /// A dim event fades only its sigil, so the target name reads the same on
     /// every line.
     fn event_prefixes(&self, name: &str, event: Event, indent: Option<usize>) -> (String, String) {
         let color = color_for_name(name);
@@ -794,8 +794,8 @@ impl OutputInner {
         let _ = self.redraw_live(out);
     }
 
-    /// Snapshot the block's last `REGION_LINES` streamed lines without
-    /// removing them from state. Returns an empty vec if the block has
+    /// Snapshot the target's last `REGION_LINES` streamed lines without
+    /// removing them from state. Returns an empty vec if the target has
     /// no active region. Exposed as a pure method for testing.
     fn recent_tail(&self, name: &str) -> Vec<String> {
         self.active
@@ -805,9 +805,9 @@ impl OutputInner {
     }
 
     /// Snapshot the header (the `Event::Starting` lines — i.e. the command
-    /// being executed) for a block that currently owns a live region. Used
+    /// being executed) for a target that currently owns a live region. Used
     /// alongside [`recent_tail`] on failure so the command stays visible in
-    /// scrollback. Returns an empty vec when the block has no active region.
+    /// scrollback. Returns an empty vec when the target has no active region.
     fn recent_header(&self, name: &str) -> Vec<String> {
         self.active
             .get(name)
@@ -816,7 +816,7 @@ impl OutputInner {
     }
 
     /// Print the task's terminal event above the live region and remove
-    /// the region. When `preserve_tail` is true (on failure), the block's
+    /// the region. When `preserve_tail` is true (on failure), the target's
     /// header (the command that was being executed) and its last
     /// `REGION_LINES` streamed lines are flushed above the event so the
     /// full failure context stays on screen. In non-TTY mode the header
@@ -859,36 +859,36 @@ impl Drop for OutputInner {
 }
 
 thread_local! {
-    /// The writer of the block whose work is running on this thread. Code
+    /// The writer of the target whose work is running on this thread. Code
     /// with no writer of its own, such as a resource resolving its inputs,
-    /// logs debug messages under it. Each block runs on one thread at a
-    /// time, so the thread identifies the block.
-    static CURRENT_BLOCK: std::cell::RefCell<Option<BlockWriter>> = const { std::cell::RefCell::new(None) };
+    /// logs debug messages under it. Each target runs on one thread at a
+    /// time, so the thread identifies the target.
+    static CURRENT_TARGET: std::cell::RefCell<Option<TargetWriter>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Makes a block's writer the current block on this thread until dropped,
+/// Makes a target's writer the current target on this thread until dropped,
 /// restoring the previous one, so scopes may nest.
-pub struct BlockScope {
-    previous: Option<BlockWriter>,
+pub struct TargetScope {
+    previous: Option<TargetWriter>,
 }
 
-impl BlockScope {
-    pub fn enter(writer: &BlockWriter) -> Self {
-        let previous = CURRENT_BLOCK.with(|current| current.replace(Some(writer.clone())));
+impl TargetScope {
+    pub fn enter(writer: &TargetWriter) -> Self {
+        let previous = CURRENT_TARGET.with(|current| current.replace(Some(writer.clone())));
         Self { previous }
     }
 }
 
-impl Drop for BlockScope {
+impl Drop for TargetScope {
     fn drop(&mut self) {
-        CURRENT_BLOCK.with(|current| *current.borrow_mut() = self.previous.take());
+        CURRENT_TARGET.with(|current| *current.borrow_mut() = self.previous.take());
     }
 }
 
-/// Emit a debug message under the current block on this thread, if there is
+/// Emit a debug message under the current target on this thread, if there is
 /// one and debug output is on. `message` is only built when it is shown.
 pub fn debug_current(message: impl FnOnce() -> String) {
-    CURRENT_BLOCK.with(|current| {
+    CURRENT_TARGET.with(|current| {
         if let Some(writer) = current.borrow().as_ref()
             && writer.debug_enabled()
         {
@@ -897,19 +897,19 @@ pub fn debug_current(message: impl FnOnce() -> String) {
     });
 }
 
-/// A writer bound to a specific block, used by providers to emit output.
+/// A writer bound to a specific target, used by providers to emit output.
 #[derive(Clone)]
-pub struct BlockWriter {
+pub struct TargetWriter {
     output: Output,
     name: String,
     color: Color,
     /// `None` = right-aligned (apply mode), `Some(n)` = left-aligned with indent (plan mode).
     indent: Option<usize>,
-    /// Why the block runs, shown on the line [`BlockWriter::starting`] prints.
+    /// Why the target runs, shown on the line [`TargetWriter::starting`] prints.
     start_reason: Option<String>,
 }
 
-impl BlockWriter {
+impl TargetWriter {
     pub fn event(&self, event: Event, message: &str) {
         self.output
             .dispatch_event(&self.name, event, self.indent, message, /*raw=*/ false);
@@ -931,11 +931,11 @@ impl BlockWriter {
         self.event_raw(event, &styled);
     }
 
-    /// A copy of this writer whose [`BlockWriter::starting`] line shows
+    /// A copy of this writer whose [`TargetWriter::starting`] line shows
     /// `reason`. The engine hands it to resources that announce their own
-    /// start, since only the engine knows why a block runs.
-    pub fn with_start_reason(&self, reason: Option<&str>) -> BlockWriter {
-        BlockWriter {
+    /// start, since only the engine knows why a target runs.
+    pub fn with_start_reason(&self, reason: Option<&str>) -> TargetWriter {
+        TargetWriter {
             output: self.output.clone(),
             name: self.name.clone(),
             color: self.color,
@@ -956,7 +956,7 @@ impl BlockWriter {
         self.output.debug
     }
 
-    /// Emit a block-scoped debug message. Each line is prefixed with the
+    /// Emit a target-scoped debug message. Each line is prefixed with the
     /// elapsed time since the `Output` was constructed. No-op when debug is
     /// disabled. Prefer the `debug!` macro to avoid formatting when disabled.
     pub fn debug(&self, message: &str) {
@@ -994,13 +994,13 @@ impl BlockWriter {
             .dispatch_stderr_details(&self.name, self.color, self.indent, details);
     }
 
-    /// Show a message printed by the block's command. A block that printed
+    /// Show a message printed by the target's command. A target that printed
     /// any messages ends with them instead of a bare "ok".
     pub fn message(&self, message: &Message) {
         self.output.dispatch_message(&self.name, self.indent, message);
     }
 
-    /// Write all lines from a reader, prefixed with the block name. Lines
+    /// Write all lines from a reader, prefixed with the target name. Lines
     /// that are [`Message`]s are shown as messages instead.
     pub fn pipe_stdout(&self, reader: impl BufRead) {
         for line in reader.lines() {
@@ -1123,14 +1123,14 @@ fn test_detail(duration: Option<std::time::Duration>, counts: &[String]) -> Stri
 }
 
 /// An `io::Write` adapter that line-buffers and prefixes output.
-pub struct BlockWriteAdapter {
-    writer: BlockWriter,
+pub struct TargetWriteAdapter {
+    writer: TargetWriter,
     stderr: bool,
     buf: Vec<u8>,
 }
 
-impl BlockWriteAdapter {
-    pub fn stdout(writer: BlockWriter) -> Self {
+impl TargetWriteAdapter {
+    pub fn stdout(writer: TargetWriter) -> Self {
         Self {
             writer,
             stderr: false,
@@ -1138,7 +1138,7 @@ impl BlockWriteAdapter {
         }
     }
 
-    pub fn stderr(writer: BlockWriter) -> Self {
+    pub fn stderr(writer: TargetWriter) -> Self {
         Self {
             writer,
             stderr: true,
@@ -1159,7 +1159,7 @@ impl BlockWriteAdapter {
     }
 }
 
-impl Write for BlockWriteAdapter {
+impl Write for TargetWriteAdapter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.buf.extend_from_slice(buf);
         self.flush_lines();
@@ -1311,7 +1311,7 @@ mod tests {
         let ok = vec!["a ✔ ok".to_owned()];
         inner.messaged.insert("a".into());
         assert!(inner.finish_messages("a", Event::Ok, "", ok.clone()).is_empty());
-        // Tracking ends with the block, so its next run shows "ok" again.
+        // Tracking ends with the target, so its next run shows "ok" again.
         assert_eq!(inner.finish_messages("a", Event::Ok, "", ok.clone()), ok);
         inner.live = false;
     }
@@ -1476,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn dim_event_keeps_block_name_colour() {
+    fn dim_event_keeps_target_name_colour() {
         let inner = inner_tty(7, 80);
         let (head, cont) = inner.event_prefixes("backend", Event::Skipped, None);
         let name = "backend".paint(color_for_name("backend")).to_string();
@@ -1498,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_tail_empty_for_unknown_block() {
+    fn recent_tail_empty_for_unknown_target() {
         let inner = inner_tty(4, 80);
         assert!(inner.recent_tail("missing").is_empty());
     }
@@ -1514,7 +1514,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_header_empty_for_unknown_block() {
+    fn recent_header_empty_for_unknown_target() {
         let inner = inner_tty(4, 80);
         assert!(inner.recent_header("missing").is_empty());
     }

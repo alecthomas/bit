@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::ast::{Block, Expr, Field, Module, Phase, Statement, StringPart};
-use crate::dag::{AFTER_FIELD, DEPENDS_ON_FIELD, Dag, DagNode, collect_block_refs, collect_dependency_refs};
+use crate::ast::{Expr, Field, Module, Phase, Statement, StringPart, Target};
+use crate::dag::{AFTER_FIELD, DEPENDS_ON_FIELD, Dag, DagNode, collect_dependency_refs, collect_target_refs};
 use crate::expr::{self, Scope};
 use crate::loader::LoadError;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    ApplyResult as ProviderApplyResult, Block as ProviderBlock, BoxError, CachePolicy, Changes, DynResource,
-    PlanAction, PlanResult, ProviderRegistry, ResourceKind, ResourceSchema, StructField, StructType,
+    ApplyResult as ProviderApplyResult, BoxError, CachePolicy, Changes, DynResource, PlanAction, PlanResult,
+    ProviderRegistry, ResourceKind, ResourceSchema, StructField, StructType, Target as ProviderTarget,
 };
 use crate::state::StateStore;
 use crate::value::{Map, Value, validate_type};
@@ -17,7 +17,7 @@ use crate::value::{Map, Value, validate_type};
 const INSTANCE_PROVIDER: &str = "module";
 
 /// Modifiers written on a module instance. They describe the instance as a
-/// whole, so every block it expands to inherits them.
+/// whole, so every target it expands to inherits them.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct InstanceModifiers {
     pub phase: Phase,
@@ -27,28 +27,28 @@ pub struct InstanceModifiers {
 }
 
 impl InstanceModifiers {
-    pub fn of(block: &Block) -> Self {
+    pub fn of(target: &Target) -> Self {
         Self {
-            phase: block.phase,
-            protected: block.protected,
-            explicit: block.explicit,
-            large: block.large,
+            phase: target.phase,
+            protected: target.protected,
+            explicit: target.explicit,
+            large: target.large,
         }
     }
 
-    /// Combine with an inner block's own modifiers. A block keeps its own
+    /// Combine with an inner target's own modifiers. A target keeps its own
     /// phase inside a default-phase instance and takes the instance's phase
     /// otherwise; a different explicit phase would contradict the instance.
-    fn merge(self, instance: &str, block: &Block) -> Result<Self, LoadError> {
-        let phase = match (self.phase, block.phase) {
+    fn merge(self, instance: &str, target: &Target) -> Result<Self, LoadError> {
+        let phase = match (self.phase, target.phase) {
             (Phase::Default, phase) => phase,
             (phase, Phase::Default) => phase,
-            (instance_phase, block_phase) if instance_phase == block_phase => instance_phase,
-            (instance_phase, block_phase) => {
+            (instance_phase, target_phase) if instance_phase == target_phase => instance_phase,
+            (instance_phase, target_phase) => {
                 return Err(LoadError::PhaseConflict {
-                    pos: block.pos.clone(),
-                    block: block.name.clone(),
-                    block_phase,
+                    pos: target.pos.clone(),
+                    target: target.name.clone(),
+                    target_phase,
                     instance: instance.to_owned(),
                     instance_phase,
                 });
@@ -56,17 +56,17 @@ impl InstanceModifiers {
         };
         Ok(Self {
             phase,
-            protected: self.protected || block.protected,
-            explicit: self.explicit || block.explicit,
-            large: self.large || block.large,
+            protected: self.protected || target.protected,
+            explicit: self.explicit || target.explicit,
+            large: self.large || target.large,
         })
     }
 
-    fn apply_to(self, block: &mut Block) {
-        block.phase = self.phase;
-        block.protected = self.protected;
-        block.explicit = self.explicit;
-        block.large = self.large;
+    fn apply_to(self, target: &mut Target) {
+        target.phase = self.phase;
+        target.protected = self.protected;
+        target.explicit = self.explicit;
+        target.large = self.large;
     }
 }
 
@@ -76,13 +76,13 @@ pub fn is_instance(node: &DagNode) -> bool {
     node.provider == INSTANCE_PROVIDER
 }
 
-/// A pass-through resource for module instance blocks.
+/// A pass-through resource for module instance targets.
 ///
-/// The module instance node sits atop a module's inner blocks in the DAG.
+/// The module instance node sits atop a module's inner targets in the DAG.
 /// Its fields are the module's declared output expressions (rewritten to
-/// reference namespaced inner blocks). The engine evaluates those fields
+/// reference namespaced inner targets). The engine evaluates those fields
 /// and this resource passes them through as outputs, making them available
-/// to downstream blocks as `instance.output_name`.
+/// to downstream targets as `instance.output_name`.
 pub struct ModuleResource {
     pub resource_schema: ResourceSchema,
 }
@@ -122,7 +122,7 @@ impl DynResource for ModuleResource {
         inputs: &Map,
         _prior_state: Option<&serde_json::Value>,
         _changes: &Changes,
-        _writer: &BlockWriter,
+        _writer: &TargetWriter,
     ) -> Result<ProviderApplyResult<serde_json::Value, Map>, BoxError> {
         Ok(ProviderApplyResult {
             outputs: inputs.clone(),
@@ -130,11 +130,15 @@ impl DynResource for ModuleResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &ProviderBlock<serde_json::Value>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(
+        &self,
+        _prior_state: &ProviderTarget<serde_json::Value>,
+        _writer: &TargetWriter,
+    ) -> Result<(), BoxError> {
         Ok(())
     }
 
-    /// A module instance only forwards the outputs of its inner blocks, which
+    /// A module instance only forwards the outputs of its inner targets, which
     /// carry their own policies. There is no result of its own to share.
     fn cache_policy(&self, _inputs: &Map) -> CachePolicy {
         CachePolicy::Local
@@ -160,33 +164,33 @@ pub fn resolve_module_path(
 struct ModuleInterface {
     params: Vec<crate::ast::Param>,
     lets: Vec<crate::ast::Let>,
-    blocks: Vec<Block>,
+    targets: Vec<Target>,
     outputs: Vec<crate::ast::Output>,
-    targets: Vec<crate::ast::Target>,
+    groups: Vec<crate::ast::Group>,
 }
 
 fn parse_module_interface(module: &Module) -> ModuleInterface {
     let mut iface = ModuleInterface {
         params: Vec::new(),
         lets: Vec::new(),
-        blocks: Vec::new(),
-        outputs: Vec::new(),
         targets: Vec::new(),
+        outputs: Vec::new(),
+        groups: Vec::new(),
     };
     for stmt in &module.statements {
         match stmt {
             Statement::Import(_) => {}
             Statement::Param(p) => iface.params.push(p.clone()),
             Statement::Let(l) => iface.lets.push(l.clone()),
-            Statement::Block(b) => iface.blocks.push(b.clone()),
+            Statement::Target(b) => iface.targets.push(b.clone()),
             Statement::Output(o) => iface.outputs.push(o.clone()),
-            Statement::Target(t) => iface.targets.push(t.clone()),
+            Statement::Group(t) => iface.groups.push(t.clone()),
         }
     }
     iface
 }
 
-/// Context for expanding a module block into the DAG.
+/// Context for expanding a module target into the DAG.
 pub struct ExpandContext<'a> {
     pub scope: &'a mut Scope,
     pub registry: &'a ProviderRegistry,
@@ -195,18 +199,18 @@ pub struct ExpandContext<'a> {
     pub import_roots: &'a [crate::import::ImportRoot],
 }
 
-/// Expand a module block into namespaced inner blocks in the DAG.
+/// Expand a module target into namespaced inner targets in the DAG.
 ///
 /// Given `instance_name = provider.resource { fields... }` where the provider
 /// resolves to a `.bit` module file, this function:
 ///
 /// 1. Parses the module file
 /// 2. Maps outer fields to module params
-/// 3. Creates namespaced inner blocks (`instance.inner_block`)
+/// 3. Creates namespaced inner targets (`instance.inner_target`)
 /// 4. Creates a synthetic module instance node for output forwarding
 /// 5. Wires all dependency edges
 ///
-/// Every block the instance expands to inherits `modifiers`.
+/// Every target the instance expands to inherits `modifiers`.
 pub fn expand_module(
     instance_name: &str,
     module_path: &Path,
@@ -221,8 +225,8 @@ pub fn expand_module(
     crate::loader::validate_names(&module_ast)?;
 
     let iface = parse_module_interface(&module_ast);
-    let inner_block_names: HashSet<String> = iface.blocks.iter().map(|b| b.name.clone()).collect();
-    let inner_target_names: HashSet<String> = iface.targets.iter().map(|target| target.name.clone()).collect();
+    let inner_target_names: HashSet<String> = iface.targets.iter().map(|b| b.name.clone()).collect();
+    let inner_group_names: HashSet<String> = iface.groups.iter().map(|group| group.name.clone()).collect();
     let param_names: HashSet<String> = iface.params.iter().map(|p| p.name.clone()).collect();
 
     // Map outer fields to param expressions
@@ -235,7 +239,7 @@ pub fn expand_module(
     }
 
     // Build unified substitution map: every param and let becomes a substitution
-    // so inner block fields are self-contained.
+    // so inner target fields are self-contained.
     let mut substitutions: HashMap<String, Expr> = HashMap::new();
     let mut eval_scope = ctx.scope.clone();
 
@@ -263,7 +267,7 @@ pub fn expand_module(
                 substitutions.insert(param.name.clone(), value.to_expr());
             }
             Err(_) => {
-                // Deferred: references outer block outputs not yet available.
+                // Deferred: references outer target outputs not yet available.
                 // Substitute the outer expression directly.
                 substitutions.insert(param.name.clone(), value_expr);
             }
@@ -272,7 +276,7 @@ pub fn expand_module(
 
     // Process let bindings in declaration order
     for let_binding in &iface.lets {
-        let rewritten = rewrite_expr(&let_binding.value, &inner_block_names, &substitutions, instance_name);
+        let rewritten = rewrite_expr(&let_binding.value, &inner_target_names, &substitutions, instance_name);
         match expr::eval(&rewritten, &eval_scope) {
             Ok(value) => {
                 if let Some(typ) = &let_binding.typ {
@@ -291,77 +295,77 @@ pub fn expand_module(
         }
     }
 
-    // Create inner block DagNodes
-    for block in &iface.blocks {
-        let qualified_name = format!("{instance_name}.{}", block.name);
-        let block_modifiers = modifiers.merge(instance_name, block)?;
+    // Create inner target DagNodes
+    for target in &iface.targets {
+        let qualified_name = format!("{instance_name}.{}", target.name);
+        let target_modifiers = modifiers.merge(instance_name, target)?;
 
-        if !block.params.is_empty() {
-            let mut declaration = block.clone();
+        if !target.params.is_empty() {
+            let mut declaration = target.clone();
             declaration.name = qualified_name;
-            block_modifiers.apply_to(&mut declaration);
-            declaration.fields = block
+            target_modifiers.apply_to(&mut declaration);
+            declaration.fields = target
                 .fields
                 .iter()
                 .map(|field| Field {
                     name: field.name.clone(),
-                    value: rewrite_expr(&field.value, &inner_block_names, &substitutions, instance_name),
+                    value: rewrite_expr(&field.value, &inner_target_names, &substitutions, instance_name),
                 })
                 .collect();
             for param in &mut declaration.params {
                 param.default = param
                     .default
                     .as_ref()
-                    .map(|value| rewrite_expr(value, &inner_block_names, &substitutions, instance_name));
+                    .map(|value| rewrite_expr(value, &inner_target_names, &substitutions, instance_name));
             }
-            ctx.dag.add_block_declaration(declaration);
+            ctx.dag.add_target_declaration(declaration);
             continue;
         }
 
         // Check for nested module
-        if let Some(nested_path) = resolve_module_path(ctx.import_roots, &block.provider, &block.resource) {
-            let rewritten_fields: Vec<Field> = block
+        if let Some(nested_path) = resolve_module_path(ctx.import_roots, &target.provider, &target.resource) {
+            let rewritten_fields: Vec<Field> = target
                 .fields
                 .iter()
                 .map(|f| Field {
                     name: f.name.clone(),
-                    value: rewrite_expr(&f.value, &inner_block_names, &substitutions, instance_name),
+                    value: rewrite_expr(&f.value, &inner_target_names, &substitutions, instance_name),
                 })
                 .collect();
-            expand_module(&qualified_name, &nested_path, &rewritten_fields, block_modifiers, ctx)?;
+            expand_module(&qualified_name, &nested_path, &rewritten_fields, target_modifiers, ctx)?;
             continue;
         }
 
         let resource = ctx
             .registry
-            .get_resource(&block.provider, &block.resource)
+            .get_resource(&target.provider, &target.resource)
             .ok_or_else(|| LoadError::UnknownResource {
-                pos: block.pos.clone(),
-                provider: block.provider.clone(),
-                resource: block.resource.clone(),
+                pos: target.pos.clone(),
+                provider: target.provider.clone(),
+                resource: target.resource.clone(),
             })?;
 
-        let rewritten_fields: Vec<Field> = block
+        let rewritten_fields: Vec<Field> = target
             .fields
             .iter()
             .map(|f| Field {
                 name: f.name.clone(),
-                value: rewrite_expr(&f.value, &inner_block_names, &substitutions, instance_name),
+                value: rewrite_expr(&f.value, &inner_target_names, &substitutions, instance_name),
             })
             .collect();
 
         let prior_state = ctx.store.load(&qualified_name)?;
 
         ctx.dag.add_node(DagNode {
-            pos: block.pos.clone(),
+            pos: target.pos.clone(),
             name: qualified_name.clone(),
-            doc: block.doc.clone(),
-            phase: block_modifiers.phase,
-            provider: block.provider.clone(),
-            resource_name: block.resource.clone(),
-            protected: block_modifiers.protected,
-            explicit: block_modifiers.explicit,
-            large: block_modifiers.large,
+            doc: target.doc.clone(),
+            phase: target_modifiers.phase,
+            provider: target.provider.clone(),
+            resource_name: target.resource.clone(),
+            protected: target_modifiers.protected,
+            explicit: target_modifiers.explicit,
+            large: target_modifiers.large,
             concurrency_group: qualified_name.clone(),
             fields: rewritten_fields,
             resource,
@@ -371,55 +375,55 @@ pub fn expand_module(
         ctx.scope
             .define(
                 &qualified_name,
-                crate::expr::SymbolKind::Block,
+                crate::expr::SymbolKind::Target,
                 Value::strct(Map::new()),
             )
             .map_err(|existing| LoadError::DuplicateName {
-                pos: block.pos.clone(),
+                pos: target.pos.clone(),
                 name: qualified_name.clone(),
                 existing: existing.as_str(),
             })?;
     }
 
-    // Wire internal dependency edges for inner blocks
-    for block in &iface.blocks {
-        let qualified_name = format!("{instance_name}.{}", block.name);
-        if !ctx.dag.has_block(&qualified_name) {
+    // Wire internal dependency edges for inner targets
+    for target in &iface.targets {
+        let qualified_name = format!("{instance_name}.{}", target.name);
+        if !ctx.dag.has_target(&qualified_name) {
             continue; // Was a nested module, edges handled by recursive expand
         }
 
         let node_fields = &ctx.dag.get_node(&qualified_name).expect("just added").fields.clone();
 
-        for dep in collect_block_refs(node_fields, ctx.scope).map_err(|source| LoadError::Eval {
-            pos: block.pos.clone(),
+        for dep in collect_target_refs(node_fields, ctx.scope).map_err(|source| LoadError::Eval {
+            pos: target.pos.clone(),
             source,
         })? {
-            if ctx.dag.has_block(&dep) && dep != qualified_name {
+            if ctx.dag.has_target(&dep) && dep != qualified_name {
                 ctx.dag.add_dep_edge(&dep, &qualified_name)?;
             }
         }
         for dep in
             collect_dependency_refs(node_fields, DEPENDS_ON_FIELD, ctx.scope).map_err(|source| LoadError::Eval {
-                pos: block.pos.clone(),
+                pos: target.pos.clone(),
                 source,
             })?
         {
-            if ctx.dag.has_block(&dep) && dep != qualified_name {
+            if ctx.dag.has_target(&dep) && dep != qualified_name {
                 ctx.dag.add_dep_edge(&dep, &qualified_name)?;
             }
         }
         for dep in collect_dependency_refs(node_fields, AFTER_FIELD, ctx.scope).map_err(|source| LoadError::Eval {
-            pos: block.pos.clone(),
+            pos: target.pos.clone(),
             source,
         })? {
-            if ctx.dag.has_block(&dep) && dep != qualified_name {
+            if ctx.dag.has_target(&dep) && dep != qualified_name {
                 ctx.dag.add_ordering_edge(&dep, &qualified_name)?;
             }
         }
     }
 
-    // Handle non-param depends_on/after: create edges from external blocks
-    // to all inner blocks so the module waits for them.
+    // Handle non-param depends_on/after: create edges from external targets
+    // to all inner targets so the module waits for them.
     for field in outer_fields {
         if field.name == DEPENDS_ON_FIELD && !param_names.contains(DEPENDS_ON_FIELD) {
             for dep in
@@ -430,10 +434,10 @@ pub fn expand_module(
                     }
                 })?
             {
-                if ctx.dag.has_block(&dep) {
-                    for inner in &iface.blocks {
+                if ctx.dag.has_target(&dep) {
+                    for inner in &iface.targets {
                         let qname = format!("{instance_name}.{}", inner.name);
-                        if ctx.dag.has_block(&qname) {
+                        if ctx.dag.has_target(&qname) {
                             ctx.dag.add_dep_edge(&dep, &qname)?;
                         }
                     }
@@ -449,10 +453,10 @@ pub fn expand_module(
                     }
                 })?
             {
-                if ctx.dag.has_block(&dep) {
-                    for inner in &iface.blocks {
+                if ctx.dag.has_target(&dep) {
+                    for inner in &iface.targets {
                         let qname = format!("{instance_name}.{}", inner.name);
-                        if ctx.dag.has_block(&qname) {
+                        if ctx.dag.has_target(&qname) {
                             ctx.dag.add_ordering_edge(&dep, &qname)?;
                         }
                     }
@@ -467,7 +471,7 @@ pub fn expand_module(
         .iter()
         .map(|o| Field {
             name: o.name.clone(),
-            value: rewrite_expr(&o.value, &inner_block_names, &substitutions, instance_name),
+            value: rewrite_expr(&o.value, &inner_target_names, &substitutions, instance_name),
         })
         .collect();
 
@@ -537,44 +541,44 @@ pub fn expand_module(
         prior_state,
     })?;
 
-    // Module instance depends on all inner blocks (so outputs can reference them)
-    for block in &iface.blocks {
-        let qualified_name = format!("{instance_name}.{}", block.name);
-        if ctx.dag.has_block(&qualified_name) {
+    // Module instance depends on all inner targets (so outputs can reference them)
+    for target in &iface.targets {
+        let qualified_name = format!("{instance_name}.{}", target.name);
+        if ctx.dag.has_target(&qualified_name) {
             ctx.dag.add_dep_edge(&qualified_name, instance_name)?;
         }
     }
 
-    // Register module targets as declarations. The invocation pass resolves
-    // their arguments and materializes any parameterized block calls.
-    for target in &iface.targets {
-        let mut declaration = target.clone();
-        declaration.name = format!("{instance_name}.{}", target.name);
+    // Register module groups as declarations. The invocation pass resolves
+    // their arguments and materializes any parameterized target calls.
+    for group in &iface.groups {
+        let mut declaration = group.clone();
+        declaration.name = format!("{instance_name}.{}", group.name);
         for param in &mut declaration.params {
             param.default = param
                 .default
                 .as_ref()
-                .map(|value| rewrite_expr(value, &inner_block_names, &substitutions, instance_name));
+                .map(|value| rewrite_expr(value, &inner_target_names, &substitutions, instance_name));
         }
-        for call in &mut declaration.blocks {
+        for call in &mut declaration.members {
             let root_name = call.name.split('.').next().unwrap_or(&call.name);
-            if inner_block_names.contains(root_name) || inner_target_names.contains(root_name) {
+            if inner_target_names.contains(root_name) || inner_group_names.contains(root_name) {
                 call.name = format!("{instance_name}.{}", call.name);
             }
             if let Some(keys) = &mut call.keys {
                 for key in keys {
-                    *key = rewrite_expr(key, &inner_block_names, &substitutions, instance_name);
+                    *key = rewrite_expr(key, &inner_target_names, &substitutions, instance_name);
                 }
             }
             for arg in &mut call.args {
-                arg.value = rewrite_expr(&arg.value, &inner_block_names, &substitutions, instance_name);
+                arg.value = rewrite_expr(&arg.value, &inner_target_names, &substitutions, instance_name);
             }
         }
-        ctx.dag.add_target_declaration(declaration);
+        ctx.dag.add_group_declaration(declaration);
     }
 
     ctx.scope
-        .define(instance_name, crate::expr::SymbolKind::Block, Value::strct(Map::new()))
+        .define(instance_name, crate::expr::SymbolKind::Target, Value::strct(Map::new()))
         .map_err(|existing| LoadError::DuplicateName {
             pos: crate::ast::Pos {
                 file: module_path.to_string_lossy().into_owned(),
@@ -590,20 +594,20 @@ pub fn expand_module(
 
 /// Rewrite an expression for use inside an expanded module.
 ///
-/// - Refs to inner blocks are prefixed: `image.ref` -> `staging.image.ref`
+/// - Refs to inner targets are prefixed: `image.ref` -> `staging.image.ref`
 ///   (using a dotted first-part so scope lookup finds the namespaced key)
 /// - Refs to params/lets are substituted with their value expressions
 /// - All other refs pass through unchanged (outer scope)
 pub(crate) fn rewrite_expr(
     expr: &Expr,
-    inner_blocks: &HashSet<String>,
+    inner_targets: &HashSet<String>,
     substitutions: &HashMap<String, Expr>,
     prefix: &str,
 ) -> Expr {
     match expr {
         Expr::Ref(parts) => {
             let first = &parts[0];
-            if inner_blocks.contains(first) {
+            if inner_targets.contains(first) {
                 let mut new_parts = parts.clone();
                 new_parts[0] = format!("{prefix}.{first}");
                 return Expr::Ref(new_parts);
@@ -615,44 +619,44 @@ pub(crate) fn rewrite_expr(
             }
             expr.clone()
         }
-        Expr::BlockRef(name) => Expr::BlockRef(if inner_blocks.contains(name) {
+        Expr::TargetRef(name) => Expr::TargetRef(if inner_targets.contains(name) {
             format!("{prefix}.{name}")
         } else {
             name.clone()
         }),
         Expr::MatrixRef { name, keys, fields } => Expr::MatrixRef {
-            name: if inner_blocks.contains(name) {
+            name: if inner_targets.contains(name) {
                 format!("{prefix}.{name}")
             } else {
                 name.clone()
             },
             keys: keys
                 .iter()
-                .map(|key| rewrite_expr(key, inner_blocks, substitutions, prefix))
+                .map(|key| rewrite_expr(key, inner_targets, substitutions, prefix))
                 .collect(),
             fields: fields.clone(),
         },
-        Expr::BlockCall {
+        Expr::TargetCall {
             name,
             keys,
             args,
             fields,
-        } => Expr::BlockCall {
-            name: if inner_blocks.contains(name) {
+        } => Expr::TargetCall {
+            name: if inner_targets.contains(name) {
                 format!("{prefix}.{name}")
             } else {
                 name.clone()
             },
             keys: keys.as_ref().map(|keys| {
                 keys.iter()
-                    .map(|key| rewrite_expr(key, inner_blocks, substitutions, prefix))
+                    .map(|key| rewrite_expr(key, inner_targets, substitutions, prefix))
                     .collect()
             }),
             args: args
                 .iter()
                 .map(|arg| Field {
                     name: arg.name.clone(),
-                    value: rewrite_expr(&arg.value, inner_blocks, substitutions, prefix),
+                    value: rewrite_expr(&arg.value, inner_targets, substitutions, prefix),
                 })
                 .collect(),
             fields: fields.clone(),
@@ -663,7 +667,7 @@ pub(crate) fn rewrite_expr(
                 .map(|p| match p {
                     StringPart::Literal(_) => p.clone(),
                     StringPart::Interpolation(e) => {
-                        StringPart::Interpolation(rewrite_expr(e, inner_blocks, substitutions, prefix))
+                        StringPart::Interpolation(rewrite_expr(e, inner_targets, substitutions, prefix))
                     }
                 })
                 .collect();
@@ -672,7 +676,7 @@ pub(crate) fn rewrite_expr(
         Expr::List(items) => Expr::List(
             items
                 .iter()
-                .map(|e| rewrite_expr(e, inner_blocks, substitutions, prefix))
+                .map(|e| rewrite_expr(e, inner_targets, substitutions, prefix))
                 .collect(),
         ),
         Expr::Map(fields) => Expr::Map(
@@ -681,36 +685,36 @@ pub(crate) fn rewrite_expr(
                 .map(|f| crate::ast::MapEntry {
                     name: f.name.clone(),
                     typ: f.typ.clone(),
-                    value: rewrite_expr(&f.value, inner_blocks, substitutions, prefix),
+                    value: rewrite_expr(&f.value, inner_targets, substitutions, prefix),
                 })
                 .collect(),
         ),
         Expr::Call(name, args) => Expr::Call(
             name.clone(),
             args.iter()
-                .map(|e| rewrite_expr(e, inner_blocks, substitutions, prefix))
+                .map(|e| rewrite_expr(e, inner_targets, substitutions, prefix))
                 .collect(),
         ),
         Expr::Pipe(inner, name, args) => Expr::Pipe(
-            Box::new(rewrite_expr(inner, inner_blocks, substitutions, prefix)),
+            Box::new(rewrite_expr(inner, inner_targets, substitutions, prefix)),
             name.clone(),
             args.iter()
-                .map(|e| rewrite_expr(e, inner_blocks, substitutions, prefix))
+                .map(|e| rewrite_expr(e, inner_targets, substitutions, prefix))
                 .collect(),
         ),
         Expr::If(cond, then_val, else_val) => Expr::If(
-            Box::new(rewrite_expr(cond, inner_blocks, substitutions, prefix)),
-            Box::new(rewrite_expr(then_val, inner_blocks, substitutions, prefix)),
-            Box::new(rewrite_expr(else_val, inner_blocks, substitutions, prefix)),
+            Box::new(rewrite_expr(cond, inner_targets, substitutions, prefix)),
+            Box::new(rewrite_expr(then_val, inner_targets, substitutions, prefix)),
+            Box::new(rewrite_expr(else_val, inner_targets, substitutions, prefix)),
         ),
         Expr::BinOp(lhs, op, rhs) => Expr::BinOp(
-            Box::new(rewrite_expr(lhs, inner_blocks, substitutions, prefix)),
+            Box::new(rewrite_expr(lhs, inner_targets, substitutions, prefix)),
             op.clone(),
-            Box::new(rewrite_expr(rhs, inner_blocks, substitutions, prefix)),
+            Box::new(rewrite_expr(rhs, inner_targets, substitutions, prefix)),
         ),
         Expr::Add(lhs, rhs) => Expr::Add(
-            Box::new(rewrite_expr(lhs, inner_blocks, substitutions, prefix)),
-            Box::new(rewrite_expr(rhs, inner_blocks, substitutions, prefix)),
+            Box::new(rewrite_expr(lhs, inner_targets, substitutions, prefix)),
+            Box::new(rewrite_expr(rhs, inner_targets, substitutions, prefix)),
         ),
         Expr::Number(_) | Expr::Bool(_) | Expr::Duration(_) | Expr::Null => expr.clone(),
     }
@@ -721,7 +725,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rewrite_namespaces_inner_block_refs() {
+    fn rewrite_namespaces_inner_target_refs() {
         let inner = HashSet::from(["image".to_owned(), "app".to_owned()]);
         let subs = HashMap::new();
 

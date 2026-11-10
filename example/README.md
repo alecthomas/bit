@@ -21,22 +21,22 @@ The BFF serves the built frontend bundle and proxies `/api/*` to the Go backend.
 ## Quick start
 
 ```sh
-bit --list                  # list explicitly defined targets
-bit -ll                     # list all blocks
+bit --list                  # list groups
+bit -ll                     # list all targets
 bit --plan                  # show what would change
-bit                         # build + test everything (default target)
+bit                         # build + test everything (default group)
 bit build                   # build artifacts only
 bit test                    # run all tests (spins up postgres)
 bit dev                     # bring up the full stack on a Docker network
 bit k8s                     # deploy to local k3d cluster
-bit --clean ...             # tear down every block (including containers)
+bit --clean ...             # tear down every target (including containers)
 ```
 
 Open <http://localhost:3000> after `bit dev`.
 
 ## What `BUILD.bit` does
 
-| Block            | Provider          | Purpose |
+| Target           | Provider          | Purpose |
 |------------------|-------------------|---------|
 | `node_modules`   | `pnpm.install`    | Install workspace deps; auto-discovers every `package.json` |
 | `frontend`       | `pnpm.run`        | `pnpm --filter frontend run build` → `frontend/dist` |
@@ -56,7 +56,7 @@ Open <http://localhost:3000> after `bit dev`.
 | `bff-test`       | `pnpm.test`       | `vitest run` in `bff/` |
 | `frontend-test`  | `pnpm.test`       | `vitest run` in `frontend/` |
 
-The image, network, and runtime-container blocks are not in the default `build`/`test` targets. Trigger them explicitly:
+The image, network, and runtime-container targets are not in the default `build`/`test` groups. Trigger them explicitly:
 
 ```sh
 bit backend-image bff-image   # build container images
@@ -83,7 +83,7 @@ curl -sS -X POST http://localhost:3000/api/users \
   -H 'Content-Type: application/json' -d '{"name":"ada"}'
 ```
 
-To stop the stack: `bit --clean ...` (the `...` tells bit to destroy every block, not just those reachable from the default target).
+To stop the stack: `bit --clean ...` (the `...` tells bit to destroy every target, not just those reachable from the default group).
 
 ## Kubernetes (local k3d)
 

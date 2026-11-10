@@ -5,9 +5,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -28,14 +28,14 @@ pub struct RustClippyInputs {
     pub rust_env: RustEnv,
 }
 
-/// Outputs from a `rust.clippy` block.
+/// Outputs from a `rust.clippy` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct RustClippyOutputs {
     /// Whether the check passed
     pub passed: bool,
 }
 
-/// Persisted state for a `rust.clippy` block.
+/// Persisted state for a `rust.clippy` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RustClippyState {
     pub package: Option<String>,
@@ -64,7 +64,7 @@ fn clippy_config(selection: &super::Selection) -> Result<Vec<PathBuf>, BoxError>
     Ok(super::config_in_ancestors(&starts, &[".clippy.toml", "clippy.toml"]))
 }
 
-fn clippy_command(inputs: &Block<RustClippyInputs>) -> CargoCommand {
+fn clippy_command(inputs: &Target<RustClippyInputs>) -> CargoCommand {
     let mut cargo = inputs.rust_env.cargo("clippy", inputs.dir.as_deref());
     cargo.envs(&inputs.env);
     if let Some(pkg) = &inputs.package {
@@ -87,7 +87,7 @@ impl Resource for RustClippyResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &Block<RustClippyInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<RustClippyInputs>) -> Vec<Ambient> {
         let mut ambient = super::build_ambient(
             &inputs.rust_env,
             inputs.dir.as_deref(),
@@ -98,7 +98,7 @@ impl Resource for RustClippyResource {
         ambient
     }
 
-    fn resolve(&self, inputs: &Block<RustClippyInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<RustClippyInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let selection = super::Selection {
             dir: inputs.dir.as_deref(),
@@ -113,7 +113,7 @@ impl Resource for RustClippyResource {
 
     fn plan(
         &self,
-        inputs: &Block<RustClippyInputs>,
+        inputs: &Target<RustClippyInputs>,
         prior_state: Option<&RustClippyState>,
     ) -> Result<PlanResult, BoxError> {
         let description = clippy_command(inputs).display();
@@ -145,10 +145,10 @@ impl Resource for RustClippyResource {
 
     fn apply(
         &self,
-        inputs: &Block<RustClippyInputs>,
+        inputs: &Target<RustClippyInputs>,
         _prior_state: Option<&RustClippyState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<RustClippyState, RustClippyOutputs>, BoxError> {
         let passed = clippy_command(inputs).run(writer).is_ok();
 
@@ -163,11 +163,11 @@ impl Resource for RustClippyResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<RustClippyState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<RustClippyState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &Block<RustClippyInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<RustClippyInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustClippyInputs {
                 package: None,
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn plan_create_with_package() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustClippyInputs {
                 package: Some("my-crate".into()),
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustClippyInputs {
                 package: None,
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustClippyInputs {
                 package: None,

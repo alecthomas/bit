@@ -1,12 +1,12 @@
 ================================================================================
-simple block
+simple target
 ================================================================================
 server = go.binary {
   main = "./cmd/server"
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     resource: (identifier)
@@ -15,14 +15,14 @@ server = go.binary {
       value: (string))))
 
 ================================================================================
-parameterized block
+parameterized target
 ================================================================================
 image(tag : string, push = false) = docker.image {
   tag = tag
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     parameters: (parameter_list
       (parameter
@@ -40,16 +40,16 @@ image(tag : string, push = false) = docker.image {
         (identifier)))))
 
 ================================================================================
-parameterized matrix block
+parameterized matrix target
 ================================================================================
 build[arch](tag : string) = exec {
   command = "build #{arch} #{tag}"
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
-    matrix_keys: (block_matrix_keys
+    matrix_keys: (target_matrix_keys
       (identifier))
     parameters: (parameter_list
       (parameter
@@ -68,25 +68,25 @@ build[arch](tag : string) = exec {
             (identifier)))))))
 
 ================================================================================
-empty block
+empty target
 ================================================================================
 fmt = rust.fmt {}
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     resource: (identifier)))
 
 ================================================================================
-bare provider block (no resource)
+bare provider target (no resource)
 ================================================================================
 docs = exec {
   command = "make"
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     (field_assignment
@@ -99,7 +99,7 @@ pre phase modifier
 pre fmt = rust.fmt {}
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     phase: (phase_modifier)
     name: (identifier)
     provider: (identifier)
@@ -111,7 +111,7 @@ post phase modifier
 post report = exec {}
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     phase: (phase_modifier)
     name: (identifier)
     provider: (identifier)))
@@ -124,7 +124,7 @@ protected db = aws.aurora {
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     protected: (protected_modifier)
     name: (identifier)
     provider: (identifier)
@@ -139,7 +139,7 @@ pre and protected modifiers
 pre protected db = aws.aurora {}
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     phase: (phase_modifier)
     protected: (protected_modifier)
     name: (identifier)
@@ -154,7 +154,7 @@ explicit migrate = exec {
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     explicit: (explicit_modifier)
     name: (identifier)
     provider: (identifier)
@@ -169,13 +169,13 @@ protected explicit db = aws.aurora {}
 explicit protected db2 = aws.aurora {}
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     protected: (protected_modifier)
     explicit: (explicit_modifier)
     name: (identifier)
     provider: (identifier)
     resource: (identifier))
-  (block
+  (target
     explicit: (explicit_modifier)
     protected: (protected_modifier)
     name: (identifier)
@@ -189,11 +189,11 @@ large build = exec {}
 pre explicit large protected image = docker.image {}
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     large: (large_modifier)
     name: (identifier)
     provider: (identifier))
-  (block
+  (target
     phase: (phase_modifier)
     explicit: (explicit_modifier)
     large: (large_modifier)
@@ -210,9 +210,9 @@ binary[arch] = go.binary {
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
-    matrix_keys: (block_matrix_keys
+    matrix_keys: (target_matrix_keys
       (identifier))
     provider: (identifier)
     resource: (identifier)
@@ -227,9 +227,9 @@ matrix expansion multiple keys
 deploy[arch, region] = kubernetes.deployment {}
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
-    matrix_keys: (block_matrix_keys
+    matrix_keys: (target_matrix_keys
       (identifier)
       (identifier))
     provider: (identifier)
@@ -243,9 +243,9 @@ tests[module, package = go.packages("./...", module)] = go.test {
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
-    matrix_keys: (block_matrix_keys
+    matrix_keys: (target_matrix_keys
       (identifier)
       (matrix_key_binding
         name: (identifier)
@@ -272,9 +272,9 @@ crate[package] = rust.build {
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
-    matrix_keys: (block_matrix_keys
+    matrix_keys: (target_matrix_keys
       (identifier))
     provider: (identifier)
     resource: (identifier)
@@ -295,7 +295,7 @@ image = docker.image {
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     resource: (identifier)
@@ -314,7 +314,7 @@ integration-test = exec.test {
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     resource: (identifier)

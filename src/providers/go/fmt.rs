@@ -8,9 +8,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -27,7 +27,7 @@ pub struct GoFmtInputs {
     pub package: Vec<String>,
 }
 
-/// Outputs from a `go.fmt` block.
+/// Outputs from a `go.fmt` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct GoFmtOutputs {}
 
@@ -38,7 +38,7 @@ pub struct GoFmtCheckOutputs {
     pub passed: bool,
 }
 
-/// Persisted state for `go.fmt` / `go.fmt-l` blocks.
+/// Persisted state for `go.fmt` / `go.fmt-l` targets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoFmtState {
     /// A string in state written before `package` took a list.
@@ -46,13 +46,13 @@ pub struct GoFmtState {
     pub package: Vec<String>,
 }
 
-/// The `.go` files, including `_test.go` files, of the packages the block's
+/// The `.go` files, including `_test.go` files, of the packages the target's
 /// patterns name. The packages they import are someone else's to format.
 ///
 /// `dir` mirrors [`super::scanner::scan`]'s `base_dir`: when set, module-root
-/// discovery starts from that directory so a block targeting a separate-module
+/// discovery starts from that directory so a target that formats a separate-module
 /// subdirectory scans the right module.
-fn go_source_files(tracker: &FileTracker, inputs: &Block<GoFmtInputs>) -> Result<Vec<std::path::PathBuf>, BoxError> {
+fn go_source_files(tracker: &FileTracker, inputs: &Target<GoFmtInputs>) -> Result<Vec<std::path::PathBuf>, BoxError> {
     let scans = tracker.derived::<super::scanner::Scans>();
     super::scanner::package_go_files(
         &scans,
@@ -64,7 +64,7 @@ fn go_source_files(tracker: &FileTracker, inputs: &Block<GoFmtInputs>) -> Result
 
 /// The hashes of the files `gofmt` reads: [`go_source_files`].
 fn resolve_go_source_files(
-    inputs: &Block<GoFmtInputs>,
+    inputs: &Target<GoFmtInputs>,
     tracker: &FileTracker,
 ) -> Result<BTreeMap<String, SHA256>, BoxError> {
     tracker.hash_files(&go_source_files(tracker, inputs)?)
@@ -85,11 +85,11 @@ fn gofmt_command(mode: &str, targets: &[String], dir: Option<&str>) -> String {
     super::display_command("gofmt", &args, dir)
 }
 
-/// The block's `.go` files that changed since its last success, or all of
+/// The target's `.go` files that changed since its last success, or all of
 /// them when anything may have changed.
 fn changed_go_files(
     tracker: &FileTracker,
-    inputs: &Block<GoFmtInputs>,
+    inputs: &Target<GoFmtInputs>,
     changes: &Changes,
 ) -> Result<Vec<String>, BoxError> {
     let files = go_source_files(tracker, inputs)?;
@@ -129,15 +129,15 @@ impl Resource for GoFmtResource {
     }
 
     /// The `gofmt` on `PATH`, which [`gofmt_ambient`] explains.
-    fn ambient(&self, _inputs: &Block<GoFmtInputs>) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Target<GoFmtInputs>) -> Vec<Ambient> {
         gofmt_ambient()
     }
 
-    fn resolve(&self, inputs: &Block<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         resolve_go_source_files(inputs, &self.tracker)
     }
 
-    fn plan(&self, inputs: &Block<GoFmtInputs>, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<GoFmtInputs>, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
         let description = gofmt_command("-w", &inputs.package, inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
@@ -163,10 +163,10 @@ impl Resource for GoFmtResource {
 
     fn apply(
         &self,
-        inputs: &Block<GoFmtInputs>,
+        inputs: &Target<GoFmtInputs>,
         _prior_state: Option<&GoFmtState>,
         changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<GoFmtState, GoFmtOutputs>, BoxError> {
         let files = changed_go_files(&self.tracker, inputs, changes)?;
         if files.is_empty() {
@@ -221,7 +221,7 @@ impl Resource for GoFmtResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<GoFmtState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<GoFmtState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
@@ -230,7 +230,7 @@ impl Resource for GoFmtResource {
         true
     }
 
-    fn cache_policy(&self, _inputs: &Block<GoFmtInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<GoFmtInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -261,15 +261,15 @@ impl Resource for GoFmtCheckResource {
     }
 
     /// The `gofmt` on `PATH`, which [`gofmt_ambient`] explains.
-    fn ambient(&self, _inputs: &Block<GoFmtInputs>) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Target<GoFmtInputs>) -> Vec<Ambient> {
         gofmt_ambient()
     }
 
-    fn resolve(&self, inputs: &Block<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<GoFmtInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         resolve_go_source_files(inputs, &self.tracker)
     }
 
-    fn plan(&self, inputs: &Block<GoFmtInputs>, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<GoFmtInputs>, prior_state: Option<&GoFmtState>) -> Result<PlanResult, BoxError> {
         let description = gofmt_command("-l", &inputs.package, inputs.dir.as_deref());
 
         let Some(prior) = prior_state else {
@@ -295,10 +295,10 @@ impl Resource for GoFmtCheckResource {
 
     fn apply(
         &self,
-        inputs: &Block<GoFmtInputs>,
+        inputs: &Target<GoFmtInputs>,
         _prior_state: Option<&GoFmtState>,
         changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<GoFmtState, GoFmtCheckOutputs>, BoxError> {
         let files = changed_go_files(&self.tracker, inputs, changes)?;
         if files.is_empty() {
@@ -343,7 +343,7 @@ impl Resource for GoFmtCheckResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<GoFmtState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<GoFmtState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
@@ -352,7 +352,7 @@ impl Resource for GoFmtCheckResource {
         true
     }
 
-    fn cache_policy(&self, _inputs: &Block<GoFmtInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<GoFmtInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -373,14 +373,14 @@ mod tests {
     const FORMATTED_TEST: &str = "package pkg\n\nfunc helper() {}\n";
 
     /// Create a module whose only unformatted file is `pkg/lib_test.go`.
-    fn module_with_unformatted_test_file() -> (tempfile::TempDir, Block<GoFmtInputs>) {
+    fn module_with_unformatted_test_file() -> (tempfile::TempDir, Target<GoFmtInputs>) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
         std::fs::create_dir_all(root.join("pkg")).unwrap();
         std::fs::write(root.join("pkg/lib.go"), "package pkg\n").unwrap();
         std::fs::write(root.join("pkg/lib_test.go"), UNFORMATTED_TEST).unwrap();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             GoFmtInputs {
                 package: vec!["./...".into()],
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn fmt_plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoFmtInputs {
                 package: vec!["./...".into()],
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn fmt_check_plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoFmtInputs {
                 package: vec!["./...".into()],
@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn fmt_plan_none_when_unchanged() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoFmtInputs {
                 package: vec!["./...".into()],
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn fmt_plan_update_when_package_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoFmtInputs {
                 package: vec!["./cmd/...".into()],
@@ -531,7 +531,7 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(root.join("lib/lib.go"), UNFORMATTED_TEST).unwrap();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             GoFmtInputs {
                 package: vec!["./cmd".into()],
@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn ambient_is_the_gofmt_executable() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some("svc".into()),
             GoFmtInputs {
                 package: default_package(),

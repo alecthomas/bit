@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::{ArtifactRef, Cas};
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
-    ReceiptCheck, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, MaterializeResult, OutputFile, PlanAction, PlanResult,
+    ReceiptCheck, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -36,14 +36,14 @@ pub struct RustExeInputs {
     pub rust_env: RustEnv,
 }
 
-/// Outputs from a `rust.exe` block.
+/// Outputs from a `rust.exe` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct RustExeOutputs {
     /// Path to the built binary
     pub path: String,
 }
 
-/// Persisted state for a `rust.exe` block.
+/// Persisted state for a `rust.exe` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RustExeState {
     pub bin: Option<String>,
@@ -81,7 +81,7 @@ fn exe_destination(target_dir: &Path, target_rel: &str) -> Result<PathBuf, BoxEr
     Ok(target_dir.join(target_rel))
 }
 
-fn state_for(inputs: &Block<RustExeInputs>, path: String, target_rel: String, tracker: &FileTracker) -> RustExeState {
+fn state_for(inputs: &Target<RustExeInputs>, path: String, target_rel: String, tracker: &FileTracker) -> RustExeState {
     RustExeState {
         bin: inputs.bin.clone(),
         package: inputs.package.clone(),
@@ -94,7 +94,7 @@ fn state_for(inputs: &Block<RustExeInputs>, path: String, target_rel: String, tr
     }
 }
 
-fn exe_command(inputs: &Block<RustExeInputs>) -> CargoCommand {
+fn exe_command(inputs: &Target<RustExeInputs>) -> CargoCommand {
     let mut cargo = inputs.rust_env.cargo("build", inputs.dir.as_deref());
     cargo.envs(&inputs.env);
     if let Some(bin) = &inputs.bin {
@@ -111,7 +111,7 @@ fn exe_command(inputs: &Block<RustExeInputs>) -> CargoCommand {
 
 /// Parse cargo's `--message-format=json` output, forwarding compiler
 /// diagnostics to the writer and returning the path to the built binary.
-fn find_binary_from_json(reader: impl BufRead, writer: &BlockWriter) -> Option<String> {
+fn find_binary_from_json(reader: impl BufRead, writer: &TargetWriter) -> Option<String> {
     let mut binary_path = None;
     for line in reader.lines() {
         let Ok(line) = line else { break };
@@ -154,11 +154,11 @@ impl Resource for RustExeResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &Block<RustExeInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<RustExeInputs>) -> Vec<Ambient> {
         super::build_ambient(&inputs.rust_env, inputs.dir.as_deref(), &inputs.env, &[])
     }
 
-    fn resolve(&self, inputs: &Block<RustExeInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<RustExeInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         super::resolve_rust_inputs(
             &super::Selection {
@@ -171,7 +171,7 @@ impl Resource for RustExeResource {
         )
     }
 
-    fn plan(&self, inputs: &Block<RustExeInputs>, prior_state: Option<&RustExeState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<RustExeInputs>, prior_state: Option<&RustExeState>) -> Result<PlanResult, BoxError> {
         let description = exe_command(inputs).display();
 
         let Some(prior) = prior_state else {
@@ -214,10 +214,10 @@ impl Resource for RustExeResource {
 
     fn apply(
         &self,
-        inputs: &Block<RustExeInputs>,
+        inputs: &Target<RustExeInputs>,
         _prior_state: Option<&RustExeState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<RustExeState, RustExeOutputs>, BoxError> {
         let cargo = exe_command(inputs);
         let mut child = cargo
@@ -260,17 +260,17 @@ impl Resource for RustExeResource {
         })
     }
 
-    fn destroy(&self, prior_state: &Block<RustExeState>, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Target<RustExeState>, writer: &TargetWriter) -> Result<(), BoxError> {
         crate::providers::remove_path(Path::new(&prior_state.path), writer)
     }
 
-    fn cache_policy(&self, _inputs: &Block<RustExeInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<RustExeInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 
     fn capture_artifacts(
         &self,
-        _inputs: &Block<RustExeInputs>,
+        _inputs: &Target<RustExeInputs>,
         state: &RustExeState,
         _outputs: &[OutputFile],
         cas: &Cas,
@@ -286,7 +286,7 @@ impl Resource for RustExeResource {
 
     fn check_receipt(
         &self,
-        inputs: &Block<RustExeInputs>,
+        inputs: &Target<RustExeInputs>,
         state: &RustExeState,
         _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
@@ -312,12 +312,12 @@ impl Resource for RustExeResource {
     /// this worktree's target directory plus the portable relative path.
     fn materialize(
         &self,
-        inputs: &Block<RustExeInputs>,
+        inputs: &Target<RustExeInputs>,
         state: &RustExeState,
         _outputs: &[OutputFile],
         artifacts: &BTreeMap<String, ArtifactRef>,
         cas: &Cas,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> MaterializeResult<RustExeState, RustExeOutputs> {
         let exe = artifacts.get(EXE_ROLE).ok_or("receipt has no exe artifact")?;
         let dest = exe_destination(
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustExeInputs {
                 bin: Some("myapp".into()),
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn plan_create_no_bin() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustExeInputs {
                 bin: None,
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn plan_create_with_package() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustExeInputs {
                 bin: None,
@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustExeInputs {
                 bin: Some("myapp".into()),
@@ -445,7 +445,7 @@ mod tests {
         let path = dir.path().join("myapp");
         std::fs::write(&path, "built").unwrap();
         let resource = make_resource();
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustExeInputs {
                 bin: Some("myapp".into()),
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_bin_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustExeInputs {
                 bin: Some("other".into()),
@@ -521,7 +521,7 @@ mod tests {
         };
 
         let out = Output::new(&[]);
-        Resource::destroy(&make_resource(), &Block::new(None, state), &out.writer("test")).unwrap();
+        Resource::destroy(&make_resource(), &Target::new(None, state), &out.writer("test")).unwrap();
 
         assert!(!path.exists());
     }

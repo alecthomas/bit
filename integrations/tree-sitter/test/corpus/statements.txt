@@ -82,46 +82,46 @@ param env : {string = string}
           (scalar_type))))))
 
 ================================================================================
-target
+group
 ================================================================================
-target build = [server, image]
+group build = [server, image]
 --------------------------------------------------------------------------------
 (source_file
-  (target_statement
+  (group_statement
     name: (identifier)
-    (target_call
+    (group_member
       name: (dotted_identifier
         (identifier)))
-    (target_call
+    (group_member
       name: (dotted_identifier
         (identifier)))))
 
 ================================================================================
-target with dotted refs
+group with dotted refs
 ================================================================================
-target deploy = [app.deploy, lib.api]
+group deploy = [app.deploy, lib.api]
 --------------------------------------------------------------------------------
 (source_file
-  (target_statement
+  (group_statement
     name: (identifier)
-    (target_call
+    (group_member
       name: (dotted_identifier
         (identifier)
         (identifier)))
-    (target_call
+    (group_member
       name: (dotted_identifier
         (identifier)
         (identifier)))))
 
 ================================================================================
-target selects parameterized matrix slice
+group selects parameterized matrix slice
 ================================================================================
-target release = [build["arm64"](tag = "1.2.3")]
+group release = [build["arm64"](tag = "1.2.3")]
 --------------------------------------------------------------------------------
 (source_file
-  (target_statement
+  (group_statement
     name: (identifier)
-    (target_call
+    (group_member
       name: (dotted_identifier
         (identifier))
       (string)
@@ -131,12 +131,12 @@ target release = [build["arm64"](tag = "1.2.3")]
           value: (string))))))
 
 ================================================================================
-parameterized target with block arguments
+parameterized group with target arguments
 ================================================================================
-target publish(tag : string, push = false) = [image(tag = tag, push = push)]
+group publish(tag : string, push = false) = [image(tag = tag, push = push)]
 --------------------------------------------------------------------------------
 (source_file
-  (target_statement
+  (group_statement
     name: (identifier)
     parameters: (parameter_list
       (parameter
@@ -146,7 +146,7 @@ target publish(tag : string, push = false) = [image(tag = tag, push = push)]
       (parameter
         name: (identifier)
         default: (boolean)))
-    (target_call
+    (group_member
       name: (dotted_identifier
         (identifier))
       arguments: (argument_list

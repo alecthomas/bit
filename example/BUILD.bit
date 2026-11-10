@@ -204,7 +204,7 @@ registry-on-k3d-net = docker.network_attach {
 
 let k3d_ctx = "k3d-#{k3d_cluster}"
 
-# Render the kustomize overlay; per-component blocks filter by label.
+# Render the kustomize overlay; per-component targets filter by label.
 let k8s_apply  = "kustomize build k8s/overlays/local | kubectl apply -l app="
 let k8s_delete = "kustomize build k8s/overlays/local | kubectl delete -l app="
 let k8s_ctx    = " --context #{k3d_ctx} -f -"
@@ -256,15 +256,15 @@ k8s-bff = exec {
   clean      = "#{k8s_delete}bff#{k8s_ctx}"
 }
 
-# ── Targets ───────────────────────────────────────────────────────────────────
+# ── Groups ────────────────────────────────────────────────────────────────────
 
 # Build all deployable artifacts.
-target build   = [frontend, bff, backend]
+group build   = [frontend, bff, backend]
 # Run the full test matrix.
-target test    = [backend-test, bff-test, frontend-test]
+group test    = [backend-test, bff-test, frontend-test]
 # Bring up the dev container stack (BFF fans out to backend and Postgres).
-target dev     = [bff-container]
+group dev     = [bff-container]
 # Deploy to local k3d cluster.
-target k8s     = [k8s-bff]
-# Default target: build everything and run all tests.
-target default = [frontend, bff, backend, backend-test, bff-test, frontend-test]
+group k8s     = [k8s-bff]
+# Default group: build everything and run all tests.
+group default = [frontend, bff, backend, backend-test, bff-test, frontend-test]

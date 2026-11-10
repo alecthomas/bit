@@ -16,27 +16,30 @@ pub enum StateError {
     NoCacheDir,
 }
 
-/// Persists block state between runs. State is always JSON.
+/// Persists target state between runs. State is always JSON.
 pub trait StateStore: Send + Sync {
-    fn load(&self, block: &str) -> Result<Option<Value>, StateError>;
-    fn save(&self, block: &str, state: &Value) -> Result<(), StateError>;
-    fn remove(&self, block: &str) -> Result<(), StateError>;
+    fn load(&self, target: &str) -> Result<Option<Value>, StateError>;
+    fn save(&self, target: &str, state: &Value) -> Result<(), StateError>;
+    fn remove(&self, target: &str) -> Result<(), StateError>;
     fn list(&self) -> Result<Vec<String>, StateError>;
 }
 
-/// JSON state store holding one file per block in a directory.
+/// JSON state store holding one file per target in a directory.
 ///
-/// A save rewrites only its own block, so saves stay cheap as state grows, and
+/// A save rewrites only its own target, so saves stay cheap as state grows, and
 /// atomic replacement keeps concurrent `bit` processes from conflicting.
 pub struct JsonDirStore {
     dir: PathBuf,
 }
 
-/// On-disk format of one block's file. File names are hashes, so the name is
+/// On-disk format of one target's file. File names are hashes, so the name is
 /// stored for `list`.
 #[derive(Serialize, Deserialize)]
-struct BlockFile {
-    block: String,
+struct TargetFile {
+    // Files written before blocks were renamed to targets use this key, and
+    // reading one with another key fails, losing track of what it built.
+    #[serde(rename = "block")]
+    target: String,
     state: Value,
 }
 
@@ -45,12 +48,12 @@ impl JsonDirStore {
         Self { dir: dir.into() }
     }
 
-    fn block_path(&self, block: &str) -> PathBuf {
+    fn target_path(&self, target: &str) -> PathBuf {
         self.dir
-            .join(format!("{}.json", hex(&Sha256::digest(block.as_bytes()))))
+            .join(format!("{}.json", hex(&Sha256::digest(target.as_bytes()))))
     }
 
-    fn read(path: &Path) -> Result<Option<BlockFile>, StateError> {
+    fn read(path: &Path) -> Result<Option<TargetFile>, StateError> {
         match fs::read(path) {
             Ok(contents) => Ok(Some(serde_json::from_slice(&contents)?)),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
@@ -58,38 +61,38 @@ impl JsonDirStore {
         }
     }
 
-    /// Atomically replaces the block's file.
+    /// Atomically replaces the target's file.
     ///
     /// The temp file must share the directory for the rename to be atomic.
-    fn write(&self, block: &str, state: &Value) -> Result<(), StateError> {
+    fn write(&self, target: &str, state: &Value) -> Result<(), StateError> {
         fs::create_dir_all(&self.dir)?;
         let tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
         let mut writer = BufWriter::new(tmp);
         serde_json::to_writer_pretty(
             &mut writer,
-            &BlockFile {
-                block: block.to_owned(),
+            &TargetFile {
+                target: target.to_owned(),
                 state: state.clone(),
             },
         )?;
         let tmp = writer.into_inner().map_err(|error| error.into_error())?;
         tmp.as_file().sync_all()?;
-        tmp.persist(self.block_path(block)).map_err(|error| error.error)?;
+        tmp.persist(self.target_path(target)).map_err(|error| error.error)?;
         Ok(())
     }
 }
 
 impl StateStore for JsonDirStore {
-    fn load(&self, block: &str) -> Result<Option<Value>, StateError> {
-        Ok(Self::read(&self.block_path(block))?.map(|file| file.state))
+    fn load(&self, target: &str) -> Result<Option<Value>, StateError> {
+        Ok(Self::read(&self.target_path(target))?.map(|file| file.state))
     }
 
-    fn save(&self, block: &str, state: &Value) -> Result<(), StateError> {
-        self.write(block, state)
+    fn save(&self, target: &str, state: &Value) -> Result<(), StateError> {
+        self.write(target, state)
     }
 
-    fn remove(&self, block: &str) -> Result<(), StateError> {
-        match fs::remove_file(self.block_path(block)) {
+    fn remove(&self, target: &str) -> Result<(), StateError> {
+        match fs::remove_file(self.target_path(target)) {
             Err(error) if error.kind() != ErrorKind::NotFound => Err(error.into()),
             _ => Ok(()),
         }
@@ -101,16 +104,16 @@ impl StateStore for JsonDirStore {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         };
-        let mut blocks = Vec::new();
+        let mut targets = Vec::new();
         for entry in entries {
             let path = entry?.path();
             if path.extension().is_some_and(|extension| extension == "json")
                 && let Some(file) = Self::read(&path)?
             {
-                blocks.push(file.block);
+                targets.push(file.target);
             }
         }
-        Ok(blocks)
+        Ok(targets)
     }
 }
 
@@ -156,30 +159,30 @@ mod tests {
     fn save_and_load() {
         let (_dir, store) = temp_store();
         let state = json!({"output": "/tmp/build", "hash": "abc123"});
-        store.save("block1", &state).unwrap();
-        assert_eq!(store.load("block1").unwrap().unwrap(), state);
+        store.save("target1", &state).unwrap();
+        assert_eq!(store.load("target1").unwrap().unwrap(), state);
     }
 
     #[test]
-    fn remove_block() {
+    fn remove_target() {
         let (_dir, store) = temp_store();
-        store.save("block1", &json!("data")).unwrap();
-        store.remove("block1").unwrap();
-        assert!(store.load("block1").unwrap().is_none());
+        store.save("target1", &json!("data")).unwrap();
+        store.remove("target1").unwrap();
+        assert!(store.load("target1").unwrap().is_none());
     }
 
     #[test]
-    fn list_blocks() {
+    fn list_targets() {
         let (_dir, store) = temp_store();
         store.save("a", &json!(1)).unwrap();
         store.save("b", &json!(2)).unwrap();
-        let mut blocks = store.list().unwrap();
-        blocks.sort();
-        assert_eq!(blocks, vec!["a", "b"]);
+        let mut targets = store.list().unwrap();
+        targets.sort();
+        assert_eq!(targets, vec!["a", "b"]);
     }
 
     #[test]
-    fn multiple_blocks_independent() {
+    fn multiple_targets_independent() {
         let (_dir, store) = temp_store();
         store.save("x", &json!({"v": "x"})).unwrap();
         store.save("y", &json!({"v": "y"})).unwrap();
@@ -190,16 +193,16 @@ mod tests {
     #[test]
     fn overwrite_existing() {
         let (_dir, store) = temp_store();
-        store.save("block1", &json!("old")).unwrap();
-        store.save("block1", &json!("new")).unwrap();
-        assert_eq!(store.load("block1").unwrap().unwrap(), json!("new"));
+        store.save("target1", &json!("old")).unwrap();
+        store.save("target1", &json!("new")).unwrap();
+        assert_eq!(store.load("target1").unwrap().unwrap(), json!("new"));
     }
 
     #[test]
     fn creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let store = JsonDirStore::new(dir.path().join("deep/nested/state"));
-        store.save("block1", &json!("data")).unwrap();
+        store.save("target1", &json!("data")).unwrap();
         assert!(dir.path().join("deep/nested/state").is_dir());
     }
 
@@ -257,10 +260,10 @@ mod tests {
     }
 
     #[test]
-    fn save_leaves_other_blocks_untouched() {
+    fn save_leaves_other_targets_untouched() {
         let (_dir, store) = temp_store();
         store.save("a", &json!(1)).unwrap();
-        let other = store.block_path("a");
+        let other = store.target_path("a");
         let before = fs::metadata(&other).unwrap().modified().unwrap();
         store.save("b", &json!(2)).unwrap();
         assert_eq!(fs::metadata(&other).unwrap().modified().unwrap(), before);

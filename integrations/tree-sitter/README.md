@@ -22,8 +22,8 @@ tree-sitter highlight path/to/BUILD.bit
 
 Covers all language constructs in `SPEC.md`:
 
-- Statements: `let`, `param`, `target`, `output`, blocks
-- Block modifiers: `pre`, `post`, `protected`, matrix `name[key]`
+- Statements: `let`, `param`, `group`, `output`, targets
+- Target modifiers: `pre`, `post`, `protected`, matrix `name[key]`
 - Types: scalar, list, map, union
 - Expressions: literals, strings (with `${}` interpolation and escapes),
   raw strings, heredocs (`<<EOF` / `<<-EOF`), lists, maps, function

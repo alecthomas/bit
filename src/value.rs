@@ -9,13 +9,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub type Map = HashMap<String, Value>;
 
-const BLOCK_REF_TAG: &str = "__bit_block_ref";
+const TARGET_REF_TAG: &str = "__bit_target_ref";
 
-/// A reference to a block in the dependency graph.
+/// A reference to a target in the dependency graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BlockRef(String);
+pub struct TargetRef(String);
 
-impl BlockRef {
+impl TargetRef {
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
@@ -25,23 +25,23 @@ impl BlockRef {
     }
 }
 
-impl fmt::Display for BlockRef {
+impl fmt::Display for TargetRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl Serialize for BlockRef {
+impl Serialize for TargetRef {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         // Provider functions use a generic serde adapter. The private tag
         // preserves reference identity there instead of degrading to a string.
         let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry(BLOCK_REF_TAG, &self.0)?;
+        map.serialize_entry(TARGET_REF_TAG, &self.0)?;
         map.end()
     }
 }
 
-impl<'de> Deserialize<'de> for BlockRef {
+impl<'de> Deserialize<'de> for TargetRef {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(Self(String::deserialize(deserializer)?))
     }
@@ -194,7 +194,7 @@ impl StructType {
 /// Runtime value in the .bit language.
 ///
 /// `List` and `Map` carry their element/value `Type` for homogeneous type checking.
-/// `Struct` carries per-field types for map literals and block outputs.
+/// `Struct` carries per-field types for map literals and target outputs.
 /// Types are **not** serialised — they are inferred on deserialisation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -206,12 +206,12 @@ pub enum Value {
     /// bit shows or reproduces the value as source, it appears as
     /// `secret("KEY")`, so the plaintext never does. The value still
     /// serializes as a plain string, so providers receive it and it reaches
-    /// the input hash and cache key: a rotated secret reruns the block.
+    /// the input hash and cache key: a rotated secret reruns the target.
     Secret {
         key: String,
         value: String,
     },
-    BlockRef(String),
+    TargetRef(String),
     Duration(Duration),
     List(Type, Vec<Value>),
     Map(Type, Map),
@@ -222,7 +222,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Str(s) | Value::Secret { value: s, .. } => write!(f, "{s}"),
-            Value::BlockRef(name) => write!(f, "{name}"),
+            Value::TargetRef(name) => write!(f, "{name}"),
             Value::Number(n) => write!(f, "{n}"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::Duration(d) => write!(f, "{d}"),
@@ -291,7 +291,7 @@ impl Value {
             Value::Bool(_) => Type::Bool,
             Value::Number(_) => Type::Number,
             Value::Str(_) | Value::Secret { .. } => Type::String,
-            Value::BlockRef(_) => Type::BlockRef,
+            Value::TargetRef(_) => Type::TargetRef,
             Value::Duration(_) => Type::Duration,
             Value::List(typ, _) => Type::List(Box::new(typ.clone())),
             Value::Map(typ, _) => Type::Map(Box::new(typ.clone())),
@@ -310,7 +310,7 @@ impl Value {
         match self {
             Value::Str(s) => Expr::Str(vec![StringPart::Literal(s.clone())]),
             Value::Secret { key, .. } => secret_call(key),
-            Value::BlockRef(name) => Expr::BlockRef(name.clone()),
+            Value::TargetRef(name) => Expr::TargetRef(name.clone()),
             Value::Number(n) => Expr::Number(n.clone()),
             Value::Bool(b) => Expr::Bool(*b),
             Value::Duration(d) => Expr::Duration(*d),
@@ -432,7 +432,7 @@ impl Serialize for Value {
             Value::Str(s) | Value::Secret { value: s, .. } => serializer.serialize_str(s),
             // Once inside the evaluator, references serialize by name so they
             // remain ordinary engine metadata rather than provider input data.
-            Value::BlockRef(name) => serializer.serialize_str(name),
+            Value::TargetRef(name) => serializer.serialize_str(name),
             Value::Duration(d) => d.serialize(serializer),
             Value::List(_, items) => {
                 let mut seq = serializer.serialize_seq(Some(items.len()))?;
@@ -472,9 +472,9 @@ fn value_from_json(raw: serde_json::Value) -> Result<Value, String> {
         }
         serde_json::Value::Object(obj) => {
             if obj.len() == 1
-                && let Some(serde_json::Value::String(name)) = obj.get(BLOCK_REF_TAG)
+                && let Some(serde_json::Value::String(name)) = obj.get(TARGET_REF_TAG)
             {
-                return Ok(Value::BlockRef(name.clone()));
+                return Ok(Value::TargetRef(name.clone()));
             }
             let map: Result<Map, String> = obj
                 .into_iter()
@@ -490,7 +490,7 @@ impl std::fmt::Display for Type {
         match self {
             Type::Any => write!(f, "any"),
             Type::String => write!(f, "string"),
-            Type::BlockRef => write!(f, "block"),
+            Type::TargetRef => write!(f, "target"),
             Type::Number => write!(f, "number"),
             Type::Bool => write!(f, "bool"),
             Type::Duration => write!(f, "duration"),
@@ -530,7 +530,7 @@ impl std::fmt::Display for Type {
 pub enum Type {
     Any,
     String,
-    BlockRef,
+    TargetRef,
     Number,
     Bool,
     Duration,
@@ -553,7 +553,7 @@ pub fn validate_type(value: &Value, typ: &Type) -> Result<(), String> {
         (Type::Any, _) => Ok(()),
         (Type::String | Type::Path, Value::Str(_) | Value::Secret { .. }) => Ok(()),
         (Type::Literal(expected), Value::Str(s)) if s == expected => Ok(()),
-        (Type::BlockRef, Value::BlockRef(_)) => Ok(()),
+        (Type::TargetRef, Value::TargetRef(_)) => Ok(()),
         (Type::Number, Value::Number(_)) => Ok(()),
         (Type::Bool, Value::Bool(_)) => Ok(()),
         (Type::Duration, Value::Duration(_)) => Ok(()),
@@ -600,7 +600,7 @@ fn type_name(value: &Value) -> &'static str {
         Value::Bool(_) => "bool",
         Value::Number(_) => "number",
         Value::Str(_) | Value::Secret { .. } => "string",
-        Value::BlockRef(_) => "block",
+        Value::TargetRef(_) => "target",
         Value::Duration(_) => "duration",
         Value::List(..) => "list",
         Value::Map(..) => "map",

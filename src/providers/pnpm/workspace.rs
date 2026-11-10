@@ -77,15 +77,15 @@ impl Workspace {
     }
 }
 
-/// The block's `env`, which pnpm sees alongside bit's own environment.
+/// The target's `env`, which pnpm sees alongside bit's own environment.
 type Env = BTreeMap<String, String>;
 
-/// Loaded workspaces by canonical root and the block `env` pnpm ran with,
-/// shared by every pnpm block. The `env` is part of the key because pnpm
+/// Loaded workspaces by canonical root and the target `env` pnpm ran with,
+/// shared by every pnpm target. The `env` is part of the key because pnpm
 /// reads settings from it that change what it lists.
 ///
 /// The file tracker owns it as a [`FileTracker::derived`] cache, which it
-/// drops whenever a block may have written files: `pnpm.install` rewrites
+/// drops whenever a target may have written files: `pnpm.install` rewrites
 /// the lockfile the dependency graph comes from, and a loaded workspace
 /// cannot tell it is stale.
 #[derive(Default)]
@@ -93,7 +93,7 @@ pub struct Workspaces(DashMap<(PathBuf, Env), Arc<Workspace>>);
 
 /// The workspace pnpm uses when run in `dir` with `env`, loaded once into
 /// `tracker`'s cache. The map is locked only to copy an entry in or out, so
-/// two blocks that miss on the same workspace may both load it.
+/// two targets that miss on the same workspace may both load it.
 pub fn workspace(tracker: &FileTracker, dir: &Path, env: &Env) -> Result<Arc<Workspace>, BoxError> {
     let key = (root_of(dir, env)?, env.clone());
     let workspaces = tracker.derived::<Workspaces>();
@@ -104,7 +104,7 @@ pub fn workspace(tracker: &FileTracker, dir: &Path, env: &Env) -> Result<Arc<Wor
     Ok(workspaces.0.entry(key).or_insert(workspace).value().clone())
 }
 
-/// pnpm's settings by canonical directory and block `env`, a
+/// pnpm's settings by canonical directory and target `env`, a
 /// [`FileTracker::derived`] cache like [`Workspaces`], since the `.npmrc`
 /// files they come from may change.
 #[derive(Default)]

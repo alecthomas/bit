@@ -35,7 +35,7 @@ pub(crate) struct StatementSource<'a> {
     pub(crate) expression: &'a str,
     pub(crate) param_type_explicit: bool,
     pub(crate) fields: Vec<FieldSource<'a>>,
-    /// Source of each block matrix key's values expression, `None` for bare keys.
+    /// Source of each target matrix key's values expression, `None` for bare keys.
     pub(crate) matrix_keys: Vec<Option<&'a str>>,
 }
 
@@ -44,8 +44,8 @@ pub(crate) struct FieldSource<'a> {
     pub(crate) expression: &'a str,
 }
 
-struct ParsedBlock<'a> {
-    block: Block,
+struct ParsedTarget<'a> {
+    target: Target,
     comments: Vec<Comment<'a>>,
     fields: Vec<FieldSource<'a>>,
     matrix_keys: Vec<Option<&'a str>>,
@@ -66,10 +66,10 @@ pub(crate) fn parse_with_comments<'a>(input: &'a str, filename: &str) -> Result<
     for stmt in &mut parsed.module.statements {
         let pos = match stmt {
             Statement::Import(i) => &mut i.pos,
-            Statement::Block(b) => &mut b.pos,
+            Statement::Target(b) => &mut b.pos,
             Statement::Let(l) => &mut l.pos,
             Statement::Param(p) => &mut p.pos,
-            Statement::Target(t) => &mut t.pos,
+            Statement::Group(t) => &mut t.pos,
             Statement::Output(o) => &mut o.pos,
         };
         let offset = pos.line; // byte offset stored temporarily in line
@@ -510,7 +510,7 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
         return Err(ErrMode::Backtrack(ContextError::new()));
     }
 
-    // A named-argument call is a parameterized block reference. Positional
+    // A named-argument call is a parameterized target reference. Positional
     // calls remain built-in functions.
     if opt(lex('(')).parse_next(input)?.is_some() {
         let args_checkpoint = input.checkpoint();
@@ -520,7 +520,7 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
                     .context(StrContext::Label("closing ')'"))
                     .parse_next(input)?;
                 let fields: Vec<String> = repeat(0.., preceded(lex('.'), ident_string)).parse_next(input)?;
-                return Ok(Expr::BlockCall {
+                return Ok(Expr::TargetCall {
                     name,
                     keys: None,
                     args,
@@ -566,7 +566,7 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
                 .context(StrContext::Label("closing ')' in matrix call"))
                 .parse_next(input)?;
             let fields: Vec<String> = repeat(0.., preceded(lex('.'), ident_string)).parse_next(input)?;
-            return Ok(Expr::BlockCall {
+            return Ok(Expr::TargetCall {
                 name,
                 keys: Some(keys),
                 args,
@@ -929,8 +929,8 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
                 })
             },
             |input: &mut &'i str| {
-                target_stmt(doc.clone(), &known_types, input)
-                    .map(|value| (Statement::Target(value), Vec::new(), Vec::new(), "", false, Vec::new()))
+                group_stmt(doc.clone(), &known_types, input)
+                    .map(|value| (Statement::Group(value), Vec::new(), Vec::new(), "", false, Vec::new()))
             },
             |input: &mut &'i str| {
                 output_stmt(doc.clone(), input).map(|(value, source)| {
@@ -945,9 +945,9 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
                 })
             },
             |input: &mut &'i str| {
-                block_stmt(doc.clone(), &known_types, input).map(|parsed| {
+                target_stmt(doc.clone(), &known_types, input).map(|parsed| {
                     (
-                        Statement::Block(parsed.block),
+                        Statement::Target(parsed.target),
                         parsed.comments,
                         parsed.fields,
                         "",
@@ -962,10 +962,10 @@ fn module<'i>(input: &mut &'i str) -> ModalResult<ParsedModule<'i>> {
         // Stash byte offset in pos.line — parse() will fix up to real line:col
         match &mut stmt {
             Statement::Import(i) => i.pos.line = offset,
-            Statement::Block(b) => b.pos.line = offset,
+            Statement::Target(b) => b.pos.line = offset,
             Statement::Let(l) => l.pos.line = offset,
             Statement::Param(p) => p.pos.line = offset,
-            Statement::Target(t) => t.pos.line = offset,
+            Statement::Group(t) => t.pos.line = offset,
             Statement::Output(o) => o.pos.line = offset,
         }
         match &stmt {
@@ -1043,7 +1043,7 @@ fn leading_module_doc<'i>(input: &mut &'i str) -> (Option<String>, Vec<Comment<'
         doc_lines.push(line.trim_end_matches('\r').to_owned());
     }
 
-    // Check if there's a blank line (or EOF) separating this block from what follows
+    // Check if there's a blank line (or EOF) separating this target from what follows
     let _ =
         take_while::<_, _, ErrMode<ContextError>>(0.., |c: char| c == ' ' || c == '\t' || c == '\r').parse_next(input);
     let has_blank = input.is_empty() || input.starts_with('\n');
@@ -1270,30 +1270,30 @@ fn infer_type(expr: &Expr, known_types: &HashMap<String, Type>) -> Option<Type> 
     }
 }
 
-fn target_stmt(doc: Option<String>, known_types: &HashMap<String, Type>, input: &mut &str) -> ModalResult<Target> {
-    keyword("target").parse_next(input)?;
+fn group_stmt(doc: Option<String>, known_types: &HashMap<String, Type>, input: &mut &str) -> ModalResult<Group> {
+    keyword("group").parse_next(input)?;
     let name = cut_err(ident_string)
-        .context(StrContext::Label("target name"))
+        .context(StrContext::Label("group name"))
         .parse_next(input)?;
     let params = opt(|input: &mut &str| formal_params(input, known_types))
         .parse_next(input)?
         .unwrap_or_default();
     cut_err(lex('='))
-        .context(StrContext::Label("'=' in target"))
+        .context(StrContext::Label("'=' in group"))
         .parse_next(input)?;
-    let blocks = cut_err(delimited(lex('['), separated(0.., target_call, lex(',')), lex(']')))
-        .context(StrContext::Label("target block list"))
+    let members = cut_err(delimited(lex('['), separated(0.., group_member, lex(',')), lex(']')))
+        .context(StrContext::Label("group member list"))
         .parse_next(input)?;
-    Ok(Target {
+    Ok(Group {
         pos: Pos::default(),
         name,
         doc,
         params,
-        blocks,
+        members,
     })
 }
 
-fn target_call(input: &mut &str) -> ModalResult<TargetCall> {
+fn group_member(input: &mut &str) -> ModalResult<GroupMember> {
     let name = dotted_ident.parse_next(input)?;
     let keys = opt(delimited(lex('['), separated(1.., matrix_ref_key, lex(',')), lex(']'))).parse_next(input)?;
     let args = opt(delimited(
@@ -1303,7 +1303,7 @@ fn target_call(input: &mut &str) -> ModalResult<TargetCall> {
     ))
     .parse_next(input)?
     .unwrap_or_default();
-    Ok(TargetCall { name, keys, args })
+    Ok(GroupMember { name, keys, args })
 }
 
 fn dotted_ident(input: &mut &str) -> ModalResult<String> {
@@ -1345,8 +1345,8 @@ fn output_stmt<'i>(doc: Option<String>, input: &mut &'i str) -> ModalResult<(Out
     ))
 }
 
-/// A field inside a block body, with optional trailing comma.
-fn block_field<'i>(input: &mut &'i str) -> ModalResult<(Field, &'i str, Vec<Comment<'i>>)> {
+/// A field inside a target body, with optional trailing comma.
+fn target_field<'i>(input: &mut &'i str) -> ModalResult<(Field, &'i str, Vec<Comment<'i>>)> {
     let start_len = input.len();
     let (field, expression) = field(input)?;
     opt(lex(',')).parse_next(input)?;
@@ -1359,11 +1359,11 @@ fn block_field<'i>(input: &mut &'i str) -> ModalResult<(Field, &'i str, Vec<Comm
     Ok((field, expression, comments))
 }
 
-fn block_stmt<'i>(
+fn target_stmt<'i>(
     doc: Option<String>,
     known_types: &HashMap<String, Type>,
     input: &mut &'i str,
-) -> ModalResult<ParsedBlock<'i>> {
+) -> ModalResult<ParsedTarget<'i>> {
     let start_len = input.len();
     let phase = if opt(keyword("pre")).parse_next(input)?.is_some() {
         Phase::Pre
@@ -1425,7 +1425,7 @@ fn block_stmt<'i>(
         .parse_next(input)?
         .unwrap_or_default();
 
-    // Once we see `name =`, this must be a block statement — commit to it
+    // Once we see `name =`, this must be a target statement — commit to it
     cut_err(lex('='))
         .context(StrContext::Expected(winnow::error::StrContextValue::Description("'='")))
         .parse_next(input)?;
@@ -1453,7 +1453,7 @@ fn block_stmt<'i>(
     loop {
         let before = *input;
         let field_start = start_len - input.len();
-        match block_field(input) {
+        match target_field(input) {
             Ok((field, expression, mut field_comments)) => {
                 for comment in &mut field_comments {
                     comment.offset += field_start;
@@ -1480,8 +1480,8 @@ fn block_stmt<'i>(
         (provider, resource)
     };
 
-    Ok(ParsedBlock {
-        block: Block {
+    Ok(ParsedTarget {
+        target: Target {
             pos: Pos::default(),
             name,
             params,
@@ -1583,7 +1583,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_import_before_blocks() {
+    fn parse_import_before_targets() {
         let input = r#"
 import "github.com/user/repo"
 
@@ -1595,7 +1595,7 @@ server = exec {
         let result = parse(input, "<test>").unwrap();
         assert_eq!(result.statements.len(), 2);
         assert!(matches!(&result.statements[0], Statement::Import(_)));
-        assert!(matches!(&result.statements[1], Statement::Block(_)));
+        assert!(matches!(&result.statements[1], Statement::Target(_)));
     }
 
     #[test]
@@ -1917,52 +1917,52 @@ server = exec {
     }
 
     #[test]
-    fn parse_parameterized_block() {
+    fn parse_parameterized_target() {
         let result = parse(
             r#"image(tag : string, push = false) = exec { command = "build #{tag} #{push}" }"#,
-            "<test>",
-        )
-        .unwrap();
-        let Statement::Block(block) = &result.statements[0] else {
-            panic!("expected block");
-        };
-        assert_eq!(block.name, "image");
-        assert_eq!(block.params.len(), 2);
-        assert_eq!(block.params[0].name, "tag");
-        assert_eq!(block.params[0].typ, Type::String);
-        assert_eq!(block.params[1].default, Some(Expr::Bool(false)));
-    }
-
-    #[test]
-    fn parse_parameterized_target_calls_block_with_named_arguments() {
-        let result = parse(
-            r#"target publish(tag : string) = [image(tag = tag), notify(message = "done")]"#,
             "<test>",
         )
         .unwrap();
         let Statement::Target(target) = &result.statements[0] else {
             panic!("expected target");
         };
-        assert_eq!(target.params.len(), 1);
-        assert_eq!(target.blocks[0].name, "image");
-        assert_eq!(target.blocks[0].args[0].name, "tag");
-        assert_eq!(target.blocks[0].args[0].value, Expr::Ref(vec!["tag".into()]));
-        assert_eq!(target.blocks[1].name, "notify");
+        assert_eq!(target.name, "image");
+        assert_eq!(target.params.len(), 2);
+        assert_eq!(target.params[0].name, "tag");
+        assert_eq!(target.params[0].typ, Type::String);
+        assert_eq!(target.params[1].default, Some(Expr::Bool(false)));
     }
 
     #[test]
-    fn parse_parameterized_block_reference_with_output() {
+    fn parse_parameterized_group_calls_target_with_named_arguments() {
+        let result = parse(
+            r#"group publish(tag : string) = [image(tag = tag), notify(message = "done")]"#,
+            "<test>",
+        )
+        .unwrap();
+        let Statement::Group(group) = &result.statements[0] else {
+            panic!("expected group");
+        };
+        assert_eq!(group.params.len(), 1);
+        assert_eq!(group.members[0].name, "image");
+        assert_eq!(group.members[0].args[0].name, "tag");
+        assert_eq!(group.members[0].args[0].value, Expr::Ref(vec!["tag".into()]));
+        assert_eq!(group.members[1].name, "notify");
+    }
+
+    #[test]
+    fn parse_parameterized_target_reference_with_output() {
         let result = parse(
             r#"consumer = exec { command = compile(package = "api").path depends_on = [prepare(env = "prod")] }"#,
             "<test>",
         )
         .unwrap();
-        let Statement::Block(block) = &result.statements[0] else {
-            panic!("expected block");
+        let Statement::Target(target) = &result.statements[0] else {
+            panic!("expected target");
         };
         assert_eq!(
-            block.fields[0].value,
-            Expr::BlockCall {
+            target.fields[0].value,
+            Expr::TargetCall {
                 name: "compile".into(),
                 keys: None,
                 args: vec![Field {
@@ -1972,10 +1972,10 @@ server = exec {
                 fields: vec!["path".into()],
             }
         );
-        let Expr::List(items) = &block.fields[1].value else {
+        let Expr::List(items) = &target.fields[1].value else {
             panic!("expected list");
         };
-        assert!(matches!(&items[0], Expr::BlockCall { name, fields, .. } if name == "prepare" && fields.is_empty()));
+        assert!(matches!(&items[0], Expr::TargetCall { name, fields, .. } if name == "prepare" && fields.is_empty()));
     }
 
     #[test]
@@ -2066,31 +2066,31 @@ server = exec {
     }
 
     #[test]
-    fn parse_target() {
-        let result = parse("target build = [server, image]", "<test>").unwrap();
+    fn parse_group() {
+        let result = parse("group build = [server, image]", "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Target(t) => {
+            Statement::Group(t) => {
                 assert_eq!(t.name, "build");
                 assert_eq!(
-                    t.blocks.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
+                    t.members.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
                     vec!["server", "image"]
                 );
             }
-            _ => panic!("expected Target"),
+            _ => panic!("expected Group"),
         }
     }
 
     #[test]
-    fn parse_target_dotted() {
-        let result = parse("target deploy = [staging.deploy]", "<test>").unwrap();
+    fn parse_group_dotted() {
+        let result = parse("group deploy = [staging.deploy]", "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Target(t) => {
+            Statement::Group(t) => {
                 assert_eq!(
-                    t.blocks.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
+                    t.members.iter().map(|call| call.name.as_str()).collect::<Vec<_>>(),
                     vec!["staging.deploy"]
                 );
             }
-            _ => panic!("expected Target"),
+            _ => panic!("expected Group"),
         }
     }
 
@@ -2107,10 +2107,10 @@ server = exec {
     }
 
     #[test]
-    fn parse_simple_block() {
+    fn parse_simple_target() {
         let result = parse(r#"server = go.binary { main = "./cmd/server" }"#, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Block(b) => {
+            Statement::Target(b) => {
                 assert_eq!(b.name, "server");
                 assert_eq!(b.provider, "go");
                 assert_eq!(b.resource, "binary");
@@ -2118,33 +2118,33 @@ server = exec {
                 assert_eq!(b.fields.len(), 1);
                 assert_eq!(b.fields[0].name, "main");
             }
-            _ => panic!("expected Block"),
+            _ => panic!("expected Target"),
         }
     }
 
     #[test]
-    fn parse_protected_block() {
+    fn parse_protected_target() {
         let result = parse(r#"protected db = aws.aurora { cluster = "prod" }"#, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Block(b) => {
+            Statement::Target(b) => {
                 assert!(b.protected);
                 assert!(!b.explicit);
                 assert_eq!(b.provider, "aws");
                 assert_eq!(b.resource, "aurora");
             }
-            _ => panic!("expected Block"),
+            _ => panic!("expected Target"),
         }
     }
 
     #[test]
-    fn parse_explicit_block() {
+    fn parse_explicit_target() {
         let result = parse(r#"explicit migrate = exec { command = "./migrate" }"#, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Block(b) => {
+            Statement::Target(b) => {
                 assert!(!b.protected);
                 assert!(b.explicit);
             }
-            _ => panic!("expected Block"),
+            _ => panic!("expected Target"),
         }
     }
 
@@ -2156,11 +2156,11 @@ server = exec {
         ] {
             let result = parse(src, "<test>").unwrap();
             match &result.statements[0] {
-                Statement::Block(b) => {
+                Statement::Target(b) => {
                     assert!(b.protected, "protected for {src}");
                     assert!(b.explicit, "explicit for {src}");
                 }
-                _ => panic!("expected Block for {src}"),
+                _ => panic!("expected Target for {src}"),
             }
         }
     }
@@ -2174,19 +2174,19 @@ server = exec {
         ] {
             let result = parse(src, "<test>").unwrap();
             match &result.statements[0] {
-                Statement::Block(b) => {
+                Statement::Target(b) => {
                     assert!(b.large, "large for {src}");
                     assert_eq!(b.name, "build");
                 }
-                _ => panic!("expected Block for {src}"),
+                _ => panic!("expected Target for {src}"),
             }
         }
         match &parse(r#"build = exec { command = "make" }"#, "<test>")
             .unwrap()
             .statements[0]
         {
-            Statement::Block(b) => assert!(!b.large),
-            _ => panic!("expected Block"),
+            Statement::Target(b) => assert!(!b.large),
+            _ => panic!("expected Target"),
         }
     }
 
@@ -2198,17 +2198,17 @@ server = exec {
     }
 
     #[test]
-    fn parse_bare_provider_block() {
+    fn parse_bare_provider_target() {
         let input =
             "docs = exec {\n  command = \"mdbook build\"\n  inputs  = [\"docs/**/*.md\"]\n  output  = \"book/\"\n}";
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Block(b) => {
+            Statement::Target(b) => {
                 assert_eq!(b.provider, "exec");
                 assert_eq!(b.resource, "exec");
                 assert_eq!(b.fields.len(), 3);
             }
-            _ => panic!("expected Block"),
+            _ => panic!("expected Target"),
         }
     }
 
@@ -2249,7 +2249,7 @@ server = exec {
     }
 
     #[test]
-    fn parse_exec_block_with_dynamic_inputs() {
+    fn parse_exec_target_with_dynamic_inputs() {
         let input = concat!(
             "server = exec {\n",
             "  command = \"go build -o #{output}/server ./cmd/server\"\n",
@@ -2260,7 +2260,7 @@ server = exec {
         );
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Block(b) => {
+            Statement::Target(b) => {
                 assert_eq!(b.name, "server");
                 assert_eq!(b.fields.len(), 3);
                 match &b.fields[1].value {
@@ -2271,7 +2271,7 @@ server = exec {
                     _ => panic!("expected Add, got {:?}", b.fields[1].value),
                 }
             }
-            _ => panic!("expected Block"),
+            _ => panic!("expected Target"),
         }
     }
 
@@ -2291,7 +2291,7 @@ server = exec {
             "\n",
             "output image_ref = image.ref\n",
             "\n",
-            "target build = [server, image]\n",
+            "group build = [server, image]\n",
         );
         let result = parse(input, "<test>").unwrap();
         assert_eq!(result.statements.len(), 7);
@@ -2320,85 +2320,85 @@ server = exec {
     }
 
     #[test]
-    fn parse_block_fields_with_commas() {
+    fn parse_target_fields_with_commas() {
         let input = r#"a = exec { command = "echo hi", output = "out" }"#;
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Block(b) => {
+            Statement::Target(b) => {
                 assert_eq!(b.fields.len(), 2);
                 assert_eq!(b.fields[0].name, "command");
                 assert_eq!(b.fields[1].name, "output");
             }
-            _ => panic!("expected Block"),
+            _ => panic!("expected Target"),
+        }
+    }
+
+    #[test]
+    fn parse_doc_comment_on_group() {
+        let input = "# Build everything\ngroup build = [server]\n";
+        let result = parse(input, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Group(t) => {
+                assert_eq!(t.name, "build");
+                assert_eq!(t.doc, Some("Build everything".into()));
+            }
+            _ => panic!("expected Group"),
         }
     }
 
     #[test]
     fn parse_doc_comment_on_target() {
-        let input = "# Build everything\ntarget build = [server]\n";
-        let result = parse(input, "<test>").unwrap();
-        match &result.statements[0] {
-            Statement::Target(t) => {
-                assert_eq!(t.name, "build");
-                assert_eq!(t.doc, Some("Build everything".into()));
-            }
-            _ => panic!("expected Target"),
-        }
-    }
-
-    #[test]
-    fn parse_doc_comment_on_block() {
         let input = "# The main server binary\nserver = go.binary { main = \"./cmd/server\" }\n";
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Block(b) => {
+            Statement::Target(b) => {
                 assert_eq!(b.name, "server");
                 assert_eq!(b.doc, Some("The main server binary".into()));
             }
-            _ => panic!("expected Block"),
+            _ => panic!("expected Target"),
         }
     }
 
     #[test]
     fn parse_multiline_doc_comment() {
-        let input = "# Build and push\n# the Docker image\ntarget deploy = [image]\n";
+        let input = "# Build and push\n# the Docker image\ngroup deploy = [image]\n";
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Target(t) => {
+            Statement::Group(t) => {
                 assert_eq!(t.doc, Some("Build and push\nthe Docker image".into()));
             }
-            _ => panic!("expected Target"),
+            _ => panic!("expected Group"),
         }
     }
 
     #[test]
     fn parse_no_doc_comment() {
-        let input = "target build = [server]\n";
+        let input = "group build = [server]\n";
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Target(t) => {
+            Statement::Group(t) => {
                 assert_eq!(t.doc, None);
             }
-            _ => panic!("expected Target"),
+            _ => panic!("expected Group"),
         }
     }
 
     #[test]
-    fn parse_commented_out_block_not_doc_comment() {
+    fn parse_commented_out_target_not_doc_comment() {
         let input = concat!(
             "# image = docker.image {\n",
             "#   tag = \"bit:latest\"\n",
             "# }\n",
             "\n",
             "# Build debug binary only\n",
-            "target debug = [debug]\n",
+            "group debug = [debug]\n",
         );
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Target(t) => {
+            Statement::Group(t) => {
                 assert_eq!(t.doc, Some("Build debug binary only".into()));
             }
-            _ => panic!("expected Target"),
+            _ => panic!("expected Group"),
         }
     }
 
@@ -2533,15 +2533,15 @@ server = exec {
     }
 
     #[test]
-    fn section_comment_between_blocks_not_attached() {
-        // A comment separated from the following block by a blank line is
+    fn section_comment_between_targets_not_attached() {
+        // A comment separated from the following target by a blank line is
         // a section header, not a doc comment — it should not attach.
         let input = "first = exec { command = \"a\" }\n\n# ── Section ──\n\nsecond = exec { command = \"b\" }\n";
         let result = parse(input, "<test>").unwrap();
         assert_eq!(result.statements.len(), 2);
         match &result.statements[1] {
-            Statement::Block(b) => assert_eq!(b.doc, None),
-            _ => panic!("expected Block"),
+            Statement::Target(b) => assert_eq!(b.doc, None),
+            _ => panic!("expected Target"),
         }
     }
 
@@ -2617,25 +2617,25 @@ server = exec {
             "<test>",
         )
         .unwrap();
-        let Statement::Block(block) = &result.statements[2] else {
-            panic!("expected Block");
+        let Statement::Target(target) = &result.statements[2] else {
+            panic!("expected Target");
         };
-        assert_eq!(block.params[0].typ, Type::String);
-        assert_eq!(block.params[1].typ, Type::String);
+        assert_eq!(target.params[0].typ, Type::String);
+        assert_eq!(target.params[1].typ, Type::String);
     }
 
     #[test]
     fn infer_parameter_type_from_prior_param() {
         let result = parse(
-            "param tag : string\ntarget publish(name = tag, copy = name) = []",
+            "param tag : string\ngroup publish(name = tag, copy = name) = []",
             "<test>",
         )
         .unwrap();
-        let Statement::Target(target) = &result.statements[1] else {
-            panic!("expected Target");
+        let Statement::Group(group) = &result.statements[1] else {
+            panic!("expected Group");
         };
-        assert_eq!(target.params[0].typ, Type::String);
-        assert_eq!(target.params[1].typ, Type::String);
+        assert_eq!(group.params[0].typ, Type::String);
+        assert_eq!(group.params[1].typ, Type::String);
     }
 
     #[test]
@@ -2706,7 +2706,7 @@ server = exec {
     }
 
     #[test]
-    fn parse_matrix_block() {
+    fn parse_matrix_target() {
         let input = r#"
 param arch = ["amd64", "arm64"]
 image[arch] = exec {
@@ -2716,16 +2716,16 @@ image[arch] = exec {
 "#;
         let result = parse(input, "<test>").unwrap();
         match &result.statements[1] {
-            Statement::Block(b) => {
+            Statement::Target(b) => {
                 assert_eq!(b.name, "image");
                 assert_eq!(b.matrix_key_names(), vec!["arch"]);
             }
-            _ => panic!("expected Block"),
+            _ => panic!("expected Target"),
         }
     }
 
     #[test]
-    fn parse_matrix_block_multi_key() {
+    fn parse_matrix_target_multi_key() {
         let input = r#"
 image[arch, region] = exec {
   command = "build"
@@ -2734,10 +2734,10 @@ image[arch, region] = exec {
 "#;
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Block(b) => {
+            Statement::Target(b) => {
                 assert_eq!(b.matrix_key_names(), vec!["arch", "region"]);
             }
-            _ => panic!("expected Block"),
+            _ => panic!("expected Target"),
         }
     }
 
@@ -2749,8 +2749,8 @@ tests[module, package = go.packages("./...", module)] = exec {
 }
 "#;
         let result = parse(input, "<test>").unwrap();
-        let Statement::Block(b) = &result.statements[0] else {
-            panic!("expected Block");
+        let Statement::Target(b) = &result.statements[0] else {
+            panic!("expected Target");
         };
         assert_eq!(b.matrix_key_names(), vec!["module", "package"]);
         assert_eq!(b.matrix_keys[0].values, None);
@@ -2760,39 +2760,39 @@ tests[module, package = go.packages("./...", module)] = exec {
     }
 
     #[test]
-    fn parse_parameterized_matrix_block_and_slice_call() {
+    fn parse_parameterized_matrix_target_and_slice_call() {
         let source = r#"
 build[arch](tag : string) = exec { command = "build #{arch} #{tag}" }
 consumer = exec { depends_on = [build["arm64"](tag = "1.2.3")] }
-target release = [build["arm64"](tag = "1.2.3")]
+group release = [build["arm64"](tag = "1.2.3")]
 "#;
         let module = parse(source, "<test>").unwrap();
-        let Statement::Block(build) = &module.statements[0] else {
-            panic!("expected block");
+        let Statement::Target(build) = &module.statements[0] else {
+            panic!("expected target");
         };
         assert_eq!(build.matrix_key_names(), ["arch"]);
         assert_eq!(build.params[0].name, "tag");
-        let Statement::Block(consumer) = &module.statements[1] else {
-            panic!("expected block");
+        let Statement::Target(consumer) = &module.statements[1] else {
+            panic!("expected target");
         };
         let Expr::List(deps) = &consumer.fields[0].value else {
             panic!("expected dependency list");
         };
-        assert!(matches!(&deps[0], Expr::BlockCall { name, keys: Some(keys), args, .. }
+        assert!(matches!(&deps[0], Expr::TargetCall { name, keys: Some(keys), args, .. }
             if name == "build" && keys.len() == 1 && args[0].name == "tag"));
-        let Statement::Target(release) = &module.statements[2] else {
-            panic!("expected target");
+        let Statement::Group(release) = &module.statements[2] else {
+            panic!("expected group");
         };
-        assert_eq!(release.blocks[0].keys.as_ref().unwrap().len(), 1);
+        assert_eq!(release.members[0].keys.as_ref().unwrap().len(), 1);
     }
 
     #[test]
-    fn parse_block_no_matrix() {
+    fn parse_target_no_matrix() {
         let input = "a = exec {\n  command = \"build\"\n  output = \"out\"\n}\n";
         let result = parse(input, "<test>").unwrap();
         match &result.statements[0] {
-            Statement::Block(b) => assert!(b.matrix_keys.is_empty()),
-            _ => panic!("expected Block"),
+            Statement::Target(b) => assert!(b.matrix_keys.is_empty()),
+            _ => panic!("expected Target"),
         }
     }
 

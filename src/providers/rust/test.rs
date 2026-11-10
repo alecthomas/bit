@@ -8,9 +8,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -38,14 +38,14 @@ pub struct RustTestInputs {
     pub rust_env: RustEnv,
 }
 
-/// Outputs from a `rust.test` block.
+/// Outputs from a `rust.test` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct RustTestOutputs {
     /// Whether the check passed
     pub passed: bool,
 }
 
-/// Persisted state for a `rust.test` block.
+/// Persisted state for a `rust.test` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RustTestState {
     pub package: Option<String>,
@@ -211,7 +211,7 @@ fn running_suite_name(rest: &str) -> String {
 /// instead.
 fn process_test_output(
     lines: impl IntoIterator<Item = (String, bool)>,
-    writer: &BlockWriter,
+    writer: &TargetWriter,
     mode: ReportMode,
 ) -> TestResult {
     let verbose = mode == ReportMode::Verbose;
@@ -338,7 +338,7 @@ pub struct RustTestResource {
     pub tracker: Arc<FileTracker>,
 }
 
-fn test_command(inputs: &Block<RustTestInputs>) -> CargoCommand {
+fn test_command(inputs: &Target<RustTestInputs>) -> CargoCommand {
     let mut cargo = inputs.rust_env.cargo("test", inputs.dir.as_deref());
     cargo.envs(&inputs.env);
     if let Some(pkg) = &inputs.package {
@@ -361,11 +361,11 @@ impl Resource for RustTestResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &Block<RustTestInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<RustTestInputs>) -> Vec<Ambient> {
         super::build_ambient(&inputs.rust_env, inputs.dir.as_deref(), &inputs.env, &[])
     }
 
-    fn resolve(&self, inputs: &Block<RustTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<RustTestInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         super::resolve_rust_inputs(
             &super::Selection {
@@ -380,7 +380,7 @@ impl Resource for RustTestResource {
 
     fn plan(
         &self,
-        inputs: &Block<RustTestInputs>,
+        inputs: &Target<RustTestInputs>,
         prior_state: Option<&RustTestState>,
     ) -> Result<PlanResult, BoxError> {
         let description = test_command(inputs).display();
@@ -412,10 +412,10 @@ impl Resource for RustTestResource {
 
     fn apply(
         &self,
-        inputs: &Block<RustTestInputs>,
+        inputs: &Target<RustTestInputs>,
         _prior_state: Option<&RustTestState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<RustTestState, RustTestOutputs>, BoxError> {
         let cargo = test_command(inputs);
         let mut child = cargo
@@ -478,11 +478,11 @@ impl Resource for RustTestResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<RustTestState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<RustTestState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &Block<RustTestInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<RustTestInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustTestInputs {
                 package: None,
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn plan_create_with_package() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustTestInputs {
                 package: Some("my-crate".into()),
@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustTestInputs {
                 package: None,
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustTestInputs {
                 package: None,

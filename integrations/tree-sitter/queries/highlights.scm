@@ -7,7 +7,7 @@
   "as"
   "let"
   "param"
-  "target"
+  "group"
   "output"
 ] @keyword
 
@@ -54,14 +54,14 @@
 (parameter
   name: (identifier) @variable.parameter)
 
-(target_statement
+(group_statement
   name: (identifier) @function)
 
 (output_statement
   name: (identifier) @variable)
 
-; Blocks
-(block
+; Targets
+(target
   name: (identifier) @variable
   provider: (identifier) @namespace
   resource: (identifier) @type)
@@ -80,7 +80,7 @@
   key: (string) @property)
 
 ; Function calls
-(block_call
+(target_call
   name: (identifier) @variable)
 
 (call
@@ -105,7 +105,7 @@
 (matrix_key_binding
   name: (identifier) @variable)
 
-; Dotted identifiers in targets
+; Dotted identifiers in groups
 (dotted_identifier
   (identifier) @variable)
 

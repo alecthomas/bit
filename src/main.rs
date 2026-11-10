@@ -25,7 +25,7 @@ use bit::value::Map;
 #[command(
     name = "bit",
     about = "bit — Build It",
-    long_about = r##"Bit is a declarative build tool. It reads BUILD.bit, tracks dependencies and state, and runs only the blocks that need work.
+    long_about = r##"Bit is a declarative build tool. It reads BUILD.bit, tracks dependencies and state, and runs only the targets that need work.
 
 BUILD.bit example (illustrative):
   import "./modules/app" as app               # Load a local module.
@@ -56,28 +56,28 @@ BUILD.bit example (illustrative):
     echo #{label}
   EOL
 
-  # pre blocks run before default-phase blocks.
+  # pre targets run before default-phase targets.
   pre prepare = exec { command = "mkdir -p dist" }
 
-  binary[arch] = go.exe {                     # One block per arch; provider.resource form.
+  binary[arch] = go.exe {                     # One target per arch; provider.resource form.
     package = "./cmd/app"
     goarch = arch
-    depends_on = [prepare]                    # Content dependency; block.output also adds one.
-    concurrency = 1                           # Limit concurrent slices of this matrix block.
+    depends_on = [prepare]                    # Content dependency; target.output also adds one.
+    concurrency = 1                           # Limit concurrent slices of this matrix target.
   }
 
   # protected must be named directly to clean; explicit excludes it from bit ...
-  # large marks a long-running or resource-heavy block.
+  # large marks a long-running or resource-heavy target.
   protected explicit large publish(name: string, profile = "release") = exec {
-    command = "echo #{name} #{profile}"       # Interpolate block parameters.
+    command = "echo #{name} #{profile}"       # Interpolate target parameters.
     after = [binary]                          # Ordering only, without change propagation.
   }
 
-  post report = exec { command = script }     # Run after default-phase blocks.
+  post report = exec { command = script }     # Run after default-phase targets.
 
-  target default = [binary]                   # Run with bit; target names select other groups.
-  # Target arguments are named on the command line: bit deploy name=app.
-  target deploy(name: string) = [publish(name = name)]
+  group default = [binary]                    # Run with bit; bit <name> runs another group.
+  # Group arguments are named on the command line: bit deploy name=app.
+  group deploy(name: string) = [publish(name = name)]
 
   output artifact = binary["amd64"].path      # Export a value from a module.
 
@@ -94,7 +94,7 @@ struct Cli {
     #[arg(short = 'P', long = "param", value_name = "KEY=VALUE")]
     params: Vec<String>,
 
-    /// Limit blocks to those affected since merge-base(REF, HEAD); REF defaults
+    /// Limit targets to those affected since merge-base(REF, HEAD); REF defaults
     /// to origin/HEAD, and a REF that is not a commit is read as a target
     #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = DEFAULT_SINCE)]
     since: Option<String>,
@@ -103,7 +103,7 @@ struct Cli {
     #[arg(short = 'p', long)]
     plan: bool,
 
-    /// Destroy named blocks and their dependents; protected blocks must be named directly
+    /// Destroy named targets and their dependents; protected targets must be named directly
     #[arg(short = 'c', long)]
     clean: bool,
 
@@ -122,15 +122,15 @@ struct Cli {
     #[arg(short = 'd', long)]
     dump: bool,
 
-    /// Show parameters, targets, and outputs
+    /// Show parameters, groups, and outputs
     #[arg(short = 'i', long)]
     info: bool,
 
-    /// List targets; repeat (-ll) to list all blocks
+    /// List groups; repeat (-ll) to list all targets
     #[arg(short = 'l', long, action = clap::ArgAction::Count)]
     list: u8,
 
-    /// Render the block dependency graph as ASCII art
+    /// Render the target dependency graph as ASCII art
     #[arg(short = 'g', long)]
     graph: bool,
 
@@ -148,14 +148,14 @@ struct Cli {
     #[arg(long)]
     fmt: bool,
 
-    /// Render a CI configuration that runs the selection, with large blocks in
+    /// Render a CI configuration that runs the selection, with large targets in
     /// separate jobs, from a built-in template ("github") or a template file
     /// path containing "/". See `bit --docs ci`
     #[arg(long, value_name = "TEMPLATE")]
     ci: Option<String>,
 
     /// Print bit's documentation, or only the section on TOPIC (e.g. "ci",
-    /// "blocks"); styled on a terminal, plain Markdown otherwise
+    /// "targets"); styled on a terminal, plain Markdown otherwise
     #[arg(long, value_name = "TOPIC", num_args = 0..=1, default_missing_value = "")]
     docs: Option<String>,
 
@@ -175,7 +175,7 @@ struct Cli {
     #[arg(short = 'L', long)]
     long: bool,
 
-    /// Targets or blocks to operate on, followed by name=value arguments
+    /// Groups or targets to operate on, followed by name=value arguments
     targets: Vec<String>,
 }
 
@@ -239,13 +239,13 @@ fn parse_invocations(raw: &[String]) -> Result<Vec<bit::invocation::Invocation>,
     for item in raw {
         if let Some((name, value)) = item.split_once('=') {
             let Some(invocation) = invocations.last_mut() else {
-                return Err(format!("target argument '{item}' must follow a target or block name"));
+                return Err(format!("argument '{item}' must follow a group or target name"));
             };
             let mut chars = name.chars();
             let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
             if !valid {
-                return Err(format!("invalid target argument '{item}' (expected name=value)"));
+                return Err(format!("invalid argument '{item}' (expected name=value)"));
             }
             invocation.args.push((name.to_owned(), value.to_owned()));
         } else {
@@ -406,7 +406,7 @@ fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
 }
 
-/// Create an Output formatter sized to the blocks that will actually run.
+/// Create an Output formatter sized to the targets that will actually run.
 fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool, long: bool, quiet: bool) -> Output {
     let names = engine::resolve_order(dag, targets).unwrap_or_default();
     output_for_names(&names, debug, long, quiet)
@@ -420,7 +420,7 @@ fn output_for_names(names: &[String], debug: bool, long: bool, quiet: bool) -> O
     Output::new(&name_refs).with_debug(debug).with_long(long)
 }
 
-/// Compute per-node graph styles that reflect each block's planned action.
+/// Compute per-node graph styles that reflect each target's planned action.
 /// Invokes `engine::plan` with a silent Output so the event stream doesn't
 /// pollute stdout before the graph is rendered. Plan errors are returned
 /// to the caller so `--plan --graph` surfaces them instead of silently
@@ -498,8 +498,8 @@ fn print_docs(topic: &str) {
 
 #[derive(Clone, Copy)]
 enum SelectionMode {
-    Targets,
-    AllBlocks,
+    Selected,
+    AllTargets,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -523,7 +523,7 @@ impl Cli {
     /// Select once so mode-specific validation and dispatch cannot diverge.
     fn selected(&self) -> Option<Operation> {
         // `--clean` cleans the cache only when `--cache` names one on the
-        // command line; a cache set in the environment never turns a block
+        // command line; a cache set in the environment never turns a target
         // clean into deleting the cache.
         let cleans_cache = self.clean && self.cache.is_some();
         let requested: Vec<_> = [
@@ -581,9 +581,9 @@ fn selected_order(
     tracker: &Arc<FileTracker>,
 ) -> Result<Vec<String>, SelectionError> {
     let order = match mode {
-        SelectionMode::Targets => engine::resolve_order(dag, targets)?,
-        SelectionMode::AllBlocks if targets.is_empty() => dag.topo_order().map_err(engine::EngineError::from)?,
-        SelectionMode::AllBlocks => engine::resolve_order(dag, targets)?,
+        SelectionMode::Selected => engine::resolve_order(dag, targets)?,
+        SelectionMode::AllTargets if targets.is_empty() => dag.topo_order().map_err(engine::EngineError::from)?,
+        SelectionMode::AllTargets => engine::resolve_order(dag, targets)?,
     };
     let Some(since) = since else {
         return Ok(order);
@@ -612,7 +612,7 @@ fn selected_order_or_exit(
     };
     if since.is_some() && order.is_empty() {
         if !quiet {
-            println!("No affected blocks.");
+            println!("No affected targets.");
         }
         None
     } else {
@@ -695,7 +695,7 @@ fn main() {
         }
     };
     if cli.since.is_some() && cli.list == 1 {
-        eprintln!("{} --since requires -ll when listing blocks", error_label());
+        eprintln!("{} --since requires -ll when listing targets", error_label());
         process::exit(1);
     }
 
@@ -847,7 +847,7 @@ fn main() {
             &cache,
             &targets,
             cli.since.as_deref(),
-            SelectionMode::Targets,
+            SelectionMode::Selected,
             &tracker,
             cli.quiet,
         ) else {
@@ -879,7 +879,7 @@ fn main() {
             &cache,
             &targets,
             cli.since.as_deref(),
-            SelectionMode::Targets,
+            SelectionMode::Selected,
             &tracker,
             cli.quiet,
         ) else {
@@ -906,22 +906,22 @@ fn main() {
                 &cache,
                 &targets,
                 cli.since.as_deref(),
-                SelectionMode::AllBlocks,
+                SelectionMode::AllTargets,
                 &tracker,
                 cli.quiet,
             ) else {
                 return;
             };
             if !cli.quiet {
-                print_block_tree(&dag, &names);
+                print_target_tree(&dag, &names);
             }
         } else if cli.list == 1 {
             if !cli.quiet {
-                print_targets(&dag, &module);
+                print_groups(&dag, &module);
             }
         } else {
             match dag.topo_order() {
-                Ok(names) if !cli.quiet => print_block_tree(&dag, &names),
+                Ok(names) if !cli.quiet => print_target_tree(&dag, &names),
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("{} {e}", error_label());
@@ -937,7 +937,7 @@ fn main() {
             &cache,
             &targets,
             cli.since.as_deref(),
-            SelectionMode::Targets,
+            SelectionMode::Selected,
             &tracker,
             cli.quiet,
         ) else {
@@ -956,7 +956,7 @@ fn main() {
             &cache,
             &targets,
             cli.since.as_deref(),
-            SelectionMode::Targets,
+            SelectionMode::Selected,
             &tracker,
             cli.quiet,
         ) else {
@@ -986,27 +986,27 @@ fn format_bit_file(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_targets(dag: &bit::dag::Dag, module: &bit::ast::Module) {
-    let mut declarations: std::collections::HashMap<&str, &bit::ast::Target> = dag
-        .target_declarations()
+fn print_groups(dag: &bit::dag::Dag, module: &bit::ast::Module) {
+    let mut declarations: std::collections::HashMap<&str, &bit::ast::Group> = dag
+        .group_declarations()
         .iter()
-        .map(|(name, target)| (name.as_str(), target))
+        .map(|(name, group)| (name.as_str(), group))
         .collect();
     declarations.extend(module.statements.iter().filter_map(|statement| match statement {
-        bit::ast::Statement::Target(target) => Some((target.name.as_str(), target)),
+        bit::ast::Statement::Group(group) => Some((group.name.as_str(), group)),
         _ => None,
     }));
-    let mut targets: Vec<_> = declarations.values().copied().collect();
-    targets.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut groups: Vec<_> = declarations.values().copied().collect();
+    groups.sort_by(|left, right| left.name.cmp(&right.name));
 
-    if targets.is_empty() {
-        println!("No targets defined.");
+    if groups.is_empty() {
+        println!("No groups defined.");
         return;
     }
 
-    for target in targets {
-        let signature = format!("{}{}", target.name, format_formal_params(&target.params));
-        match target.doc.as_deref() {
+    for group in groups {
+        let signature = format!("{}{}", group.name, format_formal_params(&group.params));
+        match group.doc.as_deref() {
             Some(doc) => {
                 let mut lines = doc.lines();
                 let first = lines.next().unwrap_or("");
@@ -1037,12 +1037,12 @@ fn format_formal_params(params: &[bit::ast::Param]) -> String {
     format!("({values})")
 }
 
-/// Render the DAG as a tree with dependencies indented beneath the blocks
+/// Render the DAG as a tree with dependencies indented beneath the targets
 /// that require them. Shared dependencies are grouped under their primary
 /// dependent (content-coupled edge preferred over synthetic ordering edges,
 /// ties broken alphabetically) and name the other dependents in an
 /// `(also: x, y)` suffix.
-fn print_block_tree(dag: &bit::dag::Dag, names: &[String]) {
+fn print_target_tree(dag: &bit::dag::Dag, names: &[String]) {
     use std::collections::HashMap;
 
     let mut children: HashMap<Option<String>, Vec<String>> = HashMap::new();
@@ -1053,10 +1053,10 @@ fn print_block_tree(dag: &bit::dag::Dag, names: &[String]) {
     for kids in children.values_mut() {
         kids.sort();
     }
-    print_block_tree_node(dag, &children, None, 0);
+    print_target_tree_node(dag, &children, None, 0);
 }
 
-fn print_block_tree_node(
+fn print_target_tree_node(
     dag: &bit::dag::Dag,
     children: &std::collections::HashMap<Option<String>, Vec<String>>,
     parent: Option<&str>,
@@ -1070,7 +1070,7 @@ fn print_block_tree_node(
         let typ = format!("{}.{}", node.provider, node.resource_name);
         // Show extra content-coupled dependents inline. Phase-edge
         // ordering dependents are omitted — they apply to every default
-        // block and would just be noise.
+        // target and would just be noise.
         let primary = dag.primary_dependent(name);
         let mut others: Vec<String> = dag
             .content_dependents(name)
@@ -1093,7 +1093,7 @@ fn print_block_tree_node(
             }
             None => println!("{pad}{name} ({}){also}", typ.dim()),
         }
-        print_block_tree_node(dag, children, Some(name), depth + 1);
+        print_target_tree_node(dag, children, Some(name), depth + 1);
     }
 }
 
@@ -1127,11 +1127,11 @@ fn print_info(quiet: bool) {
             _ => None,
         })
         .collect();
-    let targets: Vec<_> = module
+    let groups: Vec<_> = module
         .statements
         .iter()
         .filter_map(|s| match s {
-            Statement::Target(t) => Some(t),
+            Statement::Group(t) => Some(t),
             _ => None,
         })
         .collect();
@@ -1158,9 +1158,9 @@ fn print_info(quiet: bool) {
         println!();
     }
 
-    if !targets.is_empty() {
-        println!("{}:", "Targets".bold());
-        for t in &targets {
+    if !groups.is_empty() {
+        println!("{}:", "Groups".bold());
+        for t in &groups {
             let signature = format!("{}{}", t.name, format_formal_params(&t.params));
             match &t.doc {
                 Some(doc) => println!("  {} — {}", signature.bold(), doc.dim()),
@@ -1181,8 +1181,8 @@ fn print_info(quiet: bool) {
         println!();
     }
 
-    if module_params.is_empty() && targets.is_empty() && outputs.is_empty() {
-        println!("No parameters, targets, or outputs defined.");
+    if module_params.is_empty() && groups.is_empty() && outputs.is_empty() {
+        println!("No parameters, groups, or outputs defined.");
     }
 }
 

@@ -10,10 +10,10 @@ use crate::dag::{
 use crate::expr::{self, EvalError, Scope};
 use crate::file_tracker::FileTracker;
 use crate::loader::BaseScope;
-use crate::output::{BlockWriter, Event, Output};
+use crate::output::{Event, Output, TargetWriter};
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, OutputFile, PlanAction, PlanResult, ReceiptCheck,
-    ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, OutputFile, PlanAction, PlanResult, ReceiptCheck,
+    ResourceKind, Target,
 };
 use crate::providers::is_ambient_key;
 use crate::sha256::{Hasher, SHA256};
@@ -24,39 +24,39 @@ use crate::value::{Map, Type, Value};
 pub enum EngineError {
     #[error("{0}")]
     Dag(#[from] DagError),
-    #[error("{pos}: eval error in block '{block}': {source}")]
+    #[error("{pos}: eval error in target '{target}': {source}")]
     Eval {
         pos: crate::ast::Pos,
-        block: String,
+        target: String,
         source: EvalError,
     },
-    #[error("{pos}: block '{block}': {source}")]
+    #[error("{pos}: target '{target}': {source}")]
     InvalidInputs {
         pos: crate::ast::Pos,
-        block: String,
+        target: String,
         source: Box<crate::input_check::InputError>,
     },
-    #[error("{pos}: block '{block}' {phase} failed: {source}")]
+    #[error("{pos}: target '{target}' {phase} failed: {source}")]
     Provider {
         pos: crate::ast::Pos,
-        block: String,
+        target: String,
         phase: &'static str,
         source: BoxError,
     },
     #[error("{0}")]
     State(#[from] StateError),
-    #[error("{pos}: protected block '{block}' cannot be {action}")]
+    #[error("{pos}: protected target '{target}' cannot be {action}")]
     Protected {
         pos: crate::ast::Pos,
-        block: String,
+        target: String,
         action: &'static str,
     },
-    #[error("{pos}: test block '{block}' failed")]
-    TestFailed { pos: crate::ast::Pos, block: String },
-    #[error("{pos}: block '{block}' concurrency must be a positive integer, got {value}")]
+    #[error("{pos}: test target '{target}' failed")]
+    TestFailed { pos: crate::ast::Pos, target: String },
+    #[error("{pos}: target '{target}' concurrency must be a positive integer, got {value}")]
     InvalidConcurrency {
         pos: crate::ast::Pos,
-        block: String,
+        target: String,
         value: String,
     },
 }
@@ -67,8 +67,8 @@ struct ConcurrencyLimit {
     limit: usize,
 }
 
-/// Result of planning a single block.
-pub struct BlockPlan {
+/// Result of planning a single target.
+pub struct TargetPlan {
     pub name: String,
     pub plan: PlanResult,
 }
@@ -87,11 +87,11 @@ fn short_hash(h: &SHA256) -> String {
 struct WrappedState {
     state: serde_json::Value,
     outputs: Map,
-    /// The block's `dir` when it last ran, which `--clean` runs in after the
-    /// block definition has gone.
+    /// The target's `dir` when it last ran, which `--clean` runs in after the
+    /// target definition has gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dir: Option<String>,
-    /// The block's `env` when it last ran, for `--clean` likewise, less any
+    /// The target's `env` when it last ran, for `--clean` likewise, less any
     /// secrets: state is stored in plain text.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
@@ -153,7 +153,7 @@ fn unwrap_state(stored: &serde_json::Value) -> PriorState {
     }
 }
 
-fn restore_prior(writer: &BlockWriter, prior_state: Option<&serde_json::Value>) -> PriorState {
+fn restore_prior(writer: &TargetWriter, prior_state: Option<&serde_json::Value>) -> PriorState {
     match prior_state {
         Some(s) => {
             let prior = unwrap_state(s);
@@ -180,7 +180,7 @@ fn default_prior() -> PriorState {
     }
 }
 
-/// Hash the block's evaluated input fields in canonical (key-sorted) JSON
+/// Hash the target's evaluated input fields in canonical (key-sorted) JSON
 /// form, with absolute paths made portable so the hash agrees across
 /// checkouts.
 fn hash_inputs(inputs: &Map, cache: &BuildCache) -> SHA256 {
@@ -210,10 +210,10 @@ fn compute_content_hash(
     hasher.finalize()
 }
 
-/// Result hash of every block completed so far in the current run: the exact
+/// Result hash of every target completed so far in the current run: the exact
 /// result that was selected, restored, or produced. Dependents key on these
 /// rather than on persistent state so parallel execution is deterministic
-/// and a block never observes a stale hash from a previous run.
+/// and a target never observes a stale hash from a previous run.
 type RunResults = HashMap<String, SHA256>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -224,9 +224,9 @@ enum ApplyMode {
 
 /// Collect dependency hashes from the current run. A dependency outside the
 /// run's order falls back to the state loaded when the DAG was built.
-fn collect_dep_hashes(dag: &Dag, block_name: &str, results: &RunResults) -> BTreeMap<String, SHA256> {
+fn collect_dep_hashes(dag: &Dag, target_name: &str, results: &RunResults) -> BTreeMap<String, SHA256> {
     let mut dep_hashes = BTreeMap::new();
-    let mut deps = dag.content_deps(block_name);
+    let mut deps = dag.content_deps(target_name);
     deps.sort();
     for dep in deps {
         let hash = results.get(&dep).copied().or_else(|| {
@@ -242,19 +242,19 @@ fn collect_dep_hashes(dag: &Dag, block_name: &str, results: &RunResults) -> BTre
     dep_hashes
 }
 
-/// Describe why a block's content hash changed compared to its prior state.
+/// Describe why a target's content hash changed compared to its prior state.
 fn change_reason(
     prior: &PriorState,
     new_resolve_map: &BTreeMap<String, SHA256>,
     new_input_hash: &SHA256,
     new_dep_hashes: &BTreeMap<String, SHA256>,
     dag: &Dag,
-    block_name: &str,
+    target_name: &str,
     dirty_deps: &HashSet<String>,
 ) -> Option<String> {
-    // Check for dirty dependency blocks.
+    // Check for dirty dependency targets.
     let mut dirty: Vec<_> = dag
-        .content_deps(block_name)
+        .content_deps(target_name)
         .into_iter()
         .filter(|d| dirty_deps.contains(d))
         .collect();
@@ -317,7 +317,7 @@ pub fn plan_action_to_event(action: &PlanAction) -> Event {
     }
 }
 
-/// Validate that active blocks don't reference missing (unresolved) params.
+/// Validate that active targets don't reference missing (unresolved) params.
 fn validate_active_params(dag: &Dag, order: &[String], base: &BaseScope) -> Result<(), EngineError> {
     if base.missing_params.is_empty() {
         return Ok(());
@@ -330,7 +330,7 @@ fn validate_active_params(dag: &Dag, order: &[String], base: &BaseScope) -> Resu
             if base.missing_params.contains(&r) {
                 return Err(EngineError::Eval {
                     pos: node.pos.clone(),
-                    block: name.clone(),
+                    target: name.clone(),
                     source: crate::expr::EvalError::UndefinedVar(format!(
                         "missing required param '{r}' (use -P {r}=VALUE)"
                     )),
@@ -341,16 +341,16 @@ fn validate_active_params(dag: &Dag, order: &[String], base: &BaseScope) -> Resu
     Ok(())
 }
 
-/// Resolve the block execution order for a given target.
-/// - empty → `default` target if defined, else every non-`explicit` block
-/// - `...` (alone or alongside other targets) → every non-`explicit` block,
-///   unioned with the orders of any other named targets/blocks (an `explicit`
-///   block is included when named directly or pulled in as a dependency of
-///   a selected target/block)
+/// Resolve the target execution order for the given selection.
+/// - empty → `default` group if defined, else every non-`explicit` target
+/// - `...` (alone or alongside other selections) → every non-`explicit` target,
+///   unioned with the orders of any other named groups/targets (an `explicit`
+///   target is included when named directly or pulled in as a dependency of
+///   a selected group/target)
 pub fn resolve_order(dag: &Dag, targets: &[String]) -> Result<Vec<String>, EngineError> {
     if targets.is_empty() {
-        if dag.targets().contains_key("default") {
-            return Ok(dag.target_order("default")?);
+        if dag.groups().contains_key("default") {
+            return Ok(dag.selection_order("default")?);
         }
         return Ok(dag.select_all()?);
     }
@@ -361,7 +361,7 @@ pub fn resolve_order(dag: &Dag, targets: &[String]) -> Result<Vec<String>, Engin
             wildcard = true;
             continue;
         }
-        for name in dag.target_order(t)? {
+        for name in dag.selection_order(t)? {
             needed.insert(name);
         }
     }
@@ -374,8 +374,8 @@ pub fn resolve_order(dag: &Dag, targets: &[String]) -> Result<Vec<String>, Engin
     Ok(all.into_iter().filter(|n| needed.contains(n)).collect())
 }
 
-/// Narrow an already-resolved execution order to blocks affected by a set of
-/// changed paths. Directly affected blocks pull in their content dependents
+/// Narrow an already-resolved execution order to targets affected by a set of
+/// changed paths. Directly affected targets pull in their content dependents
 /// and every prerequisite required to execute the result.
 pub fn affected_order(
     dag: &Dag,
@@ -408,7 +408,9 @@ pub fn affected_order(
     let mut affected = HashSet::new();
 
     for name in order {
-        let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
+        let node = dag
+            .get_node(name)
+            .ok_or_else(|| DagError::UnknownTarget(name.clone()))?;
         let prior = node
             .prior_state
             .as_ref()
@@ -456,7 +458,7 @@ pub fn affected_order(
         // one outside the repository. Those are compared with the prior run
         // instead. Only the prior map holds output hashes, so an output that
         // is not also a source is left out rather than always differing. As
-        // with the inputs above, a block that never ran has nothing to
+        // with the inputs above, a target that never ran has nothing to
         // compare against.
         if prior.provider_state.is_some() {
             let unseen_keys = current
@@ -485,7 +487,7 @@ pub fn affected_order(
             unmatched_removed.remove(*path);
         }
 
-        // A block with no source paths cannot be proven unaffected by Git.
+        // A target with no source paths cannot be proven unaffected by Git.
         if tracked.iter().all(|path| is_output(path)) {
             direct = true;
         }
@@ -512,20 +514,20 @@ pub fn affected_order(
 
     let mut needed = affected.clone();
     for name in affected {
-        for dependency in dag.target_order(&name)? {
+        for dependency in dag.selection_order(&name)? {
             needed.insert(dependency);
         }
     }
     Ok(order.iter().filter(|name| needed.contains(*name)).cloned().collect())
 }
 
-/// A usable shared-cache receipt found for a block.
+/// A usable shared-cache receipt found for a target.
 struct CacheHit {
     receipt: Receipt,
     check: ReceiptCheck,
 }
 
-/// Everything decided about a block before any side effect. Shared by plan
+/// Everything decided about a target before any side effect. Shared by plan
 /// and apply so both report the same action.
 struct Prepared {
     inputs: Map,
@@ -551,7 +553,7 @@ struct Prepared {
 }
 
 impl Prepared {
-    /// Hash a dependent should use for this block if it is not going to run.
+    /// Hash a dependent should use for this target if it is not going to run.
     fn settled_hash(&self) -> Option<SHA256> {
         match (&self.plan.action, &self.hit) {
             (PlanAction::None, Some(_)) => Some(self.content_hash),
@@ -589,7 +591,7 @@ struct ResolvedHashes {
     recorded: Vec<String>,
 }
 
-/// A block's sources as [`resolve_sources`] finds them.
+/// A target's sources as [`resolve_sources`] finds them.
 struct Sources {
     /// Files and ambient fingerprints, all known before the action runs.
     hashes: BTreeMap<String, SHA256>,
@@ -608,7 +610,7 @@ fn recorded_variables_match(receipt: &Receipt, paths: &PortablePaths) -> bool {
         .all(|(name, fingerprint)| crate::providers::variable_fingerprint(name, paths) == *fingerprint)
 }
 
-/// The block's sources: the files its resource resolves and the ambient
+/// The target's sources: the files its resource resolves and the ambient
 /// state it depends on, so a tool upgrade or changed variable is a source
 /// change like any other.
 fn resolve_sources(
@@ -630,12 +632,12 @@ fn resolve_sources(
     let start = std::time::Instant::now();
     let mut ambient = Vec::new();
     let mut recorded = Vec::new();
-    let env = crate::provider::block_env(inputs);
+    let env = crate::provider::target_env(inputs);
     for item in node.resource.ambient(inputs)? {
         match item {
             Ambient::RecordedVariable(name) => recorded.push(name),
             Ambient::Version(mut command) => {
-                command.block_env.clone_from(&env);
+                command.target_env.clone_from(&env);
                 ambient.push(Ambient::Version(command));
             }
             other => ambient.push(other),
@@ -677,7 +679,7 @@ fn resolve_hashes(
             tracked.insert(output.role.clone(), tracker.hash_file(path)?);
         } else if path.is_dir() {
             // Each file is tracked under its own key, so deleting or editing
-            // one reruns the block and is reported as a changed path.
+            // one reruns the target and is reported as a changed path.
             for file in files_under(path)? {
                 let key = cache.normalize_str(&file.to_string_lossy()).into_owned();
                 tracked.insert(key, tracker.hash_file(&file)?);
@@ -707,12 +709,12 @@ fn files_under(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
     Ok(files)
 }
 
-/// The block's `dir` field.
-fn block_dir(inputs: &Map) -> Option<&str> {
+/// The target's `dir` field.
+fn target_dir(inputs: &Map) -> Option<&str> {
     inputs.get(DIR_FIELD).and_then(Value::as_str)
 }
 
-/// The block's `env` as [`WrappedState`] records it: without secrets, whose
+/// The target's `env` as [`WrappedState`] records it: without secrets, whose
 /// values must not reach the state file.
 fn recorded_env(inputs: &Map) -> BTreeMap<String, String> {
     let Some(env) = inputs.get(ENV_FIELD).and_then(Value::as_map) else {
@@ -733,7 +735,7 @@ fn uncached_outputs(inputs: &Map) -> HashSet<String> {
         Some(Value::Str(one)) => vec![one.as_str()],
         _ => vec![],
     };
-    let dir = block_dir(inputs);
+    let dir = target_dir(inputs);
     entries
         .into_iter()
         .map(|entry| crate::provider::in_dir(dir, entry).trim_end_matches('/').to_owned())
@@ -763,7 +765,7 @@ fn action_key(
         provider: &node.provider,
         resource: &node.resource_name,
         cache_version: version,
-        block: name,
+        target: name,
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
         inputs: hash_inputs(&prepared.inputs, cache),
@@ -775,10 +777,10 @@ fn action_key(
 
 fn provider_error(node: &DagNode, name: &str, phase: &'static str) -> impl FnOnce(BoxError) -> EngineError {
     let pos = node.pos.clone();
-    let block = name.to_owned();
+    let target = name.to_owned();
     move |source| EngineError::Provider {
         pos,
-        block,
+        target,
         phase,
         source,
     }
@@ -816,7 +818,7 @@ fn changes_since_success(
 
 /// Resolve inputs, compute hashes, plan, and consult the shared cache.
 #[allow(clippy::too_many_arguments)]
-fn prepare_block(
+fn prepare_target(
     name: &str,
     node: &DagNode,
     dag: &Dag,
@@ -825,10 +827,10 @@ fn prepare_block(
     dirty: &HashSet<String>,
     cache: &BuildCache,
     tracker: &FileTracker,
-    writer: &BlockWriter,
+    writer: &TargetWriter,
     mode: ApplyMode,
 ) -> Result<Prepared, EngineError> {
-    let _scope = crate::output::BlockScope::enter(writer);
+    let _scope = crate::output::TargetScope::enter(writer);
     let prior = restore_prior(writer, node.prior_state.as_ref());
 
     let outputs = output_files(node, &inputs, cache).map_err(provider_error(node, name, "resolve"))?;
@@ -884,7 +886,7 @@ fn prepare_block(
     if node.protected && plan.action == PlanAction::Destroy {
         return Err(EngineError::Protected {
             pos: node.pos.clone(),
-            block: name.to_owned(),
+            target: name.to_owned(),
             action: "destroyed",
         });
     }
@@ -970,7 +972,7 @@ fn prepare_block(
     Ok(prepared)
 }
 
-/// Plan all blocks in the DAG (or a target subset), returning what would
+/// Plan all targets in the DAG (or a selected subset), returning what would
 /// change. Consults the shared cache read-only: a restorable receipt is
 /// reported as [`PlanAction::Restore`] but nothing is materialized.
 pub fn plan(
@@ -980,12 +982,12 @@ pub fn plan(
     output: &Output,
     targets: &[String],
     tracker: &Arc<FileTracker>,
-) -> Result<Vec<BlockPlan>, EngineError> {
+) -> Result<Vec<TargetPlan>, EngineError> {
     let order = resolve_order(dag, targets)?;
     plan_selected(dag, base, cache, output, &order, tracker)
 }
 
-/// Plan an exact, already-resolved block order.
+/// Plan an exact, already-resolved target order.
 pub fn plan_selected(
     dag: &mut Dag,
     base: &BaseScope,
@@ -993,10 +995,10 @@ pub fn plan_selected(
     output: &Output,
     order: &[String],
     tracker: &Arc<FileTracker>,
-) -> Result<Vec<BlockPlan>, EngineError> {
+) -> Result<Vec<TargetPlan>, EngineError> {
     tracker.reset();
     validate_active_params(dag, order, base)?;
-    crate::debug!(output, "plan: {} block(s) in order: {}", order.len(), order.join(", "));
+    crate::debug!(output, "plan: {} target(s) in order: {}", order.len(), order.join(", "));
 
     let mut scope = base.scope.clone();
     let mut plans = Vec::new();
@@ -1004,17 +1006,19 @@ pub fn plan_selected(
     let mut results = RunResults::new();
 
     for name in order {
-        let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
+        let node = dag
+            .get_node(name)
+            .ok_or_else(|| DagError::UnknownTarget(name.clone()))?;
         let writer = output.writer_indented(name, 0);
         evaluate_concurrency(node, &scope)?;
 
         let inputs = eval_fields_lenient(&node.fields, &scope).map_err(|e| EngineError::Eval {
             pos: node.pos.clone(),
-            block: name.clone(),
+            target: name.clone(),
             source: e,
         })?;
         let dep_hashes = collect_dep_hashes(dag, name, &results);
-        let prepared = prepare_block(
+        let prepared = prepare_target(
             name,
             node,
             dag,
@@ -1046,7 +1050,7 @@ pub fn plan_selected(
         };
         scope.set(name, Value::strct(outputs));
 
-        plans.push(BlockPlan {
+        plans.push(TargetPlan {
             name: name.clone(),
             plan: prepared.plan,
         });
@@ -1055,9 +1059,9 @@ pub fn plan_selected(
     Ok(plans)
 }
 
-/// Apply all blocks in the DAG (or a target subset).
-/// With no targets: runs the `default` target if defined, else all blocks.
-/// With `["..."]`: runs all blocks.
+/// Apply all targets in the DAG (or a selected subset).
+/// With no selection: runs the `default` group if defined, else all targets.
+/// With `["..."]`: runs all targets.
 #[allow(clippy::too_many_arguments)]
 pub fn apply(
     dag: &mut Dag,
@@ -1068,12 +1072,12 @@ pub fn apply(
     targets: &[String],
     jobs: usize,
     tracker: &Arc<FileTracker>,
-) -> Result<Vec<BlockPlan>, EngineError> {
+) -> Result<Vec<TargetPlan>, EngineError> {
     let order = resolve_order(dag, targets)?;
     apply_selected(dag, base, store, cache, output, &order, jobs, tracker)
 }
 
-/// Apply an exact, already-resolved block order.
+/// Apply an exact, already-resolved target order.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_selected(
     dag: &mut Dag,
@@ -1084,12 +1088,12 @@ pub fn apply_selected(
     order: &[String],
     jobs: usize,
     tracker: &Arc<FileTracker>,
-) -> Result<Vec<BlockPlan>, EngineError> {
+) -> Result<Vec<TargetPlan>, EngineError> {
     apply_selected_with_mode(dag, base, store, cache, output, order, jobs, tracker, ApplyMode::Normal)
 }
 
-/// Force-apply an exact, already-resolved block order without consulting the
-/// shared cache or skipping unchanged blocks.
+/// Force-apply an exact, already-resolved target order without consulting the
+/// shared cache or skipping unchanged targets.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_selected_forced(
     dag: &mut Dag,
@@ -1100,7 +1104,7 @@ pub fn apply_selected_forced(
     order: &[String],
     jobs: usize,
     tracker: &Arc<FileTracker>,
-) -> Result<Vec<BlockPlan>, EngineError> {
+) -> Result<Vec<TargetPlan>, EngineError> {
     apply_selected_with_mode(dag, base, store, cache, output, order, jobs, tracker, ApplyMode::Force)
 }
 
@@ -1115,12 +1119,12 @@ fn apply_selected_with_mode(
     jobs: usize,
     tracker: &Arc<FileTracker>,
     mode: ApplyMode,
-) -> Result<Vec<BlockPlan>, EngineError> {
+) -> Result<Vec<TargetPlan>, EngineError> {
     tracker.reset();
     validate_active_params(dag, order, base)?;
     crate::debug!(
         output,
-        "apply: {} block(s), jobs={}, order: {}",
+        "apply: {} target(s), jobs={}, order: {}",
         order.len(),
         jobs,
         order.join(", ")
@@ -1144,7 +1148,7 @@ fn apply_selected_with_mode(
     }
 }
 
-/// Apply blocks sequentially in the given order.
+/// Apply targets sequentially in the given order.
 #[allow(clippy::too_many_arguments)]
 fn apply_order(
     dag: &mut Dag,
@@ -1155,23 +1159,25 @@ fn apply_order(
     order: &[String],
     tracker: &Arc<FileTracker>,
     mode: ApplyMode,
-) -> Result<Vec<BlockPlan>, EngineError> {
+) -> Result<Vec<TargetPlan>, EngineError> {
     let mut scope = base.scope.clone();
     let mut results = RunResults::new();
     let mut plans = Vec::new();
 
     for name in order {
-        let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
+        let node = dag
+            .get_node(name)
+            .ok_or_else(|| DagError::UnknownTarget(name.clone()))?;
         let writer = output.writer(name);
         let dep_hashes = collect_dep_hashes(dag, name, &results);
-        let result = execute_block(name, node, dag, &scope, dep_hashes, cache, &writer, tracker, mode)?;
+        let result = execute_target(name, node, dag, &scope, dep_hashes, cache, &writer, tracker, mode)?;
         let test_failed = result.test_failed;
         let pos = result.pos.clone();
-        complete_block(result, store, output, &mut scope, &mut results, &mut plans)?;
+        complete_target(result, store, output, &mut scope, &mut results, &mut plans)?;
         if test_failed {
             return Err(EngineError::TestFailed {
                 pos,
-                block: name.clone(),
+                target: name.clone(),
             });
         }
     }
@@ -1179,29 +1185,29 @@ fn apply_order(
     Ok(plans)
 }
 
-/// Result sent back from a worker thread after executing a block.
-struct BlockResult {
+/// Result sent back from a worker thread after executing a target.
+struct TargetResult {
     pos: crate::ast::Pos,
     name: String,
     plan: PlanResult,
     outputs: Map,
-    /// The wrapped state to persist, if the block was applied or restored.
+    /// The wrapped state to persist, if the target was applied or restored.
     wrapped_state: Option<serde_json::Value>,
-    /// Hash dependents should use for this block, if it has a settled result.
+    /// Hash dependents should use for this target, if it has a settled result.
     result_hash: Option<SHA256>,
     /// Whether this was a failed test (passed == false).
     test_failed: bool,
 }
 
-/// Persist a completed block's state and make its result visible to
+/// Persist a completed target's state and make its result visible to
 /// dependents.
-fn complete_block(
-    result: BlockResult,
+fn complete_target(
+    result: TargetResult,
     store: &dyn StateStore,
     output: &Output,
     scope: &mut Scope,
     results: &mut RunResults,
-    plans: &mut Vec<BlockPlan>,
+    plans: &mut Vec<TargetPlan>,
 ) -> Result<(), EngineError> {
     if let Some(state) = &result.wrapped_state {
         store.save(&result.name, state)?;
@@ -1211,14 +1217,14 @@ fn complete_block(
         results.insert(result.name.clone(), hash);
     }
     scope.set(&result.name, Value::strct(result.outputs));
-    plans.push(BlockPlan {
+    plans.push(TargetPlan {
         name: result.name,
         plan: result.plan,
     });
     Ok(())
 }
 
-/// Apply blocks in parallel using a ready-queue scheduler.
+/// Apply targets in parallel using a ready-queue scheduler.
 #[allow(clippy::too_many_arguments)]
 fn apply_order_parallel(
     dag: &Dag,
@@ -1231,7 +1237,7 @@ fn apply_order_parallel(
     tracker: &Arc<FileTracker>,
     concurrency: &HashMap<String, Option<ConcurrencyLimit>>,
     mode: ApplyMode,
-) -> Result<Vec<BlockPlan>, EngineError> {
+) -> Result<Vec<TargetPlan>, EngineError> {
     use std::collections::VecDeque;
     use std::sync::mpsc;
 
@@ -1253,18 +1259,18 @@ fn apply_order_parallel(
 
     let mut scope = base.scope.clone();
     let mut results = RunResults::new();
-    let mut plans: Vec<BlockPlan> = Vec::new();
+    let mut plans: Vec<TargetPlan> = Vec::new();
     let mut completed = 0;
     let total = order.len();
 
     std::thread::scope(|s| {
-        let (result_tx, result_rx) = mpsc::channel::<(String, Result<BlockResult, EngineError>)>();
+        let (result_tx, result_rx) = mpsc::channel::<(String, Result<TargetResult, EngineError>)>();
         let mut in_flight = 0;
         let mut running_by_group: HashMap<String, usize> = HashMap::new();
         let mut failed: Option<EngineError> = None;
 
         loop {
-            // Dispatch ready blocks up to the job limit. Dependency hashes are
+            // Dispatch ready targets up to the job limit. Dependency hashes are
             // snapshotted here, on the scheduler thread, after every
             // dependency has completed.
             while in_flight < jobs && !ready.is_empty() && failed.is_none() {
@@ -1276,7 +1282,7 @@ fn apply_order_parallel(
                     break;
                 };
                 let name = ready.remove(index).expect("ready index is valid");
-                let node = dag.get_node(&name).expect("block in order");
+                let node = dag.get_node(&name).expect("target in order");
                 let writer = output.writer(&name);
                 let scope_snapshot = scope.clone();
                 let dep_hashes = collect_dep_hashes(dag, &name, &results);
@@ -1288,7 +1294,7 @@ fn apply_order_parallel(
                 }
 
                 s.spawn(move || {
-                    let result = execute_block(
+                    let result = execute_target(
                         &name,
                         node,
                         dag,
@@ -1318,12 +1324,13 @@ fn apply_order_parallel(
             }
 
             match result {
-                Ok(block_result) => {
-                    let name = block_result.name.clone();
-                    let test_failed = block_result.test_failed;
-                    let pos = block_result.pos.clone();
+                Ok(target_result) => {
+                    let name = target_result.name.clone();
+                    let test_failed = target_result.test_failed;
+                    let pos = target_result.pos.clone();
 
-                    if let Err(e) = complete_block(block_result, store, output, &mut scope, &mut results, &mut plans) {
+                    if let Err(e) = complete_target(target_result, store, output, &mut scope, &mut results, &mut plans)
+                    {
                         failed = Some(e);
                         continue;
                     }
@@ -1331,7 +1338,7 @@ fn apply_order_parallel(
                     if test_failed {
                         failed = Some(EngineError::TestFailed {
                             pos,
-                            block: name.clone(),
+                            target: name.clone(),
                         });
                     }
                     completed += 1;
@@ -1377,7 +1384,7 @@ fn bind_receipt(
     outputs: &[OutputFile],
     hit: &CacheHit,
     cache: &BuildCache,
-    writer: &BlockWriter,
+    writer: &TargetWriter,
 ) -> Result<ApplyResult<serde_json::Value, Map>, BoxError> {
     let cas = cache.cas().ok_or("shared cache unavailable")?;
     // A valid receipt's outputs are already in place, so only a restore
@@ -1390,7 +1397,7 @@ fn bind_receipt(
             .materialize(inputs, &hit.receipt.state, outputs, &hit.receipt.artifacts, cas, writer)
     };
     // Restoring declared outputs moves temporary files into place while other
-    // blocks may be resolving inputs. The tracker skips discovered files that
+    // targets may be resolving inputs. The tracker skips discovered files that
     // vanish before they are hashed, and rehashes restored files whose
     // metadata changed, so this needs no coordination with resolution.
     match materialize()? {
@@ -1423,7 +1430,7 @@ fn publish_receipt(
     state: &serde_json::Value,
     outputs: &Map,
     cache: &BuildCache,
-    writer: &BlockWriter,
+    writer: &TargetWriter,
 ) {
     let CachePolicy::Shared { version } = node.resource.cache_policy(&prepared.inputs) else {
         return;
@@ -1478,12 +1485,12 @@ fn publish_receipt(
 }
 
 /// Report a failure of the remote cache as a warning the first time in a
-/// run, since every later block would only repeat it, and anything else in
+/// run, since every later target would only repeat it, and anything else in
 /// the debug log. A miss is the outcome either way, so the run continues.
-fn report_cache_error(writer: &BlockWriter, cache: &BuildCache, context: &str, error: &crate::cache::CacheError) {
+fn report_cache_error(writer: &TargetWriter, cache: &BuildCache, context: &str, error: &crate::cache::CacheError) {
     if cache.first_remote_failure(error) {
-        // A message, unlike an output line, stays visible when the block
-        // succeeds, as it will: the block just runs instead.
+        // A message, unlike an output line, stays visible when the target
+        // succeeds, as it will: the target just runs instead.
         writer.message(&crate::output::Message::new(
             crate::output::MessageLevel::Warning,
             format!("{context}: {error}; further remote cache failures this run are not shown"),
@@ -1493,7 +1500,7 @@ fn report_cache_error(writer: &BlockWriter, cache: &BuildCache, context: &str, e
     }
 }
 
-fn warn_conflict(writer: &BlockWriter, key: &ActionKey) {
+fn warn_conflict(writer: &TargetWriter, key: &ActionKey) {
     writer.stderr_line(&format!(
         "warning: a different receipt already exists for this action (key={}); keeping it. \
          The action key may be missing an input the result depends on.",
@@ -1501,24 +1508,24 @@ fn warn_conflict(writer: &BlockWriter, key: &ActionKey) {
     ));
 }
 
-/// Execute a single block: evaluate fields, plan, restore or apply if
+/// Execute a single target: evaluate fields, plan, restore or apply if
 /// needed, compute the post-apply hash, and publish a receipt.
 #[allow(clippy::too_many_arguments)]
-fn execute_block(
+fn execute_target(
     name: &str,
     node: &DagNode,
     dag: &Dag,
     scope: &Scope,
     dep_hashes: BTreeMap<String, SHA256>,
     cache: &BuildCache,
-    writer: &BlockWriter,
+    writer: &TargetWriter,
     tracker: &FileTracker,
     mode: ApplyMode,
-) -> Result<BlockResult, EngineError> {
-    let _scope = crate::output::BlockScope::enter(writer);
+) -> Result<TargetResult, EngineError> {
+    let _scope = crate::output::TargetScope::enter(writer);
     let inputs = eval_fields(&node.fields, scope).map_err(|e| EngineError::Eval {
         pos: node.pos.clone(),
-        block: name.to_owned(),
+        target: name.to_owned(),
         source: e,
     })?;
     // The loader could not see values that come from upstream outputs.
@@ -1526,13 +1533,13 @@ fn execute_block(
         crate::input_check::check_values(&inputs, &node.resource.schema().inputs).map_err(|source| {
             EngineError::InvalidInputs {
                 pos: node.pos.clone(),
-                block: name.to_owned(),
+                target: name.to_owned(),
                 source: Box::new(source),
             }
         })?;
     }
 
-    let mut prepared = prepare_block(
+    let mut prepared = prepare_target(
         name,
         node,
         dag,
@@ -1575,7 +1582,7 @@ fn execute_block(
     if bound.is_none() && prepared.plan.action == PlanAction::None {
         writer.event(Event::Skipped, "no changes");
         let result_hash = prepared.settled_hash();
-        return Ok(BlockResult {
+        return Ok(TargetResult {
             pos: node.pos.clone(),
             name: name.to_owned(),
             plan: prepared.plan,
@@ -1610,7 +1617,7 @@ fn execute_block(
                     writer.event(Event::Failed, &e.to_string());
                     EngineError::Provider {
                         pos: node.pos.clone(),
-                        block: name.to_owned(),
+                        target: name.to_owned(),
                         phase: "apply",
                         source: e,
                     }
@@ -1626,8 +1633,8 @@ fn execute_block(
         // Re-resolve after apply: outputs now exist and mutating actions
         // such as formatters change their own inputs. The tracker rehashes
         // any file whose metadata changed, but globs and providers' parsed
-        // sources may predate files the block added, here and for every
-        // block that resolves after it.
+        // sources may predate files the target added, here and for every
+        // target that resolves after it.
         tracker.invalidate();
         let ResolvedHashes {
             sources: post_sources,
@@ -1669,7 +1676,7 @@ fn execute_block(
         let wrapped = WrappedState {
             state: new_state.clone(),
             outputs: apply_result.outputs.clone(),
-            dir: block_dir(&prepared.inputs).map(str::to_owned),
+            dir: target_dir(&prepared.inputs).map(str::to_owned),
             env: recorded_env(&prepared.inputs),
             content_hash: post_hash,
             input_hash,
@@ -1679,7 +1686,7 @@ fn execute_block(
         };
         Some(serde_json::to_value(&wrapped).expect("serialize wrapped state"))
     } else {
-        crate::debug!(writer, "apply returned no state (stateless block)");
+        crate::debug!(writer, "apply returned no state (stateless target)");
         None
     };
 
@@ -1691,7 +1698,7 @@ fn execute_block(
         writer.event(Event::Ok, "");
     }
 
-    Ok(BlockResult {
+    Ok(TargetResult {
         pos: node.pos.clone(),
         name: name.to_owned(),
         plan: prepared.plan,
@@ -1702,27 +1709,27 @@ fn execute_block(
     })
 }
 
-/// Destroy each target block and all of its transitive dependents, in reverse
-/// topological order (sinks first, so each block is torn down before the
-/// blocks it depends on).
+/// Destroy each selected target and all of its transitive dependents, in reverse
+/// topological order (sinks first, so each target is torn down before the
+/// targets it depends on).
 ///
 /// # Arguments
 ///
-/// * `targets` - Block or target names to destroy. An empty slice, or any
-///   target list containing the literal `"..."`, destroys every non-`explicit`
-///   block in the DAG (unioned with the transitive dependents of the other
-///   named targets); `explicit` blocks must be named to be destroyed.
-///   Protected blocks are destroyed only when their exact block name appears
-///   in this list. Selecting them through a target or `...` is not sufficient.
+/// * `targets` - Target or group names to destroy. An empty slice, or any
+///   list containing the literal `"..."`, destroys every non-`explicit`
+///   target in the DAG (unioned with the transitive dependents of the other
+///   named groups and targets); `explicit` targets must be named to be destroyed.
+///   Protected targets are destroyed only when their exact target name appears
+///   in this list. Selecting them through a group or `...` is not sufficient.
 /// * `continue_on_error` - When true, continue past provider errors (the
-///   failing block still shows an error, but remaining blocks proceed).
+///   failing target still shows an error, but remaining targets proceed).
 ///
 /// # Errors
 ///
-/// Returns [`EngineError`] if a target is unknown, a cycle exists, or a
+/// Returns [`EngineError`] if a selected name is unknown, a cycle exists, or a
 /// provider fails during teardown (unless `continue_on_error` is set, in
 /// which case provider errors are collected and the first is returned after
-/// all blocks have been processed).
+/// all targets have been processed).
 pub fn destroy(
     dag: &mut Dag,
     store: &dyn StateStore,
@@ -1733,10 +1740,10 @@ pub fn destroy(
     let mut order: Vec<String> = if targets.is_empty() {
         dag.select_all()?
     } else {
-        // Gather each target's transitive dependents (inclusive) and emit them
+        // Gather each selection's transitive dependents (inclusive) and emit them
         // in a single topological order so tie-breaking stays deterministic.
-        // `...` is composable: it contributes every non-`explicit` block,
-        // unioned with the dependents of any other named targets.
+        // `...` is composable: it contributes every non-`explicit` target,
+        // unioned with the dependents of any other named groups and targets.
         let mut needed = std::collections::HashSet::new();
         let mut wildcard = false;
         for t in targets {
@@ -1758,7 +1765,7 @@ pub fn destroy(
     order.reverse();
     crate::debug!(
         output,
-        "destroy: {} block(s) in reverse order: {}",
+        "destroy: {} target(s) in reverse order: {}",
         order.len(),
         order.join(", ")
     );
@@ -1766,9 +1773,11 @@ pub fn destroy(
     let mut first_error: Option<EngineError> = None;
 
     for name in &order {
-        let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
+        let node = dag
+            .get_node(name)
+            .ok_or_else(|| DagError::UnknownTarget(name.clone()))?;
         let writer = output.writer(name);
-        let _scope = crate::output::BlockScope::enter(&writer);
+        let _scope = crate::output::TargetScope::enter(&writer);
 
         if node.protected && !targets.iter().any(|target| target == name) {
             writer.event(Event::Protected, "protected");
@@ -1786,11 +1795,11 @@ pub fn destroy(
             continue;
         };
 
-        let prior_state = Block::new(prior.dir, provider_state).with_env(prior.env);
+        let prior_state = Target::new(prior.dir, provider_state).with_env(prior.env);
         if let Err(e) = node.resource.destroy(&prior_state, &writer) {
             let err = EngineError::Provider {
                 pos: node.pos.clone(),
-                block: name.clone(),
+                target: name.clone(),
                 phase: "destroy",
                 source: e,
             };
@@ -1814,29 +1823,31 @@ pub fn destroy(
     }
 }
 
-/// Dump evaluated inputs and stored outputs for all blocks (or a target subset).
+/// Dump evaluated inputs and stored outputs for all targets (or a selected subset).
 pub fn dump(dag: &mut Dag, base: &BaseScope, targets: &[String]) -> Result<(), EngineError> {
     let order = resolve_order(dag, targets)?;
     dump_selected(dag, base, &order, false)
 }
 
-/// Dump evaluated inputs and stored outputs for an exact block order.
+/// Dump evaluated inputs and stored outputs for an exact target order.
 pub fn dump_selected(dag: &mut Dag, base: &BaseScope, order: &[String], quiet: bool) -> Result<(), EngineError> {
     let mut scope = base.scope.clone();
 
     for (i, name) in order.iter().enumerate() {
-        let node = dag.get_node(name).ok_or_else(|| DagError::UnknownBlock(name.clone()))?;
+        let node = dag
+            .get_node(name)
+            .ok_or_else(|| DagError::UnknownTarget(name.clone()))?;
 
-        // Evaluate inputs, but replace depends_on/after with block names
+        // Evaluate inputs, but replace depends_on/after with target names
         let mut inputs = eval_fields_lenient(&node.fields, &scope).map_err(|e| EngineError::Eval {
             pos: node.pos.clone(),
-            block: name.clone(),
+            target: name.clone(),
             source: e,
         })?;
         let depends_on = dag::collect_dependency_refs(&node.fields, DEPENDS_ON_FIELD, &scope).map_err(|source| {
             EngineError::Eval {
                 pos: node.pos.clone(),
-                block: name.clone(),
+                target: name.clone(),
                 source,
             }
         })?;
@@ -1849,7 +1860,7 @@ pub fn dump_selected(dag: &mut Dag, base: &BaseScope, order: &[String], quiet: b
         let after =
             dag::collect_dependency_refs(&node.fields, AFTER_FIELD, &scope).map_err(|source| EngineError::Eval {
                 pos: node.pos.clone(),
-                block: name.clone(),
+                target: name.clone(),
                 source,
             })?;
         if !after.is_empty() {
@@ -1925,9 +1936,9 @@ fn dump_scalar(value: &Value) -> String {
     }
 }
 
-/// Fields left out of a block's evaluated inputs. `after` must stay out
+/// Fields left out of a target's evaluated inputs. `after` must stay out
 /// because the inputs feed the content hash, and evaluating `after = [a]`
-/// yields `a`'s outputs, which would couple the block to `a`'s content. The
+/// yields `a`'s outputs, which would couple the target to `a`'s content. The
 /// DAG takes `after` edges from the unevaluated fields instead.
 fn is_unhashed_field(name: &str) -> bool {
     name == CONCURRENCY_FIELD || name == AFTER_FIELD
@@ -1966,7 +1977,7 @@ fn evaluate_concurrency(node: &DagNode, scope: &Scope) -> Result<Option<Concurre
     };
     let value = expr::eval(&field.value, scope).map_err(|source| EngineError::Eval {
         pos: node.pos.clone(),
-        block: node.name.clone(),
+        target: node.name.clone(),
         source,
     })?;
     let limit = value
@@ -1975,7 +1986,7 @@ fn evaluate_concurrency(node: &DagNode, scope: &Scope) -> Result<Option<Concurre
         .filter(|limit| *limit > 0)
         .ok_or_else(|| EngineError::InvalidConcurrency {
             pos: node.pos.clone(),
-            block: node.name.clone(),
+            target: node.name.clone(),
             value: value.to_string(),
         })?;
     Ok(Some(ConcurrencyLimit {
@@ -1992,7 +2003,7 @@ fn concurrency_limits(
     order
         .iter()
         .map(|name| {
-            let node = dag.get_node(name).expect("block in order");
+            let node = dag.get_node(name).expect("target in order");
             Ok((name.clone(), evaluate_concurrency(node, scope)?))
         })
         .collect()
@@ -2006,7 +2017,7 @@ mod tests {
     use crate::file_tracker::FileTracker;
     use crate::loader;
     use crate::parser;
-    use crate::provider::{Block, DynResource, FuncSignature, Provider, ProviderRegistry, Resource};
+    use crate::provider::{DynResource, FuncSignature, Provider, ProviderRegistry, Resource, Target};
     use crate::providers::exec::ExecProvider;
     use crate::state::StateStore;
 
@@ -2037,15 +2048,15 @@ mod tests {
     }
 
     impl StateStore for MemoryStore {
-        fn load(&self, block: &str) -> Result<Option<serde_json::Value>, StateError> {
-            Ok(self.data.read().unwrap().get(block).cloned())
+        fn load(&self, target: &str) -> Result<Option<serde_json::Value>, StateError> {
+            Ok(self.data.read().unwrap().get(target).cloned())
         }
-        fn save(&self, block: &str, state: &serde_json::Value) -> Result<(), StateError> {
-            self.data.write().unwrap().insert(block.into(), state.clone());
+        fn save(&self, target: &str, state: &serde_json::Value) -> Result<(), StateError> {
+            self.data.write().unwrap().insert(target.into(), state.clone());
             Ok(())
         }
-        fn remove(&self, block: &str) -> Result<(), StateError> {
-            self.data.write().unwrap().remove(block);
+        fn remove(&self, target: &str) -> Result<(), StateError> {
+            self.data.write().unwrap().remove(target);
             Ok(())
         }
         fn list(&self) -> Result<Vec<String>, StateError> {
@@ -2053,7 +2064,7 @@ mod tests {
         }
     }
 
-    fn load_and_apply(input: &str) -> Result<Vec<BlockPlan>, EngineError> {
+    fn load_and_apply(input: &str) -> Result<Vec<TargetPlan>, EngineError> {
         let tracker = test_tracker();
         let module = parser::parse(input, "<test>").expect("parse failed");
         let store = MemoryStore::new();
@@ -2064,7 +2075,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_simple_block() {
+    fn apply_simple_target() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
@@ -2129,7 +2140,7 @@ mod tests {
             fn kind(&self) -> ResourceKind {
                 ResourceKind::Test
             }
-            fn resolve(&self, inputs: &Block<Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+            fn resolve(&self, inputs: &Target<Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
                 let mut map = BTreeMap::new();
                 for name in ["a.txt", "b.txt"] {
                     let path = PathBuf::from(inputs.path(name));
@@ -2137,7 +2148,7 @@ mod tests {
                 }
                 Ok(map)
             }
-            fn plan(&self, _inputs: &Block<Inputs>, prior_state: Option<&()>) -> Result<PlanResult, BoxError> {
+            fn plan(&self, _inputs: &Target<Inputs>, prior_state: Option<&()>) -> Result<PlanResult, BoxError> {
                 Ok(PlanResult {
                     action: if prior_state.is_some() {
                         PlanAction::None
@@ -2150,10 +2161,10 @@ mod tests {
             }
             fn apply(
                 &self,
-                inputs: &Block<Inputs>,
+                inputs: &Target<Inputs>,
                 _prior_state: Option<&()>,
                 changes: &Changes,
-                _writer: &BlockWriter,
+                _writer: &TargetWriter,
             ) -> Result<ApplyResult<(), Outputs>, BoxError> {
                 self.seen.lock().unwrap().push(changes.clone());
                 Ok(ApplyResult {
@@ -2163,10 +2174,10 @@ mod tests {
                     state: Some(()),
                 })
             }
-            fn destroy(&self, _prior_state: &Block<()>, _writer: &BlockWriter) -> Result<(), BoxError> {
+            fn destroy(&self, _prior_state: &Target<()>, _writer: &TargetWriter) -> Result<(), BoxError> {
                 Ok(())
             }
-            fn cache_policy(&self, _inputs: &Block<Inputs>) -> CachePolicy {
+            fn cache_policy(&self, _inputs: &Target<Inputs>) -> CachePolicy {
                 CachePolicy::Local
             }
         }
@@ -2217,14 +2228,14 @@ mod tests {
 
         let applies = seen.lock().unwrap().len();
         assert!(run(false));
-        assert_eq!(seen.lock().unwrap().len(), applies, "unchanged block must not run");
+        assert_eq!(seen.lock().unwrap().len(), applies, "unchanged target must not run");
 
         assert!(run(true));
         assert_eq!(last(), Changes::All);
     }
 
     #[test]
-    fn matrix_concurrency_does_not_limit_unrelated_blocks() {
+    fn matrix_concurrency_does_not_limit_unrelated_targets() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         #[derive(Default)]
@@ -2284,11 +2295,11 @@ mod tests {
                 ResourceKind::Build
             }
 
-            fn resolve(&self, _inputs: &Block<Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+            fn resolve(&self, _inputs: &Target<Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
                 Ok(BTreeMap::new())
             }
 
-            fn plan(&self, _inputs: &Block<Inputs>, _prior_state: Option<&()>) -> Result<PlanResult, BoxError> {
+            fn plan(&self, _inputs: &Target<Inputs>, _prior_state: Option<&()>) -> Result<PlanResult, BoxError> {
                 Ok(PlanResult {
                     action: PlanAction::Create,
                     description: "probe concurrency".into(),
@@ -2298,10 +2309,10 @@ mod tests {
 
             fn apply(
                 &self,
-                inputs: &Block<Inputs>,
+                inputs: &Target<Inputs>,
                 _prior_state: Option<&()>,
                 _changes: &Changes,
-                _writer: &BlockWriter,
+                _writer: &TargetWriter,
             ) -> Result<ApplyResult<(), Outputs>, BoxError> {
                 let running = self.counts.running.fetch_add(1, Ordering::SeqCst) + 1;
                 self.counts.max_running.fetch_max(running, Ordering::SeqCst);
@@ -2326,11 +2337,11 @@ mod tests {
                 })
             }
 
-            fn destroy(&self, _prior_state: &Block<()>, _writer: &BlockWriter) -> Result<(), BoxError> {
+            fn destroy(&self, _prior_state: &Target<()>, _writer: &TargetWriter) -> Result<(), BoxError> {
                 Ok(())
             }
 
-            fn cache_policy(&self, _inputs: &Block<Inputs>) -> CachePolicy {
+            fn cache_policy(&self, _inputs: &Target<Inputs>) -> CachePolicy {
                 CachePolicy::Local
             }
         }
@@ -2383,7 +2394,7 @@ other-b = probe.run { label = "other-b" }
     }
 
     #[test]
-    fn upstream_outputs_are_checked_before_a_block_runs() {
+    fn upstream_outputs_are_checked_before_a_target_runs() {
         // exec's values command declares no types, so the loader cannot
         // check `version.dir`.
         let input = r#"
@@ -2393,7 +2404,7 @@ build = exec { command = "true" dir = version.dir }
         let error = load_and_apply(input).err().expect("a list dir should fail");
         assert_eq!(
             error.to_string(),
-            "<test>:3:1: block 'build': field 'dir': expected string, got list"
+            "<test>:3:1: target 'build': field 'dir': expected string, got list"
         );
     }
 
@@ -2498,7 +2509,7 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn protected_block_skips_destroy() {
+    fn protected_target_skips_destroy() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
@@ -2521,12 +2532,12 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn explicitly_named_protected_block_is_destroyed() {
+    fn explicitly_named_protected_target_is_destroyed() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
         let input = format!(
-            "protected build = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\ntarget all = [build]\n",
+            "protected build = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\ngroup all = [build]\n",
             output.display(),
             output.display(),
         );
@@ -2548,7 +2559,7 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn force_does_not_destroy_implicitly_selected_protected_block() {
+    fn force_does_not_destroy_implicitly_selected_protected_target() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.txt");
@@ -2597,7 +2608,7 @@ lint[module] = go.lint {
         assert!(destroy(&mut dag, &store, &out, &[], false).is_err());
 
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
-        // With force, still returns error but processes all blocks
+        // With force, still returns error but processes all targets
         let result = destroy(&mut dag, &store, &out, &[], true);
         assert!(result.is_err());
         // "b" should have been cleaned despite "a" failing first
@@ -2607,7 +2618,7 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn explicit_block_excluded_from_wildcard_selection() {
+    fn explicit_target_excluded_from_wildcard_selection() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let file_a = dir.path().join("a.txt");
@@ -2626,11 +2637,11 @@ lint[module] = go.lint {
         let store = MemoryStore::new();
         let (dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
 
-        // `bit` (no targets, no default) skips explicit blocks
+        // `bit` (no targets, no default) skips explicit targets
         assert_eq!(resolve_order(&dag, &[]).unwrap(), vec!["a".to_owned()]);
-        // `bit ...` also skips explicit blocks
+        // `bit ...` also skips explicit targets
         assert_eq!(resolve_order(&dag, &["...".into()]).unwrap(), vec!["a".to_owned()]);
-        // Naming the block directly still runs it
+        // Naming the target directly still runs it
         assert_eq!(resolve_order(&dag, &["b".into()]).unwrap(), vec!["b".to_owned()]);
     }
 
@@ -2720,7 +2731,7 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn affected_order_always_selects_blocks_with_only_a_directory_output() {
+    fn affected_order_always_selects_targets_with_only_a_directory_output() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("gen");
@@ -2743,7 +2754,7 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn affected_order_selects_blocks_whose_tool_version_changed() {
+    fn affected_order_selects_targets_whose_tool_version_changed() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source.txt");
@@ -2766,7 +2777,7 @@ lint[module] = go.lint {
         assert!(affected(&store).is_empty(), "nothing changed");
 
         // Record a different bash version than the one installed, as if it
-        // was upgraded since the block ran.
+        // was upgraded since the target ran.
         let mut wrapped: WrappedState = serde_json::from_value(store.load("build").unwrap().unwrap()).unwrap();
         let version = wrapped
             .resolve_map
@@ -2779,7 +2790,7 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn affected_order_keeps_unmapped_blocks_and_falls_back_for_unknown_deletions() {
+    fn affected_order_keeps_unmapped_targets_and_falls_back_for_unknown_deletions() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source.txt");
@@ -2815,7 +2826,7 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn explicit_block_pulled_in_as_dependency() {
+    fn explicit_target_pulled_in_as_dependency() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let file_a = dir.path().join("a.txt");
@@ -2840,10 +2851,10 @@ lint[module] = go.lint {
             vec!["a".to_owned(), "b".to_owned()]
         );
         // `...` still skips the explicit dep, leaving b without its dependency —
-        // matching the contract that `...` is purely a "non-explicit blocks" filter.
+        // matching the contract that `...` is purely a "non-explicit targets" filter.
         assert_eq!(resolve_order(&dag, &["...".into()]).unwrap(), vec!["b".to_owned()]);
-        // `...` is composable: naming the explicit block alongside `...` unions
-        // the wildcard expansion with the named block (and its deps).
+        // `...` is composable: naming the explicit target alongside `...` unions
+        // the wildcard expansion with the named target (and its deps).
         assert_eq!(
             resolve_order(&dag, &["...".into(), "a".into()]).unwrap(),
             vec!["a".to_owned(), "b".to_owned()]
@@ -2856,7 +2867,7 @@ lint[module] = go.lint {
         let dir = tempfile::tempdir().unwrap();
         let file_a = dir.path().join("a.txt");
         let file_b = dir.path().join("b.txt");
-        // `a` is a regular block selected by `...`; `b` is explicit and must
+        // `a` is a regular target selected by `...`; `b` is explicit and must
         // be named to participate.
         let input = format!(
             concat!(
@@ -2872,14 +2883,14 @@ lint[module] = go.lint {
         let store = MemoryStore::new();
         let (dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
 
-        // `bit ... b` should run every non-explicit block plus the named explicit one.
+        // `bit ... b` should run every non-explicit target plus the named explicit one.
         let mut order = resolve_order(&dag, &["...".into(), "b".into()]).unwrap();
         order.sort();
         assert_eq!(order, vec!["a".to_owned(), "b".to_owned()]);
     }
 
     #[test]
-    fn explicit_block_skipped_by_destroy_wildcard() {
+    fn explicit_target_skipped_by_destroy_wildcard() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let file_a = dir.path().join("a.txt");
@@ -2915,14 +2926,14 @@ lint[module] = go.lint {
         stored.sort();
         assert_eq!(stored, vec!["a".to_owned(), "b".to_owned()]);
 
-        // Destroying with `...` should leave the explicit block's state in place.
+        // Destroying with `...` should leave the explicit target's state in place.
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &["...".into()], false).unwrap();
         assert_eq!(store.list().unwrap(), vec!["b".to_owned()]);
     }
 
     #[test]
-    fn destroy_wildcard_composes_with_named_block() {
+    fn destroy_wildcard_composes_with_named_target() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let file_a = dir.path().join("a.txt");
@@ -2954,7 +2965,7 @@ lint[module] = go.lint {
         )
         .unwrap();
 
-        // `bit -c ... b` should destroy every non-explicit block AND the named explicit one.
+        // `bit -c ... b` should destroy every non-explicit target AND the named explicit one.
         let (mut dag, _base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &out, &["...".into(), "b".into()], false).unwrap();
         assert!(store.list().unwrap().is_empty());
@@ -3035,7 +3046,7 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn target_filters_blocks() {
+    fn group_filters_targets() {
         let tracker = test_tracker();
         let dir = tempfile::tempdir().unwrap();
         let out_a = dir.path().join("a.txt");
@@ -3044,7 +3055,7 @@ lint[module] = go.lint {
             concat!(
                 "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
                 "b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-                "target just_a = [a]\n",
+                "group just_a = [a]\n",
             ),
             out_a.display(),
             out_a.display(),
@@ -3085,7 +3096,7 @@ lint[module] = go.lint {
         let module = parser::parse(&input, "<test>").unwrap();
         let store = MemoryStore::new();
 
-        // First apply creates the block
+        // First apply creates the target
         let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         let out = Output::new(&[]);
         apply(&mut dag, &base, &store, &test_cache(), &out, &[], 1, &tracker).unwrap();
@@ -3195,7 +3206,7 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn changing_dir_reruns_the_block_and_clean_uses_the_dir_it_ran_in() {
+    fn changing_dir_reruns_the_target_and_clean_uses_the_dir_it_ran_in() {
         let root = tempfile::tempdir().unwrap();
         let (a, b) = (root.path().join("a"), root.path().join("b"));
         std::fs::create_dir_all(&a).unwrap();
@@ -3203,7 +3214,7 @@ lint[module] = go.lint {
         let tracker = test_tracker();
         let store = MemoryStore::new();
         let output = Output::new(&[]);
-        let block = |dir: &Path| {
+        let target = |dir: &Path| {
             let input = format!(
                 "build = exec {{\n  command = \"touch out\"\n  dir = \"{}\"\n  outputs = \"out\"\n}}\n",
                 dir.display()
@@ -3212,7 +3223,7 @@ lint[module] = go.lint {
         };
         let run = |dir: &Path| {
             let (mut dag, base) =
-                loader::load(&block(dir), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+                loader::load(&target(dir), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
             apply(&mut dag, &base, &store, &test_cache(), &output, &[], 1, &tracker).unwrap()
         };
 
@@ -3221,19 +3232,19 @@ lint[module] = go.lint {
         assert_eq!(run(&b)[0].plan.action, PlanAction::Update);
         assert!(b.join("out").is_file(), "the command runs in `dir`");
 
-        // A block that no longer exists is destroyed in the `dir` it ran in.
-        let (mut dag, _) = loader::load(&block(&b), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        // A target that no longer exists is destroyed in the `dir` it ran in.
+        let (mut dag, _) = loader::load(&target(&b), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &output, &[], false).unwrap();
         assert!(!b.join("out").exists());
     }
 
     #[test]
-    fn changing_env_reruns_the_block_and_clean_uses_the_env_it_ran_with() {
+    fn changing_env_reruns_the_target_and_clean_uses_the_env_it_ran_with() {
         let dir = tempfile::tempdir().unwrap();
         let tracker = test_tracker();
         let store = MemoryStore::new();
         let output = Output::new(&[]);
-        let block = |value: &str| {
+        let target = |value: &str| {
             let input = format!(
                 "build = exec {{\n  command = \"echo $FOO > out\"\n  clean = \"echo $FOO > cleaned\"\n  \
                  dir = \"{}\"\n  env = {{ FOO = \"{value}\" }}\n  outputs = \"out\"\n}}\n",
@@ -3243,7 +3254,7 @@ lint[module] = go.lint {
         };
         let run = |value: &str| {
             let (mut dag, base) =
-                loader::load(&block(value), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+                loader::load(&target(value), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
             apply(&mut dag, &base, &store, &test_cache(), &output, &[], 1, &tracker).unwrap()
         };
 
@@ -3252,7 +3263,7 @@ lint[module] = go.lint {
         assert_eq!(run("b")[0].plan.action, PlanAction::Update);
         assert_eq!(std::fs::read_to_string(dir.path().join("out")).unwrap(), "b\n");
 
-        let (mut dag, _) = loader::load(&block("b"), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+        let (mut dag, _) = loader::load(&target("b"), &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
         destroy(&mut dag, &store, &output, &[], false).unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("cleaned")).unwrap(), "b\n");
     }
@@ -3274,7 +3285,7 @@ lint[module] = go.lint {
             recorded_env(&inputs),
             BTreeMap::from([("PLAIN".to_owned(), "a".to_owned())])
         );
-        assert_eq!(crate::provider::block_env(&inputs).len(), 2);
+        assert_eq!(crate::provider::target_env(&inputs).len(), 2);
     }
 
     #[test]
@@ -3295,7 +3306,7 @@ lint[module] = go.lint {
         let registry = test_registry(&test_tracker());
         let resource = registry.get_resource("exec", "exec").unwrap();
         let output = Output::new(&[]);
-        let prior_state = Block::new(prior.dir, prior.provider_state.unwrap());
+        let prior_state = Target::new(prior.dir, prior.provider_state.unwrap());
         resource.destroy(&prior_state, &output.writer("build")).unwrap();
         assert!(marker.exists());
     }
@@ -3345,10 +3356,10 @@ lint[module] = go.lint {
         use serde::{Deserialize, Serialize};
 
         use crate::cache::{ArtifactRef, Cas};
-        use crate::output::BlockWriter;
+        use crate::output::TargetWriter;
         use crate::provider::{
-            Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, DynResource, FuncSignature, MaterializeResult,
-            OutputFile, PlanAction, PlanResult, Provider, Resource, ResourceKind,
+            Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, MaterializeResult,
+            OutputFile, PlanAction, PlanResult, Provider, Resource, ResourceKind, Target,
         };
         use crate::sha256::SHA256;
         use crate::value::Value;
@@ -3417,7 +3428,7 @@ lint[module] = go.lint {
         /// Left behind by `apply` when `recorded` is set, like a dep-info file.
         const RECORD: &str = "record.d";
 
-        fn out_path(inputs: &Block<Inputs>) -> PathBuf {
+        fn out_path(inputs: &Target<Inputs>) -> PathBuf {
             PathBuf::from(inputs.path("out.txt"))
         }
 
@@ -3432,7 +3443,7 @@ lint[module] = go.lint {
             fn kind(&self) -> ResourceKind {
                 self.kind.clone()
             }
-            fn resolve(&self, inputs: &Block<Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+            fn resolve(&self, inputs: &Target<Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
                 let mut map = BTreeMap::new();
                 let path = PathBuf::from(inputs.path("src.txt"));
                 if path.is_file() {
@@ -3440,14 +3451,14 @@ lint[module] = go.lint {
                 }
                 Ok(map)
             }
-            fn ambient(&self, inputs: &Block<Inputs>) -> Vec<Ambient> {
+            fn ambient(&self, inputs: &Target<Inputs>) -> Vec<Ambient> {
                 let mut ambient: Vec<Ambient> = inputs.tool.iter().cloned().map(Ambient::Executable).collect();
                 if std::path::Path::new(&inputs.path(RECORD)).is_file() {
                     ambient.extend(inputs.recorded.iter().cloned().map(Ambient::RecordedVariable));
                 }
                 ambient
             }
-            fn plan(&self, _inputs: &Block<Inputs>, prior: Option<&State>) -> Result<PlanResult, BoxError> {
+            fn plan(&self, _inputs: &Target<Inputs>, prior: Option<&State>) -> Result<PlanResult, BoxError> {
                 Ok(PlanResult {
                     action: if prior.is_some() {
                         PlanAction::None
@@ -3460,10 +3471,10 @@ lint[module] = go.lint {
             }
             fn apply(
                 &self,
-                inputs: &Block<Inputs>,
+                inputs: &Target<Inputs>,
                 _prior: Option<&State>,
                 _changes: &Changes,
-                _writer: &BlockWriter,
+                _writer: &TargetWriter,
             ) -> Result<ApplyResult<State, Outputs>, BoxError> {
                 self.applies.fetch_add(1, Ordering::SeqCst);
                 let out = out_path(inputs);
@@ -3486,14 +3497,14 @@ lint[module] = go.lint {
                     }),
                 })
             }
-            fn destroy(&self, state: &Block<State>, _writer: &BlockWriter) -> Result<(), BoxError> {
+            fn destroy(&self, state: &Target<State>, _writer: &TargetWriter) -> Result<(), BoxError> {
                 let _ = std::fs::remove_file(&state.path);
                 Ok(())
             }
-            fn cache_policy(&self, _inputs: &Block<Inputs>) -> CachePolicy {
+            fn cache_policy(&self, _inputs: &Target<Inputs>) -> CachePolicy {
                 CachePolicy::Shared { version: 1 }
             }
-            fn output_keys(&self, inputs: &Block<Inputs>) -> Vec<String> {
+            fn output_keys(&self, inputs: &Target<Inputs>) -> Vec<String> {
                 vec![out_path(inputs).to_string_lossy().into_owned()]
             }
             /// Capture and check come from the default implementations. Only
@@ -3501,12 +3512,12 @@ lint[module] = go.lint {
             /// worktree's absolute output path.
             fn materialize(
                 &self,
-                inputs: &Block<Inputs>,
+                inputs: &Target<Inputs>,
                 _state: &State,
                 outputs: &[OutputFile],
                 artifacts: &BTreeMap<String, ArtifactRef>,
                 cas: &Cas,
-                writer: &BlockWriter,
+                writer: &TargetWriter,
             ) -> MaterializeResult<State, Outputs> {
                 crate::provider::restore_output_files(outputs, artifacts, cas, writer)?;
                 let path = out_path(inputs).to_string_lossy().into_owned();
@@ -3559,7 +3570,7 @@ lint[module] = go.lint {
             self.root.join("out.txt")
         }
 
-        fn block(&self, name: &str, resource: &str, extra: &str) -> String {
+        fn target(&self, name: &str, resource: &str, extra: &str) -> String {
             format!(
                 "{name} = cached.{resource} {{\n  dir = \"{}\"\n{extra}}}\n",
                 self.root.display()
@@ -3634,7 +3645,7 @@ lint[module] = go.lint {
             (dag, base, tracker)
         }
 
-        fn apply(&self, wt: &Worktree, input: &str, jobs: usize) -> Result<Vec<BlockPlan>, EngineError> {
+        fn apply(&self, wt: &Worktree, input: &str, jobs: usize) -> Result<Vec<TargetPlan>, EngineError> {
             self.apply_with(wt, input, jobs, &self.cache(wt))
         }
 
@@ -3644,13 +3655,13 @@ lint[module] = go.lint {
             input: &str,
             jobs: usize,
             cache: &BuildCache,
-        ) -> Result<Vec<BlockPlan>, EngineError> {
+        ) -> Result<Vec<TargetPlan>, EngineError> {
             let (mut dag, base, tracker) = self.load(wt, input);
             let output = Output::new(&[]);
             apply(&mut dag, &base, &wt.store, cache, &output, &[], jobs, &tracker)
         }
 
-        fn plan(&self, wt: &Worktree, input: &str) -> Vec<BlockPlan> {
+        fn plan(&self, wt: &Worktree, input: &str) -> Vec<TargetPlan> {
             let (mut dag, base, tracker) = self.load(wt, input);
             let output = Output::new(&[]);
             plan(&mut dag, &base, &self.cache(wt), &output, &[], &tracker).unwrap()
@@ -3705,8 +3716,8 @@ lint[module] = go.lint {
         }
     }
 
-    fn wrapped(store: &MemoryStore, block: &str) -> WrappedState {
-        serde_json::from_value(store.load(block).unwrap().unwrap()).unwrap()
+    fn wrapped(store: &MemoryStore, target: &str) -> WrappedState {
+        serde_json::from_value(store.load(target).unwrap().unwrap()).unwrap()
     }
 
     /// A variable known only from what a build left behind is recorded in
@@ -3717,7 +3728,7 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
-        h.apply(&a, &a.block("app", "file", "  recorded = \"PATH\"\n"), 1)
+        h.apply(&a, &a.target("app", "file", "  recorded = \"PATH\"\n"), 1)
             .unwrap();
         let receipt = h.only_receipt();
         assert_eq!(
@@ -3732,7 +3743,7 @@ lint[module] = go.lint {
         let b = h.worktree("b");
         b.write_src("hello");
         let plans = h
-            .apply(&b, &b.block("app", "file", "  recorded = \"PATH\"\n"), 1)
+            .apply(&b, &b.target("app", "file", "  recorded = \"PATH\"\n"), 1)
             .unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Restore);
         assert_eq!(h.applies(), 1);
@@ -3743,8 +3754,8 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
-        let block = |wt: &Worktree| wt.block("app", "file", "  recorded = \"PATH\"\n");
-        h.apply(&a, &block(&a), 1).unwrap();
+        let target = |wt: &Worktree| wt.target("app", "file", "  recorded = \"PATH\"\n");
+        h.apply(&a, &target(&a), 1).unwrap();
         // Stand in for a build that ran with a different PATH.
         let path = h.receipts().remove(0);
         let mut variants = h.only_variants();
@@ -3755,7 +3766,7 @@ lint[module] = go.lint {
 
         let b = h.worktree("b");
         b.write_src("hello");
-        let plans = h.apply(&b, &block(&b), 1).unwrap();
+        let plans = h.apply(&b, &target(&b), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Create);
         assert_eq!(h.applies(), 2);
         assert_eq!(
@@ -3772,7 +3783,7 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
-        h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+        h.apply(&a, &a.target("app", "file", ""), 1).unwrap();
 
         let other = h.base.join("other");
         std::fs::create_dir_all(&other).unwrap();
@@ -3782,7 +3793,7 @@ lint[module] = go.lint {
             store: MemoryStore::new(),
         };
         b.write_src("hello");
-        let plans = h.apply(&b, &b.block("app", "file", ""), 1).unwrap();
+        let plans = h.apply(&b, &b.target("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Restore);
         assert_eq!(h.applies(), 1);
     }
@@ -3802,7 +3813,7 @@ lint[module] = go.lint {
         assert_eq!(
             prior.content_hash,
             SHA256::digest(b"c"),
-            "an unchanged block still skips"
+            "an unchanged target still skips"
         );
     }
 
@@ -3819,14 +3830,14 @@ lint[module] = go.lint {
 
         let a = h.worktree("a");
         a.write_src("hello");
-        h.apply_with(&a, &a.block("app", "file", ""), 1, &machine("ci", &a, true))
+        h.apply_with(&a, &a.target("app", "file", ""), 1, &machine("ci", &a, true))
             .unwrap();
         a.delete();
 
         let b = h.worktree("b");
         b.write_src("hello");
         let dev = machine("dev", &b, false);
-        let plans = h.apply_with(&b, &b.block("app", "file", ""), 1, &dev).unwrap();
+        let plans = h.apply_with(&b, &b.target("app", "file", ""), 1, &dev).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Restore);
         assert_eq!(h.applies(), 1, "provider must not run on a remote hit");
         assert_eq!(std::fs::read_to_string(b.out()).unwrap(), "hello");
@@ -3837,7 +3848,7 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
-        let plans = h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+        let plans = h.apply(&a, &a.target("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Create);
         assert_eq!(h.applies(), 1);
         assert_eq!(h.receipts().len(), 1);
@@ -3846,7 +3857,7 @@ lint[module] = go.lint {
 
         let b = h.worktree("b");
         b.write_src("hello");
-        let plans = h.apply(&b, &b.block("app", "file", ""), 1).unwrap();
+        let plans = h.apply(&b, &b.target("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Restore);
         assert_eq!(plans[0].plan.reason.as_deref(), Some("cached"));
         assert_eq!(h.applies(), 1, "provider must not run on a cache hit");
@@ -3858,13 +3869,13 @@ lint[module] = go.lint {
             "restored state is saved locally"
         );
 
-        // The restored block is now settled locally.
-        let plans = h.apply(&b, &b.block("app", "file", ""), 1).unwrap();
+        // The restored target is now settled locally.
+        let plans = h.apply(&b, &b.target("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::None);
         assert_eq!(h.applies(), 1);
     }
 
-    /// Load `publish name=app`, whose block reads the secret `key`, with the
+    /// Load `publish name=app`, whose target reads the secret `key`, with the
     /// secret set to `value`. Returns the instance name, its input hash and
     /// its shared-cache key.
     fn load_secret_instance(key: &str, value: &str) -> (String, SHA256, ActionKey) {
@@ -3896,7 +3907,7 @@ lint[module] = go.lint {
             provider: "exec",
             resource: "exec",
             cache_version: 1,
-            block: &name,
+            target: &name,
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
             inputs: input_hash,
@@ -3929,19 +3940,19 @@ lint[module] = go.lint {
     }
 
     #[test]
-    fn changed_tool_reruns_block_and_changes_action_key() {
+    fn changed_tool_reruns_target_and_changes_action_key() {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
         let tool = a.root.join("tool");
         std::fs::write(&tool, "v1").unwrap();
-        let block = a.block("app", "file", &format!("  tool = \"{}\"\n", tool.display()));
+        let target = a.target("app", "file", &format!("  tool = \"{}\"\n", tool.display()));
 
-        assert_eq!(h.apply(&a, &block, 1).unwrap()[0].plan.action, PlanAction::Create);
-        assert_eq!(h.apply(&a, &block, 1).unwrap()[0].plan.action, PlanAction::None);
+        assert_eq!(h.apply(&a, &target, 1).unwrap()[0].plan.action, PlanAction::Create);
+        assert_eq!(h.apply(&a, &target, 1).unwrap()[0].plan.action, PlanAction::None);
 
         std::fs::write(&tool, "v2").unwrap();
-        let plans = h.apply(&a, &block, 1).unwrap();
+        let plans = h.apply(&a, &target, 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Update);
         assert_eq!(plans[0].plan.reason.as_deref(), Some("'tool' changed"));
         assert_eq!(h.applies(), 2);
@@ -3950,7 +3961,7 @@ lint[module] = go.lint {
         // The output is identical under both tools, so the v1 receipt is
         // bound as already valid.
         std::fs::write(&tool, "v1").unwrap();
-        let plans = h.apply(&a, &block, 1).unwrap();
+        let plans = h.apply(&a, &target, 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::None);
         assert_eq!(plans[0].plan.reason.as_deref(), Some("cached"));
         assert_eq!(h.applies(), 2);
@@ -3961,17 +3972,17 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
-        h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+        h.apply(&a, &a.target("app", "file", ""), 1).unwrap();
         a.delete();
 
         let b = h.worktree("b");
         b.write_src("hello");
-        h.apply(&b, &b.block("app", "file", ""), 1).unwrap();
+        h.apply(&b, &b.target("app", "file", ""), 1).unwrap();
         std::fs::write(b.out(), "tampered").unwrap();
 
         let c = h.worktree("c");
         c.write_src("hello");
-        let plans = h.apply(&c, &c.block("app", "file", ""), 1).unwrap();
+        let plans = h.apply(&c, &c.target("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Restore);
         assert_eq!(std::fs::read_to_string(c.out()).unwrap(), "hello");
         assert_eq!(h.applies(), 1);
@@ -3982,15 +3993,15 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("v1");
-        h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+        h.apply(&a, &a.target("app", "file", ""), 1).unwrap();
         a.write_src("v2");
-        let plans = h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+        let plans = h.apply(&a, &a.target("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Update);
         assert_eq!(h.applies(), 2);
         assert_eq!(h.receipts().len(), 2);
 
         a.write_src("v1");
-        let plans = h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+        let plans = h.apply(&a, &a.target("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Restore);
         assert_eq!(h.applies(), 2);
         assert_eq!(std::fs::read_to_string(a.out()).unwrap(), "v1");
@@ -4001,7 +4012,7 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("v1");
-        h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+        h.apply(&a, &a.target("app", "file", ""), 1).unwrap();
 
         assert_eq!(h.only_receipt().artifacts.keys().collect::<Vec<_>>(), ["out.txt"]);
     }
@@ -4012,7 +4023,7 @@ lint[module] = go.lint {
     fn uncached_entries_resolve_like_the_outputs_they_name() {
         let h = Harness::new();
         let a = h.worktree("a");
-        let block = format!(
+        let target = format!(
             concat!(
                 "app = exec {{\n",
                 "  command  = \"mkdir -p dist && touch dist/a keep.txt\"\n",
@@ -4024,7 +4035,7 @@ lint[module] = go.lint {
             a.root.display()
         );
         std::fs::create_dir_all(a.root.join("web")).unwrap();
-        h.apply(&a, &block, 1).unwrap();
+        h.apply(&a, &target, 1).unwrap();
 
         assert!(a.root.join("web/dist/a").is_file(), "outputs are relative to `dir`");
         assert_eq!(h.only_receipt().artifacts.keys().collect::<Vec<_>>(), ["web/keep.txt"]);
@@ -4037,19 +4048,19 @@ lint[module] = go.lint {
         a.write_src("v1");
         // Named with the trailing slash `output` uses for directories, which
         // is optional here.
-        let block = a.block("app", "file", "  uncached = [\"out.txt/\"]\n");
-        h.apply(&a, &block, 1).unwrap();
+        let target = a.target("app", "file", "  uncached = [\"out.txt/\"]\n");
+        h.apply(&a, &target, 1).unwrap();
 
         assert!(h.only_receipt().artifacts.is_empty());
 
         // A second worktree still matches the action, because excluding an
-        // output changes what is stored, not what the block depends on. It
+        // output changes what is stored, not what the target depends on. It
         // therefore reuses the result without receiving the excluded file --
         // the cost of opting an output out.
         let b = h.worktree("b");
         b.write_src("v1");
         let plans = h
-            .apply(&b, &b.block("app", "file", "  uncached = [\"out.txt/\"]\n"), 1)
+            .apply(&b, &b.target("app", "file", "  uncached = [\"out.txt/\"]\n"), 1)
             .unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::None);
         assert_eq!(h.applies(), 1);
@@ -4060,7 +4071,8 @@ lint[module] = go.lint {
     fn valid_receipt_is_bound_without_materializing() {
         let h = Harness::new();
         let a = h.worktree("a");
-        h.apply(&a, &a.block("app", "file", "  content = \"hi\"\n"), 1).unwrap();
+        h.apply(&a, &a.target("app", "file", "  content = \"hi\"\n"), 1)
+            .unwrap();
 
         // Reproduce what apply would have written, permissions included: a
         // receipt only counts as valid when the destination is byte- and
@@ -4068,7 +4080,9 @@ lint[module] = go.lint {
         let b = h.worktree("b");
         std::fs::write(b.out(), "hi").unwrap();
         std::fs::set_permissions(b.out(), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let plans = h.apply(&b, &b.block("app", "file", "  content = \"hi\"\n"), 1).unwrap();
+        let plans = h
+            .apply(&b, &b.target("app", "file", "  content = \"hi\"\n"), 1)
+            .unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::None);
         assert_eq!(plans[0].plan.reason.as_deref(), Some("cached"));
         assert_eq!(h.applies(), 1);
@@ -4080,12 +4094,12 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
-        h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+        h.apply(&a, &a.target("app", "file", ""), 1).unwrap();
         a.delete();
 
         let b = h.worktree("b");
         b.write_src("hello");
-        let plans = h.plan(&b, &b.block("app", "file", ""));
+        let plans = h.plan(&b, &b.target("app", "file", ""));
         assert_eq!(plans[0].plan.action, PlanAction::Restore);
         assert!(!b.out().exists());
         assert!(b.store.load("app").unwrap().is_none());
@@ -4095,12 +4109,12 @@ lint[module] = go.lint {
     fn failed_tests_never_publish_receipts() {
         let h = Harness::new();
         let a = h.worktree("a");
-        let result = h.apply(&a, &a.block("t", "check", "  content = \"x\"\n  passed = false\n"), 1);
+        let result = h.apply(&a, &a.target("t", "check", "  content = \"x\"\n  passed = false\n"), 1);
         assert!(matches!(result, Err(EngineError::TestFailed { .. })));
         assert!(h.receipts().is_empty());
         assert!(a.store.load("t").unwrap().is_some(), "failure stays in local state");
 
-        h.apply(&a, &a.block("t", "check", "  content = \"x\"\n  passed = true\n"), 1)
+        h.apply(&a, &a.target("t", "check", "  content = \"x\"\n  passed = true\n"), 1)
             .unwrap();
         assert_eq!(h.receipts().len(), 1);
     }
@@ -4110,7 +4124,7 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
-        h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+        h.apply(&a, &a.target("app", "file", ""), 1).unwrap();
         a.delete();
         for blob in h.blobs() {
             std::fs::set_permissions(&blob, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
@@ -4119,7 +4133,7 @@ lint[module] = go.lint {
 
         let b = h.worktree("b");
         b.write_src("hello");
-        let plans = h.apply(&b, &b.block("app", "file", ""), 1).unwrap();
+        let plans = h.apply(&b, &b.target("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Create);
         assert_eq!(h.applies(), 2);
         assert_eq!(std::fs::read_to_string(b.out()).unwrap(), "hello");
@@ -4133,7 +4147,7 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
-        h.apply(&a, &a.block("app", "file", ""), 1).unwrap();
+        h.apply(&a, &a.target("app", "file", ""), 1).unwrap();
         a.delete();
         for receipt in h.receipts() {
             std::fs::write(&receipt, "{ nope").unwrap();
@@ -4141,7 +4155,7 @@ lint[module] = go.lint {
 
         let b = h.worktree("b");
         b.write_src("hello");
-        let plans = h.apply(&b, &b.block("app", "file", ""), 1).unwrap();
+        let plans = h.apply(&b, &b.target("app", "file", ""), 1).unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::Create);
         assert_eq!(h.applies(), 2);
     }
@@ -4151,7 +4165,7 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
-        let input = a.block("app", "file", "");
+        let input = a.target("app", "file", "");
         h.apply(&a, &input, 1).unwrap();
         h.destroy(&a, &input);
         assert!(!a.out().exists());
@@ -4169,7 +4183,7 @@ lint[module] = go.lint {
         std::fs::create_dir_all(&b_dir).unwrap();
         let input = format!(
             "{}b = cached.file {{\n  dir = \"{}\"\n  content = \"from #{{a.path}}\"\n}}\n",
-            a.block("a", "file", ""),
+            a.target("a", "file", ""),
             b_dir.display()
         );
 
@@ -4196,7 +4210,7 @@ lint[module] = go.lint {
         let h = Harness::new();
         let a = h.worktree("a");
         a.write_src("hello");
-        let (mut dag, base, tracker) = h.load(&a, &a.block("app", "file", ""));
+        let (mut dag, base, tracker) = h.load(&a, &a.target("app", "file", ""));
         let local = BuildCache::local_only(&a.root);
         apply(&mut dag, &base, &a.store, &local, &Output::new(&[]), &[], 1, &tracker).unwrap();
         assert!(h.receipts().is_empty());

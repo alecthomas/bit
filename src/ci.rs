@@ -1,8 +1,8 @@
-//! Split a selection into CI jobs so `large` blocks run apart from the rest.
+//! Split a selection into CI jobs so `large` targets run apart from the rest.
 //!
-//! Each job runs `bit` on its own blocks, which also runs everything they
-//! depend on, and jobs share no results. A block that needs a large block
-//! therefore runs in that large block's job, so the large block is built
+//! Each job runs `bit` on its own targets, which also runs everything they
+//! depend on, and jobs share no results. A target that needs a large target
+//! therefore runs in that large target's job, so the large target is built
 //! once rather than again in every job that consumes it.
 
 use std::collections::{HashMap, HashSet};
@@ -12,10 +12,10 @@ use serde::Serialize;
 use crate::dag::{Dag, DagError};
 use crate::invocation::Invocation;
 
-/// Job ID for blocks that need no large block.
+/// Job ID for targets that need no large target.
 pub const DEFAULT_JOB: &str = "default";
 
-/// Job ID no block's job takes, so a template can add a job with it that
+/// Job ID no target's job takes, so a template can add a job with it that
 /// succeeds only when every other job does. Rulesets require checks by name,
 /// and the other jobs change with `BUILD.bit`, so this one check is the stable
 /// name to require.
@@ -26,14 +26,14 @@ pub const GATE_JOB: &str = "ci";
 pub struct Job {
     /// Job identifier, valid as a GitHub Actions job ID.
     pub id: String,
-    /// Large blocks this job exists for, in topological order. Empty for the
+    /// Large targets this job exists for, in topological order. Empty for the
     /// default job.
     pub large: Vec<String>,
-    /// The large blocks as the command line selects them, or `default`.
+    /// The large targets as the command line selects them, or `default`.
     pub name: String,
-    /// Blocks the job runs, including their dependencies, in topological order.
+    /// Targets the job runs, including their dependencies, in topological order.
     pub order: Vec<String>,
-    /// Arguments to `bit` that select the job's blocks.
+    /// Arguments to `bit` that select the job's targets.
     pub selection: Vec<String>,
 }
 
@@ -41,7 +41,7 @@ pub struct Job {
 pub enum CiError {
     #[error("{0}")]
     Dag(#[from] DagError),
-    #[error("block '{0}' cannot be selected on the command line, so no CI job can run it")]
+    #[error("target '{0}' cannot be selected on the command line, so no CI job can run it")]
     Unselectable(String),
     #[error("CI template: {0}")]
     Template(String),
@@ -49,23 +49,23 @@ pub enum CiError {
 
 /// Split `order`, a selection in topological order, into jobs.
 ///
-/// Large blocks are grouped so that no block needs large blocks from two
-/// jobs: a large block that depends on another, or a block that depends on
-/// both, puts them in one job. Each group becomes a job that runs its blocks
-/// and their dependencies. Blocks that no large job runs form the default
+/// Large targets are joined so that no target needs large targets from two
+/// jobs: a large target that depends on another, or a target that depends on
+/// both, puts them in one job. Each set becomes a job that runs its targets
+/// and their dependencies. Targets that no large job runs form the default
 /// job.
 pub fn partition(dag: &Dag, order: &[String]) -> Result<Vec<Job>, CiError> {
-    // A job runs everything its blocks depend on, even blocks such as
+    // A job runs everything its targets depend on, even targets such as
     // `explicit` ones that a bulk selection leaves out, so partition what
     // the jobs will actually run.
     let siblings = siblings(dag);
     let order = closure(&dag.topo_order()?, dag, &siblings, order);
     let order = order.as_slice();
-    let mut groups = Groups::default();
-    // A representative of the group of large blocks each block needs.
+    let mut sets = DisjointSets::default();
+    // A representative of the set of large targets each target needs.
     // Selecting a matrix instance runs all its slices, so a slice needs
     // whatever its siblings need. A sibling can come later in the order,
-    // so repeat until no block gains a group.
+    // so repeat until no target gains a set.
     let mut needs: HashMap<&str, String> = HashMap::new();
     loop {
         let mut changed = false;
@@ -80,7 +80,7 @@ pub fn partition(dag: &Dag, order: &[String]) -> Result<Vec<Job>, CiError> {
             }
             let Some(first) = members.first() else { continue };
             for other in &members[1..] {
-                groups.union(first, other);
+                sets.union(first, other);
             }
             if !needs.contains_key(name.as_str()) {
                 needs.insert(name, first.clone());
@@ -92,14 +92,14 @@ pub fn partition(dag: &Dag, order: &[String]) -> Result<Vec<Job>, CiError> {
         }
     }
 
-    // Large blocks and all members of each group, in order of first appearance.
+    // Large targets and all members of each set, in order of first appearance.
     let mut large_jobs: Vec<(Vec<String>, Vec<String>)> = Vec::new();
     let mut job_of_root: HashMap<String, usize> = HashMap::new();
     for name in order {
         let Some(member) = needs.get(name.as_str()) else {
             continue;
         };
-        let root = groups.find(member);
+        let root = sets.find(member);
         let index = *job_of_root.entry(root).or_insert_with(|| {
             large_jobs.push((Vec::new(), Vec::new()));
             large_jobs.len() - 1
@@ -146,7 +146,7 @@ pub fn partition(dag: &Dag, order: &[String]) -> Result<Vec<Job>, CiError> {
 /// instance runs, itself included.
 fn siblings(dag: &Dag) -> HashMap<String, Vec<String>> {
     let mut by_invocation: HashMap<Vec<String>, Vec<String>> = HashMap::new();
-    for name in dag.block_names() {
+    for name in dag.target_names() {
         if let Some(invocation) = dag.invocation(&name) {
             by_invocation
                 .entry(invocation_words(invocation))
@@ -181,7 +181,7 @@ fn invocation_words(invocation: &Invocation) -> Vec<String> {
 }
 
 /// Arguments that make `bit` run exactly `job_order`, a dependency-closed
-/// set of blocks: the blocks nothing else in the set depends on.
+/// set of targets: the targets nothing else in the set depends on.
 fn selection(dag: &Dag, job_order: &[String]) -> Result<Vec<String>, CiError> {
     let selectors = Selectors::new(dag, job_order);
     let mut words = Vec::new();
@@ -202,7 +202,7 @@ fn selection(dag: &Dag, job_order: &[String]) -> Result<Vec<String>, CiError> {
     Ok(words)
 }
 
-/// The job's large blocks as the command line selects them, or
+/// The job's large targets as the command line selects them, or
 /// [`DEFAULT_JOB`].
 fn job_name(dag: &Dag, job_order: &[String], large: &[String]) -> String {
     if large.is_empty() {
@@ -210,10 +210,10 @@ fn job_name(dag: &Dag, job_order: &[String], large: &[String]) -> String {
     }
     let selectors = Selectors::new(dag, job_order);
     let mut names: Vec<String> = Vec::new();
-    for block in large {
+    for target in large {
         let name = selectors
-            .get(block)
-            .map_or_else(|| block.clone(), |selector| shell_join(&selector));
+            .get(target)
+            .map_or_else(|| target.clone(), |selector| shell_join(&selector));
         if !names.contains(&name) {
             names.push(name);
         }
@@ -221,7 +221,7 @@ fn job_name(dag: &Dag, job_order: &[String], large: &[String]) -> String {
     names.join(", ")
 }
 
-/// Finds the command-line words that select a block within one job.
+/// Finds the command-line words that select a target within one job.
 struct Selectors<'a> {
     dag: &'a Dag,
     in_job: HashSet<&'a str>,
@@ -244,7 +244,7 @@ impl<'a> Selectors<'a> {
         } else if let Some(matrix) = whole_matrix(self.dag, &self.matrices, &self.in_job, name) {
             Some(vec![matrix.to_owned()])
         } else if name.contains(['(', '=']) {
-            // The command line reads `=` as a target argument, and only a
+            // The command line reads `=` as an argument, and only a
             // recorded invocation can recreate an instance.
             None
         } else {
@@ -253,12 +253,12 @@ impl<'a> Selectors<'a> {
     }
 }
 
-/// The slices of each matrix block, keyed by the block's name.
+/// The slices of each matrix target, keyed by the target's name.
 ///
-/// Only matrix expansion gives an uninvoked block a foreign concurrency group.
+/// Only matrix expansion gives an uninvoked target a foreign concurrency group.
 fn matrix_slices(dag: &Dag) -> HashMap<String, Vec<String>> {
     let mut matrices: HashMap<String, Vec<String>> = HashMap::new();
-    for name in dag.block_names() {
+    for name in dag.target_names() {
         let Some(node) = dag.get_node(&name) else { continue };
         if node.concurrency_group != name && dag.invocation(&name).is_none() {
             matrices.entry(node.concurrency_group.clone()).or_default().push(name);
@@ -267,8 +267,8 @@ fn matrix_slices(dag: &Dag) -> HashMap<String, Vec<String>> {
     matrices
 }
 
-/// The name of the matrix block that `slice` belongs to, if the job runs all
-/// of that block's slices, so naming the block selects nothing extra.
+/// The name of the matrix target that `slice` belongs to, if the job runs all
+/// of that target's slices, so naming the target selects nothing extra.
 fn whole_matrix<'a>(
     dag: &'a Dag,
     matrices: &HashMap<String, Vec<String>>,
@@ -283,11 +283,11 @@ fn whole_matrix<'a>(
         .then_some(matrix)
 }
 
-/// A GitHub Actions job ID derived from a block name, which may contain
+/// A GitHub Actions job ID derived from a target name, which may contain
 /// matrix keys or instance arguments that job IDs do not allow.
-fn unique_id(block: &str, taken: &mut HashSet<String>) -> String {
+fn unique_id(target: &str, taken: &mut HashSet<String>) -> String {
     let mut base = String::new();
-    for c in block.chars() {
+    for c in target.chars() {
         if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
             base.push(c);
         } else if !base.ends_with('-') {
@@ -307,13 +307,13 @@ fn unique_id(block: &str, taken: &mut HashSet<String>) -> String {
     id
 }
 
-/// Union-find over large block names.
+/// Union-find over large target names.
 #[derive(Default)]
-struct Groups {
+struct DisjointSets {
     parent: HashMap<String, String>,
 }
 
-impl Groups {
+impl DisjointSets {
     fn find(&mut self, name: &str) -> String {
         let mut root = name.to_owned();
         while let Some(parent) = self.parent.get(&root) {
@@ -457,13 +457,13 @@ mod tests {
 
     struct EmptyStore;
     impl StateStore for EmptyStore {
-        fn load(&self, _block: &str) -> Result<Option<serde_json::Value>, StateError> {
+        fn load(&self, _target: &str) -> Result<Option<serde_json::Value>, StateError> {
             Ok(None)
         }
-        fn save(&self, _block: &str, _state: &serde_json::Value) -> Result<(), StateError> {
+        fn save(&self, _target: &str, _state: &serde_json::Value) -> Result<(), StateError> {
             Ok(())
         }
-        fn remove(&self, _block: &str) -> Result<(), StateError> {
+        fn remove(&self, _target: &str) -> Result<(), StateError> {
             Ok(())
         }
         fn list(&self) -> Result<Vec<String>, StateError> {
@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn without_large_blocks_everything_runs_in_the_default_job() {
+    fn without_large_targets_everything_runs_in_the_default_job() {
         let jobs = jobs(
             r#"
 a = exec { command = "a" }
@@ -520,7 +520,7 @@ b = exec { command = "b" depends_on = [a] }
     }
 
     #[test]
-    fn large_blocks_run_in_their_own_jobs_with_their_consumers() {
+    fn large_targets_run_in_their_own_jobs_with_their_consumers() {
         let jobs = jobs(
             r#"
 gen = exec { command = "gen" }
@@ -543,7 +543,7 @@ lint = exec { command = "lint" }
     }
 
     #[test]
-    fn blocks_needing_two_large_blocks_join_their_jobs() {
+    fn targets_needing_two_large_targets_join_their_jobs() {
         let jobs = jobs(
             r#"
 large a = exec { command = "a" }
@@ -564,7 +564,7 @@ both = exec { command = "both" depends_on = [b, c] }
     }
 
     #[test]
-    fn pre_blocks_run_in_every_job() {
+    fn pre_targets_run_in_every_job() {
         let jobs = jobs(
             r#"
 pre fmt = exec { command = "fmt" }
@@ -602,7 +602,7 @@ large ci = exec { command = "ci" }
             r#"
 large build = exec { command = "build" }
 large image = exec { command = "image" }
-target release = [build]
+group release = [build]
 "#,
             "release",
             &[],
@@ -672,7 +672,7 @@ large build[arch](name : string) = exec { command = "build #{name} #{arch}" }
     }
 
     #[test]
-    fn job_names_select_their_large_blocks() {
+    fn job_names_select_their_large_targets() {
         let jobs = jobs(
             r#"
 let arch = ["amd64", "arm64"]

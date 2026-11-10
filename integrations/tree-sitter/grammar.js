@@ -21,9 +21,9 @@ module.exports = grammar({
       $.import_statement,
       $.let_statement,
       $.param_statement,
-      $.target_statement,
+      $.group_statement,
       $.output_statement,
-      $.block,
+      $.target,
     ),
 
     // ── Statements ──
@@ -53,15 +53,15 @@ module.exports = grammar({
       optional(seq('=', field('default', $._expression))),
     ),
 
-    target_statement: $ => seq(
-      'target',
+    group_statement: $ => seq(
+      'group',
       field('name', $.identifier),
       optional(field('parameters', $.parameter_list)),
       '=',
       '[',
       optional(seq(
-        $.target_call,
-        repeat(seq(',', $.target_call)),
+        $.group_member,
+        repeat(seq(',', $.group_member)),
       )),
       ']',
     ),
@@ -82,7 +82,7 @@ module.exports = grammar({
       optional(seq('=', field('default', $._expression))),
     ),
 
-    target_call: $ => seq(
+    group_member: $ => seq(
       field('name', $.dotted_identifier),
       optional(seq('[', $._matrix_key, repeat(seq(',', $._matrix_key)), ']')),
       optional(field('arguments', $.argument_list)),
@@ -104,7 +104,7 @@ module.exports = grammar({
       field('value', $._expression),
     ),
 
-    block_argument_list: $ => seq(
+    target_argument_list: $ => seq(
       '(',
       $.named_argument,
       repeat(seq(',', $.named_argument)),
@@ -122,7 +122,7 @@ module.exports = grammar({
     // `protected`, `explicit`, and `large` are independent and may appear in
     // any order. `repeat(choice(...))` allows every ordering without baking
     // the ordering into the grammar; the real parser enforces uniqueness.
-    block: $ => seq(
+    target: $ => seq(
       optional(field('phase', $.phase_modifier)),
       repeat(choice(
         field('protected', $.protected_modifier),
@@ -130,7 +130,7 @@ module.exports = grammar({
         field('large', $.large_modifier),
       )),
       field('name', $.identifier),
-      optional(field('matrix_keys', $.block_matrix_keys)),
+      optional(field('matrix_keys', $.target_matrix_keys)),
       optional(field('parameters', $.parameter_list)),
       '=',
       field('provider', $.identifier),
@@ -145,14 +145,14 @@ module.exports = grammar({
     explicit_modifier: _ => 'explicit',
     large_modifier: _ => 'large',
 
-    block_matrix_keys: $ => seq(
+    target_matrix_keys: $ => seq(
       '[',
-      $._block_matrix_key,
-      repeat(seq(',', $._block_matrix_key)),
+      $._target_matrix_key,
+      repeat(seq(',', $._target_matrix_key)),
       ']',
     ),
 
-    _block_matrix_key: $ => choice($.identifier, $.matrix_key_binding),
+    _target_matrix_key: $ => choice($.identifier, $.matrix_key_binding),
 
     // `key = expr`: the key's values are computed per combination of the
     // keys before it.
@@ -253,7 +253,7 @@ module.exports = grammar({
       $.null,
       $.list,
       $.map,
-      $.block_call,
+      $.target_call,
       $.call,
       $.reference,
     ),
@@ -353,9 +353,9 @@ module.exports = grammar({
 
     // ── Calls & References ──
 
-    block_call: $ => seq(
+    target_call: $ => seq(
       choice(
-        seq(field('name', $.identifier), field('arguments', $.block_argument_list)),
+        seq(field('name', $.identifier), field('arguments', $.target_argument_list)),
         seq(field('slice', $.matrix_slice_ref), field('arguments', $.argument_list)),
       ),
       repeat(seq('.', field('field', $.identifier))),

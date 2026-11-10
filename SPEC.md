@@ -2,15 +2,15 @@
 
 ## Specification v0.1
 
-bit models the software lifecycle as a dependency graph of **blocks**. Each block has a provider, inputs, and outputs. The same syntax describes a compiled binary, a test suite, a Docker image, and a running container.
+bit models the software lifecycle as a dependency graph of **targets**. Each target has a provider, inputs, and outputs. The same syntax describes a compiled binary, a test suite, a Docker image, and a running container.
 
 Providers implement a Rust trait and are compiled into bit. Modules written in bit itself (§2) are the other extension mechanism.
 
 ---
 
-## 1. Blocks
+## 1. Targets
 
-The block is the main structural element:
+The target is the main structural element:
 
 ```
 name = provider.resource {
@@ -20,11 +20,11 @@ name = provider.resource {
 
 A resource named after its provider can be called bare: `exec { ... }` is `exec.exec { ... }`. Fields may be separated by newlines or commas.
 
-Blocks may be prefixed with modifiers:
+Targets may be prefixed with modifiers:
 
 ```
-pre setup = exec { ... }              # run before default-phase blocks
-post report = exec { ... }            # run after default-phase blocks
+pre setup = exec { ... }              # run before default-phase targets
+post report = exec { ... }            # run after default-phase targets
 protected prod_db = docker.container { ... }
 explicit migrate = exec { ... }
 large image = docker.image { ... }
@@ -68,35 +68,35 @@ container = docker.container {
 
 `depends_on` means "I depend on this": the parent's content hash is part of the child's. `after` means "run this first": ordering only. Expression refs (e.g. `image.ref`) implicitly create content edges.
 
-Every block also accepts these engine fields, handled by the engine rather than the provider:
+Every target also accepts these engine fields, handled by the engine rather than the provider:
 
 | Field | Meaning |
 |-------|---------|
 | `depends_on` | Content dependencies |
 | `after` | Ordering-only dependencies |
-| `concurrency` | Maximum number of this block's matrix slices that run at once |
-| `dir` | Directory the block runs in; relative paths resolve against it |
-| `env` | Map of environment variables set for every process the block runs, including version probes and input discovery. A resource's own variables override it. Part of the input hash. Recorded for `--clean`, except secret values |
+| `concurrency` | Maximum number of this target's matrix slices that run at once |
+| `dir` | Directory the target runs in; relative paths resolve against it |
+| `env` | Map of environment variables set for every process the target runs, including version probes and input discovery. A resource's own variables override it. Part of the input hash. Recorded for `--clean`, except secret values |
 | `uncached` | Outputs kept out of the shared build cache |
 
-### Parameterized Blocks
+### Parameterized Targets
 
-A block can declare parameters. It is instantiated by calling it with named arguments, from a target or an expression:
+A target can declare parameters. It is instantiated by calling it with named arguments, from a group or an expression:
 
 ```
 publish(name: string, profile = "release") = exec {
   command = "echo #{name} #{profile}"
 }
 
-target release = [publish(name = "app")]
+group release = [publish(name = "app")]
 let path = publish(name = "app").path
 ```
 
-Defaults may refer to earlier parameters. A call with named arguments is a block call. A call with positional arguments is a function call.
+Defaults may refer to earlier parameters. A call with named arguments is a target call. A call with positional arguments is a function call.
 
 ### Matrix Expansion
 
-Blocks can expand over list values using `name[key]` syntax:
+Targets can expand over list values using `name[key]` syntax:
 
 ```
 let arch = ["amd64", "arm64"]
@@ -107,9 +107,9 @@ binary[arch] = go.exe {
 }
 ```
 
-This creates one block per list element, named `binary["amd64"]` and `binary["arm64"]`. Inside the block, `arch` is a scalar bound to the current element. On the command line, identifier keys may be unquoted: `bit 'binary[arm64]'`.
+This creates one target per list element, named `binary["amd64"]` and `binary["arm64"]`. Inside the target, `arch` is a scalar bound to the current element. On the command line, identifier keys may be unquoted: `bit 'binary[arm64]'`.
 
-Blocks with exactly the same key names, in the same order, align. References between them resolve to the matching slice:
+Targets with exactly the same key names, in the same order, align. References between them resolve to the matching slice:
 
 ```
 image[arch] = docker.image {
@@ -148,9 +148,9 @@ tests[module, package = go.packages("./...", module)] = go.test {
 }
 ```
 
-A specific slice is referenced with key expressions: `binary["arm64", "linux"].path`. Matrix blocks may also take parameters: `build[arch](tag: string) = ...`.
+A specific slice is referenced with key expressions: `binary["arm64", "linux"].path`. Matrix targets may also take parameters: `build[arch](tag: string) = ...`.
 
-Non-matrix blocks can depend on matrix blocks. The dependency applies to all slices:
+Non-matrix targets can depend on matrix targets. The dependency applies to all slices:
 
 ```
 release = exec {
@@ -159,13 +159,13 @@ release = exec {
 }
 ```
 
-A call to a parameterized matrix block without keys, such as `depends_on = [build(tag = "1.2.3")]`, likewise depends on every slice of that instance.
+A call to a parameterized matrix target without keys, such as `depends_on = [build(tag = "1.2.3")]`, likewise depends on every slice of that instance.
 
 State is keyed per slice by its full name.
 
 ## 2. Modules
 
-A `.bit` file is itself a provider. It declares parameters, contains `let` bindings and blocks, and exposes outputs and targets. Expressions outside the module can reach only its declared outputs and targets.
+A `.bit` file is itself a provider. It declares parameters, contains `let` bindings and targets, and exposes outputs and groups. Expressions outside the module can reach only its declared outputs and groups.
 
 Modules are made available through `import` statements in a project's `BUILD.bit`. Imports in a module's resource files are ignored. **Each import brings exactly one provider into scope.** Resources are `<resource>.bit` files at the root of the imported directory, called as `provider.resource`. A `<provider>.bit` at the root is the default resource, callable bare. An imported module with the same name as a built-in provider shadows it for the resources the module defines.
 
@@ -193,7 +193,7 @@ container = docker.container {
 output image_ref = image.ref
 output name      = container.name
 
-target run = [container]
+group run = [container]
 ```
 
 ```
@@ -209,18 +209,18 @@ app = app {
 }
 
 # Expressions can reference app.image_ref, app.name, and app.run.
-# app.server.path is an error: inner blocks are not in the instance's value.
+# app.server.path is an error: inner targets are not in the instance's value.
 
-target run = [app.run]
+group run = [app.run]
 ```
 
 Parameters without a default are required. Argument values are type-checked against the parameter types. Outputs are untyped.
 
-Inner blocks become graph nodes named `<instance>.<block>`, such as `app.server`. Expressions cannot reach them, but a target list or the command line can name them directly.
+Inner targets become graph nodes named `<instance>.<target>`, such as `app.server`. Expressions cannot reach them, but a group or the command line can name them directly.
 
-Modules nest arbitrarily. Two instances of the same module produce independent subgraphs. Depending on an instance (`depends_on = [app]`) depends on every block inside it. `depends_on` and `after` on an instance add edges to every inner block, unless the module declares a parameter with that name. Modules may contain parameterized blocks and parameterized targets.
+Modules nest arbitrarily. Two instances of the same module produce independent subgraphs. Depending on an instance (`depends_on = [app]`) depends on every target inside it. `depends_on` and `after` on an instance add edges to every inner target, unless the module declares a parameter with that name. Modules may contain parameterized targets and parameterized groups.
 
-Modifiers on an instance describe it as a whole, so every block it expands to inherits them, including nested instances. `protected`, `explicit`, and `large` are added to each block's own. A `pre` or `post` instance puts its blocks in that phase. Inside a default-phase instance, blocks keep their own phase. A block whose phase contradicts its instance's, such as a `post` block in a `pre` instance, is an error.
+Modifiers on an instance describe it as a whole, so every target it expands to inherits them, including nested instances. `protected`, `explicit`, and `large` are added to each target's own. A `pre` or `post` instance puts its targets in that phase. Inside a default-phase instance, targets keep their own phase. A target whose phase contradicts its instance's, such as a `post` target in a `pre` instance, is an error.
 
 A module's leading doc comment becomes its description in `bit --schema`.
 
@@ -304,7 +304,7 @@ Intentionally minimal. No loops, no user-defined functions. `if` expressions are
 - **Maps** — `{ key = value }`. Keys are identifiers or strings. A key may carry a type (`{ age: number = null }`), and a `null` value makes the field optional.
 - **`true`, `false`, `null`**.
 
-Lists, maps, argument lists, and block fields allow trailing commas. Identifiers may contain `-`.
+Lists, maps, argument lists, and target fields allow trailing commas. Identifiers may contain `-`.
 
 ### Comments
 
@@ -347,7 +347,7 @@ So `a + b | trim` is `a + (b | trim)`.
 
 Functions whose argument is `v` accept a string or a list of strings, applied to each element. `bit --schema` lists the exact signatures.
 
-`exec()` runs when the expression is evaluated. In a `let` binding that is at load time. In a block's fields, it runs when that block's inputs are evaluated.
+`exec()` runs when the expression is evaluated. In a `let` binding that is at load time. In a target's fields, it runs when that target's inputs are evaluated.
 
 ### Pipes
 
@@ -398,9 +398,9 @@ db(name : string) = docker.container {
 }
 ```
 
-`secret(name)` returns a `string` that keeps `name` as its key. bit shows it as `secret("DB_PASSWORD")`, never as its value, for example in `bit --dump` and in input type errors. Its value is still part of the block's evaluated inputs, so it reaches the input hash and the shared-cache key, and a new value reruns the block. Concatenating, interpolating, or comparing a secret yields an ordinary string or bool without a key.
+`secret(name)` returns a `string` that keeps `name` as its key. bit shows it as `secret("DB_PASSWORD")`, never as its value, for example in `bit --dump` and in input type errors. Its value is still part of the target's evaluated inputs, so it reaches the input hash and the shared-cache key, and a new value reruns the target. Concatenating, interpolating, or comparing a secret yields an ordinary string or bool without a key.
 
-A secret cannot be bound to a block or target parameter, as an argument, a default, or inside a list or map. Bound values name the instance, and every instance must be expressible as a command-line invocation, which never carries secrets.
+A secret cannot be bound to a target or group parameter, as an argument, a default, or inside a list or map. Bound values name the instance, and every instance must be expressible as a command-line invocation, which never carries secrets.
 
 ### Provider Functions
 
@@ -410,23 +410,23 @@ Providers export helper functions, callable in expressions under the provider na
 let packages = go.packages("./...")
 ```
 
-## 4. Targets
+## 4. Groups
 
-Named groups for CLI invocation:
+Named sets of targets for CLI invocation:
 
 ```
-target build  = [server, image]
-target test   = [unit_tests, lint]
-target deploy(name: string) = [publish(name = name)]
+group build  = [server, image]
+group test   = [unit_tests, lint]
+group deploy(name: string) = [publish(name = name)]
 ```
 
-An entry is a block, target, or module member (`app.run`), optionally followed by matrix keys (`binary["arm64"]`) and named arguments. Targets can take parameters, passed on the command line as `bit deploy name=app`. `bit` with no arguments runs the `default` target, or every non-`explicit` block if there is none. `bit ...` runs every non-`explicit` block.
+An entry is a target, group, or module member (`app.run`), optionally followed by matrix keys (`binary["arm64"]`) and named arguments. Groups can take parameters, passed on the command line as `bit deploy name=app`. `bit` with no arguments runs the `default` group, or every non-`explicit` target if there is none. `bit ...` runs every non-`explicit` target.
 
 `output name = expr` exports a value from a module (§2).
 
 ## 5. Providers
 
-A **provider** implements the `Provider` trait and groups related resources and shared functions. A **resource** implements the `Resource` trait and handles a single block type. For example, the `go` provider contains `go.exe` and `go.test` resources. The core engine has no knowledge of any language, tool, or platform.
+A **provider** implements the `Provider` trait and groups related resources and shared functions. A **resource** implements the `Resource` trait and handles a single target type. For example, the `go` provider contains `go.exe` and `go.test` resources. The core engine has no knowledge of any language, tool, or platform.
 
 Built-in providers:
 
@@ -445,7 +445,7 @@ Built-in providers:
 ### 5.1 Resource Kinds
 
 - **`build`** (default) — skipped if its content hash is unchanged.
-- **`test`** — skipped like build blocks while passing. A failed test reruns on the next run, is never stored in the shared build cache, and keeps its last successful run as the baseline for detecting changes. A failed test stops the run (§12).
+- **`test`** — skipped like build targets while passing. A failed test reruns on the next run, is never stored in the shared build cache, and keeps its last successful run as the baseline for detecting changes. A failed test stops the run (§12).
 
 Linters such as `go.lint` and `rust.clippy` are `test` resources.
 
@@ -459,27 +459,27 @@ Resources discover the full set of input and output files from minimal user conf
 
 A resource reports three things:
 
-- **`resolve()`** — a map from each source file path to its SHA-256. Providers hash through a shared file tracker, so files used by several blocks are read once.
-- **`output_keys()`** — the paths the block produces. A trailing `/` marks a directory.
+- **`resolve()`** — a map from each source file path to its SHA-256. Providers hash through a shared file tracker, so files used by several targets are read once.
+- **`output_keys()`** — the paths the target produces. A trailing `/` marks a directory.
 - **`ambient()`** — tool versions, executables, and environment variables the result depends on. The engine fingerprints them and adds them to the sources under `version:`, `executable:`, and `env:` keys.
 
 For example, the `docker.image` provider parses the Dockerfile to discover `COPY` and `ADD` source paths automatically, skipping multi-stage `COPY --from=...` and `ADD` with URLs.
 
 ## 6. Lifecycle
 
-Every block goes through up to four phases: **resolve**, **plan**, **apply**, and **destroy**. The lifecycle is the same for all providers. Whether a provider manages external resources or produces local files is an implementation detail, and the protocol is identical.
+Every target goes through up to four phases: **resolve**, **plan**, **apply**, and **destroy**. The lifecycle is the same for all providers. Whether a provider manages external resources or produces local files is an implementation detail, and the protocol is identical.
 
 ### 6.1 Resolve
 
-Resolve discovers source files from the user-supplied configuration (§5.3). For a `go.exe` block where the user writes `package = "./cmd/server"`, resolve follows the Go import graph and returns every file that contributes to the binary. A resource that manages no files, such as `docker.network`, can return an empty map.
+Resolve discovers source files from the user-supplied configuration (§5.3). For a `go.exe` target where the user writes `package = "./cmd/server"`, resolve follows the Go import graph and returns every file that contributes to the binary. A resource that manages no files, such as `docker.network`, can return an empty map.
 
 Resolve runs on every plan and apply. A file's hash is cached for the rest of the run once its timestamps are at least two seconds old, so files that are still being written are re-read.
 
 ### 6.2 Change Detection
 
-For each block the engine computes a **content hash** (§8) from the block's evaluated fields, its sources and outputs, and the content hashes of its `depends_on` parents. The hash is persisted with the block's state. On the next run the engine recomputes it and compares.
+For each target the engine computes a **content hash** (§8) from the target's evaluated fields, its sources and outputs, and the content hashes of its `depends_on` parents. The hash is persisted with the target's state. On the next run the engine recomputes it and compares.
 
-Changes propagate through the DAG. If block A's inputs change, A's content hash changes. Block B depends on A, so A's hash is part of B's, and B is invalidated too.
+Changes propagate through the DAG. If target A's inputs change, A's content hash changes. Target B depends on A, so A's hash is part of B's, and B is invalidated too.
 
 Within a single plan, the engine also keeps a dirty set: if a parent is planned for a change, every descendant is planned for an update, since the parent's new state hasn't been persisted yet. During apply, a child's hash uses the parent's hash from the current run.
 
@@ -491,42 +491,42 @@ The engine upgrades `none` to `update`, with a generated reason, when:
 
 - the content hash differs from the stored one;
 - a dependency is dirty in this run;
-- the block is a test that failed last time.
+- the target is a test that failed last time.
 
 `--force` upgrades `none` to `update` or `create` and bypasses the shared cache.
 
-If the block can use the shared build cache (§8.1), the engine then looks for a receipt. A valid receipt skips the block as cached. A receipt whose outputs are missing locally becomes `restore`, which rebuilds them from the cache.
+If the target can use the shared build cache (§8.1), the engine then looks for a receipt. A valid receipt skips the target as cached. A receipt whose outputs are missing locally becomes `restore`, which rebuilds them from the cache.
 
-**Protected blocks**: a plan to `destroy` a protected block is an error.
+**Protected targets**: a plan to `destroy` a protected target is an error.
 
 ### 6.4 Apply
 
-Apply executes the planned action. It receives the inputs, the prior state, the set of input paths changed since the block last succeeded (or "all"), and a writer for the block's output. It returns `outputs`, which downstream blocks can reference, and an optional `state`. On failure it returns an error.
+Apply executes the planned action. It receives the inputs, the prior state, the set of input paths changed since the target last succeeded (or "all"), and a writer for the target's output. It returns `outputs`, which downstream targets can reference, and an optional `state`. On failure it returns an error.
 
 After apply, the engine re-resolves sources, hashes the declared outputs, and recomputes the content hash. It then persists a wrapped state containing:
 
 - the provider's state;
-- the block's outputs;
+- the target's outputs;
 - the `dir` it ran in, and its `env` less any secrets;
 - the content hash and its parts (input hash, resolved sources, dependency hashes).
 
-Outputs are persisted so that skipped blocks can still provide values to downstream blocks. On the next run, the provider's state is passed back as `prior_state`. If the provider returns no state, nothing is persisted.
+Outputs are persisted so that skipped targets can still provide values to downstream targets. On the next run, the provider's state is passed back as `prior_state`. If the provider returns no state, nothing is persisted.
 
-**Test blocks** return `passed` (bool). A test that runs and fails returns `passed = false`. An error return means the test could not be run at all.
+**Test targets** return `passed` (bool). A test that runs and fails returns `passed = false`. An error return means the test could not be run at all.
 
 ### 6.5 Destroy
 
-Destroy removes everything a block has produced. The engine calls the provider's `destroy` with the prior state, then removes the persisted state. The provider cleans up, for example by deleting output files or removing a container.
+Destroy removes everything a target has produced. The engine calls the provider's `destroy` with the prior state, then removes the persisted state. The provider cleans up, for example by deleting output files or removing a container.
 
-`bit --clean` with no targets destroys every non-`explicit` block, regardless of the `default` target. With targets, it destroys them and everything that depends on them through any edge, including `after` and phase edges. Blocks are destroyed in reverse dependency order. With `--force`, cleaning continues past errors.
+`bit --clean` with no targets destroys every non-`explicit` target, regardless of the `default` group. With targets, it destroys them and everything that depends on them through any edge, including `after` and phase edges. Targets are destroyed in reverse dependency order. With `--force`, cleaning continues past errors.
 
 `--clean` never touches the shared build cache. `--cache --clean` deletes it.
 
-**Protected blocks** are skipped with a notice unless the block itself is named on the command line. Naming a target that contains it, or using `...`, is not enough.
+**Protected targets** are skipped with a notice unless the target itself is named on the command line. Naming a group that contains it, or using `...`, is not enough.
 
 ### 6.6 Rollback
 
-**TBD.** If apply succeeds for a block but a later block fails, nothing rolls back the already-applied blocks. This is a known gap.
+**TBD.** If apply succeeds for a target but a later target fails, nothing rolls back the already-applied targets. This is a known gap.
 
 ### 6.7 Phase Summary
 
@@ -548,7 +548,7 @@ Destroy removes everything a block has produced. The engine calls the provider's
 | `outputs` | Output file or directory, or a list of them |
 | `clean` | Command run by `--clean` instead of removing the outputs |
 | `resolve` | Command whose stdout is stored as state. Plan is `create` if it fails and `update` if its output changed |
-| `values` | Command whose stdout is a JSON object. Each key becomes a block output |
+| `values` | Command whose stdout is a JSON object. Each key becomes a target output |
 
 ```
 docs = exec {
@@ -558,11 +558,11 @@ docs = exec {
 }
 ```
 
-`command` runs as `bash -eo pipefail -c <command>` in `dir`. It receives `BIT_CHANGED_FILES`: the absolute paths of inputs changed since the block last succeeded, one per line. The variable is unset on a full run, or when the list exceeds 64 KiB. Changing `command` or `clean` plans an update.
+`command` runs as `bash -eo pipefail -c <command>` in `dir`. It receives `BIT_CHANGED_FILES`: the absolute paths of inputs changed since the target last succeeded, one per line. The variable is unset on a full run, or when the list exceeds 64 KiB. Changing `command` or `clean` plans an update.
 
 `inputs` is a list of globs expanded by `resolve()`. A directory names every file beneath it. A valid pattern that matches nothing is allowed. Relative `inputs`, `outputs`, and `uncached` paths are relative to `dir`.
 
-A trailing `/` in `outputs` marks a directory, which is created before the command runs. For a file output, its parent directory is created. A block with one output exposes it as `path`. A block with several outputs exposes them as `paths`:
+A trailing `/` in `outputs` marks a directory, which is created before the command runs. For a file output, its parent directory is created. A target with one output exposes it as `path`. A target with several outputs exposes them as `paths`:
 
 ```
 build = exec {
@@ -572,7 +572,7 @@ build = exec {
 }
 ```
 
-Blocks with outputs and no `resolve` or `values` can use the shared build cache. Others are local only.
+Targets with outputs and no `resolve` or `values` can use the shared build cache. Others are local only.
 
 Dynamic input discovery uses `exec()` in the expression language:
 
@@ -585,7 +585,7 @@ server = exec {
 }
 ```
 
-The `exec()` call runs when the block's inputs are evaluated, before `command` runs. Its output is split into lines and appended to the static globs.
+The `exec()` call runs when the target's inputs are evaluated, before `command` runs. Its output is split into lines and appended to the static globs.
 
 `exec.test` runs a command as a test. It takes `command`, `inputs`, `outputs` (a list), `clean`, `results`, and `report`, and outputs `passed`:
 
@@ -606,34 +606,34 @@ unit = exec.test {
 
 Without `results`, a non-zero exit means `passed = false`, not an error. `results` is a jq filter applied to each JSON document or JSONL line of stdout. It maps them to `{suite?, name?, event?, status?, duration?, output?}` records. With `results`, the test passes only if the command exits successfully and every reported test and suite passed. `report` selects `suites` (default), `tests`, or `verbose` output (§9).
 
-If an `exec` block becomes complex, that's the signal to write a real provider.
+If an `exec` target becomes complex, that's the signal to write a real provider.
 
 ## 8. Caching and Invalidation
 
 ### Content Hash (Merkle Tree)
 
-Each block's state includes a **content hash** computed by the engine:
+Each target's state includes a **content hash** computed by the engine:
 
 ```
 content_hash = sha256(
-  input_hash,   # sha256 of the block's evaluated fields as canonical JSON, paths rewritten as in §8.1
+  input_hash,   # sha256 of the target's evaluated fields as canonical JSON, paths rewritten as in §8.1
   resolve_map,  # sources, ambient fingerprints, and existing declared outputs (directories file by file)
   dep_hashes,   # name + content hash of each depends_on parent
 )
 ```
 
-Every field except `concurrency` and `after` is part of `input_hash`. `after` is left out because evaluating it yields the parents' outputs, which would couple the block to their content. A parent's hash comes from the current run if it ran, otherwise from its stored state.
+Every field except `concurrency` and `after` is part of `input_hash`. `after` is left out because evaluating it yields the parents' outputs, which would couple the target to their content. A parent's hash comes from the current run if it ran, otherwise from its stored state.
 
-This forms a Merkle tree over the DAG. A change in any leaf propagates up through every block that depends on it.
+This forms a Merkle tree over the DAG. A change in any leaf propagates up through every target that depends on it.
 
 ### Invalidation
 
-- **File changes** — a modified source file changes the content hash of every block that includes it.
-- **Field changes** — changing a block's evaluated fields changes its hash.
+- **File changes** — a modified source file changes the content hash of every target that includes it.
+- **Field changes** — changing a target's evaluated fields changes its hash.
 - **Tool changes** — a changed tool version, executable, or environment variable reported by `ambient()` changes the hash.
 - **Parent changes** — a parent's content hash is part of the child's.
-- **Output deletion** — output files are included in the hash. If an output is deleted, the block rebuilds.
-- **Within-run propagation** — during plan, descendants of a block planned for a change are planned for an update.
+- **Output deletion** — output files are included in the hash. If an output is deleted, the target rebuilds.
+- **Within-run propagation** — during plan, descendants of a target planned for a change are planned for an update.
 
 ### 8.1 Shared Build Cache
 
@@ -647,12 +647,12 @@ Before hashing, absolute paths in source keys, inputs, path-valued environment v
 The action key hashes:
 
 - the receipt version, provider, resource, and the resource's cache version;
-- the block name, OS, and architecture;
+- the target name, OS, and architecture;
 - the input hash;
 - the sources, excluding files that are only outputs;
 - the dependencies' result hashes.
 
-A resource opts in through `cache_policy()`, which returns `Local` or `Shared { version }`. The cache is consulted only when the block uses a shared policy, the plan is not `none`, the run isn't forced, and no dependency is dirty. It is never consulted for a test that failed last time.
+A resource opts in through `cache_policy()`, which returns `Local` or `Shared { version }`. The cache is consulted only when the target uses a shared policy, the plan is not `none`, the run isn't forced, and no dependency is dirty. It is never consulted for a test that failed last time.
 
 The lookup key uses sources measured before apply. The publish key uses sources re-measured after apply. Inputs that a resource only discovers after building must therefore also be found before it, or the keys never match.
 
@@ -660,21 +660,21 @@ The exception is an environment variable a tool records reading, such as one lis
 
 On a hit, `check_receipt()` decides the result:
 
-- **Valid** — the outputs are already in place, so the block is skipped as cached.
+- **Valid** — the outputs are already in place, so the target is skipped as cached.
 - **Restore** — `materialize()` rebuilds the outputs from the artifact store.
-- **Unusable** — the block runs.
+- **Unusable** — the target runs.
 
-The receipt's outputs and state are bound to the block. If binding fails, the block runs.
+The receipt's outputs and state are bound to the target. If binding fails, the target runs.
 
 After a successful apply, the engine captures the outputs with `capture_artifacts()` and publishes a receipt containing state, outputs, artifacts, and the content hash. Publishing is best-effort. A different receipt with the same recorded fingerprints is a conflict and produces a warning. Outputs listed in `uncached` are not stored. Failed tests are never published.
 
 A remote cache can sit behind the local one. A lookup that misses locally reads the remote's receipts and copies them to disk. Before checking a receipt, the engine copies any tree manifests it needs. Before restoring, it copies the artifact blobs, checking each against its digest. Planning never downloads artifact contents. Results are published to the remote only when it is writable, blobs before the receipt that references them. A remote failure is a cache miss; the first in a run is shown as a warning message and later ones only in the debug log. An S3 remote stores objects under its prefix with the disk cache's layout.
 
-The disk cache is trimmed by age, as Go's build cache is. A lookup that finds a receipt refreshes the mtime of its receipts file and of every blob the receipt needs that is on disk. Storing a blob that is already present refreshes it too. A refresh is skipped when the mtime is under an hour old. When a run completes without error, bit reads `trim.txt` in the cache directory, which holds the time of the last trim. If a day has passed, bit takes a non-blocking exclusive lock on it, checks again, and writes the new time before removing anything. A process that finds the lock held skips the trim. The trim removes every file under `actions/` and `cas/` whose mtime is more than five days and one hour old, leaving directories in place. Nothing is locked against removal: a reader that loses a receipt or blob sees a miss and runs the block. A remote is never trimmed.
+The disk cache is trimmed by age, as Go's build cache is. A lookup that finds a receipt refreshes the mtime of its receipts file and of every blob the receipt needs that is on disk. Storing a blob that is already present refreshes it too. A refresh is skipped when the mtime is under an hour old. When a run completes without error, bit reads `trim.txt` in the cache directory, which holds the time of the last trim. If a day has passed, bit takes a non-blocking exclusive lock on it, checks again, and writes the new time before removing anything. A process that finds the lock held skips the trim. The trim removes every file under `actions/` and `cas/` whose mtime is more than five days and one hour old, leaving directories in place. Nothing is locked against removal: a reader that loses a receipt or blob sees a miss and runs the target. A remote is never trimmed.
 
 ## 9. Tests
 
-Tests are blocks whose resource has `kind = "test"`. There is no `test` keyword in the language.
+Tests are targets whose resource has `kind = "test"`. There is no `test` keyword in the language.
 
 Test resources run their tool and parse its native output into suite and test results: `go test -json` for `go.test`, cargo's output for `rust.test`, or a jq `results` filter for `exec.test`. The `report` field controls what is shown:
 
@@ -684,17 +684,17 @@ Test resources run their tool and parse its native output into suite and test re
 
 Outside `verbose`, the tool's output is shown only when the test fails.
 
-Test blocks output `passed` (bool). `passed = false` stops the run (§12).
+Test targets output `passed` (bool). `passed = false` stops the run (§12).
 
 ## 10. State
 
 When a provider returns `state` from apply, the engine persists it. Providers that return no state have nothing persisted. The engine treats them identically; there is no separate category of "stateful" vs "stateless" provider.
 
-State lives in `<cache dir>/bit/<sha256 of the canonical project root>/state/`. Each block has one JSON file, named by the SHA-256 of its full block name, containing `{block, state}`. Writes are atomic: a temporary file followed by a rename.
+State lives in `<cache dir>/bit/<sha256 of the canonical project root>/state/`. Each target has one JSON file, named by the SHA-256 of its full target name, containing `{block, state}`. Writes are atomic: a temporary file followed by a rename.
 
-### Protected Blocks
+### Protected Targets
 
-The `protected` modifier guards a block against `--clean`. A protected block is skipped with a notice unless it is named directly on the command line. A plan that would destroy it is an error.
+The `protected` modifier guards a target against `--clean`. A protected target is skipped with a notice unless it is named directly on the command line. A plan that would destroy it is an error.
 
 ```
 protected db = docker.container {
@@ -703,9 +703,9 @@ protected db = docker.container {
 }
 ```
 
-### Explicit Blocks
+### Explicit Targets
 
-Blocks can be prefixed with the `explicit` modifier to exclude them from the `...` selector (and the no-target/no-`default` fallback) for every action — apply, plan, destroy, dump. An `explicit` block still runs when named directly (`bit migrate`) or pulled in as a transitive dependency of a named target/block. The modifier is independent of `protected` and the two may be combined in either order.
+Targets can be prefixed with the `explicit` modifier to exclude them from the `...` selector (and the no-target/no-`default` fallback) for every action — apply, plan, destroy, dump. An `explicit` target still runs when named directly (`bit migrate`) or pulled in as a transitive dependency of a named group/target. The modifier is independent of `protected` and the two may be combined in either order.
 
 ```
 explicit migrate = exec {
@@ -719,9 +719,9 @@ protected explicit prod_db = docker.container {
 }
 ```
 
-### Large Blocks
+### Large Targets
 
-The `large` modifier marks a block as long-running or resource-heavy. Blocks without it are small. The engine records the size on each graph node. Matrix slices and parameterized instances take it from their declaration. Every block that a `large` module instance expands to is also `large`. The modifier does not change local execution and may be combined with `protected` and `explicit` in any order.
+The `large` modifier marks a target as long-running or resource-heavy. Targets without it are small. The engine records the size on each graph node. Matrix slices and parameterized instances take it from their declaration. Every target that a `large` module instance expands to is also `large`. The modifier does not change local execution and may be combined with `protected` and `explicit` in any order.
 
 ```
 large image = docker.image {
@@ -742,7 +742,7 @@ pub enum Value {
     Bool(bool),
     Number(BigDecimal),
     Str(String),
-    BlockRef(String),
+    TargetRef(String),
     Duration(Duration),
     List(Type, Vec<Value>),
     Map(Type, Map),
@@ -750,7 +750,7 @@ pub enum Value {
 }
 
 pub enum Type {
-    Any, String, BlockRef, Number, Bool, Duration,
+    Any, String, TargetRef, Number, Bool, Duration,
     List(Box<Type>),
     Map(Box<Type>),
     Struct(StructType),
@@ -791,7 +791,7 @@ pub struct ApplyResult<S, O> {
     pub state: Option<S>,
 }
 
-/// Input paths changed since the block last succeeded.
+/// Input paths changed since the target last succeeded.
 pub enum Changes { All, Paths(BTreeSet<PathBuf>) }
 
 pub enum CachePolicy { Local, Shared { version: u32 } }
@@ -807,8 +807,8 @@ pub enum Ambient {
     RecordedVariable(String),  // recorded by an earlier run; checked, not keyed
 }
 
-/// Block inputs or state, with the block's `dir` and `env`. Derefs to `T`.
-pub struct Block<T> {
+/// Target inputs or state, with the target's `dir` and `env`. Derefs to `T`.
+pub struct Target<T> {
     pub dir: Option<String>,
     pub env: BTreeMap<String, String>,
     pub value: T,
@@ -836,7 +836,7 @@ pub trait Provider: Send + Sync {
     fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError>;
 }
 
-/// A resource implements a single block type, e.g. "exe" within "go".
+/// A resource implements a single target type, e.g. "exe" within "go".
 pub trait Resource {
     type State: Serialize + DeserializeOwned;
     type Inputs: DeserializeOwned + Schema;
@@ -846,23 +846,23 @@ pub trait Resource {
     fn kind(&self) -> ResourceKind;
     fn schema(&self) -> ResourceSchema;  // default: from Inputs and Outputs
 
-    fn resolve(&self, inputs: &Block<Self::Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError>;
-    fn ambient(&self, inputs: &Block<Self::Inputs>) -> Vec<Ambient>;  // default: none
-    fn output_keys(&self, inputs: &Block<Self::Inputs>) -> Vec<String>;  // default: none
+    fn resolve(&self, inputs: &Target<Self::Inputs>) -> Result<BTreeMap<String, SHA256>, BoxError>;
+    fn ambient(&self, inputs: &Target<Self::Inputs>) -> Vec<Ambient>;  // default: none
+    fn output_keys(&self, inputs: &Target<Self::Inputs>) -> Vec<String>;  // default: none
 
-    fn plan(&self, inputs: &Block<Self::Inputs>, prior_state: Option<&Self::State>)
+    fn plan(&self, inputs: &Target<Self::Inputs>, prior_state: Option<&Self::State>)
         -> Result<PlanResult, BoxError>;
-    fn apply(&self, inputs: &Block<Self::Inputs>, prior_state: Option<&Self::State>,
-             changes: &Changes, writer: &BlockWriter)
+    fn apply(&self, inputs: &Target<Self::Inputs>, prior_state: Option<&Self::State>,
+             changes: &Changes, writer: &TargetWriter)
         -> Result<ApplyResult<Self::State, Self::Outputs>, BoxError>;
-    fn destroy(&self, prior_state: &Block<Self::State>, writer: &BlockWriter) -> Result<(), BoxError>;
+    fn destroy(&self, prior_state: &Target<Self::State>, writer: &TargetWriter) -> Result<(), BoxError>;
 
     fn announces_start(&self) -> bool;  // default: false
     fn default_concurrency(&self) -> Option<usize>;  // default: unlimited
 
     // Shared build cache contract. The engine owns keys, receipts, and the
     // artifact store; the resource owns what its artifacts mean.
-    fn cache_policy(&self, inputs: &Block<Self::Inputs>) -> CachePolicy;
+    fn cache_policy(&self, inputs: &Target<Self::Inputs>) -> CachePolicy;
     fn capture_artifacts(&self, inputs, state, outputs: &[OutputFile], cas: &Cas)
         -> Result<BTreeMap<String, ArtifactRef>, BoxError>;  // default: output files
     fn check_receipt(&self, inputs, state, outputs, artifacts, cas)
@@ -881,9 +881,9 @@ parse .bit files, resolve imports
   ▼
 build DAG from references, depends_on, after, and phases
   ▼
-select blocks (targets, ..., --since)
+select targets (groups, targets, ..., --since)
   ▼
-for each block (topological order, parallel where possible):
+for each target (topological order, parallel where possible):
   ├─ evaluate fields, validate against the schema
   ├─ resolve sources, ambient, and output paths → compute content hash
   ├─ plan; upgrade none → update if the hash changed or a dependency is dirty
@@ -896,41 +896,41 @@ for each block (topological order, parallel where possible):
       └─ publish a shared cache receipt
 ```
 
-Blocks run in topological order, with ties broken alphabetically. A ready-queue scheduler runs up to `-j` blocks at once, defaulting to the number of CPUs. `-j1` runs them one at a time.
+Targets run in topological order, with ties broken alphabetically. A ready-queue scheduler runs up to `-j` targets at once, defaulting to the number of CPUs. `-j1` runs them one at a time.
 
-A block's `concurrency` field caps how many of its matrix slices run at once. A resource can set a default through `default_concurrency()`; `go.lint` defaults to 1.
+A target's `concurrency` field caps how many of its matrix slices run at once. A resource can set a default through `default_concurrency()`; `go.lint` defaults to 1.
 
-`pre` blocks run before every default-phase block, and `post` blocks after them, through ordering-only edges.
+`pre` targets run before every default-phase target, and `post` targets after them, through ordering-only edges.
 
-The first error or failed test stops the run. No new blocks start, including blocks on independent branches. Blocks already running finish and their state is saved. Then bit exits with the error.
+The first error or failed test stops the run. No new targets start, including targets on independent branches. Targets already running finish and their state is saved. Then bit exits with the error.
 
-`--since <ref>` narrows the selection to blocks affected by changes since `merge-base(ref, HEAD)`, plus the blocks they require. A block is affected when a changed path is one of its inputs, or when it depends on an affected block. bit falls back to wider selections when `.bit` files changed, a block's inputs were never recorded, or blocks were removed.
+`--since <ref>` narrows the selection to targets affected by changes since `merge-base(ref, HEAD)`, plus the targets they require. A target is affected when a changed path is one of its inputs, or when it depends on an affected target. bit falls back to wider selections when `.bit` files changed, a target's inputs were never recorded, or targets were removed.
 
 ## 13. CLI
 
-Positional arguments name targets or blocks, followed by `name=value` target arguments. A flag selects the operation; with no flag, bit applies. Operations map to lifecycle phases:
+Positional arguments name groups or targets, followed by `name=value` arguments. A flag selects the operation; with no flag, bit applies. Operations map to lifecycle phases:
 
 | Invocation | Phases | Description |
 |------------|--------|-------------|
-| `bit [target...]` | resolve → plan → apply | Apply targets (`default` target if defined, else every non-`explicit` block; `...` for every non-`explicit` block) |
+| `bit [target...]` | resolve → plan → apply | Apply targets (`default` group if defined, else every non-`explicit` target; `...` for every non-`explicit` target) |
 | `bit --plan [target...]` | resolve → plan | Show what would change without applying |
 | `bit --clean [target...]` | destroy | Destroy targets and their dependents in reverse dependency order |
-| `bit --graph [target...]` | — | Render the dependency graph; with `--plan`, colour nodes by planned action. With `--json`, print an object mapping each selected block to the selected blocks that must run before it, including phase ordering; `--json` cannot be combined with `--plan --graph` |
+| `bit --graph [target...]` | — | Render the dependency graph; with `--plan`, colour nodes by planned action. With `--json`, print an object mapping each selected target to the selected targets that must run before it, including phase ordering; `--json` cannot be combined with `--plan --graph` |
 | `bit --dump [target...]` | — | Show evaluated inputs and stored outputs |
-| `bit --list` | — | List targets; `-ll` lists all blocks as a dependency tree |
-| `bit --info` | — | Show parameters, targets, and outputs |
+| `bit --list` | — | List groups; `-ll` lists all targets as a dependency tree |
+| `bit --info` | — | Show parameters, groups, and outputs |
 | `bit --schema [name]` | — | Show built-in functions and provider schemas |
 | `bit --docs [topic]` | — | Print the README embedded at build time, or the section whose heading matches `topic` by anchor slug or leading words (`ci` for "CI workflows"); styled for a terminal, plain Markdown otherwise or when `NO_COLOR` is set |
 | `bit --update [repo...]` | — | Re-resolve git imports and rewrite `BUILD.bit.lock` |
 | `bit --fmt [file]` | — | Format `BUILD.bit`, or the named `.bit` file, in place |
 | `bit --cache <uri> --clean` | — | Delete everything in that build cache; disk only |
-| `bit --ci <template> [target...]` | — | Render a CI configuration for the selection from a template, built in (`github`) or a file path containing `/`, with each group of dependent `large` blocks in its own job |
+| `bit --ci <template> [target...]` | — | Render a CI configuration for the selection from a template, built in (`github`) or a file path containing `/`, with each set of dependent `large` targets in its own job |
 
 Modifiers:
 
 - `--force` (`-f`) — rebuild past change detection and the cache; with `--clean`, continue past errors.
-- `--cache <uri>` — the build cache, defaulting to `$BIT_CACHE`, then `disk://`: `disk://[path]`, `s3://bucket/prefix` (read-only), or `s3+rw://bucket/prefix`. With `--clean`, the cache is cleaned instead of blocks; a cache set only by `BIT_CACHE` never is.
-- `--since [ref]` — limit apply, plan, graph, dump, and block listing to blocks affected since `merge-base(ref, HEAD)`.
+- `--cache <uri>` — the build cache, defaulting to `$BIT_CACHE`, then `disk://`: `disk://[path]`, `s3://bucket/prefix` (read-only), or `s3+rw://bucket/prefix`. With `--clean`, the cache is cleaned instead of targets; a cache set only by `BIT_CACHE` never is.
+- `--since [ref]` — limit apply, plan, graph, dump, and target listing to targets affected since `merge-base(ref, HEAD)`.
 - `-P key=value` — set a module parameter.
 - `-j N` — number of parallel jobs.
 
@@ -959,8 +959,8 @@ large image = docker.image {
 
 output image_ref = image.ref
 
-target build = [image]
-target test  = [tests, lint]
+group build = [image]
+group test  = [tests, lint]
 ```
 
 ```
@@ -1010,10 +1010,10 @@ smoke = exec.test {
   depends_on = [app]
 }
 
-target default = [api.build]
-target test    = [api.test]
-target run     = [app, smoke]
-target release = [push]
+group default = [api.build]
+group test    = [api.test]
+group run     = [app, smoke]
+group release = [push]
 ```
 
 `bit` builds the image. `bit test` runs the Go tests and linter. `bit run` builds and tests the service, starts it with its database, then runs a smoke test against it. `bit release` builds and tests the service, then pushes the image. `bit --clean` removes everything bit built except `db`, which must be named directly: `bit --clean db`.

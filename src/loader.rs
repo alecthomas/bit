@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::ast::{Module, Statement};
 use crate::dag::{
-    AFTER_FIELD, DEPENDS_ON_FIELD, Dag, DagError, DagNode, collect_all_refs, collect_block_refs,
-    collect_dependency_refs,
+    AFTER_FIELD, DEPENDS_ON_FIELD, Dag, DagError, DagNode, collect_all_refs, collect_dependency_refs,
+    collect_target_refs,
 };
 use crate::expr::{self, EvalError, Scope};
 use crate::matrix;
@@ -34,8 +34,8 @@ pub enum LoadError {
         name: String,
         message: String,
     },
-    #[error("{pos}: undefined '{name}' referenced in block '{from}'")]
-    UnknownBlock {
+    #[error("{pos}: undefined '{name}' referenced in target '{from}'")]
+    UnknownTarget {
         pos: crate::ast::Pos,
         name: String,
         from: String,
@@ -56,17 +56,17 @@ pub enum LoadError {
         name: String,
         existing: &'static str,
     },
-    #[error("{pos}: block '{block}': {source}")]
+    #[error("{pos}: target '{target}': {source}")]
     InvalidInputs {
         pos: crate::ast::Pos,
-        block: String,
+        target: String,
         source: Box<crate::input_check::InputError>,
     },
-    #[error("{pos}: block '{block}' is {block_phase}, but its module instance '{instance}' is {instance_phase}")]
+    #[error("{pos}: target '{target}' is {target_phase}, but its module instance '{instance}' is {instance_phase}")]
     PhaseConflict {
         pos: crate::ast::Pos,
-        block: String,
-        block_phase: crate::ast::Phase,
+        target: String,
+        target_phase: crate::ast::Phase,
         instance: String,
         instance_phase: crate::ast::Phase,
     },
@@ -83,7 +83,7 @@ pub enum LoadError {
 pub struct BaseScope {
     pub scope: Scope,
     /// Params that were declared without defaults and not provided via -p,
-    /// plus let bindings that transitively depend on them. Active blocks
+    /// plus let bindings that transitively depend on them. Active targets
     /// referencing these will produce errors at execution time.
     pub missing_params: std::collections::HashSet<String>,
 }
@@ -97,7 +97,7 @@ pub struct BaseScope {
 /// - Validates no cycles
 ///
 /// Field expressions are NOT evaluated here — they're deferred to execution
-/// time because they may reference upstream block outputs.
+/// time because they may reference upstream target outputs.
 pub fn load(
     module: &Module,
     params: &Map,
@@ -109,7 +109,7 @@ pub fn load(
     Ok((dag, base))
 }
 
-/// Load the graph and bind parameters for explicitly selected targets or blocks.
+/// Load the graph and bind parameters for explicitly selected groups or targets.
 pub fn load_selected(
     module: &Module,
     params: &Map,
@@ -121,9 +121,9 @@ pub fn load_selected(
     validate_names(module)?;
     let mut scope = Scope::with_providers(registry.clone());
     let mut dag = Dag::new();
-    let mut concrete_blocks = Vec::new();
-    let mut matrix_blocks: HashMap<String, Vec<String>> = HashMap::new();
-    let mut deferred_matrix: Vec<crate::ast::Block> = Vec::new();
+    let mut concrete_targets = Vec::new();
+    let mut matrix_targets: HashMap<String, Vec<String>> = HashMap::new();
+    let mut deferred_matrix: Vec<crate::ast::Target> = Vec::new();
     let mut missing_params: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut declared_params: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -193,14 +193,14 @@ pub fn load_selected(
                     }
                 }
             }
-            Statement::Block(b) => {
+            Statement::Target(b) => {
                 if !b.params.is_empty() {
-                    // A parameterized block is a declaration, not a graph node.
+                    // A parameterized target is a declaration, not a graph node.
                     continue;
                 }
-                concrete_blocks.push(b.clone());
+                concrete_targets.push(b.clone());
                 if !b.matrix_keys.is_empty() {
-                    // Defer matrix blocks — full define happens in expand_matrix.
+                    // Defer matrix targets — full define happens in expand_matrix.
                     // Check here only for conflicts with params/lets.
                     if let Some(existing) = scope.kind(&b.name) {
                         return Err(LoadError::DuplicateName {
@@ -209,7 +209,7 @@ pub fn load_selected(
                             existing: existing.as_str(),
                         });
                     }
-                    matrix_blocks.insert(b.name.clone(), b.matrix_key_names());
+                    matrix_targets.insert(b.name.clone(), b.matrix_key_names());
                     deferred_matrix.push(b.clone());
                 } else if let Some(module_path) = module::resolve_module_path(import_roots, &b.provider, &b.resource) {
                     // Full define happens in expand_module.
@@ -264,7 +264,7 @@ pub fn load_selected(
                     })?;
 
                     scope
-                        .define(&b.name, expr::SymbolKind::Block, Value::strct(Map::new()))
+                        .define(&b.name, expr::SymbolKind::Target, Value::strct(Map::new()))
                         .map_err(|existing| LoadError::DuplicateName {
                             pos: b.pos.clone(),
                             name: b.name.clone(),
@@ -272,24 +272,24 @@ pub fn load_selected(
                         })?;
                 }
             }
-            Statement::Target(_) => {}
+            Statement::Group(_) => {}
             Statement::Output(_) => {
-                // Outputs are deferred — they reference block outputs
+                // Outputs are deferred — they reference target outputs
                 // which aren't available until execution.
             }
         }
     }
 
-    // Expand matrix blocks now that all params/lets are in scope
-    for block in &deferred_matrix {
-        matrix::expand_matrix(block, "", &mut scope, registry, store, &mut dag, &matrix_blocks)?;
+    // Expand matrix targets now that all params/lets are in scope
+    for target in &deferred_matrix {
+        matrix::expand_matrix(target, "", &mut scope, registry, store, &mut dag, &matrix_targets)?;
     }
 
     let selected_names = crate::invocation::materialize(
         module,
         invocations,
-        &mut concrete_blocks,
-        &mut matrix_blocks,
+        &mut concrete_targets,
+        &mut matrix_targets,
         &mut module::ExpandContext {
             scope: &mut scope,
             registry,
@@ -299,27 +299,27 @@ pub fn load_selected(
         },
     )?;
 
-    // Include every actual DAG node so dependencies introduced by block calls
-    // inside matrix slices and expanded modules are wired too. Source blocks
+    // Include every actual DAG node so dependencies introduced by target calls
+    // inside matrix slices and expanded modules are wired too. Source targets
     // remain in the list for module-level depends_on/after handling.
-    let mut wired_blocks: Vec<(String, crate::ast::Pos, Vec<crate::ast::Field>, bool)> = dag
-        .block_names()
+    let mut wired_targets: Vec<(String, crate::ast::Pos, Vec<crate::ast::Field>, bool)> = dag
+        .target_names()
         .into_iter()
         .map(|name| {
-            let node = dag.get_node(&name).expect("listed block exists");
+            let node = dag.get_node(&name).expect("listed target exists");
             (name, node.pos.clone(), node.fields.clone(), false)
         })
         .collect();
-    wired_blocks.extend(
-        concrete_blocks
+    wired_targets.extend(
+        concrete_targets
             .iter()
-            .filter(|block| block.matrix_keys.is_empty())
-            .map(|block| {
+            .filter(|target| target.matrix_keys.is_empty())
+            .map(|target| {
                 (
-                    block.name.clone(),
-                    block.pos.clone(),
-                    block.fields.clone(),
-                    module::resolve_module_path(import_roots, &block.provider, &block.resource).is_some(),
+                    target.name.clone(),
+                    target.pos.clone(),
+                    target.fields.clone(),
+                    module::resolve_module_path(import_roots, &target.provider, &target.resource).is_some(),
                 )
             }),
     );
@@ -327,17 +327,17 @@ pub fn load_selected(
     // Build dependency edges from field refs, depends_on, and after. Matrix
     // and module expansion may have wired some edges already; Dag deduplicates
     // them while this pass adds references created during materialization.
-    for (block_name, block_pos, block_fields, is_module_source) in &wired_blocks {
-        let destinations = dependency_destinations(block_name, *is_module_source, &dag);
+    for (target_name, target_pos, target_fields, is_module_source) in &wired_targets {
+        let destinations = dependency_destinations(target_name, *is_module_source, &dag);
         // Implicit deps from expression refs — these may reference
-        // scope variables (not blocks), so we only create edges for
-        // names that exist in the DAG or as matrix blocks.
-        let refs = collect_block_refs(block_fields, &scope).map_err(|source| LoadError::Eval {
-            pos: block_pos.clone(),
+        // scope variables (not targets), so we only create edges for
+        // names that exist in the DAG or as matrix targets.
+        let refs = collect_target_refs(target_fields, &scope).map_err(|source| LoadError::Eval {
+            pos: target_pos.clone(),
             source,
         })?;
         for dep in &refs {
-            if let Some(resolved) = resolve_dep(dep, &dag, &matrix_blocks, &scope) {
+            if let Some(resolved) = resolve_dep(dep, &dag, &matrix_targets, &scope) {
                 for r in &resolved {
                     for destination in &destinations {
                         if r != destination {
@@ -347,18 +347,19 @@ pub fn load_selected(
                 }
             }
         }
-        // Explicit depends_on — must reference known blocks.
+        // Explicit depends_on — must reference known targets.
         for dep in
-            collect_dependency_refs(block_fields, DEPENDS_ON_FIELD, &scope).map_err(|source| LoadError::Eval {
-                pos: block_pos.clone(),
+            collect_dependency_refs(target_fields, DEPENDS_ON_FIELD, &scope).map_err(|source| LoadError::Eval {
+                pos: target_pos.clone(),
                 source,
             })?
         {
-            let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope).ok_or_else(|| LoadError::UnknownBlock {
-                pos: block_pos.clone(),
-                name: dep.clone(),
-                from: block_name.clone(),
-            })?;
+            let resolved =
+                resolve_dep(&dep, &dag, &matrix_targets, &scope).ok_or_else(|| LoadError::UnknownTarget {
+                    pos: target_pos.clone(),
+                    name: dep.clone(),
+                    from: target_name.clone(),
+                })?;
             for r in &resolved {
                 for destination in &destinations {
                     if r != destination {
@@ -367,16 +368,17 @@ pub fn load_selected(
                 }
             }
         }
-        // Explicit after — must reference known blocks.
-        for dep in collect_dependency_refs(block_fields, AFTER_FIELD, &scope).map_err(|source| LoadError::Eval {
-            pos: block_pos.clone(),
+        // Explicit after — must reference known targets.
+        for dep in collect_dependency_refs(target_fields, AFTER_FIELD, &scope).map_err(|source| LoadError::Eval {
+            pos: target_pos.clone(),
             source,
         })? {
-            let resolved = resolve_dep(&dep, &dag, &matrix_blocks, &scope).ok_or_else(|| LoadError::UnknownBlock {
-                pos: block_pos.clone(),
-                name: dep.clone(),
-                from: block_name.clone(),
-            })?;
+            let resolved =
+                resolve_dep(&dep, &dag, &matrix_targets, &scope).ok_or_else(|| LoadError::UnknownTarget {
+                    pos: target_pos.clone(),
+                    name: dep.clone(),
+                    from: target_name.clone(),
+                })?;
             for r in &resolved {
                 for destination in &destinations {
                     if r != destination {
@@ -387,18 +389,18 @@ pub fn load_selected(
         }
     }
 
-    // Validate that all expression refs in block fields resolve to known names.
-    for (block_name, block_pos, block_fields, _) in &wired_blocks {
-        for name in collect_all_refs(block_fields) {
+    // Validate that all expression refs in target fields resolve to known names.
+    for (target_name, target_pos, target_fields, _) in &wired_targets {
+        for name in collect_all_refs(target_fields) {
             if scope.get(&name).is_none()
-                && !dag.has_block(&name)
-                && !matrix_blocks.contains_key(&name)
+                && !dag.has_target(&name)
+                && !matrix_targets.contains_key(&name)
                 && !missing_params.contains(&name)
             {
-                return Err(LoadError::UnknownBlock {
-                    pos: block_pos.clone(),
+                return Err(LoadError::UnknownTarget {
+                    pos: target_pos.clone(),
                     name,
-                    from: block_name.clone(),
+                    from: target_name.clone(),
                 });
             }
         }
@@ -426,8 +428,8 @@ pub(crate) fn validate_names(module: &Module) -> Result<(), LoadError> {
         let (name, pos, kind) = match statement {
             Statement::Param(param) => (&param.name, &param.pos, "param"),
             Statement::Let(binding) => (&binding.name, &binding.pos, "variable"),
-            Statement::Block(block) => (&block.name, &block.pos, "block"),
             Statement::Target(target) => (&target.name, &target.pos, "target"),
+            Statement::Group(group) => (&group.name, &group.pos, "group"),
             Statement::Import(_) | Statement::Output(_) => continue,
         };
         if let Some(existing) = names.insert(name.as_str(), kind) {
@@ -446,28 +448,28 @@ fn dependency_destinations(name: &str, include_module_children: bool, dag: &Dag)
         return vec![name.to_owned()];
     }
     let prefix = format!("{name}.");
-    dag.block_names()
+    dag.target_names()
         .into_iter()
         .filter(|candidate| candidate == name || candidate.starts_with(&prefix))
         .collect()
 }
 
 /// Resolve a dependency name to actual DAG node names.
-/// If the name is a matrix block, returns all expanded slice names, including
+/// If the name is a matrix target, returns all expanded slice names, including
 /// an empty list for a matrix with no slices. Returns `None` for an unknown name.
 fn resolve_dep(
     name: &str,
     dag: &Dag,
-    matrix_blocks: &HashMap<String, Vec<String>>,
+    matrix_targets: &HashMap<String, Vec<String>>,
     scope: &Scope,
 ) -> Option<Vec<String>> {
-    if dag.has_block(name) {
+    if dag.has_target(name) {
         return Some(vec![name.to_owned()]);
     }
-    if !matrix_blocks.contains_key(name) {
+    if !matrix_targets.contains_key(name) {
         return None;
     }
-    matrix::group_slices(name, scope)
+    matrix::instance_slices(name, scope)
 }
 
 #[cfg(test)]
@@ -521,23 +523,23 @@ mod tests {
                 return Err("unexpected dependency function call".into());
             }
             let references = if package == "app" {
-                vec![Value::BlockRef(r#"crate["core"]"#.into())]
+                vec![Value::TargetRef(r#"crate["core"]"#.into())]
             } else {
                 Vec::new()
             };
-            Ok(Value::List(crate::value::Type::BlockRef, references))
+            Ok(Value::List(crate::value::Type::TargetRef, references))
         }
     }
 
     struct EmptyStore;
     impl StateStore for EmptyStore {
-        fn load(&self, _block: &str) -> Result<Option<serde_json::Value>, StateError> {
+        fn load(&self, _target: &str) -> Result<Option<serde_json::Value>, StateError> {
             Ok(None)
         }
-        fn save(&self, _block: &str, _state: &serde_json::Value) -> Result<(), StateError> {
+        fn save(&self, _target: &str, _state: &serde_json::Value) -> Result<(), StateError> {
             Ok(())
         }
-        fn remove(&self, _block: &str) -> Result<(), StateError> {
+        fn remove(&self, _target: &str) -> Result<(), StateError> {
             Ok(())
         }
         fn list(&self) -> Result<Vec<String>, StateError> {
@@ -546,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn load_simple_block() {
+    fn load_simple_target() {
         let input = r#"
 server = exec {
   command = "go build"
@@ -739,7 +741,7 @@ b = exec {
 
     #[test]
     fn topo_order_is_stable_and_alphabetical() {
-        // Three independent blocks defined out of alphabetical order.
+        // Three independent targets defined out of alphabetical order.
         // Stable order should be alphabetical regardless of input order.
         let input = r#"
 zebra = exec { command = "z" outputs = "z" }
@@ -772,17 +774,17 @@ integration-test = exec {
     }
 
     #[test]
-    fn load_target() {
+    fn load_group() {
         let input = r#"
 server = exec {
   command = "build"
   outputs = "out"
 }
-target build = [server]
+group build = [server]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
-        let order = dag.target_order("build").unwrap();
+        let order = dag.selection_order("build").unwrap();
         assert_eq!(order, vec!["server"]);
     }
 
@@ -790,19 +792,19 @@ target build = [server]
     fn duplicate_declaration_names_are_rejected() {
         let cases = [
             (
-                "clippy = exec { command = \"lint\" outputs = \"out\" }\ntarget clippy = [clippy]\n",
-                "block",
-            ),
-            (
-                "target clippy = [clippy]\nclippy = exec { command = \"lint\" outputs = \"out\" }\n",
+                "clippy = exec { command = \"lint\" outputs = \"out\" }\ngroup clippy = [clippy]\n",
                 "target",
             ),
-            ("target clippy = []\ntarget clippy = []\n", "target"),
             (
-                "clippy(value : string) = exec { command = value outputs = \"out\" }\ntarget clippy = []\n",
-                "block",
+                "group clippy = [clippy]\nclippy = exec { command = \"lint\" outputs = \"out\" }\n",
+                "group",
             ),
-            ("param clippy : string\ntarget clippy = []\n", "param"),
+            ("group clippy = []\ngroup clippy = []\n", "group"),
+            (
+                "clippy(value : string) = exec { command = value outputs = \"out\" }\ngroup clippy = []\n",
+                "target",
+            ),
+            ("param clippy : string\ngroup clippy = []\n", "param"),
         ];
         for (input, existing) in cases {
             let module = parser::parse(input, "<test>").unwrap();
@@ -824,7 +826,7 @@ target build = [server]
             dir.path(),
             "mymod",
             "mymod",
-            "clippy = exec { command = \"lint\" outputs = \"out\" }\ntarget clippy = [clippy]\n",
+            "clippy = exec { command = \"lint\" outputs = \"out\" }\ngroup clippy = [clippy]\n",
         );
         let module = parser::parse("inst = mymod {}\n", "<test>").unwrap();
         let error = match load(
@@ -839,19 +841,19 @@ target build = [server]
         };
         assert!(matches!(
             error,
-            LoadError::DuplicateName { name, existing: "block", pos }
+            LoadError::DuplicateName { name, existing: "target", pos }
                 if name == "clippy" && pos.line == 2 && pos.col == 1
         ));
     }
 
     #[test]
-    fn load_parameterized_target_materializes_bound_block() {
+    fn load_parameterized_group_materializes_bound_target() {
         let input = r#"
 image(tag : string) = exec {
   command = "build #{tag}"
   outputs = "out"
 }
-target publish(tag : string) = [image(tag = tag)]
+group publish(tag : string) = [image(tag = tag)]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let invocations = [crate::invocation::Invocation {
@@ -862,7 +864,7 @@ target publish(tag : string) = [image(tag = tag)]
             load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
 
         assert_eq!(selected, vec![r#"publish(tag="v1")"#]);
-        assert_eq!(dag.target_order(&selected[0]).unwrap(), vec![r#"image(tag="v1")"#]);
+        assert_eq!(dag.selection_order(&selected[0]).unwrap(), vec![r#"image(tag="v1")"#]);
         let node = dag.get_node(r#"image(tag="v1")"#).unwrap();
         assert_eq!(
             node.fields.iter().find(|field| field.name == "command").unwrap().value,
@@ -883,23 +885,23 @@ target publish(tag : string) = [image(tag = tag)]
             (
                 "argument",
                 "job(token : string) = exec { command = token outputs = \"out\" }\n\
-                 target run = [job(token = secret(\"BIT_TEST_LOADER_SECRET\"))]\n",
+                 group run = [job(token = secret(\"BIT_TEST_LOADER_SECRET\"))]\n",
             ),
             (
                 "nested argument",
                 "job(tokens : [string]) = exec { command = \"x\" outputs = \"out\" }\n\
-                 target run = [job(tokens = [secret(\"BIT_TEST_LOADER_SECRET\")])]\n",
+                 group run = [job(tokens = [secret(\"BIT_TEST_LOADER_SECRET\")])]\n",
             ),
             (
                 "default",
                 "job(token = secret(\"BIT_TEST_LOADER_SECRET\")) = exec { command = token outputs = \"out\" }\n\
-                 target run = [job()]\n",
+                 group run = [job()]\n",
             ),
             (
-                "target argument",
+                "group argument",
                 "job(token : string) = exec { command = token outputs = \"out\" }\n\
-                 target run(token : string) = [job(token = token)]\n\
-                 target outer = [run(token = secret(\"BIT_TEST_LOADER_SECRET\"))]\n",
+                 group run(token : string) = [job(token = token)]\n\
+                 group outer = [run(token = secret(\"BIT_TEST_LOADER_SECRET\"))]\n",
             ),
         ];
         for (case, input) in cases {
@@ -926,12 +928,12 @@ target publish(tag : string) = [image(tag = tag)]
     }
 
     #[test]
-    fn a_block_may_read_a_secret_in_its_body() {
+    fn a_target_may_read_a_secret_in_its_body() {
         // SAFETY: only this test reads or writes this variable.
         unsafe { std::env::set_var("BIT_TEST_LOADER_BODY_SECRET", "hunter2") };
         let input = "let token = secret(\"BIT_TEST_LOADER_BODY_SECRET\")\n\
                      job(name : string) = exec { command = token outputs = \"out\" }\n\
-                     target run = [job(name = \"app\")]\n";
+                     group run = [job(name = \"app\")]\n";
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, scope, _) = load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &[]).unwrap();
         assert_eq!(
@@ -941,15 +943,15 @@ target publish(tag : string) = [image(tag = tag)]
                 value: "hunter2".into(),
             })
         );
-        assert!(dag.has_block(r#"job(name="app")"#));
+        assert!(dag.has_target(r#"job(name="app")"#));
     }
 
     #[test]
     fn parameterized_invocations_share_equal_arguments_and_separate_different_arguments() {
         let input = r#"
 job(value : string) = exec { command = value outputs = "out" }
-target first(value : string) = [job(value = value)]
-target second(value : string) = [job(value = value)]
+group first(value : string) = [job(value = value)]
+group second(value : string) = [job(value = value)]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let invocations = [
@@ -970,13 +972,13 @@ target second(value : string) = [job(value = value)]
             load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
 
         assert_eq!(selected.len(), 3);
-        assert!(dag.has_block(r#"job(value="a")"#));
-        assert!(dag.has_block(r#"job(value="b")"#));
-        assert_eq!(dag.block_names().len(), 2);
+        assert!(dag.has_target(r#"job(value="a")"#));
+        assert!(dag.has_target(r#"job(value="b")"#));
+        assert_eq!(dag.target_names().len(), 2);
     }
 
     #[test]
-    fn block_references_materialize_parameterized_blocks_in_fields_and_dependencies() {
+    fn target_references_materialize_parameterized_targets_in_fields_and_dependencies() {
         let input = r#"
 prepare(package : string) = exec {
   command = "prepare #{package}"
@@ -992,7 +994,7 @@ release(package : string) = exec {
   outputs = "released"
   after = [prepare(package = package)]
 }
-target publish(package : string) = [release(package = package)]
+group publish(package : string) = [release(package = package)]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let invocations = [crate::invocation::Invocation {
@@ -1005,10 +1007,10 @@ target publish(package : string) = [release(package = package)]
         let prepare = r#"prepare(package="api")"#;
         let compile = r#"compile(package="api")"#;
         let release = r#"release(package="api")"#;
-        assert!(dag.has_block(prepare));
-        assert!(dag.has_block(compile));
-        assert!(dag.has_block(release));
-        assert_eq!(dag.block_names().len(), 3);
+        assert!(dag.has_target(prepare));
+        assert!(dag.has_target(compile));
+        assert!(dag.has_target(release));
+        assert_eq!(dag.target_names().len(), 3);
         assert!(dag.content_deps(compile).contains(&prepare.to_owned()));
         assert!(dag.content_deps(release).contains(&compile.to_owned()));
         assert!(dag.deps(release).contains(&prepare.to_owned()));
@@ -1016,7 +1018,7 @@ target publish(package : string) = [release(package = package)]
     }
 
     #[test]
-    fn matrix_dependencies_can_invoke_parameterized_blocks() {
+    fn matrix_dependencies_can_invoke_parameterized_targets() {
         let input = r#"
 let arch = ["amd64", "arm64"]
 
@@ -1037,7 +1039,7 @@ build[arch] = exec {
         for arch in ["amd64", "arm64"] {
             let prepare = format!(r#"prepare(arch="{arch}")"#);
             let build = format!(r#"build["{arch}"]"#);
-            assert!(dag.has_block(&prepare));
+            assert!(dag.has_target(&prepare));
             assert!(dag.content_deps(&build).contains(&prepare));
         }
     }
@@ -1056,8 +1058,8 @@ build[arch](tag : string) = exec {
   outputs = "built"
   depends_on = [prepare[arch](tag = tag)]
 }
-target release(tag : string) = [build(tag = tag)]
-target arm(tag : string) = [build["arm64"](tag = tag)]
+group release(tag : string) = [build(tag = tag)]
+group arm(tag : string) = [build["arm64"](tag = tag)]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let invocations = [
@@ -1081,18 +1083,18 @@ target arm(tag : string) = [build["arm64"](tag = tag)]
             for arch in ["amd64", "arm64"] {
                 let build = format!(r#"build["{arch}"](tag="{tag}")"#);
                 let prepare = format!(r#"prepare["{arch}"](tag="{tag}")"#);
-                assert!(dag.has_block(&build));
+                assert!(dag.has_target(&build));
                 assert!(dag.content_deps(&build).contains(&prepare));
             }
         }
-        assert_eq!(dag.block_names().len(), 8);
-        assert_eq!(dag.targets()[&selected[0]].blocks.len(), 2);
+        assert_eq!(dag.target_names().len(), 8);
+        assert_eq!(dag.groups()[&selected[0]].targets.len(), 2);
         assert_eq!(
-            dag.targets()[&selected[1]].blocks,
+            dag.groups()[&selected[1]].targets,
             vec![r#"build["arm64"](tag="1.2.3")"#]
         );
         assert_eq!(
-            dag.targets()[&selected[2]].blocks,
+            dag.groups()[&selected[2]].targets,
             vec![r#"build["arm64"](tag="2.0.0")"#]
         );
     }
@@ -1136,17 +1138,17 @@ announce(tag : string) = exec {
     }
 
     #[test]
-    fn matrix_key_list_can_be_a_block_parameter() {
+    fn matrix_key_list_can_be_a_target_parameter() {
         let input = r#"
 work[arch](arch : [string], tag : string) = exec {
   command = "build #{arch} #{tag}"
   outputs = "built"
 }
-target release = [work(arch = ["arm64"], tag = "1.2.3")]
+group release = [work(arch = ["arm64"], tag = "1.2.3")]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
-        let order = dag.target_order("release").unwrap();
+        let order = dag.selection_order("release").unwrap();
         assert_eq!(order.len(), 1);
         let node = dag.get_node(&order[0]).unwrap();
         let command = node.fields.iter().find(|field| field.name == "command").unwrap();
@@ -1162,7 +1164,7 @@ test[module, package = split("#{module}/x,#{module}/#{suffix}", ",")](suffix : s
   command = "test #{module} #{package}"
   outputs = "tested"
 }
-target all = [test(suffix = "y")]
+group all = [test(suffix = "y")]
 "##;
         let module = parser::parse(input, "<test>").unwrap();
         let invocations = [crate::invocation::Invocation {
@@ -1173,7 +1175,7 @@ target all = [test(suffix = "y")]
             load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &invocations).unwrap();
 
         assert_eq!(
-            dag.targets()[&selected[0]].blocks,
+            dag.groups()[&selected[0]].targets,
             vec![
                 r#"test["a", "a/x"](suffix="y")"#,
                 r#"test["a", "a/y"](suffix="y")"#,
@@ -1240,27 +1242,27 @@ deploy = exec {
     }
 
     #[test]
-    fn load_target_unknown_block() {
-        let input = "target build = [nonexistent]\n";
+    fn load_group_unknown_target() {
+        let input = "group build = [nonexistent]\n";
         let module = parser::parse(input, "<test>").unwrap();
         let result = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]);
-        assert!(matches!(result, Err(LoadError::Dag(DagError::UnknownTargetBlock(..)))));
+        assert!(matches!(result, Err(LoadError::Dag(DagError::UnknownGroupMember(..)))));
     }
 
     #[test]
-    fn load_target_doc() {
+    fn load_group_doc() {
         let input = r#"
 server = exec {
   command = "build"
   outputs = "out"
 }
 # Build the server
-target build = [server]
+group build = [server]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
-        let targets = dag.targets();
-        assert_eq!(targets["build"].doc.as_deref(), Some("Build the server"));
+        let groups = dag.groups();
+        assert_eq!(groups["build"].doc.as_deref(), Some("Build the server"));
     }
 
     /// Create a module file at {dir}/{provider}/{resource}.bit.
@@ -1280,7 +1282,7 @@ target build = [server]
     }
 
     #[test]
-    fn load_module_creates_namespaced_blocks() {
+    fn load_module_creates_namespaced_targets() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1313,11 +1315,11 @@ inst = mymod {
         )
         .unwrap();
 
-        // Inner block is namespaced
-        assert!(dag.has_block("inst.inner"));
-        // Module instance block exists
-        assert!(dag.has_block("inst"));
-        // Module instance depends on inner block
+        // Inner target is namespaced
+        assert!(dag.has_target("inst.inner"));
+        // Module instance target exists
+        assert!(dag.has_target("inst"));
+        // Module instance depends on inner target
         let order = dag.topo_order().unwrap();
         let inner_pos = order.iter().position(|n| n == "inst.inner").unwrap();
         let inst_pos = order.iter().position(|n| n == "inst").unwrap();
@@ -1366,7 +1368,7 @@ inst = mymod {
     }
 
     #[test]
-    fn load_module_inner_block_refs_namespaced() {
+    fn load_module_inner_target_refs_namespaced() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1416,7 +1418,7 @@ inst = mymod {}
     }
 
     #[test]
-    fn load_module_registers_targets() {
+    fn load_module_registers_groups() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1428,7 +1430,7 @@ a = exec {
   outputs = "a"
 }
 
-target build = [a]
+group build = [a]
 "#,
         );
 
@@ -1445,9 +1447,9 @@ inst = mymod {}
         )
         .unwrap();
 
-        let targets = dag.targets();
-        assert!(targets.contains_key("inst.build"));
-        let order = dag.target_order("inst.build").unwrap();
+        let groups = dag.groups();
+        assert!(groups.contains_key("inst.build"));
+        let order = dag.selection_order("inst.build").unwrap();
         assert!(order.contains(&"inst.a".to_owned()));
     }
 
@@ -1598,15 +1600,15 @@ inst2 = mymod {
         )
         .unwrap();
 
-        // Both instances create independent blocks
-        assert!(dag.has_block("inst1.a"));
-        assert!(dag.has_block("inst2.a"));
-        assert!(dag.has_block("inst1"));
-        assert!(dag.has_block("inst2"));
+        // Both instances create independent targets
+        assert!(dag.has_target("inst1.a"));
+        assert!(dag.has_target("inst2.a"));
+        assert!(dag.has_target("inst1"));
+        assert!(dag.has_target("inst2"));
     }
 
     #[test]
-    fn load_module_outer_block_dep() {
+    fn load_module_outer_target_dep() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1624,7 +1626,7 @@ output result = a.path
 "#,
         );
 
-        // The module param references an outer block's output
+        // The module param references an outer target's output
         let input = r#"
 outer = exec {
   command = "build outer"
@@ -1652,7 +1654,7 @@ inst = mymod {
     }
 
     #[test]
-    fn module_dependencies_can_invoke_parameterized_blocks() {
+    fn module_dependencies_can_invoke_parameterized_targets() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1687,12 +1689,12 @@ inst = mymod {
         .unwrap();
 
         let prepare = r#"prepare(env="prod")"#.to_owned();
-        assert!(dag.has_block(&prepare));
+        assert!(dag.has_target(&prepare));
         assert!(dag.content_deps("inst.a").contains(&prepare));
     }
 
     #[test]
-    fn imported_module_blocks_can_declare_and_pass_parameters() {
+    fn imported_module_targets_can_declare_and_pass_parameters() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1726,12 +1728,12 @@ output path = image.path
         .unwrap();
 
         let compile = r#"inst.compile(package="api")"#.to_owned();
-        assert!(dag.has_block(&compile));
+        assert!(dag.has_target(&compile));
         assert!(dag.content_deps("inst.image").contains(&compile));
     }
 
     #[test]
-    fn large_module_instance_marks_every_expanded_block_large() {
+    fn large_module_instance_marks_every_expanded_target_large() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1774,7 +1776,7 @@ output path = image.path
     }
 
     #[test]
-    fn module_instance_modifiers_reach_every_expanded_block() {
+    fn module_instance_modifiers_reach_every_expanded_target() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1831,7 +1833,7 @@ output path = image.path
     }
 
     #[test]
-    fn module_block_phase_must_not_contradict_instance_phase() {
+    fn module_target_phase_must_not_contradict_instance_phase() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1853,7 +1855,7 @@ output path = image.path
     }
 
     #[test]
-    fn imported_module_targets_can_declare_parameters() {
+    fn imported_module_groups_can_declare_parameters() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1865,7 +1867,7 @@ job(value : string) = exec {
   outputs = "out"
 }
 
-target run(value : string) = [job(value = value)]
+group run(value : string) = [job(value = value)]
 "#,
         );
 
@@ -1886,13 +1888,13 @@ target run(value : string) = [job(value = value)]
 
         assert_eq!(selected, vec![r#"inst.run(value="hello")"#]);
         assert_eq!(
-            dag.target_order(&selected[0]).unwrap(),
+            dag.selection_order(&selected[0]).unwrap(),
             vec![r#"inst.job(value="hello")"#]
         );
     }
 
     #[test]
-    fn imported_module_target_selects_parameterized_matrix_slice() {
+    fn imported_module_group_selects_parameterized_matrix_slice() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -1903,7 +1905,7 @@ job[arch](arch : [string], tag : string) = exec {
   command = "build #{arch} #{tag}"
   outputs = "out"
 }
-target run = [job["arm64"](arch = ["amd64", "arm64"], tag = "v1")]
+group run = [job["arm64"](arch = ["amd64", "arm64"], tag = "v1")]
 "#,
         );
 
@@ -1918,7 +1920,7 @@ target run = [job["arm64"](arch = ["amd64", "arm64"], tag = "v1")]
         .unwrap();
 
         assert_eq!(
-            dag.target_order("inst.run").unwrap(),
+            dag.selection_order("inst.run").unwrap(),
             vec![r#"inst.job["arm64"](arch=["amd64", "arm64"], tag="v1")"#]
         );
     }
@@ -1953,12 +1955,12 @@ inst = myns.myres {}
         )
         .unwrap();
 
-        assert!(dag.has_block("inst.a"));
-        assert!(dag.has_block("inst"));
+        assert!(dag.has_target("inst.a"));
+        assert!(dag.has_target("inst"));
     }
 
     #[test]
-    fn matrix_expands_blocks() {
+    fn matrix_expands_targets() {
         let input = r#"
 let arch = ["amd64", "arm64"]
 
@@ -1970,9 +1972,9 @@ build[arch] = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
-        assert!(dag.has_block(r#"build["amd64"]"#));
-        assert!(dag.has_block(r#"build["arm64"]"#));
-        assert!(!dag.has_block("build"));
+        assert!(dag.has_target(r#"build["amd64"]"#));
+        assert!(dag.has_target(r#"build["arm64"]"#));
+        assert!(!dag.has_target("build"));
     }
 
     #[test]
@@ -1983,7 +1985,7 @@ large plain = exec { command = "a" outputs = "a" }
 small = exec { command = "b" outputs = "b" }
 large build[arch] = exec { command = "build #{arch}" outputs = "out-#{arch}" }
 large image(tag : string) = exec { command = "image #{tag}" outputs = "image" }
-target publish = [image(tag = "v1")]
+group publish = [image(tag = "v1")]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let invocations = [crate::invocation::Invocation {
@@ -2005,7 +2007,7 @@ target publish = [image(tag = "v1")]
     }
 
     #[test]
-    fn matrix_dependencies_can_come_from_block_reference_function() {
+    fn matrix_dependencies_can_come_from_target_reference_function() {
         let input = r#"
 let package = ["app", "core"]
 
@@ -2025,7 +2027,7 @@ crate[package] = exec {
     }
 
     #[test]
-    fn matrix_key_can_be_a_block_reference() {
+    fn matrix_key_can_be_a_target_reference() {
         let input = r#"
 let dependency = dependency.of("app")
 
@@ -2037,11 +2039,11 @@ consumer[dependency] = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
-        assert!(dag.has_block(r#"consumer[crate["core"]]"#));
+        assert!(dag.has_target(r#"consumer[crate["core"]]"#));
     }
 
     #[test]
-    fn dependency_function_does_not_coerce_strings_to_block_references() {
+    fn dependency_function_does_not_coerce_strings_to_target_references() {
         let input = r#"
 core = exec {
   command = "build core"
@@ -2061,8 +2063,8 @@ app = exec {
             Err(LoadError::Eval {
                 source: EvalError::Type(message),
                 ..
-            }) => assert!(message.contains("list of block references")),
-            _ => panic!("expected a block reference type error"),
+            }) => assert!(message.contains("list of target references")),
+            _ => panic!("expected a target reference type error"),
         }
     }
 
@@ -2088,7 +2090,7 @@ build[arch] = exec {
     }
 
     #[test]
-    fn matrix_cross_block_refs() {
+    fn matrix_cross_target_refs() {
         let input = r#"
 let arch = ["amd64", "arm64"]
 
@@ -2159,10 +2161,10 @@ build[arch, os] = exec {
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
-        assert!(dag.has_block(r#"build["amd64", "linux"]"#));
-        assert!(dag.has_block(r#"build["amd64", "darwin"]"#));
-        assert!(dag.has_block(r#"build["arm64", "linux"]"#));
-        assert!(dag.has_block(r#"build["arm64", "darwin"]"#));
+        assert!(dag.has_target(r#"build["amd64", "linux"]"#));
+        assert!(dag.has_target(r#"build["amd64", "darwin"]"#));
+        assert!(dag.has_target(r#"build["arm64", "linux"]"#));
+        assert!(dag.has_target(r#"build["arm64", "darwin"]"#));
     }
 
     #[test]
@@ -2194,7 +2196,7 @@ package = exec {
     }
 
     #[test]
-    fn target_expands_matrix_block_to_all_slices() {
+    fn group_expands_matrix_target_to_all_slices() {
         let input = r#"
 let package = ["api", "worker"]
 
@@ -2202,17 +2204,17 @@ tests[package] = exec.test {
   command = "test #{package}"
 }
 
-target check = [tests]
+group check = [tests]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
-        let order = dag.target_order("check").unwrap();
+        let order = dag.selection_order("check").unwrap();
         assert_eq!(order, vec![r#"tests["api"]"#, r#"tests["worker"]"#]);
     }
 
     #[test]
-    fn target_accepts_empty_matrix_block() {
+    fn group_accepts_empty_matrix_target() {
         let input = r#"
 let package = []
 
@@ -2220,16 +2222,16 @@ tests[package] = exec.test {
   command = "test #{package}"
 }
 
-target check = [tests]
+group check = [tests]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
-        assert_eq!(dag.target_order("check").unwrap(), Vec::<String>::new());
+        assert_eq!(dag.selection_order("check").unwrap(), Vec::<String>::new());
     }
 
     #[test]
-    fn target_accepts_dots_in_matrix_values() {
+    fn group_accepts_dots_in_matrix_values() {
         let input = r#"
 let package = ["github.com/block/spectre/internal"]
 
@@ -2237,13 +2239,13 @@ tests[package] = exec.test {
   command = "test #{package}"
 }
 
-target check = [tests]
+group check = [tests]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let (dag, _scope) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
         assert_eq!(
-            dag.target_order("check").unwrap(),
+            dag.selection_order("check").unwrap(),
             vec![r#"tests["github.com/block/spectre/internal"]"#]
         );
     }
@@ -2321,7 +2323,7 @@ build[version] = exec { command = "build #{version}" }
     }
 
     #[test]
-    fn unknown_field_on_matrix_block_is_rejected() {
+    fn unknown_field_on_matrix_target_is_rejected() {
         let input = r#"
 let module = [".", "open"]
 
@@ -2333,7 +2335,7 @@ go-test[module] = go.test {
 "#;
         assert_eq!(
             input_error(input, &go_registry(), &[]),
-            "<test>:4:1: block 'go-test[\".\"]': unknown field 'module'; valid fields: package, flags, inputs, \
+            "<test>:4:1: target 'go-test[\".\"]': unknown field 'module'; valid fields: package, flags, inputs, \
              report, goos, goarch, cgo, depends_on, after, concurrency, uncached, dir, env"
         );
     }
@@ -2352,7 +2354,7 @@ go-test[module] = go.test {
     fn unknown_field_suggests_closest_name() {
         let error = input_error("build = exec { comand = \"true\" }\n", &test_registry(), &[]);
         assert!(
-            error.starts_with("<test>:1:1: block 'build': unknown field 'comand' (did you mean 'command'?)"),
+            error.starts_with("<test>:1:1: target 'build': unknown field 'comand' (did you mean 'command'?)"),
             "{error}"
         );
         let error = input_error(
@@ -2404,7 +2406,7 @@ build = go.test { package = "./..." dir = pass.passed }
         assert!(error.ends_with("field 'dir': expected string, got bool"), "{error}");
 
         // exec's values command declares no types, so its outputs pass
-        // until the block runs.
+        // until the target runs.
         let input = r#"
 version = exec { command = "true" values = "echo {}" }
 build = go.test { package = version.package }
@@ -2451,13 +2453,13 @@ app = go.exe {
     }
 
     #[test]
-    fn parameterized_block_inputs_are_checked_when_invoked() {
+    fn parameterized_target_inputs_are_checked_when_invoked() {
         let input = r#"
 image(tag : string) = exec {
   command = "build #{tag}"
   tags = [tag]
 }
-target publish(tag : string) = [image(tag = tag)]
+group publish(tag : string) = [image(tag = tag)]
 "#;
         let module = parser::parse(input, "<test>").unwrap();
         let invocations = [crate::invocation::Invocation {
@@ -2469,13 +2471,13 @@ target publish(tag : string) = [image(tag = tag)]
             Ok(_) => panic!("expected invalid inputs"),
         };
         assert!(
-            error.starts_with("<test>:2:1: block 'image(tag=\"v1\")': unknown field 'tags'"),
+            error.starts_with("<test>:2:1: target 'image(tag=\"v1\")': unknown field 'tags'"),
             "{error}"
         );
     }
 
     #[test]
-    fn module_blocks_are_checked_and_module_params_pass_through() {
+    fn module_targets_are_checked_and_module_params_pass_through() {
         let dir = tempfile::tempdir().unwrap();
         write_module(
             dir.path(),
@@ -2488,7 +2490,7 @@ target publish(tag : string) = [image(tag = tag)]
             &test_registry(),
             &roots(dir.path(), "mymod"),
         );
-        assert!(error.contains("block 'inst.build': unknown field 'outptu'"), "{error}");
+        assert!(error.contains("target 'inst.build': unknown field 'outptu'"), "{error}");
 
         write_module(
             dir.path(),

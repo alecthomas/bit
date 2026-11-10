@@ -8,7 +8,7 @@ bit's goal is minimal configuration. A resource should work out for itself what 
 2. Find the inputs from the tool's own configuration and conventions. Follow everything the configuration points to: module and workspace paths, template inputs, imports, and dependency lock files. Hashing a config file is not enough if its contents name more inputs.
 3. Find the outputs the same way, from the paths the tool or its configuration names. Take flags that move outputs, such as `--output`, into account.
 4. When an input can't be determined exactly, track more rather than less. An extra input costs a rerun. A missing input gives a stale build that reports success.
-5. Check how the engine uses what you declare. For example, the shared cache computes a block's key before it runs and again after, so inputs discovered only after a build, such as from dep-info files, must also be found the same way before it.
+5. Check how the engine uses what you declare. For example, the shared cache computes a target's key before it runs and again after, so inputs discovered only after a build, such as from dep-info files, must also be found the same way before it.
 6. Add a field for users to set only when the information can't be discovered. Document what the resource discovers in its schema doc comments.
 
 ## Editor integrations must track the bit parser
@@ -24,7 +24,7 @@ When you change the bit grammar — adding/removing/renaming statements, keyword
 5. Verify: `tree-sitter test` must report 100% success.
 6. Mirror the highlight changes in `integrations/zed/languages/bit/highlights.scm` (Zed uses its own captures; don't just copy the tree-sitter file). Add the same keywords and any new node captures.
 
-The Zed extension's `grammars.bit.rev` pin in `integrations/zed/extension.toml` is auto-synced to the latest tree-sitter-touching commit by the `sync-zed-rev` target in `BUILD.bit` (runs as part of the default `bit` target). Don't edit it manually.
+The Zed extension's `grammars.bit.rev` pin in `integrations/zed/extension.toml` is auto-synced to the latest tree-sitter-touching commit by the `sync-zed-rev` target in `BUILD.bit` (runs as part of the default `bit` group). Don't edit it manually.
 
 A grammar change without these updates breaks editor highlighting and structural editing for every bit user.
 
@@ -36,4 +36,4 @@ The README helps someone understand and start using bit; it is not a reference m
 
 Keep README changes as brief as possible: say what a user needs to know, often a few words in existing text or a table row.
 
-The `## Providers` section is the exception: it is auto-generated from the live provider schemas by the `sync-readme` target in `BUILD.bit` (which shells out to `bit --schema --json | jq …`). Run `bit sync-readme` (or just `bit`, since `sync-readme` is in the default target) after touching any provider or module schema; don't hand-edit that section.
+The `## Providers` section is the exception: it is auto-generated from the live provider schemas by the `sync-readme` target in `BUILD.bit` (which shells out to `bit --schema --json | jq …`). Run `bit sync-readme` (or just `bit`, since `sync-readme` is in the default group) after touching any provider or module schema; don't hand-edit that section.

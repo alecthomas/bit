@@ -8,9 +8,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -36,14 +36,14 @@ fn default_package() -> Vec<String> {
     vec!["./...".to_owned()]
 }
 
-/// Outputs from a `go.lint` block.
+/// Outputs from a `go.lint` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct GoLintOutputs {
     /// Whether linting passed
     pub passed: bool,
 }
 
-/// Persisted state for a `go.lint` block.
+/// Persisted state for a `go.lint` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoLintState {
     /// A string in state written before `package` took a list.
@@ -92,7 +92,7 @@ struct Affected {
 /// `None` to lint the whole pattern.
 fn affected_packages(
     tracker: &FileTracker,
-    inputs: &Block<GoLintInputs>,
+    inputs: &Target<GoLintInputs>,
     changes: &Changes,
 ) -> Result<Option<Affected>, BoxError> {
     let Some(affected) = super::affected_packages(
@@ -151,7 +151,7 @@ impl Resource for GoLintResource {
         ResourceKind::Test
     }
 
-    fn ambient(&self, inputs: &Block<GoLintInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<GoLintInputs>) -> Vec<Ambient> {
         let dir = inputs.dir.as_deref();
         vec![
             crate::providers::version("golangci-lint", &["version"], dir),
@@ -159,7 +159,7 @@ impl Resource for GoLintResource {
         ]
     }
 
-    fn resolve(&self, inputs: &Block<GoLintInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<GoLintInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         let dir = inputs.dir.as_deref();
         // golangci-lint lints tests by default; tracking them when disabled only costs a rerun.
@@ -184,7 +184,7 @@ impl Resource for GoLintResource {
         Ok(files)
     }
 
-    fn plan(&self, inputs: &Block<GoLintInputs>, prior_state: Option<&GoLintState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<GoLintInputs>, prior_state: Option<&GoLintState>) -> Result<PlanResult, BoxError> {
         let description = super::display_command(
             "golangci-lint",
             &lint_args(inputs, &inputs.package),
@@ -214,10 +214,10 @@ impl Resource for GoLintResource {
 
     fn apply(
         &self,
-        inputs: &Block<GoLintInputs>,
+        inputs: &Target<GoLintInputs>,
         _prior_state: Option<&GoLintState>,
         changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<GoLintState, GoLintOutputs>, BoxError> {
         let state = GoLintState {
             package: inputs.package.clone(),
@@ -284,7 +284,7 @@ impl Resource for GoLintResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<GoLintState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<GoLintState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
@@ -298,7 +298,7 @@ impl Resource for GoLintResource {
         Some(1)
     }
 
-    fn cache_policy(&self, _inputs: &Block<GoLintInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<GoLintInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn config_found_in_block_dir() {
+    fn config_found_in_target_dir() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join(".golangci.yml");
         std::fs::write(&config, "version: \"2\"\n").unwrap();
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn config_found_in_ancestor_of_block_dir() {
+    fn config_found_in_ancestor_of_target_dir() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join(".golangci.yaml");
         std::fs::write(&config, "version: \"2\"\n").unwrap();
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn config_in_block_dir_takes_precedence_over_ancestor() {
+    fn config_in_target_dir_takes_precedence_over_ancestor() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".golangci.yml"), "version: \"2\"\n").unwrap();
         let module = dir.path().join("module");
@@ -359,7 +359,7 @@ mod tests {
         std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
         std::fs::write(root.join("lib.go"), "package lib\n").unwrap();
         std::fs::write(root.join("lib_test.go"), "package lib\n").unwrap();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             GoLintInputs {
                 package: vec!["./...".into()],
@@ -372,13 +372,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tracks_config_in_block_dir() {
+    fn resolve_tracks_config_in_target_dir() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("go.mod"), "module example.com/test\n").unwrap();
         std::fs::write(root.join("main.go"), "package main\n").unwrap();
         std::fs::write(root.join(".golangci.yml"), "version: \"2\"\n").unwrap();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             GoLintInputs {
                 package: vec!["./...".into()],
@@ -403,7 +403,7 @@ mod tests {
         std::fs::create_dir_all(root.join("ci")).unwrap();
         std::fs::write(root.join("ci/lint.yml"), "version: \"2\"\n").unwrap();
         for flags in [["--config", "ci/lint.yml"], ["-c", "ci/lint.yml"]] {
-            let inputs = Block::new(
+            let inputs = Target::new(
                 Some(root.to_string_lossy().into_owned()),
                 GoLintInputs {
                     package: vec!["./...".into()],
@@ -431,7 +431,7 @@ mod tests {
         // The default listing excludes this package, but build tags may not.
         std::fs::create_dir_all(root.join("tagged")).unwrap();
         std::fs::write(root.join("tagged/tagged.go"), "//go:build extra\n\npackage tagged\n").unwrap();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             GoLintInputs {
                 package: vec!["./...".into()],
@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoLintInputs {
                 package: vec!["./...".into()],
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoLintInputs {
                 package: vec!["./...".into()],
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoLintInputs {
                 package: vec!["./...".into()],

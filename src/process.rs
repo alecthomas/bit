@@ -1,19 +1,19 @@
-//! Running external commands so `--debug` shows each one under the block
+//! Running external commands so `--debug` shows each one under the target
 //! that ran it, with how long it took.
 
 use std::io;
 use std::process::{Child, Command, ExitStatus, Output};
 use std::time::{Duration, Instant};
 
-/// [`Command`] methods that log the command to the current block's debug
-/// output. See [`crate::output::BlockScope`].
+/// [`Command`] methods that log the command to the current target's debug
+/// output. See [`crate::output::TargetScope`].
 pub trait CommandExt {
     /// [`Command::output`], logged with its exit status and duration.
     fn logged_output(&mut self) -> io::Result<Output>;
     /// [`Command::status`], logged with its exit status and duration.
     fn logged_status(&mut self) -> io::Result<ExitStatus>;
     /// [`Command::spawn`], logged when it starts. The caller waits, so the
-    /// duration shows as the gap to the block's next message.
+    /// duration shows as the gap to the target's next message.
     fn logged_spawn(&mut self) -> io::Result<Child>;
 }
 

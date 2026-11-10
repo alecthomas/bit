@@ -6,9 +6,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -16,7 +16,7 @@ use crate::sha256::SHA256;
 /// changes, not when the registry copy was deleted or overwritten.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct PushInputs {
-    /// Source image reference (e.g. from a docker.image block's ref)
+    /// Source image reference (e.g. from a docker.image target's ref)
     pub image: String,
     /// Destination tag including registry (e.g. "localhost:5000/app:abc123")
     pub tag: String,
@@ -72,15 +72,15 @@ impl Resource for PushResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, _inputs: &Block<PushInputs>) -> Vec<Ambient> {
+    fn ambient(&self, _inputs: &Target<PushInputs>) -> Vec<Ambient> {
         vec![crate::providers::version("docker", &["--version"], None)]
     }
 
-    fn resolve(&self, _inputs: &Block<PushInputs>) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, _inputs: &Target<PushInputs>) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
         Ok(std::collections::BTreeMap::new())
     }
 
-    fn plan(&self, inputs: &Block<PushInputs>, prior_state: Option<&PushState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<PushInputs>, prior_state: Option<&PushState>) -> Result<PlanResult, BoxError> {
         let desc = format!(
             "docker tag {} {} && docker push {}",
             inputs.image, inputs.tag, inputs.tag
@@ -120,10 +120,10 @@ impl Resource for PushResource {
 
     fn apply(
         &self,
-        inputs: &Block<PushInputs>,
+        inputs: &Target<PushInputs>,
         _prior_state: Option<&PushState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<PushState, PushOutputs>, BoxError> {
         let tag_status = super::docker(&inputs.env)
             .args(["tag", &inputs.image, &inputs.tag])
@@ -174,7 +174,7 @@ impl Resource for PushResource {
         })
     }
 
-    fn destroy(&self, prior_state: &Block<PushState>, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Target<PushState>, writer: &TargetWriter) -> Result<(), BoxError> {
         use crate::output::Event;
         writer.event(Event::Starting, &format!("docker rmi {}", prior_state.tag));
         let output = super::docker(&prior_state.env)
@@ -186,7 +186,7 @@ impl Resource for PushResource {
 
     /// A push mutates a remote registry. Another worktree's receipt says
     /// nothing about whether this tag is still there.
-    fn cache_policy(&self, _inputs: &Block<PushInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<PushInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 }
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             PushInputs {
                 image: "myapp:latest".into(),
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_tag_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             PushInputs {
                 image: "myapp:latest".into(),

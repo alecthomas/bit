@@ -12,19 +12,19 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
-use crate::provider::{Ambient, Block, BoxError, PlanAction, PlanResult};
+use crate::output::TargetWriter;
+use crate::provider::{Ambient, BoxError, PlanAction, PlanResult, Target};
 use crate::sha256::SHA256;
 
-/// Run `program args...` in the block's `dir` with its `env`, streaming its
+/// Run `program args...` in the target's `dir` with its `env`, streaming its
 /// output through the writer.
-fn run<T>(program: &str, args: &[String], block: &Block<T>, writer: &BlockWriter) -> Result<ExitStatus, BoxError> {
+fn run<T>(program: &str, args: &[String], target: &Target<T>, writer: &TargetWriter) -> Result<ExitStatus, BoxError> {
     let mut cmd = Command::new(program);
     cmd.args(args)
-        .envs(&block.env)
+        .envs(&target.env)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(dir) = &block.dir {
+    if let Some(dir) = &target.dir {
         cmd.current_dir(dir);
     }
     let mut child = cmd
@@ -71,7 +71,7 @@ fn version(program: &str, dir: Option<&str>) -> Ambient {
     crate::providers::version(program, &["--version"], dir)
 }
 
-/// Plan a block whose configuration was `prior` when it last ran.
+/// Plan a target whose configuration was `prior` when it last ran.
 fn plan<T: PartialEq>(description: String, prior: Option<&T>, current: &T) -> PlanResult {
     let action = match prior {
         None => PlanAction::Create,
@@ -85,7 +85,7 @@ fn plan<T: PartialEq>(description: String, prior: Option<&T>, current: &T) -> Pl
     }
 }
 
-/// `path` relative to the block's working directory, as bit's process sees it.
+/// `path` relative to the target's working directory, as bit's process sees it.
 fn in_dir(dir: Option<&str>, path: &str) -> PathBuf {
     Path::new(dir.unwrap_or("")).join(path)
 }

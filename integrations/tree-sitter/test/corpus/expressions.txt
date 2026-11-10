@@ -352,7 +352,7 @@ let x = build["arm64"](tag = "1.2.3").path
 (source_file
   (let_statement
     name: (identifier)
-    value: (block_call
+    value: (target_call
       slice: (matrix_slice_ref
         name: (identifier)
         (string))
@@ -453,16 +453,16 @@ param timeout : duration = 30s
     default: (duration)))
 
 ================================================================================
-parameterized block reference
+parameterized target reference
 ================================================================================
 let x = compile(package = package).path
 --------------------------------------------------------------------------------
 (source_file
   (let_statement
     name: (identifier)
-    value: (block_call
+    value: (target_call
       name: (identifier)
-      arguments: (block_argument_list
+      arguments: (target_argument_list
         (named_argument
           name: (identifier)
           value: (reference
@@ -470,7 +470,7 @@ let x = compile(package = package).path
       field: (identifier))))
 
 ================================================================================
-parameterized block dependency
+parameterized target dependency
 ================================================================================
 let x = [prepare(env = "prod")]
 --------------------------------------------------------------------------------
@@ -478,9 +478,9 @@ let x = [prepare(env = "prod")]
   (let_statement
     name: (identifier)
     value: (list
-      (block_call
+      (target_call
         name: (identifier)
-        arguments: (block_argument_list
+        arguments: (target_argument_list
           (named_argument
             name: (identifier)
             value: (string)))))))

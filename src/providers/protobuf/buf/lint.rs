@@ -4,9 +4,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -22,7 +22,7 @@ pub struct BufLintInputs {
     pub flags: Vec<String>,
 }
 
-/// Outputs from a `buf.lint` block.
+/// Outputs from a `buf.lint` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct BufLintOutputs {
     /// Whether linting passed
@@ -58,18 +58,22 @@ impl Resource for BufLintResource {
         ResourceKind::Test
     }
 
-    fn resolve(&self, inputs: &Block<BufLintInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<BufLintInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         inputs
             .target
             .sources(inputs.dir.as_deref(), &inputs.flags)?
             .hash(&self.tracker)
     }
 
-    fn ambient(&self, inputs: &Block<BufLintInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<BufLintInputs>) -> Vec<Ambient> {
         inputs.target.check_ambient(inputs.dir.as_deref(), &inputs.flags)
     }
 
-    fn plan(&self, inputs: &Block<BufLintInputs>, prior_state: Option<&BufLintInputs>) -> Result<PlanResult, BoxError> {
+    fn plan(
+        &self,
+        inputs: &Target<BufLintInputs>,
+        prior_state: Option<&BufLintInputs>,
+    ) -> Result<PlanResult, BoxError> {
         Ok(super::super::plan(
             inputs.target.describe(&lint_args(inputs)),
             prior_state,
@@ -79,10 +83,10 @@ impl Resource for BufLintResource {
 
     fn apply(
         &self,
-        inputs: &Block<BufLintInputs>,
+        inputs: &Target<BufLintInputs>,
         _prior_state: Option<&BufLintInputs>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<BufLintInputs, BufLintOutputs>, BoxError> {
         let status = inputs.target.run(inputs, &lint_args(inputs), writer)?;
         Ok(ApplyResult {
@@ -93,13 +97,13 @@ impl Resource for BufLintResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<BufLintInputs>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<BufLintInputs>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
     /// The buf and plugin executables are tools, so the action key already
     /// describes the toolchain, but not a remote input's content.
-    fn cache_policy(&self, inputs: &Block<BufLintInputs>) -> CachePolicy {
+    fn cache_policy(&self, inputs: &Target<BufLintInputs>) -> CachePolicy {
         inputs.target.cache_policy(inputs.dir.as_deref())
     }
 }
@@ -122,7 +126,7 @@ mod tests {
     fn plan_describes_command_and_updates_when_flags_change() {
         let inputs: BufLintInputs =
             serde_json::from_str(r#"{"input": "proto", "flags": ["--error-format=json"]}"#).unwrap();
-        let inputs = Block::new(None, inputs);
+        let inputs = Target::new(None, inputs);
         let result = Resource::plan(&test_resource(), &inputs, None).unwrap();
         assert_eq!(result.action, PlanAction::Create);
         assert_eq!(result.description, "buf lint --error-format=json proto");

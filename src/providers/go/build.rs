@@ -7,9 +7,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -33,11 +33,11 @@ pub struct GoBuildInputs {
     pub go_env: GoEnv,
 }
 
-/// Outputs from a `go.build` block (none meaningful).
+/// Outputs from a `go.build` target (none meaningful).
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct GoBuildOutputs {}
 
-/// Persisted state for a `go.build` block.
+/// Persisted state for a `go.build` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoBuildState {
     /// A string in state written before `package` took a list.
@@ -48,7 +48,7 @@ pub struct GoBuildState {
     pub go_env: GoEnv,
 }
 
-/// The arguments to `go` that compile the block's packages, in
+/// The arguments to `go` that compile the target's packages, in
 /// [`super::run_dir`].
 fn build_args(inputs: &GoBuildInputs) -> Vec<String> {
     let mut args = vec!["build".to_owned()];
@@ -58,7 +58,7 @@ fn build_args(inputs: &GoBuildInputs) -> Vec<String> {
 }
 
 /// The directory `go build` runs in.
-fn go_dir(inputs: &Block<GoBuildInputs>) -> Option<String> {
+fn go_dir(inputs: &Target<GoBuildInputs>) -> Option<String> {
     super::run_dir(inputs.dir.as_deref(), &inputs.flags)
 }
 
@@ -85,11 +85,11 @@ impl Resource for GoBuildResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &Block<GoBuildInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<GoBuildInputs>) -> Vec<Ambient> {
         vec![super::toolchain(&inputs.go_env, go_dir(inputs).as_deref())]
     }
 
-    fn resolve(&self, inputs: &Block<GoBuildInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<GoBuildInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         super::resolve_go_inputs(
             &inputs.package,
             inputs.dir.as_deref(),
@@ -101,7 +101,7 @@ impl Resource for GoBuildResource {
         )
     }
 
-    fn plan(&self, inputs: &Block<GoBuildInputs>, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<GoBuildInputs>, prior_state: Option<&GoBuildState>) -> Result<PlanResult, BoxError> {
         let description = super::display_command("go", &build_args(inputs), go_dir(inputs).as_deref());
 
         let Some(prior) = prior_state else {
@@ -128,10 +128,10 @@ impl Resource for GoBuildResource {
 
     fn apply(
         &self,
-        inputs: &Block<GoBuildInputs>,
+        inputs: &Target<GoBuildInputs>,
         _prior_state: Option<&GoBuildState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<GoBuildState, GoBuildOutputs>, BoxError> {
         let args = build_args(inputs);
 
@@ -175,15 +175,15 @@ impl Resource for GoBuildResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<GoBuildState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<GoBuildState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &Block<GoBuildInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<GoBuildInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 
-    fn output_keys(&self, inputs: &Block<GoBuildInputs>) -> Vec<String> {
+    fn output_keys(&self, inputs: &Target<GoBuildInputs>) -> Vec<String> {
         super::build_outputs(go_dir(inputs).as_deref(), &inputs.flags)
     }
 }
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoBuildInputs {
                 package: vec!["./...".into()],
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn output_flag_names_outputs_and_chdir_runs_go_elsewhere() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some("svc".into()),
             GoBuildInputs {
                 package: vec!["./...".into()],
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             GoBuildInputs {
                 package: vec!["./...".into()],

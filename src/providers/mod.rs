@@ -8,7 +8,7 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::cache::PortablePaths;
 use crate::file_tracker::FileTracker;
-use crate::output::{BlockWriter, Event};
+use crate::output::{Event, TargetWriter};
 use crate::provider::{Ambient, BoxError, VersionCommand};
 use crate::sha256::{Hasher, SHA256};
 
@@ -123,7 +123,7 @@ where
 /// Remove a provider-owned file, directory, or symlink. Missing paths are
 /// already clean; every other filesystem error must reach the engine so it
 /// does not discard state after an incomplete destroy.
-pub(crate) fn remove_path(path: &Path, writer: &BlockWriter) -> Result<(), BoxError> {
+pub(crate) fn remove_path(path: &Path, writer: &TargetWriter) -> Result<(), BoxError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
@@ -251,8 +251,8 @@ pub fn find_executable(program: &str) -> Option<PathBuf> {
 /// fingerprint by an [`AMBIENT_KEY_PREFIXES`] prefix, which no path has.
 ///
 /// A tool that cannot be found or run is recorded as such rather than
-/// failing the block: running it fails anyway, and recording it means
-/// installing it later reruns the block. An unset variable is omitted, so
+/// failing the target: running it fails anyway, and recording it means
+/// installing it later reruns the target. An unset variable is omitted, so
 /// setting it later is a new source.
 ///
 /// Values that are paths, a variable's or a line of version output such as
@@ -302,7 +302,7 @@ pub fn hash_ambient(
 /// The source key and fingerprint of the executable `name`, found at `found`.
 ///
 /// A path in the repository is the key, so a Git change such as a Hermit
-/// upgrade maps to the blocks that run it.
+/// upgrade maps to the targets that run it.
 ///
 /// Elsewhere the path varies (Hermit's link farm directory is named by a
 /// hash), so the key is `name`. Only the directory is resolved, not the link.
@@ -363,7 +363,7 @@ pub(crate) fn version(program: &str, args: &[&str], dir: Option<&str>) -> Ambien
 }
 
 /// Per-process cache of tool probe output (versions, `go env`, ...) so a run
-/// with many blocks pays for each probe once.
+/// with many targets pays for each probe once.
 static PROBE_CACHE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Run `build()` once per distinct `key` and return its trimmed stdout.

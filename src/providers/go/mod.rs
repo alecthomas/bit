@@ -39,7 +39,7 @@ impl GoEnv {
         cmd.envs(self.vars());
     }
 
-    /// The block's `env` with these overrides applied on top, as a command
+    /// The target's `env` with these overrides applied on top, as a command
     /// sees them after `envs(env)` and [`GoEnv::apply_to`].
     pub fn over(&self, env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
         let mut merged = env.clone();
@@ -63,7 +63,7 @@ impl GoEnv {
     }
 }
 
-/// Deserialize a block's `package` field: one Go package pattern or a list of
+/// Deserialize a target's `package` field: one Go package pattern or a list of
 /// them. The list must not be empty, so a deserialized field always has a
 /// first pattern.
 fn package_patterns<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -72,7 +72,7 @@ where
 {
     let packages = crate::providers::string_or_vec(deserializer)?;
     // The go command treats no patterns as the current directory's package,
-    // so an empty list would silently build something the block never named.
+    // so an empty list would silently build something the target never named.
     if packages.is_empty() {
         return Err(serde::de::Error::custom("package list must not be empty"));
     }
@@ -81,12 +81,12 @@ where
 
 /// Scan Go source files for package patterns and return hashed inputs,
 /// together with the files the go command `flags` name and the files
-/// matching the block's extra `inputs` globs.
+/// matching the target's extra `inputs` globs.
 ///
-/// `dir` is the block's `dir`. The go command runs there, or where a `-C`
+/// `dir` is the target's `dir`. The go command runs there, or where a `-C`
 /// flag moves it, and the scanner walks up from there to locate `go.mod`.
 /// `None` starts from bit's CWD. The `inputs` globs are relative to `dir`,
-/// as in every other block. `env` is the block's `env`.
+/// as in every other target. `env` is the target's `env`.
 pub fn resolve_go_inputs(
     patterns: &[String],
     dir: Option<&str>,
@@ -109,7 +109,7 @@ pub fn resolve_go_inputs(
     Ok(hashes)
 }
 
-/// A go command flag that takes a value, as a block's `flags` give it.
+/// A go command flag that takes a value, as a target's `flags` give it.
 struct FlagValue<'a> {
     name: &'a str,
     value: &'a str,
@@ -157,10 +157,10 @@ fn flag_values<'a>(flags: &'a [String], names: &[&str]) -> Vec<FlagValue<'a>> {
     found
 }
 
-/// The directory the go command runs in: the block's `dir`, changed by a
+/// The directory the go command runs in: the target's `dir`, changed by a
 /// `-C` flag. bit applies `-C` itself, by running the go command there,
 /// because the go command accepts `-C` only as its first flag and bit
-/// places its own flags ahead of the block's.
+/// places its own flags ahead of the target's.
 fn run_dir(dir: Option<&str>, flags: &[String]) -> Option<String> {
     match flag_values(flags, &["C"]).last() {
         Some(chdir) => Some(crate::provider::in_dir(dir, chdir.value)),
@@ -269,7 +269,7 @@ fn display_command(program: &str, args: &[String], dir: Option<&str>) -> String 
 }
 
 /// The effective Go toolchain and target, as `go env` reports them once the
-/// block's `GoEnv` overrides and the ambient environment apply. Run in
+/// target's `GoEnv` overrides and the ambient environment apply. Run in
 /// `dir`, the go command honours the module's `toolchain` line, so a
 /// toolchain switch behind it is seen.
 pub fn toolchain(env: &GoEnv, dir: Option<&str>) -> Ambient {
@@ -437,7 +437,7 @@ struct Affected {
 }
 
 /// The packages `patterns` name whose files include a changed path, or `None`
-/// to run the whole patterns. `tests` must match what the block resolves,
+/// to run the whole patterns. `tests` must match what the target resolves,
 /// so each tracked path belongs to the packages that depend on it. `list`
 /// reports the packages `go` matches for the patterns, so `args` and `env`
 /// must match those of the narrowed command: see [`GoEnv::over`].
@@ -529,7 +529,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn go_env_overrides_the_block_env() {
+    fn go_env_overrides_the_target_env() {
         let env = BTreeMap::from([
             ("GOOS".to_owned(), "linux".to_owned()),
             ("GOFLAGS".to_owned(), "-mod=mod".to_owned()),

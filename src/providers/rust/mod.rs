@@ -16,7 +16,7 @@ use crate::cache::PortablePaths;
 use crate::file_tracker::FileTracker;
 use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider, VersionCommand};
 use crate::sha256::SHA256;
-use crate::value::{BlockRef, Value};
+use crate::value::{TargetRef, Value};
 
 /// Shared Rust environment/config fields flattened into all rust resources.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
@@ -88,7 +88,7 @@ impl CargoCommand {
         self
     }
 
-    /// Set the block's `env` for the command. [`CargoCommand::display`]
+    /// Set the target's `env` for the command. [`CargoCommand::display`]
     /// leaves it out, since its values may be secrets.
     pub fn envs(&mut self, env: &BTreeMap<String, String>) -> &mut Self {
         self.env.clone_from(env);
@@ -140,7 +140,7 @@ impl CargoCommand {
             cmd.current_dir(dir);
         }
         cmd.envs(&self.env);
-        // A wrapper the user sets, in bit's environment or the block's, wins.
+        // A wrapper the user sets, in bit's environment or the target's, wins.
         if let Some(wrapper) = remap_wrapper()
             && std::env::var_os("RUSTC_WORKSPACE_WRAPPER").is_none()
             && !self.env.contains_key("RUSTC_WORKSPACE_WRAPPER")
@@ -152,7 +152,7 @@ impl CargoCommand {
 
     /// Spawn the command, pipe stdout/stderr to the writer, wait for exit.
     /// Returns an error if the command fails to spawn or exits non-zero.
-    pub fn run(&self, writer: &crate::output::BlockWriter) -> Result<(), BoxError> {
+    pub fn run(&self, writer: &crate::output::TargetWriter) -> Result<(), BoxError> {
         let mut child = self
             .command()
             .stdout(Stdio::piped())
@@ -269,12 +269,12 @@ pub fn toolchain(env: &RustEnv, dir: Option<&str>, extra: &[&[&str]]) -> Vec<Amb
 /// [`toolchain`] plus the variables cargo reads that change compiler
 /// output, for the resources that compile. No version command reports
 /// them, and without them a binary built with different flags in another
-/// worktree could be restored from the shared cache. `block_env` is the
-/// block's `env`, which cargo's target directory may depend on.
+/// worktree could be restored from the shared cache. `target_env` is the
+/// target's `env`, which cargo's target directory may depend on.
 pub fn build_ambient(
     env: &RustEnv,
     dir: Option<&str>,
-    block_env: &BTreeMap<String, String>,
+    target_env: &BTreeMap<String, String>,
     extra: &[&[&str]],
 ) -> Vec<Ambient> {
     const BUILD_VARIABLES: [&str; 13] = [
@@ -310,7 +310,7 @@ pub fn build_ambient(
     //
     // Without a target directory nothing has been built, so nothing is
     // recorded yet; a failure to find it surfaces when resolving instead.
-    if let Ok(target_dir) = target_directory(dir, block_env) {
+    if let Ok(target_dir) = target_directory(dir, target_env) {
         ambient.extend(
             recorded_variables(&target_dir)
                 .into_iter()
@@ -428,7 +428,7 @@ struct DiscoveredPaths {
 }
 
 /// Discovered paths and `cargo metadata` output, by the `dir` cargo runs in
-/// and the block's `env`. Blocks in different directories can belong to
+/// and the target's `env`. Targets in different directories can belong to
 /// different workspaces, and a variable such as `CARGO_TARGET_DIR` changes
 /// what cargo reports.
 static DISCOVERED_CACHE: LazyLock<Mutex<HashMap<String, DiscoveredPaths>>> = LazyLock::new(Default::default);
@@ -458,8 +458,8 @@ pub fn target_directory(dir: Option<&str>, env: &BTreeMap<String, String>) -> Re
     Ok(discovered(dir, env)?.target_dir)
 }
 
-/// What a rust block builds: the packages its `package` field and cargo
-/// `flags` select, in the workspace cargo finds from `dir` with the block's
+/// What a rust target builds: the packages its `package` field and cargo
+/// `flags` select, in the workspace cargo finds from `dir` with the target's
 /// `env`.
 pub struct Selection<'a> {
     pub dir: Option<&'a str>,
@@ -468,7 +468,7 @@ pub struct Selection<'a> {
     pub flags: &'a [String],
 }
 
-/// The cargo flags in a block's `flags` that change which packages build.
+/// The cargo flags in a target's `flags` that change which packages build.
 #[derive(Debug, Default, PartialEq)]
 struct SelectionFlags {
     /// `-p`/`--package` specs, by package name.
@@ -553,7 +553,7 @@ impl Selection<'_> {
     }
 }
 
-/// The directories of the local packages a block builds, as
+/// The directories of the local packages a target builds, as
 /// [`resolve_rust_inputs`] selects them.
 pub fn package_roots(selection: &Selection) -> Result<Vec<PathBuf>, BoxError> {
     Ok(selection.paths()?.1.roots)
@@ -892,15 +892,15 @@ fn packages() -> Result<Vec<String>, BoxError> {
 ///
 /// `package` names the Cargo workspace package. When `template` is set, every
 /// `$` in it is replaced with the dependency package name. For example,
-/// `crate[$]` returns matrix block references. Development dependencies are
+/// `crate[$]` returns matrix target references. Development dependencies are
 /// excluded because Cargo does not build them for `cargo build` and permits
 /// cycles through them.
 #[bit_derive::provider_function]
-fn dependencies(package: String, template: Option<String>) -> Result<Vec<BlockRef>, BoxError> {
+fn dependencies(package: String, template: Option<String>) -> Result<Vec<TargetRef>, BoxError> {
     Ok(
         workspace_package_dependencies(&cargo_metadata(None, &BTreeMap::new())?, &package, template.as_deref())?
             .into_iter()
-            .map(BlockRef::new)
+            .map(TargetRef::new)
             .collect(),
     )
 }
@@ -1299,7 +1299,7 @@ mod tests {
         assert_eq!(functions[1].name, "dependencies");
         assert_eq!(
             functions[1].returns,
-            crate::value::Type::List(Box::new(crate::value::Type::BlockRef))
+            crate::value::Type::List(Box::new(crate::value::Type::TargetRef))
         );
     }
 
@@ -1515,20 +1515,20 @@ mod tests {
     }
 
     #[test]
-    fn cargo_sets_block_env_without_displaying_it() {
-        let block_env = BTreeMap::from([
+    fn cargo_sets_target_env_without_displaying_it() {
+        let target_env = BTreeMap::from([
             ("TOKEN".to_owned(), "s3cr3t".to_owned()),
             ("RUSTC_WORKSPACE_WRAPPER".to_owned(), "mine".to_owned()),
         ]);
         let mut cargo = RustEnv::default().cargo("build", None);
-        cargo.envs(&block_env);
+        cargo.envs(&target_env);
         let command = cargo.command();
         let envs: HashMap<_, _> = command.get_envs().collect();
         assert_eq!(
             envs[std::ffi::OsStr::new("TOKEN")],
             Some(std::ffi::OsStr::new("s3cr3t"))
         );
-        // The block's wrapper is the user's, so bit's remap wrapper yields.
+        // The target's wrapper is the user's, so bit's remap wrapper yields.
         assert_eq!(
             envs[std::ffi::OsStr::new("RUSTC_WORKSPACE_WRAPPER")],
             Some(std::ffi::OsStr::new("mine"))

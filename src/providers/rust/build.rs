@@ -4,15 +4,15 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
 use super::{CargoCommand, RustEnv, RustFeatures};
 
-/// Compile Rust packages. A result shared from another worktree restores nothing into `target/`, so use `rust.exe` for a binary other blocks need.
+/// Compile Rust packages. A result shared from another worktree restores nothing into `target/`, so use `rust.exe` for a binary other targets need.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct RustBuildInputs {
     /// Package to build (-p flag)
@@ -30,7 +30,7 @@ pub struct RustBuildInputs {
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct RustBuildOutputs {}
 
-/// Persisted state for a `rust.build` block.
+/// Persisted state for a `rust.build` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RustBuildState {
     pub package: Option<String>,
@@ -45,7 +45,7 @@ pub struct RustBuildResource {
     pub tracker: Arc<FileTracker>,
 }
 
-fn build_command(inputs: &Block<RustBuildInputs>) -> CargoCommand {
+fn build_command(inputs: &Target<RustBuildInputs>) -> CargoCommand {
     let mut cargo = inputs.rust_env.cargo("build", inputs.dir.as_deref());
     cargo.envs(&inputs.env);
     if let Some(pkg) = &inputs.package {
@@ -68,11 +68,11 @@ impl Resource for RustBuildResource {
         ResourceKind::Build
     }
 
-    fn ambient(&self, inputs: &Block<RustBuildInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<RustBuildInputs>) -> Vec<Ambient> {
         super::build_ambient(&inputs.rust_env, inputs.dir.as_deref(), &inputs.env, &[])
     }
 
-    fn resolve(&self, inputs: &Block<RustBuildInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<RustBuildInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let tracker = &*self.tracker;
         super::resolve_rust_inputs(
             &super::Selection {
@@ -87,7 +87,7 @@ impl Resource for RustBuildResource {
 
     fn plan(
         &self,
-        inputs: &Block<RustBuildInputs>,
+        inputs: &Target<RustBuildInputs>,
         prior_state: Option<&RustBuildState>,
     ) -> Result<PlanResult, BoxError> {
         let description = build_command(inputs).display();
@@ -119,10 +119,10 @@ impl Resource for RustBuildResource {
 
     fn apply(
         &self,
-        inputs: &Block<RustBuildInputs>,
+        inputs: &Target<RustBuildInputs>,
         _prior_state: Option<&RustBuildState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<RustBuildState, RustBuildOutputs>, BoxError> {
         build_command(inputs).run(writer)?;
 
@@ -137,11 +137,11 @@ impl Resource for RustBuildResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<RustBuildState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<RustBuildState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
-    fn cache_policy(&self, _inputs: &Block<RustBuildInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<RustBuildInputs>) -> CachePolicy {
         CachePolicy::Shared { version: 1 }
     }
 }
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_prior_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustBuildInputs {
                 package: None,
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn plan_create_with_package() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustBuildInputs {
                 package: Some("my-crate".into()),
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn plan_none_when_unchanged() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustBuildInputs {
                 package: None,
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_flags_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustBuildInputs {
                 package: None,
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn plan_update_when_features_changed() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             RustBuildInputs {
                 package: None,

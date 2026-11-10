@@ -4,9 +4,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::{BlockWriter, Event};
+use crate::output::{Event, TargetWriter};
 use crate::provider::{
-    ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -52,7 +52,7 @@ fn network_id(env: &super::Env, name: &str) -> Option<String> {
 /// Why the network `prior` recorded must be created again, given the ID of
 /// the network now named `prior.name`, if any. A network removed and
 /// created again under the same name has a new ID, and the containers
-/// attached to the old one are not attached to it, so blocks using the
+/// attached to the old one are not attached to it, so targets using the
 /// network's `id` must see the change.
 fn drift(prior: &NetworkState, current_id: Option<&str>) -> Option<&'static str> {
     match current_id {
@@ -62,7 +62,7 @@ fn drift(prior: &NetworkState, current_id: Option<&str>) -> Option<&'static str>
     }
 }
 
-/// The arguments to `docker` that create the block's network.
+/// The arguments to `docker` that create the target's network.
 fn create_args(inputs: &NetworkInputs) -> Vec<String> {
     let mut args = vec!["network".to_owned(), "create".to_owned()];
     if let Some(driver) = &inputs.driver {
@@ -96,17 +96,17 @@ impl Resource for NetworkResource {
         ResourceKind::Build
     }
 
-    fn resolve(&self, _inputs: &Block<NetworkInputs>) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, _inputs: &Target<NetworkInputs>) -> Result<std::collections::BTreeMap<String, SHA256>, BoxError> {
         Ok(std::collections::BTreeMap::new())
     }
 
     /// None: the network is daemon state that the docker CLI only requests,
     /// so a CLI upgrade must not recreate it under its attached containers.
-    fn ambient(&self, _inputs: &Block<NetworkInputs>) -> Vec<crate::provider::Ambient> {
+    fn ambient(&self, _inputs: &Target<NetworkInputs>) -> Vec<crate::provider::Ambient> {
         vec![]
     }
 
-    fn plan(&self, inputs: &Block<NetworkInputs>, prior_state: Option<&NetworkState>) -> Result<PlanResult, BoxError> {
+    fn plan(&self, inputs: &Target<NetworkInputs>, prior_state: Option<&NetworkState>) -> Result<PlanResult, BoxError> {
         let desc = crate::providers::display_command("docker", &create_args(inputs));
 
         let Some(prior) = prior_state else {
@@ -142,10 +142,10 @@ impl Resource for NetworkResource {
 
     fn apply(
         &self,
-        inputs: &Block<NetworkInputs>,
+        inputs: &Target<NetworkInputs>,
         prior_state: Option<&NetworkState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<NetworkState, NetworkOutputs>, BoxError> {
         // Adopt an existing network with the same name. If the driver
         // differs from what was requested, recreate.
@@ -197,14 +197,14 @@ impl Resource for NetworkResource {
         })
     }
 
-    fn destroy(&self, prior_state: &Block<NetworkState>, writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Target<NetworkState>, writer: &TargetWriter) -> Result<(), BoxError> {
         writer.event(Event::Starting, &format!("docker network rm {}", prior_state.name));
         remove_network(&prior_state.env, &prior_state.name)
     }
 
     /// A network is named, mutable state in the local Docker daemon; see
     /// `docker.container`.
-    fn cache_policy(&self, _inputs: &Block<NetworkInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<NetworkInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 }
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_no_state() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             NetworkInputs {
                 name: "test-net".into(),
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn description_includes_driver() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             NetworkInputs {
                 name: "test-net".into(),
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn plan_create_when_network_missing() {
-        let inputs = Block::new(
+        let inputs = Target::new(
             None,
             NetworkInputs {
                 name: "bit-nonexistent-network-test".into(),

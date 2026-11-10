@@ -41,7 +41,7 @@ fn docs_topic_prints_one_section_without_escape_codes() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let docs = String::from_utf8(output.stdout).unwrap();
     assert!(docs.starts_with("## CI workflows\n"), "{docs}");
-    assert!(docs.contains("[`large`](#blocks)"));
+    assert!(docs.contains("[`large`](#targets)"));
     assert!(!docs.contains('\x1b'));
     assert!(!docs.contains("## Providers"));
 }
@@ -97,7 +97,7 @@ fn help_explains_build_file_and_points_to_schema() {
         "param version: string = \"dev\"",
         "name: string = \"Bob\", retries = 2, age: int = null",
         "binary[arch] = go.exe",
-        "target default = [binary]",
+        "group default = [binary]",
         "output artifact = binary[\"amd64\"].path",
         "Use --schema to list all available resources and functions.",
     ] {
@@ -193,7 +193,7 @@ fn fmt_rejects_invalid_input_without_rewriting_it() {
 }
 
 #[test]
-fn target_arguments_bind_by_name_without_consuming_the_next_selector() {
+fn group_arguments_bind_by_name_without_consuming_the_next_selector() {
     let project = tempfile::tempdir().unwrap();
     fs::write(
         project.path().join("BUILD.bit"),
@@ -202,7 +202,7 @@ job(value : string) = exec {
   command = "printf #{value}"
 }
 
-target show(value : string) = [job(value = value)]
+group show(value : string) = [job(value = value)]
 "#,
     )
     .unwrap();
@@ -217,7 +217,7 @@ target show(value : string) = [job(value = value)]
 }
 
 #[test]
-fn graph_json_maps_each_block_to_all_its_deps() {
+fn graph_json_maps_each_target_to_all_its_deps() {
     let project = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
     fs::write(
@@ -259,7 +259,7 @@ fn quiet_suppresses_success_output_across_modes() {
     let cache = tempfile::tempdir().unwrap();
     fs::write(
         project.path().join("BUILD.bit"),
-        "task = exec { command = \"printf build-output\" }\ntarget build = [task]\n",
+        "task = exec { command = \"printf build-output\" }\ngroup build = [task]\n",
     )
     .unwrap();
 
@@ -366,7 +366,7 @@ fn schema_json_separates_imported_module_resources() {
 }
 
 #[test]
-fn list_shows_targets_and_repeated_list_shows_blocks() {
+fn list_shows_groups_and_repeated_list_shows_targets() {
     let project = tempfile::tempdir().unwrap();
     fs::write(
         project.path().join("BUILD.bit"),
@@ -380,23 +380,23 @@ beta = exec {
 }
 
 # Build the project
-target build = [alpha, beta]
-target deploy = [beta]
+group build = [alpha, beta]
+group deploy = [beta]
 "#,
     )
     .unwrap();
 
-    let targets = run_bit(project.path(), &["-l"]);
-    assert!(targets.status.success(), "{}", String::from_utf8_lossy(&targets.stderr));
-    let stdout = String::from_utf8(targets.stdout).unwrap();
+    let groups = run_bit(project.path(), &["-l"]);
+    assert!(groups.status.success(), "{}", String::from_utf8_lossy(&groups.stderr));
+    let stdout = String::from_utf8(groups.stdout).unwrap();
     assert!(stdout.contains("build"));
     assert!(stdout.contains("Build the project"));
     assert!(stdout.contains("deploy"));
     assert!(!stdout.contains("exec.exec"));
 
-    let blocks = run_bit(project.path(), &["-ll"]);
-    assert!(blocks.status.success(), "{}", String::from_utf8_lossy(&blocks.stderr));
-    let stdout = String::from_utf8(blocks.stdout).unwrap();
+    let targets = run_bit(project.path(), &["-ll"]);
+    assert!(targets.status.success(), "{}", String::from_utf8_lossy(&targets.stderr));
+    let stdout = String::from_utf8(targets.stdout).unwrap();
     assert!(stdout.contains("alpha"));
     assert!(stdout.contains("beta"));
     assert!(stdout.contains("exec.exec"));
@@ -428,9 +428,9 @@ package = exec {
     )
     .unwrap();
 
-    let blocks = run_bit(project.path(), &["-ll"]);
-    assert!(blocks.status.success(), "{}", String::from_utf8_lossy(&blocks.stderr));
-    let stdout = String::from_utf8(blocks.stdout).unwrap();
+    let targets = run_bit(project.path(), &["-ll"]);
+    assert!(targets.status.success(), "{}", String::from_utf8_lossy(&targets.stderr));
+    let stdout = String::from_utf8(targets.stdout).unwrap();
     let lines: Vec<_> = stdout.lines().collect();
     assert!(lines.iter().any(|line| line.starts_with("package ")));
     assert!(lines.iter().any(|line| line.starts_with("  binary-a ")));
@@ -445,7 +445,7 @@ package = exec {
 }
 
 #[test]
-fn force_rebuilds_implicit_and_specified_blocks_without_cache() {
+fn force_rebuilds_implicit_and_specified_targets_without_cache() {
     let project = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
     fs::write(
@@ -517,7 +517,7 @@ fn narrowed_run_prints_only_the_command_it_runs() {
 }
 
 #[test]
-fn since_lists_changed_blocks_and_content_dependents() {
+fn since_lists_changed_targets_and_content_dependents() {
     let project = tempfile::tempdir().unwrap();
     fs::write(project.path().join("a.txt"), "a\n").unwrap();
     fs::write(project.path().join("b.txt"), "b\n").unwrap();
@@ -583,9 +583,9 @@ e = exec {
     fs::write(project.path().join("e.txt"), "changed\n").unwrap();
     fs::write(project.path().join("d.txt"), "untracked\n").unwrap();
 
-    let target_list = run_bit(project.path(), &["--list", "--since", base]);
-    assert!(!target_list.status.success());
-    assert!(String::from_utf8_lossy(&target_list.stderr).contains("--since requires -ll"));
+    let group_list = run_bit(project.path(), &["--list", "--since", base]);
+    assert!(!group_list.status.success());
+    assert!(String::from_utf8_lossy(&group_list.stderr).contains("--since requires -ll"));
 
     let output = run_bit(project.path(), &["-ll", "--since", base]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

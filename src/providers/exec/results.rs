@@ -10,7 +10,7 @@ use jaq_core::{Compiler, Ctx, Vars, unwrap_valr};
 use jaq_json::Val;
 use serde::Deserialize;
 
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::BoxError;
 use crate::providers::ReportMode;
 
@@ -189,7 +189,7 @@ pub struct Outcome {
 /// are summarized when the command exits.
 pub struct Report<'a> {
     filter: &'a ResultsFilter,
-    writer: &'a BlockWriter,
+    writer: &'a TargetWriter,
     mode: ReportMode,
     /// Lines of a multi-line document still being read.
     document: Vec<String>,
@@ -205,7 +205,7 @@ pub struct Report<'a> {
 }
 
 impl<'a> Report<'a> {
-    pub fn new(filter: &'a ResultsFilter, writer: &'a BlockWriter, mode: ReportMode) -> Self {
+    pub fn new(filter: &'a ResultsFilter, writer: &'a TargetWriter, mode: ReportMode) -> Self {
         Self {
             filter,
             writer,

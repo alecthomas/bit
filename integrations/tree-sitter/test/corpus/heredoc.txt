@@ -8,7 +8,7 @@ EOF
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     (field_assignment
@@ -27,7 +27,7 @@ x = exec {
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     (field_assignment
@@ -45,7 +45,7 @@ SCRIPT
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     (field_assignment
@@ -63,7 +63,7 @@ EOF
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     (field_assignment
@@ -85,7 +85,7 @@ EOF
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     resource: (identifier)
@@ -113,7 +113,7 @@ EOF
 }
 --------------------------------------------------------------------------------
 (source_file
-  (block
+  (target
     name: (identifier)
     provider: (identifier)
     (field_assignment

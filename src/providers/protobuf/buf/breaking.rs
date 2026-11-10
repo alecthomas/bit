@@ -5,9 +5,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
+use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, Block, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -33,14 +33,14 @@ impl BufBreakingInputs {
     }
 }
 
-/// Outputs from a `buf.breaking` block.
+/// Outputs from a `buf.breaking` target.
 #[derive(Debug, Serialize, bit_derive::Schema)]
 pub struct BufBreakingOutputs {
     /// Whether no breaking changes were found
     pub passed: bool,
 }
 
-/// Persisted state for a `buf.breaking` block.
+/// Persisted state for a `buf.breaking` target.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BufBreakingState {
     #[serde(flatten)]
@@ -112,20 +112,20 @@ impl Resource for BufBreakingResource {
 
     /// A local baseline is tracked like the input. A Git baseline is
     /// tracked by the commit it names, in `plan`.
-    fn resolve(&self, inputs: &Block<BufBreakingInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    fn resolve(&self, inputs: &Target<BufBreakingInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let dir = inputs.dir.as_deref();
         let mut sources = inputs.target.sources(dir, &inputs.flags)?;
         sources.add_input(dir, &inputs.against)?;
         sources.hash(&self.tracker)
     }
 
-    fn ambient(&self, inputs: &Block<BufBreakingInputs>) -> Vec<Ambient> {
+    fn ambient(&self, inputs: &Target<BufBreakingInputs>) -> Vec<Ambient> {
         inputs.target.check_ambient(inputs.dir.as_deref(), &inputs.flags)
     }
 
     fn plan(
         &self,
-        inputs: &Block<BufBreakingInputs>,
+        inputs: &Target<BufBreakingInputs>,
         prior_state: Option<&BufBreakingState>,
     ) -> Result<PlanResult, BoxError> {
         let mut result = super::super::plan(
@@ -145,10 +145,10 @@ impl Resource for BufBreakingResource {
 
     fn apply(
         &self,
-        inputs: &Block<BufBreakingInputs>,
+        inputs: &Target<BufBreakingInputs>,
         _prior_state: Option<&BufBreakingState>,
         _changes: &Changes,
-        writer: &BlockWriter,
+        writer: &TargetWriter,
     ) -> Result<ApplyResult<BufBreakingState, BufBreakingOutputs>, BoxError> {
         let against_commit = git_baseline_commit(&inputs.against, inputs.dir.as_deref())?;
         let status = inputs.target.run(inputs, &inputs.args(), writer)?;
@@ -163,13 +163,13 @@ impl Resource for BufBreakingResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Block<BufBreakingState>, _writer: &BlockWriter) -> Result<(), BoxError> {
+    fn destroy(&self, _prior_state: &Target<BufBreakingState>, _writer: &TargetWriter) -> Result<(), BoxError> {
         Ok(())
     }
 
     /// The baseline usually lives outside the tracked sources, as a Git ref
     /// or a remote module, so the action key cannot describe it.
-    fn cache_policy(&self, _inputs: &Block<BufBreakingInputs>) -> CachePolicy {
+    fn cache_policy(&self, _inputs: &Target<BufBreakingInputs>) -> CachePolicy {
         CachePolicy::Local
     }
 }
@@ -249,7 +249,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("baseline/proto/a.proto"), "").unwrap();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(root.to_string_lossy().into_owned()),
             BufBreakingInputs {
                 target: BufTarget {
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn plan_updates_when_baseline_moves() {
         let dir = repo();
-        let inputs = Block::new(
+        let inputs = Target::new(
             Some(dir.path().to_string_lossy().into_owned()),
             BufBreakingInputs {
                 target: BufTarget { input: None },

@@ -10,14 +10,14 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::file_tracker::FileTracker;
-use crate::output::BlockWriter;
-use crate::provider::{Ambient, Block, BoxError, CachePolicy, DynResource, FuncSignature, Provider};
+use crate::output::TargetWriter;
+use crate::provider::{Ambient, BoxError, CachePolicy, DynResource, FuncSignature, Provider, Target};
 use crate::value::Value;
 
 use workspace::Sources;
 
 /// What a buf command operates on. Shared by all buf resources, which run
-/// buf in the block's `dir`.
+/// buf in the target's `dir`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
 pub struct BufTarget {
     /// Buf input, relative to `dir` (defaults to the workspace in `dir`)
@@ -26,9 +26,9 @@ pub struct BufTarget {
 }
 
 impl BufTarget {
-    /// Run `buf <args...> [input]` in the block's `dir` with its `env`.
-    fn run<T>(&self, block: &Block<T>, args: &[String], writer: &BlockWriter) -> Result<ExitStatus, BoxError> {
-        super::run("buf", &self.args(args), block, writer)
+    /// Run `buf <args...> [input]` in the target's `dir` with its `env`.
+    fn run<T>(&self, target: &Target<T>, args: &[String], writer: &TargetWriter) -> Result<ExitStatus, BoxError> {
+        super::run("buf", &self.args(args), target, writer)
     }
 
     /// Plan description for `buf <args...> [input]`.

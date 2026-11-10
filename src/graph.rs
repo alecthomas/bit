@@ -59,7 +59,7 @@ pub struct NodeStyle {
 
 /// Render the DAG as a left-to-right ASCII graph, grouped by phase.
 ///
-/// Blocks are partitioned into pre / default / post phases, and each
+/// Targets are partitioned into pre / default / post phases, and each
 /// phase is rendered as its own subgraph laid out side-by-side from
 /// left to right. Edges between phases are omitted — the horizontal
 /// layout implies ordering. Within a phase, all parent edges are
@@ -120,8 +120,8 @@ pub fn render(dag: &Dag, names: &[String], styles: &HashMap<String, NodeStyle>) 
     out.trim_end_matches('\n').to_owned()
 }
 
-/// Render the selected blocks as a JSON object mapping each block name to
-/// the sorted names of the selected blocks that must run before it.
+/// Render the selected targets as a JSON object mapping each target name to
+/// the sorted names of the selected targets that must run before it.
 ///
 /// Every edge counts, whatever created it, including the synthetic edges
 /// that order phases, so the map alone is the complete run-time graph.
@@ -184,7 +184,7 @@ fn render_parents(topo: &[String], parents: &HashMap<String, Vec<String>>) -> St
         .join("\n")
 }
 
-/// A layout slot. Real nodes carry a `key` (the block name, used for edge
+/// A layout slot. Real nodes carry a `key` (the target name, used for edge
 /// lookups) and a separate `label` (what gets drawn and measured). The two
 /// differ when the caller supplies a decorated label — for example `+ foo`
 /// with a plan symbol prepended — so we can lay out around the rendered
@@ -276,7 +276,7 @@ impl Layout {
         let max_layer = layer.values().copied().max().unwrap_or(0);
 
         // Seed each layer with real nodes, alphabetically. The label
-        // defaults to the block name when no override is provided.
+        // defaults to the target name when no override is provided.
         let mut layers: Vec<Vec<Slot>> = vec![Vec::new(); max_layer + 1];
         let mut sorted = names.to_vec();
         sorted.sort();

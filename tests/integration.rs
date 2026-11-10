@@ -40,15 +40,15 @@ impl MemoryStore {
 }
 
 impl StateStore for MemoryStore {
-    fn load(&self, block: &str) -> Result<Option<serde_json::Value>, StateError> {
-        Ok(self.data.read().unwrap().get(block).cloned())
+    fn load(&self, target: &str) -> Result<Option<serde_json::Value>, StateError> {
+        Ok(self.data.read().unwrap().get(target).cloned())
     }
-    fn save(&self, block: &str, state: &serde_json::Value) -> Result<(), StateError> {
-        self.data.write().unwrap().insert(block.into(), state.clone());
+    fn save(&self, target: &str, state: &serde_json::Value) -> Result<(), StateError> {
+        self.data.write().unwrap().insert(target.into(), state.clone());
         Ok(())
     }
-    fn remove(&self, block: &str) -> Result<(), StateError> {
-        self.data.write().unwrap().remove(block);
+    fn remove(&self, target: &str) -> Result<(), StateError> {
+        self.data.write().unwrap().remove(target);
         Ok(())
     }
     fn list(&self) -> Result<Vec<String>, StateError> {
@@ -56,7 +56,7 @@ impl StateStore for MemoryStore {
     }
 }
 
-fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
+fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::TargetPlan> {
     let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
@@ -73,7 +73,7 @@ fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
     .expect("apply failed")
 }
 
-fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
+fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::TargetPlan> {
     let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
     let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
@@ -95,7 +95,7 @@ fn run_destroy(input: &str, store: &MemoryStore) {
 }
 
 #[test]
-fn single_exec_block() {
+fn single_exec_target() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("hello.txt");
     let input = format!(
@@ -112,7 +112,7 @@ fn single_exec_block() {
 }
 
 #[test]
-fn chained_blocks_with_refs() {
+fn chained_targets_with_refs() {
     let dir = tempfile::tempdir().unwrap();
     let file_a = dir.path().join("a.txt");
     let file_b = dir.path().join("b.txt");
@@ -188,7 +188,7 @@ fn destroy_removes_state() {
 }
 
 #[test]
-fn explicit_block_excluded_from_default_apply() {
+fn explicit_target_excluded_from_default_apply() {
     let dir = tempfile::tempdir().unwrap();
     let out_a = dir.path().join("a.txt");
     let out_b = dir.path().join("b.txt");
@@ -204,7 +204,7 @@ fn explicit_block_excluded_from_default_apply() {
     );
     let store = MemoryStore::new();
 
-    // Default apply (no targets, no `default` target) skips the explicit block.
+    // Default apply (no targets, no `default` group) skips the explicit target.
     run_apply(&input, &store);
     assert!(out_a.exists());
     assert!(!out_b.exists());
@@ -228,7 +228,7 @@ fn explicit_block_excluded_from_default_apply() {
 }
 
 #[test]
-fn protected_block_survives_destroy() {
+fn protected_target_survives_destroy() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.txt");
     let input = format!(
@@ -244,7 +244,7 @@ fn protected_block_survives_destroy() {
 }
 
 #[test]
-fn target_filters_execution() {
+fn group_filters_execution() {
     let dir = tempfile::tempdir().unwrap();
     let out_a = dir.path().join("a.txt");
     let out_b = dir.path().join("b.txt");
@@ -252,7 +252,7 @@ fn target_filters_execution() {
         concat!(
             "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             "b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "target just_a = [a]\n",
+            "group just_a = [a]\n",
         ),
         out_a.display(),
         out_a.display(),
@@ -280,7 +280,7 @@ fn target_filters_execution() {
 }
 
 #[test]
-fn let_bindings_in_block_fields() {
+fn let_bindings_in_target_fields() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("out.txt");
     let input = format!(
@@ -368,7 +368,7 @@ fn dependency_change_propagates_to_plan() {
     let out_a = dir.path().join("a.txt");
     let out_b = dir.path().join("b.txt");
 
-    // Apply both blocks
+    // Apply both targets
     let input_v1 = format!(
         concat!(
             "a = exec {{\n  command = \"echo v1 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
@@ -448,7 +448,7 @@ fn after_does_not_propagate_changes() {
     let out_a = dir.path().join("a.txt");
     let out_b = dir.path().join("b.txt");
 
-    // Apply both blocks — b runs after a but is not content-coupled
+    // Apply both targets — b runs after a but is not content-coupled
     let input_v1 = format!(
         concat!(
             "a = exec {{\n  command = \"echo v1 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
@@ -494,25 +494,25 @@ fn after_ignores_parent_output_values() {
     let out_a1 = dir.path().join("a1.txt");
     let out_a2 = dir.path().join("a2.txt");
     let out_b = dir.path().join("b.txt");
-    let block_a = |out: &std::path::Path| {
+    let target_a = |out: &std::path::Path| {
         format!(
             "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             out.display(),
             out.display(),
         )
     };
-    let block_b = format!(
+    let target_b = format!(
         "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
         out_b.display(),
         out_b.display(),
     );
     let store = MemoryStore::new();
-    run_apply(&format!("{}{block_b}", block_a(&out_a1)), &store);
+    run_apply(&format!("{}{target_b}", target_a(&out_a1)), &store);
 
     // Rebuild a alone so its stored `path` output changes.
-    run_apply(&block_a(&out_a2), &store);
+    run_apply(&target_a(&out_a2), &store);
 
-    let plans = run_plan(&format!("{}{block_b}", block_a(&out_a2)), &store);
+    let plans = run_plan(&format!("{}{target_b}", target_a(&out_a2)), &store);
     assert_eq!(
         plans[1].plan.action,
         bit::provider::PlanAction::None,
@@ -526,7 +526,7 @@ fn doc_comments_preserved() {
         "# The server\n",
         "server = exec {\n  command = \"echo hi\"\n  outputs = \"out\"\n  inputs = []\n}\n",
         "# Build everything\n",
-        "target build = [server]\n",
+        "group build = [server]\n",
     );
     let tracker = test_tracker();
     let module = parser::parse(input, "<test>").unwrap();
@@ -534,8 +534,8 @@ fn doc_comments_preserved() {
     let (dag, _base) = loader::load(&module, &Map::new(), &registry(&tracker), &store, &[]).unwrap();
     let node = dag.get_node("server").unwrap();
     assert_eq!(node.fields.len(), 3);
-    let targets = dag.targets();
-    assert_eq!(targets["build"].doc.as_deref(), Some("Build everything"));
+    let groups = dag.groups();
+    assert_eq!(groups["build"].doc.as_deref(), Some("Build everything"));
 }
 
 #[test]
@@ -568,7 +568,7 @@ fn dump_after_apply() {
 }
 
 #[test]
-fn dump_with_target() {
+fn dump_with_group() {
     let dir = tempfile::tempdir().unwrap();
     let out_a = dir.path().join("a.txt");
     let out_b = dir.path().join("b.txt");
@@ -576,7 +576,7 @@ fn dump_with_target() {
         concat!(
             "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
             "b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "target just_a = [a]\n",
+            "group just_a = [a]\n",
         ),
         out_a.display(),
         out_a.display(),
@@ -585,7 +585,7 @@ fn dump_with_target() {
     );
     let store = MemoryStore::new();
     run_apply(&input, &store);
-    // Dump filtered to target should succeed
+    // Dump filtered to a group should succeed
     run_dump(&input, &store, &["just_a".into()]);
 }
 
@@ -596,7 +596,7 @@ fn write_module(dir: &std::path::Path, provider: &str, resource: &str, content: 
     fs::write(module_dir.join(format!("{resource}.bit")), content).unwrap();
 }
 
-fn run_apply_in_dir(dir: &std::path::Path, input: &str, store: &MemoryStore) -> Vec<engine::BlockPlan> {
+fn run_apply_in_dir(dir: &std::path::Path, input: &str, store: &MemoryStore) -> Vec<engine::TargetPlan> {
     let tracker = test_tracker();
     let module = parser::parse(input, "<test>").expect("parse failed");
     // Module-system tests in this file all use the `mymod` provider, mirroring
@@ -652,7 +652,7 @@ inst = mymod {
     let store = MemoryStore::new();
     let results = run_apply_in_dir(dir.path(), input, &store);
 
-    // Should have 2 blocks: inst.inner (exec) and inst (module outputs)
+    // Should have 2 targets: inst.inner (exec) and inst (module outputs)
     assert_eq!(results.len(), 2);
     assert!(out_inner.exists());
     assert_eq!(fs::read_to_string(&out_inner).unwrap().trim(), "hello from module");
@@ -700,7 +700,7 @@ fn module_output_forwarding() {
     let store = MemoryStore::new();
     let results = run_apply_in_dir(dir.path(), &input, &store);
 
-    // 3 blocks: inst.inner, inst, consumer
+    // 3 targets: inst.inner, inst, consumer
     assert_eq!(results.len(), 3);
     assert!(out_consumer.exists());
     assert_eq!(
@@ -786,7 +786,7 @@ fn parameterized_matrix_slice_end_to_end() {
             "  outputs = \"{dir}/chosen.txt\"\n",
             "  inputs = []\n",
             "}}\n",
-            "target default = [chosen]\n",
+            "group default = [chosen]\n",
         ),
         dir = dir.path().display(),
     );
@@ -867,7 +867,7 @@ fn go_exe_restores_from_shared_cache_after_worktree_deleted() {
         cache_dir: &std::path::Path,
         store: &MemoryStore,
         plan_only: bool,
-    ) -> Vec<engine::BlockPlan> {
+    ) -> Vec<engine::TargetPlan> {
         let tracker = test_tracker();
         let mut reg = ProviderRegistry::new();
         reg.register(Box::new(bit::providers::go::GoProvider::new(tracker.clone())));
@@ -910,7 +910,7 @@ fn go_exe_restores_from_shared_cache_after_worktree_deleted() {
     assert_eq!(plans[0].plan.action, bit::provider::PlanAction::None);
 }
 
-/// End to end with the real binary: build a `rust.exe` block in linked
+/// End to end with the real binary: build a `rust.exe` target in linked
 /// worktree A, delete A, and confirm worktree B restores the binary from the
 /// shared cache without cargo compiling anything. The binary prints the
 /// `file!()` of a file it includes by absolute path, which only the remap
