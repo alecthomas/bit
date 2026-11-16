@@ -60,6 +60,16 @@ fn host_platform() -> (String, String, String) {
 
 type Vars = HashMap<String, String>;
 
+/// The local paths a Dockerfile reads, by the build context they come from.
+#[derive(Debug, Default, PartialEq)]
+pub struct Sources {
+    /// Paths in the main build context, which its `.dockerignore` filters.
+    pub context: Vec<PathBuf>,
+    /// Paths in local named build contexts. The main context's
+    /// `.dockerignore` does not apply to them.
+    pub named: Vec<PathBuf>,
+}
+
 /// Parse a Dockerfile and return local source paths from COPY/ADD instructions.
 ///
 /// Variables follow Docker's scoping. ARGs before the first `FROM` are
@@ -69,15 +79,19 @@ type Vars = HashMap<String, String>;
 /// the same name, and an unset variable expands to nothing, as in Docker.
 /// Skips multi-stage `COPY --from=...` and ADD with URLs.
 ///
+/// `named_contexts` maps local named contexts, which override same-named stages as in BuildKit, to directories.
+/// `COPY --from` and `FROM` one are sources, but `RUN --mount` is not, so a mounted cache never forces a rebuild.
+///
 /// A build for several `platforms` reads each platform's files, so the
 /// sources of every one are returned. With none, Docker builds for the
 /// host's platform.
 pub fn dockerfile_sources(
     dockerfile: &Path,
     context: &Path,
+    named_contexts: &HashMap<String, PathBuf>,
     build_args: &HashMap<String, String>,
     platforms: &[String],
-) -> Result<Vec<PathBuf>, BoxError> {
+) -> Result<Sources, BoxError> {
     let contents = std::fs::read_to_string(dockerfile).map_err(|e| format!("reading {}: {e}", dockerfile.display()))?;
     let parsed = parse_dockerfile::parse(&contents).map_err(|e| format!("parsing {}: {e}", dockerfile.display()))?;
 
@@ -85,24 +99,39 @@ pub fn dockerfile_sources(
         [] => vec![None],
         platforms => platforms.iter().map(|platform| Some(platform.as_str())).collect(),
     };
-    let mut paths = Vec::new();
+    let mut sources = Sources::default();
     for target in targets {
-        for path in platform_sources(&parsed, context, build_args, target)? {
-            if !paths.contains(&path) {
-                paths.push(path);
+        let platform = platform_sources(&parsed, context, named_contexts, build_args, target)?;
+        for (all, found) in [
+            (&mut sources.context, platform.context),
+            (&mut sources.named, platform.named),
+        ] {
+            for path in found {
+                if !all.contains(&path) {
+                    all.push(path);
+                }
             }
         }
     }
-    Ok(paths)
+    Ok(sources)
+}
+
+/// The directory of the local named context `name`, which BuildKit matches
+/// as it matches stage names, without regard to case.
+fn named_context<'a>(named_contexts: &'a HashMap<String, PathBuf>, name: &str) -> Option<&'a PathBuf> {
+    named_contexts
+        .iter()
+        .find_map(|(candidate, dir)| candidate.eq_ignore_ascii_case(name).then_some(dir))
 }
 
 /// The sources [`dockerfile_sources`] returns for one `target` platform.
 fn platform_sources(
     parsed: &parse_dockerfile::Dockerfile<'_>,
     context: &Path,
+    named_contexts: &HashMap<String, PathBuf>,
     build_args: &HashMap<String, String>,
     target: Option<&str>,
-) -> Result<Vec<PathBuf>, BoxError> {
+) -> Result<Sources, BoxError> {
     let meta = builtin_args(target);
     let mut global = meta.clone();
     for arg in parsed.global_args() {
@@ -115,9 +144,12 @@ fn platform_sources(
     }
 
     let mut stage_envs: HashMap<String, Vars> = HashMap::new();
-    let mut paths = Vec::new();
+    let mut sources = Sources::default();
     for stage in parsed.stages() {
         let base = expand(&stage.from.image.value, &global)?.to_ascii_lowercase();
+        if let Some(dir) = named_context(named_contexts, &base) {
+            sources.named.push(dir.clone());
+        }
         let mut env = stage_envs.get(&base).cloned().unwrap_or_default();
         let mut args = Vars::new();
         for instruction in stage.instructions {
@@ -139,13 +171,26 @@ fn platform_sources(
                 }
                 Instruction::Env(instruction) => env.extend(env_pairs(&instruction.arguments.value, &vars)?),
                 Instruction::Copy(copy) => {
-                    let has_from = copy.options.iter().any(|f| &*f.name.value == "from");
-                    if has_from {
-                        continue;
-                    }
+                    let from = match copy.options.iter().find(|f| &*f.name.value == "from") {
+                        None => None,
+                        Some(flag) => {
+                            let name = expand(flag.value.as_ref().map_or("", |v| &*v.value), &vars)?;
+                            // Otherwise it copies from another stage or an image.
+                            let Some(dir) = named_context(named_contexts, &name) else {
+                                continue;
+                            };
+                            Some(dir)
+                        }
+                    };
                     for src in &copy.src {
                         if let parse_dockerfile::Source::Path(p) = src {
-                            paths.push(context.join(expand(&p.value, &vars)?));
+                            let src = expand(&p.value, &vars)?;
+                            match from {
+                                // A source is relative to the named context's
+                                // root even when written as an absolute path.
+                                Some(dir) => sources.named.push(dir.join(src.trim_start_matches('/'))),
+                                None => sources.context.push(context.join(src)),
+                            }
                         }
                     }
                 }
@@ -156,7 +201,7 @@ fn platform_sources(
                             if src_path.starts_with("http://") || src_path.starts_with("https://") {
                                 continue;
                             }
-                            paths.push(context.join(src_path));
+                            sources.context.push(context.join(src_path));
                         }
                     }
                 }
@@ -168,7 +213,7 @@ fn platform_sources(
                         .filter_map(|flag| flag.value.as_ref());
                     for mount in mounts {
                         if let Some(source) = context_bind_source(&expand(&mount.value, &vars)?) {
-                            paths.push(context.join(source));
+                            sources.context.push(context.join(source));
                         }
                     }
                 }
@@ -179,7 +224,7 @@ fn platform_sources(
             stage_envs.insert(name.value.to_ascii_lowercase(), env);
         }
     }
-    Ok(paths)
+    Ok(sources)
 }
 
 /// The context path a `RUN --mount` mounts, given its comma-separated
@@ -533,11 +578,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Dockerfile"), dockerfile).unwrap();
         let build_args = build_args.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect();
-        dockerfile_sources(&dir.path().join("Dockerfile"), Path::new(""), &build_args, &[])
-            .unwrap()
-            .into_iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect()
+        dockerfile_sources(
+            &dir.path().join("Dockerfile"),
+            Path::new(""),
+            &HashMap::new(),
+            &build_args,
+            &[],
+        )
+        .unwrap()
+        .context
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
     }
 
     #[test]
@@ -580,7 +632,9 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &HashMap::new(), &[])
+            .unwrap()
+            .context;
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0], dir.path().join("dist/app-amd64"));
     }
@@ -596,7 +650,9 @@ mod tests {
         .unwrap();
 
         let args = HashMap::from([("TARGETARCH".into(), "arm64".into())]);
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &args, &[]).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &args, &[])
+            .unwrap()
+            .context;
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0], dir.path().join("dist/app-arm64"));
     }
@@ -611,7 +667,9 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &HashMap::new(), &[])
+            .unwrap()
+            .context;
         assert_eq!(sources, [dir.path().join("dist/app-")]);
     }
 
@@ -629,6 +687,44 @@ mod tests {
     }
 
     #[test]
+    fn named_contexts_are_sources_only_when_copied_or_built_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let dockerfile = dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile,
+            concat!(
+                "FROM golang AS builder\n",
+                "ARG CONF=conf\n",
+                "COPY --from=Assets /img /app/img\n",
+                "COPY --from=${CONF} app.toml /app/\n",
+                "COPY --from=builder /out /out\n",
+                "RUN --mount=type=bind,from=gocache,target=/root/.cache/go-build go build\n",
+                "FROM vendor\n",
+                "COPY main.go /src/\n",
+            ),
+        )
+        .unwrap();
+        let named = HashMap::from([
+            ("assets".to_owned(), PathBuf::from("/assets")),
+            ("conf".to_owned(), PathBuf::from("/conf")),
+            ("gocache".to_owned(), PathBuf::from("/gocache")),
+            ("vendor".to_owned(), PathBuf::from("/vendor")),
+        ]);
+
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &named, &HashMap::new(), &[]).unwrap();
+
+        assert_eq!(sources.context, [dir.path().join("main.go")]);
+        assert_eq!(
+            sources.named,
+            [
+                PathBuf::from("/assets/img"),
+                PathBuf::from("/conf/app.toml"),
+                PathBuf::from("/vendor")
+            ]
+        );
+    }
+
+    #[test]
     fn target_args_come_from_the_platforms_built() {
         let dir = tempfile::tempdir().unwrap();
         let dockerfile = dir.path().join("Dockerfile");
@@ -639,7 +735,9 @@ mod tests {
         .unwrap();
 
         let platforms = ["linux/amd64".to_owned(), "linux/arm/v7".to_owned()];
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &platforms).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &HashMap::new(), &platforms)
+            .unwrap()
+            .context;
         assert_eq!(
             sources,
             [dir.path().join("dist/linux-amd64"), dir.path().join("dist/linux-armv7")]
@@ -659,7 +757,9 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &HashMap::new(), &[])
+            .unwrap()
+            .context;
         assert_eq!(sources.len(), 1);
         let path_str = sources[0].to_string_lossy();
         assert!(!path_str.contains('$'));
@@ -676,7 +776,9 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &HashMap::new(), &[])
+            .unwrap()
+            .context;
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0], dir.path().join("src/"));
         assert_eq!(sources[1], dir.path().join("config.toml"));
@@ -697,7 +799,9 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &HashMap::new(), &[])
+            .unwrap()
+            .context;
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0], dir.path().join("src/"));
     }
@@ -712,7 +816,9 @@ mod tests {
         )
         .unwrap();
 
-        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &[]).unwrap();
+        let sources = dockerfile_sources(&dockerfile, dir.path(), &HashMap::new(), &HashMap::new(), &[])
+            .unwrap()
+            .context;
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0], dir.path().join("local.txt"));
     }

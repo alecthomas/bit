@@ -463,7 +463,7 @@ A resource reports three things:
 - **`output_keys()`** — the paths the target produces. A trailing `/` marks a directory.
 - **`ambient()`** — tool versions, executables, and environment variables the result depends on. The engine fingerprints them and adds them to the sources under `version:`, `executable:`, and `env:` keys.
 
-For example, the `docker.image` provider parses the Dockerfile to discover `COPY` and `ADD` source paths automatically, skipping multi-stage `COPY --from=...` and `ADD` with URLs.
+For example, the `docker.image` provider parses the Dockerfile to discover `COPY` and `ADD` source paths automatically, skipping `ADD` with URLs and `COPY --from=...` another stage or image. A `COPY --from` a local named build context is a source.
 
 ## 6. Lifecycle
 

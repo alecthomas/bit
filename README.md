@@ -711,11 +711,12 @@ target = buf.breaking {
 
 ```bit
 target = docker.image {
-  tag = string                     # Image tag
-  context = string?                # Build context directory, relative to `dir`
-  dockerfile = string?             # Dockerfile path, relative to `context`
-  build_args = {string = string}?  # Docker build arguments
-  platform = (string | [string])?  # Target platform(s)
+  tag = string                         # Image tag
+  context = string?                    # Build context directory, relative to `dir`
+  dockerfile = string?                 # Dockerfile path, relative to `context`
+  build_args = {string = string}?      # Docker build arguments
+  build_contexts = {string = string}?  # Named build contexts, each passed as `--build-context name=source`. Local paths are relative to `dir`. Only files used by `COPY --from=name` or `FROM name` are inputs, so a `RUN --mount` cache never triggers builds.
+  platform = (string | [string])?      # Target platform(s)
 }
 ```
 

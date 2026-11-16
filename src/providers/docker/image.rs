@@ -38,6 +38,10 @@ pub struct ImageInputs {
     /// Docker build arguments
     #[serde(default)]
     pub build_args: HashMap<String, String>,
+    /// Named build contexts, each passed as `--build-context name=source`. Local paths are relative to `dir`.
+    /// Only files used by `COPY --from=name` or `FROM name` are inputs, so a `RUN --mount` cache never triggers builds.
+    #[serde(default)]
+    pub build_contexts: HashMap<String, String>,
     /// Target platform(s)
     #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
@@ -230,6 +234,73 @@ impl Target<ImageInputs> {
     fn dockerfile_path(&self) -> PathBuf {
         self.context_path().join(&self.dockerfile)
     }
+
+    /// Each named build context as docker is given it, sorted by name, with
+    /// a local path made relative to `dir` as `context` is.
+    fn build_context_args(&self) -> Vec<String> {
+        let mut contexts: Vec<_> = self.build_contexts.iter().collect();
+        contexts.sort();
+        contexts
+            .into_iter()
+            .map(|(name, source)| {
+                let source = match source.strip_prefix(OCI_LAYOUT) {
+                    Some(path) => format!("{OCI_LAYOUT}{}", self.path(path)),
+                    None if is_remote_build_context(source) => source.clone(),
+                    None => self.path(source),
+                };
+                format!("{name}={source}")
+            })
+            .collect()
+    }
+
+    /// The local directories among the named build contexts, by name.
+    fn local_build_contexts(&self) -> HashMap<String, PathBuf> {
+        self.build_contexts
+            .iter()
+            .filter(|(_, source)| !source.starts_with(OCI_LAYOUT) && !is_remote_build_context(source))
+            .map(|(name, source)| (name.clone(), PathBuf::from(self.path(source))))
+            .collect()
+    }
+}
+
+/// The prefix of a build context read from a local OCI image layout.
+const OCI_LAYOUT: &str = "oci-layout://";
+
+/// Whether buildx reads a `--build-context` source remotely rather than from a local path.
+/// Mirrors `loadInputs` in buildx's `build/opt.go` and BuildKit's `gitutil.ParseGitRef`.
+fn is_remote_build_context(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    [
+        "docker-image://",
+        "target:",
+        "http://",
+        "https://",
+        "git://",
+        "ssh://",
+        "github.com/",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+        || is_scp_style_git_url(source)
+}
+
+/// Whether `source` is an SCP-style Git URL such as `git@github.com:org/repo`,
+/// matching BuildKit's `^([a-zA-Z0-9-_]+)@([a-zA-Z0-9-.]+):` prefix.
+fn is_scp_style_git_url(source: &str) -> bool {
+    let Some((user, rest)) = source.split_once('@') else {
+        return false;
+    };
+    let Some((host, _)) = rest.split_once(':') else {
+        return false;
+    };
+    !user.is_empty()
+        && user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
 }
 
 /// Build the argument list for `docker buildx build`.
@@ -256,6 +327,10 @@ fn build_args(inputs: &Target<ImageInputs>, metadata_path: Option<&Path>) -> Vec
     for (key, val) in &inputs.build_args {
         args.push("--build-arg".into());
         args.push(format!("{key}={val}"));
+    }
+    for context in inputs.build_context_args() {
+        args.push("--build-context".into());
+        args.push(context);
     }
     if let Some(path) = metadata_path {
         args.push("--metadata-file".into());
@@ -372,11 +447,21 @@ impl Resource for ImageResource {
             files.insert(dockerfile.to_string_lossy().into_owned(), hash);
         }
 
-        for src in &parse::dockerfile_sources(&dockerfile, context, &inputs.build_args, &inputs.platform)? {
-            for path in parse::expand_path(src, &dockerignore) {
-                let hash = tracker.hash_file(&path)?;
-                files.insert(path.to_string_lossy().into_owned(), hash);
-            }
+        let sources = parse::dockerfile_sources(
+            &dockerfile,
+            context,
+            &inputs.local_build_contexts(),
+            &inputs.build_args,
+            &inputs.platform,
+        )?;
+        let context_files = sources
+            .context
+            .iter()
+            .flat_map(|src| parse::expand_path(src, &dockerignore));
+        let named_files = sources.named.iter().flat_map(|src| parse::expand_path(src, &None));
+        for path in context_files.chain(named_files) {
+            let hash = tracker.hash_file(&path)?;
+            files.insert(path.to_string_lossy().into_owned(), hash);
         }
 
         Ok(files)
@@ -706,6 +791,7 @@ mod tests {
                 context: ".".into(),
                 dockerfile: "Dockerfile".into(),
                 build_args: HashMap::new(),
+                build_contexts: HashMap::new(),
                 platform: vec![],
             },
         )
@@ -728,6 +814,7 @@ mod tests {
                 context: ".".into(),
                 dockerfile: "Dockerfile".into(),
                 build_args: HashMap::new(),
+                build_contexts: HashMap::new(),
                 platform: vec!["linux/amd64".into(), "linux/arm64".into()],
             },
         )
@@ -765,6 +852,72 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["Dockerfile", "src/a.txt"]);
+    }
+
+    #[test]
+    fn build_contexts_are_passed_with_local_paths_relative_to_dir() {
+        let mut inputs = test_inputs();
+        inputs.dir = Some("services".into());
+        inputs.build_contexts = HashMap::from([
+            ("gocache".into(), ".cache/go-build".into()),
+            ("abs".into(), "/var/cache".into()),
+            ("base".into(), "docker-image://alpine:3.20".into()),
+            ("git".into(), "git@github.com:org/repo.git".into()),
+            ("layout".into(), "oci-layout://images/app:v1".into()),
+            ("web".into(), "https://example.com/ctx.tar".into()),
+        ]);
+
+        let args = build_args(&inputs, None);
+
+        let contexts: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--build-context")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(
+            contexts,
+            [
+                "abs=/var/cache",
+                "base=docker-image://alpine:3.20",
+                "git=git@github.com:org/repo.git",
+                "gocache=services/.cache/go-build",
+                "layout=oci-layout://services/images/app:v1",
+                "web=https://example.com/ctx.tar",
+            ]
+        );
+    }
+
+    #[test]
+    fn named_context_files_are_inputs_only_when_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |rel: &str| dir.path().join(rel).to_string_lossy().into_owned();
+        std::fs::create_dir_all(dir.path().join("app")).unwrap();
+        std::fs::create_dir_all(dir.path().join("assets/img")).unwrap();
+        std::fs::create_dir_all(dir.path().join("cache")).unwrap();
+        std::fs::write(
+            dir.path().join("app/Dockerfile"),
+            concat!(
+                "FROM golang\n",
+                "COPY --from=assets /img /img\n",
+                "RUN --mount=type=bind,from=gocache,target=/root/.cache/go-build go build\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("app/.dockerignore"), "**/*.png\n").unwrap();
+        std::fs::write(dir.path().join("assets/img/logo.png"), "").unwrap();
+        std::fs::write(dir.path().join("cache/entry"), "").unwrap();
+        let mut inputs = test_inputs();
+        inputs.dir = Some(dir.path().to_string_lossy().into_owned());
+        inputs.context = "app".into();
+        inputs.build_contexts = HashMap::from([("assets".into(), "assets".into()), ("gocache".into(), "cache".into())]);
+
+        let resolved = Resource::resolve(&ImageResource::new(Arc::new(FileTracker::default())), &inputs).unwrap();
+
+        // The main context's .dockerignore does not filter a named context.
+        assert_eq!(
+            resolved.into_keys().collect::<Vec<_>>(),
+            [path("app/Dockerfile"), path("assets/img/logo.png")]
+        );
     }
 
     #[test]
@@ -882,6 +1035,7 @@ exit 0
                 context: ".".into(),
                 dockerfile: "Dockerfile".into(),
                 build_args: HashMap::new(),
+                build_contexts: HashMap::new(),
                 platform: vec![],
             },
         );
@@ -909,6 +1063,7 @@ exit 0
                 context: ".".into(),
                 dockerfile: "Dockerfile".into(),
                 build_args: HashMap::new(),
+                build_contexts: HashMap::new(),
                 platform: vec!["linux/arm64".into()],
             },
         );
@@ -942,6 +1097,7 @@ exit 0
                 context: dir.path().to_string_lossy().into_owned(),
                 dockerfile: "Dockerfile".into(),
                 build_args: HashMap::new(),
+                build_contexts: HashMap::new(),
                 platform: vec![],
             },
         );
@@ -968,6 +1124,7 @@ exit 0
                 context: dir.path().to_string_lossy().into_owned(),
                 dockerfile: "Dockerfile".into(),
                 build_args: HashMap::new(),
+                build_contexts: HashMap::new(),
                 platform: vec![],
             },
         );
