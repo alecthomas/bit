@@ -502,7 +502,22 @@ mod tests {
         }
 
         fn functions(&self) -> Vec<FuncSignature> {
-            Vec::new()
+            ["fail", "strings", "of"]
+                .into_iter()
+                .map(|name| FuncSignature {
+                    name: name.into(),
+                    description: None,
+                    params: vec![(
+                        "package".into(),
+                        crate::value::StructField {
+                            typ: crate::value::Type::String,
+                            default: None,
+                            description: None,
+                        },
+                    )],
+                    returns: crate::value::Type::Any,
+                })
+                .collect()
         }
 
         fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {

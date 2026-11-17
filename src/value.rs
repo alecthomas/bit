@@ -417,7 +417,7 @@ impl Value {
 fn secret_call(key: &str) -> crate::ast::Expr {
     use crate::ast::{Expr, StringPart};
     Expr::Call(
-        "secret".into(),
+        vec!["secret".into()],
         vec![Expr::Str(vec![StringPart::Literal(key.to_owned())])],
     )
 }

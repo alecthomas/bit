@@ -246,8 +246,8 @@ impl std::fmt::Display for Expr {
                 }
                 Ok(())
             }
-            Expr::Call(name, args) => {
-                write!(f, "{name}(")?;
+            Expr::Call(path, args) => {
+                write!(f, "{}(", path.join("."))?;
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -290,10 +290,12 @@ pub enum Expr {
         args: Vec<Field>,
         fields: Vec<String>,
     },
-    /// `func(args...)`
-    Call(String, Vec<Expr>),
-    /// `expr | pipe` or `expr | pipe(args...)`
-    Pipe(Box<Expr>, String, Vec<Expr>),
+    /// `func(args...)` or `provider.func(args...)`, the function as a path of
+    /// names that resolves like a reference.
+    Call(Vec<String>, Vec<Expr>),
+    /// `expr | pipe` or `expr | pipe(args...)`, with the function named as in
+    /// [`Expr::Call`].
+    Pipe(Box<Expr>, Vec<String>, Vec<Expr>),
     /// `if cond then a else b`
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     /// `a == b`, `a != b`
@@ -362,20 +364,20 @@ mod tests {
         let expr = Expr::Pipe(
             Box::new(Expr::Pipe(
                 Box::new(Expr::Call(
-                    "exec".into(),
+                    vec!["exec".into()],
                     vec![Expr::Str(vec![StringPart::Literal("cmd".into())])],
                 )),
-                "trim".into(),
+                vec!["trim".into()],
                 vec![],
             )),
-            "lines".into(),
+            vec!["lines".into()],
             vec![],
         );
         match &expr {
             Expr::Pipe(inner, name, _) => {
-                assert_eq!(name, "lines");
+                assert_eq!(name, &["lines"]);
                 match inner.as_ref() {
-                    Expr::Pipe(_, name, _) => assert_eq!(name, "trim"),
+                    Expr::Pipe(_, name, _) => assert_eq!(name, &["trim"]),
                     _ => panic!("expected inner Pipe"),
                 }
             }
@@ -419,7 +421,7 @@ mod tests {
                     name: "sha".into(),
                     typ: None,
                     value: Expr::Call(
-                        "exec".into(),
+                        vec!["exec".into()],
                         vec![Expr::Str(vec![StringPart::Literal("git rev-parse HEAD".into())])],
                     ),
                 }),

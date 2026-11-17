@@ -827,6 +827,10 @@ impl ProviderRegistry {
         p.call_function(name, args)
     }
 
+    pub fn contains(&self, provider: &str) -> bool {
+        self.providers.contains_key(provider)
+    }
+
     /// List all registered provider names.
     pub fn provider_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.providers.keys().map(|s| s.as_str()).collect();

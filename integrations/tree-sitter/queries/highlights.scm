@@ -95,6 +95,11 @@
 (pipe_expression
   pipe: (identifier) @function.call)
 
+(pipe_expression
+  pipe: (provider_function
+    (identifier) @namespace
+    (identifier) @function.call))
+
 ; References
 (reference
   (identifier) @variable)

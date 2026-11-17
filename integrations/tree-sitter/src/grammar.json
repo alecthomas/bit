@@ -1197,7 +1197,7 @@
             "name": "pipe",
             "content": {
               "type": "SYMBOL",
-              "name": "identifier"
+              "name": "_function_name"
             }
           },
           {
@@ -1823,17 +1823,8 @@
           "type": "FIELD",
           "name": "name",
           "content": {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "SYMBOL",
-                "name": "identifier"
-              },
-              {
-                "type": "SYMBOL",
-                "name": "provider_function"
-              }
-            ]
+            "type": "SYMBOL",
+            "name": "_function_name"
           }
         },
         {
@@ -1876,6 +1867,19 @@
         {
           "type": "STRING",
           "value": ")"
+        }
+      ]
+    },
+    "_function_name": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "identifier"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "provider_function"
         }
       ]
     },
@@ -2006,7 +2010,9 @@
       "name": "_heredoc_content"
     }
   ],
-  "inline": [],
+  "inline": [
+    "_function_name"
+  ],
   "supertypes": [],
   "reserved": {}
 }

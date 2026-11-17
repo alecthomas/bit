@@ -17,6 +17,8 @@ pub enum EvalError {
     UndefinedField(String),
     #[error("unknown function: {0}")]
     UnknownFunc(String),
+    #[error("{name} is a {kind}, not a function")]
+    NotAFunction { name: String, kind: SymbolKind },
     #[error("parameterized target call was not materialized: {0}")]
     UnmaterializedTargetCall(String),
     #[error("provider function '{name}' failed: {message}")]
@@ -43,6 +45,7 @@ pub enum SymbolKind {
     Param,
     Let,
     Target,
+    Provider,
 }
 
 impl SymbolKind {
@@ -51,6 +54,7 @@ impl SymbolKind {
             SymbolKind::Param => "param",
             SymbolKind::Let => "variable",
             SymbolKind::Target => "target",
+            SymbolKind::Provider => "provider",
         }
     }
 }
@@ -162,15 +166,15 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
             eval_ref(&parts, scope, mode)
         }
         Expr::TargetCall { name, .. } => Err(EvalError::UnmaterializedTargetCall(name.clone())),
-        Expr::Call(name, args) => {
+        Expr::Call(path, args) => {
             let values: Result<Vec<_>, _> = args.iter().map(|e| eval_inner(e, scope, mode)).collect();
             let values = values?;
             if mode == EvalMode::Lenient && values.iter().any(has_placeholder) {
                 return Ok(values.into_iter().find(has_placeholder).unwrap());
             }
-            call_function(name, &values, scope)
+            call_function(path, &values, scope)
         }
-        Expr::Pipe(inner, name, args) => {
+        Expr::Pipe(inner, path, args) => {
             let lhs = eval_inner(inner, scope, mode)?;
             let mut all_args = vec![lhs];
             for arg in args {
@@ -179,7 +183,7 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
             if mode == EvalMode::Lenient && all_args.iter().any(has_placeholder) {
                 return Ok(all_args.into_iter().find(has_placeholder).unwrap());
             }
-            call_builtin(name, &all_args)
+            call_function(path, &all_args, scope)
         }
         Expr::If(cond, then_val, else_val) => {
             let cond = eval_inner(cond, scope, mode)?;
@@ -427,19 +431,65 @@ pub fn builtin_return_type(name: &str) -> Option<Type> {
     builtins().get(name).map(|b| b.return_type.clone())
 }
 
-/// Look up the declared return type of a builtin or `provider.function` call.
-/// Unlike [`builtin_return_type`], this keeps a polymorphic builtin's full type.
-pub fn function_return_type(name: &str, scope: &Scope) -> Option<Type> {
-    let Some((provider, function)) = name.split_once('.') else {
-        return builtins().get(name).map(|def| def.signature.returns.clone());
+/// A function a call's path resolves to.
+enum Function<'a> {
+    Builtin(&'a str),
+    Provider {
+        providers: &'a ProviderRegistry,
+        provider: &'a str,
+        signature: FuncSignature,
+    },
+}
+
+/// Resolve a call's path like a reference, one name at a time.
+/// Built-ins and providers share the config's namespace; declared names win.
+fn resolve_function<'a>(path: &'a [String], scope: &'a Scope) -> Result<Function<'a>, EvalError> {
+    let unknown = || EvalError::UnknownFunc(path.join("."));
+    let Some((name, members)) = path.split_first() else {
+        return Err(unknown());
     };
-    scope
-        .providers
-        .as_ref()?
-        .provider_functions(provider)
-        .into_iter()
-        .find(|signature| signature.name == function)
-        .map(|signature| signature.returns)
+    if let Some(kind) = scope.kind(name) {
+        return Err(EvalError::NotAFunction {
+            name: name.clone(),
+            kind,
+        });
+    }
+    if builtins().contains_key(name) {
+        return match members {
+            [] => Ok(Function::Builtin(name)),
+            _ => Err(unknown()),
+        };
+    }
+    let providers = scope.providers.as_ref().ok_or_else(unknown)?;
+    if !providers.contains(name) {
+        return Err(unknown());
+    }
+    match members {
+        [] => Err(EvalError::NotAFunction {
+            name: name.clone(),
+            kind: SymbolKind::Provider,
+        }),
+        [function] => providers
+            .provider_functions(name)
+            .into_iter()
+            .find(|signature| signature.name == *function)
+            .map(|signature| Function::Provider {
+                providers,
+                provider: name,
+                signature,
+            })
+            .ok_or_else(unknown),
+        _ => Err(unknown()),
+    }
+}
+
+/// Look up the declared return type of the function a call's path names.
+/// Unlike [`builtin_return_type`], this keeps a polymorphic builtin's full type.
+pub fn function_return_type(path: &[String], scope: &Scope) -> Option<Type> {
+    match resolve_function(path, scope).ok()? {
+        Function::Builtin(name) => builtins().get(name).map(|def| def.signature.returns.clone()),
+        Function::Provider { signature, .. } => Some(signature.returns),
+    }
 }
 
 fn call_builtin(name: &str, args: &[Value]) -> Result<Value, EvalError> {
@@ -465,20 +515,20 @@ fn call_builtin(name: &str, args: &[Value]) -> Result<Value, EvalError> {
     })
 }
 
-fn call_function(name: &str, args: &[Value], scope: &Scope) -> Result<Value, EvalError> {
-    let Some((provider, function)) = name.split_once('.') else {
-        return call_builtin(name, args);
-    };
-    let providers = scope
-        .providers
-        .as_ref()
-        .ok_or_else(|| EvalError::UnknownFunc(name.to_owned()))?;
-    providers
-        .call_function(provider, function, args)
-        .map_err(|source| EvalError::ProviderFunction {
-            name: name.to_owned(),
-            message: source.to_string(),
-        })
+fn call_function(path: &[String], args: &[Value], scope: &Scope) -> Result<Value, EvalError> {
+    match resolve_function(path, scope)? {
+        Function::Builtin(name) => call_builtin(name, args),
+        Function::Provider {
+            providers,
+            provider,
+            signature,
+        } => providers
+            .call_function(provider, &signature.name, args)
+            .map_err(|source| EvalError::ProviderFunction {
+                name: path.join("."),
+                message: source.to_string(),
+            }),
+    }
 }
 
 /// Read an environment variable, with an optional fallback.
@@ -722,7 +772,19 @@ mod tests {
         }
 
         fn functions(&self) -> Vec<FuncSignature> {
-            vec![]
+            vec![FuncSignature {
+                name: "echo".into(),
+                description: None,
+                params: vec![(
+                    "value".into(),
+                    StructField {
+                        typ: Type::Any,
+                        default: None,
+                        description: None,
+                    },
+                )],
+                returns: Type::Any,
+            }]
         }
 
         fn call_function(&self, name: &str, args: &[Value]) -> Result<Value, BoxError> {
@@ -754,11 +816,71 @@ mod tests {
         providers.register(Box::new(FunctionProvider));
         let scope = Scope::with_providers(providers);
         let expression = Expr::Call(
-            "example.echo".into(),
+            vec!["example".into(), "echo".into()],
             vec![Expr::Str(vec![StringPart::Literal("value".into())])],
         );
 
         assert_eq!(eval(&expression, &scope).unwrap(), Value::Str("value".into()));
+    }
+
+    #[test]
+    fn eval_pipe_into_provider_function() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(Box::new(FunctionProvider));
+        let scope = Scope::with_providers(providers);
+        let expression = Expr::Pipe(
+            Box::new(Expr::Str(vec![StringPart::Literal("value".into())])),
+            vec!["example".into(), "echo".into()],
+            vec![],
+        );
+
+        assert_eq!(eval(&expression, &scope).unwrap(), Value::Str("value".into()));
+    }
+
+    fn call_error(path: &[&str], scope: &Scope) -> String {
+        let path = path.iter().map(|name| (*name).to_owned()).collect();
+        eval(&Expr::Call(path, vec![]), scope).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn declared_name_hides_builtin_function() {
+        let mut scope = Scope::new();
+        scope
+            .define("env", SymbolKind::Param, Value::Str("prod".into()))
+            .unwrap();
+
+        assert_eq!(call_error(&["env"], &scope), "env is a param, not a function");
+    }
+
+    #[test]
+    fn provider_is_not_a_function() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(Box::new(FunctionProvider));
+        let scope = Scope::with_providers(providers);
+
+        assert_eq!(
+            call_error(&["example"], &scope),
+            "example is a provider, not a function"
+        );
+    }
+
+    #[test]
+    fn unresolved_function_paths_are_unknown() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(Box::new(FunctionProvider));
+        let scope = Scope::with_providers(providers);
+
+        for path in [
+            &["example", "missing"][..],
+            &["example", "echo", "more"],
+            &["trim", "more"],
+            &["missing", "echo"],
+        ] {
+            assert_eq!(
+                call_error(path, &scope),
+                format!("unknown function: {}", path.join("."))
+            );
+        }
     }
 
     #[test]
@@ -877,7 +999,7 @@ mod tests {
         let mut scope = Scope::new();
         scope.set("debug", Value::strct(Map::new()));
         let expr = Expr::Call(
-            "exec".into(),
+            vec!["exec".into()],
             vec![Expr::Str(vec![
                 StringPart::Interpolation(Expr::Ref(vec!["debug".into(), "path".into()])),
                 StringPart::Literal(" --schema".into()),
@@ -893,13 +1015,13 @@ mod tests {
         scope.set("debug", Value::strct(Map::new()));
         let expr = Expr::Pipe(
             Box::new(Expr::Call(
-                "exec".into(),
+                vec!["exec".into()],
                 vec![Expr::Str(vec![
                     StringPart::Interpolation(Expr::Ref(vec!["debug".into(), "path".into()])),
                     StringPart::Literal(" --schema".into()),
                 ])],
             )),
-            "sha256".into(),
+            vec!["sha256".into()],
             vec![],
         );
         let result = eval_lenient(&expr, &scope).unwrap();
@@ -1097,7 +1219,7 @@ mod tests {
     fn eval_exec() {
         let scope = Scope::new();
         let expr = Expr::Call(
-            "exec".into(),
+            vec!["exec".into()],
             vec![Expr::Str(vec![StringPart::Literal("echo hello".into())])],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("hello\n".into()));
@@ -1108,7 +1230,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("  hello  ".into())])),
-            "trim".into(),
+            vec!["trim".into()],
             vec![],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("hello".into()));
@@ -1119,7 +1241,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("a\nb\n\nc".into())])),
-            "lines".into(),
+            vec!["lines".into()],
             vec![],
         );
         assert_eq!(
@@ -1137,7 +1259,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("a:b:c".into())])),
-            "split".into(),
+            vec!["split".into()],
             vec![Expr::Str(vec![StringPart::Literal(":".into())])],
         );
         assert_eq!(
@@ -1159,7 +1281,7 @@ mod tests {
                 Expr::Str(vec![StringPart::Literal("b".into())]),
                 Expr::Str(vec![StringPart::Literal("a".into())]),
             ])),
-            "uniq".into(),
+            vec!["uniq".into()],
             vec![],
         );
         assert_eq!(
@@ -1175,10 +1297,10 @@ mod tests {
         let expr = Expr::Pipe(
             Box::new(Expr::Pipe(
                 Box::new(Expr::Str(vec![StringPart::Literal("  hello  ".into())])),
-                "trim".into(),
+                vec!["trim".into()],
                 vec![],
             )),
-            "lines".into(),
+            vec!["lines".into()],
             vec![],
         );
         assert_eq!(
@@ -1191,7 +1313,7 @@ mod tests {
     fn eval_env_with_default() {
         let scope = Scope::new();
         let expr = Expr::Call(
-            "env".into(),
+            vec!["env".into()],
             vec![
                 Expr::Str(vec![StringPart::Literal("BIT_TEST_NONEXISTENT_VAR_12345".into())]),
                 Expr::Str(vec![StringPart::Literal("fallback".into())]),
@@ -1251,7 +1373,7 @@ mod tests {
     #[test]
     fn project_dir_returns_working_directory() {
         let expected = std::env::current_dir().unwrap().to_string_lossy().into_owned();
-        let expression = Expr::Call("project_dir".into(), vec![]);
+        let expression = Expr::Call(vec!["project_dir".into()], vec![]);
         assert_eq!(eval(&expression, &Scope::new()).unwrap(), Value::Str(expected));
     }
 
@@ -1308,10 +1430,10 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Call(
-                "exec".into(),
+                vec!["exec".into()],
                 vec![Expr::Str(vec![StringPart::Literal("echo hello".into())])],
             )),
-            "trim".into(),
+            vec!["trim".into()],
             vec![],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("hello".into()));
@@ -1322,7 +1444,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("/usr/bin/test".into())])),
-            "basename".into(),
+            vec!["basename".into()],
             vec![],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("test".into()));
@@ -1336,7 +1458,7 @@ mod tests {
                 Expr::Str(vec![StringPart::Literal("/a/b.txt".into())]),
                 Expr::Str(vec![StringPart::Literal("/c/d.go".into())]),
             ])),
-            "basename".into(),
+            vec!["basename".into()],
             vec![],
         );
         assert_eq!(
@@ -1350,7 +1472,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("/usr/bin/test".into())])),
-            "dirname".into(),
+            vec!["dirname".into()],
             vec![],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("/usr/bin".into()));
@@ -1364,7 +1486,7 @@ mod tests {
                 Expr::Str(vec![StringPart::Literal("/a/b.txt".into())]),
                 Expr::Str(vec![StringPart::Literal("/c/d.go".into())]),
             ])),
-            "dirname".into(),
+            vec!["dirname".into()],
             vec![],
         );
         assert_eq!(
@@ -1378,7 +1500,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("amd64".into())])),
-            "prefix".into(),
+            vec!["prefix".into()],
             vec![Expr::Str(vec![StringPart::Literal("linux/".into())])],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("linux/amd64".into()));
@@ -1392,7 +1514,7 @@ mod tests {
                 Expr::Str(vec![StringPart::Literal("amd64".into())]),
                 Expr::Str(vec![StringPart::Literal("arm64".into())]),
             ])),
-            "prefix".into(),
+            vec!["prefix".into()],
             vec![Expr::Str(vec![StringPart::Literal("linux/".into())])],
         );
         assert_eq!(
@@ -1406,7 +1528,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("app".into())])),
-            "suffix".into(),
+            vec!["suffix".into()],
             vec![Expr::Str(vec![StringPart::Literal(".exe".into())])],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("app.exe".into()));
@@ -1420,7 +1542,7 @@ mod tests {
                 Expr::Str(vec![StringPart::Literal("app".into())]),
                 Expr::Str(vec![StringPart::Literal("lib".into())]),
             ])),
-            "suffix".into(),
+            vec!["suffix".into()],
             vec![Expr::Str(vec![StringPart::Literal(".so".into())])],
         );
         assert_eq!(
@@ -1434,7 +1556,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("linux/amd64".into())])),
-            "trim_prefix".into(),
+            vec!["trim_prefix".into()],
             vec![Expr::Str(vec![StringPart::Literal("linux/".into())])],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("amd64".into()));
@@ -1448,7 +1570,7 @@ mod tests {
                 Expr::Str(vec![StringPart::Literal("linux/amd64".into())]),
                 Expr::Str(vec![StringPart::Literal("darwin/arm64".into())]),
             ])),
-            "trim_prefix".into(),
+            vec!["trim_prefix".into()],
             vec![Expr::Str(vec![StringPart::Literal("linux/".into())])],
         );
         assert_eq!(
@@ -1462,7 +1584,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("app.exe".into())])),
-            "trim_suffix".into(),
+            vec!["trim_suffix".into()],
             vec![Expr::Str(vec![StringPart::Literal(".exe".into())])],
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Str("app".into()));
@@ -1476,7 +1598,7 @@ mod tests {
                 Expr::Str(vec![StringPart::Literal("app.so".into())]),
                 Expr::Str(vec![StringPart::Literal("lib.a".into())]),
             ])),
-            "trim_suffix".into(),
+            vec!["trim_suffix".into()],
             vec![Expr::Str(vec![StringPart::Literal(".so".into())])],
         );
         assert_eq!(
@@ -1490,7 +1612,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("hello".into())])),
-            "sha256".into(),
+            vec!["sha256".into()],
             vec![],
         );
         assert_eq!(
@@ -1508,7 +1630,7 @@ mod tests {
                 Expr::Str(vec![StringPart::Literal("main_test.go".into())]),
                 Expr::Str(vec![StringPart::Literal("util.go".into())]),
             ])),
-            "filter".into(),
+            vec!["filter".into()],
             vec![Expr::Str(vec![StringPart::Literal("_test\\.go$".into())])],
         );
         assert_eq!(
@@ -1522,7 +1644,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::List(vec![Expr::Str(vec![StringPart::Literal("a".into())])])),
-            "filter".into(),
+            vec!["filter".into()],
             vec![Expr::Str(vec![StringPart::Literal("(".into())])],
         );
         assert!(matches!(eval(&expr, &scope), Err(EvalError::Regex(_))));
@@ -1533,7 +1655,7 @@ mod tests {
         let scope = Scope::new();
         let expr = Expr::Pipe(
             Box::new(Expr::Str(vec![StringPart::Literal("v1.2.3-v4.5.6".into())])),
-            "replace".into(),
+            vec!["replace".into()],
             vec![
                 Expr::Str(vec![StringPart::Literal("v(\\d+)\\.(\\d+)\\.\\d+".into())]),
                 Expr::Str(vec![StringPart::Literal("$1.$2".into())]),
@@ -1550,7 +1672,7 @@ mod tests {
                 Expr::Str(vec![StringPart::Literal("cmd/api/main.go".into())]),
                 Expr::Str(vec![StringPart::Literal("README.md".into())]),
             ])),
-            "replace".into(),
+            vec!["replace".into()],
             vec![
                 Expr::Str(vec![StringPart::Literal("^cmd/([^/]+)/.*$".into())]),
                 Expr::Str(vec![StringPart::Literal("${1}".into())]),

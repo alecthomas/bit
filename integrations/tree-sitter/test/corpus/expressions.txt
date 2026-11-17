@@ -273,6 +273,22 @@ let x = s | split(",")
       (string))))
 
 ================================================================================
+pipe into provider function
+================================================================================
+let x = "./..." | go.packages(dir)
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (pipe_expression
+      value: (string)
+      pipe: (provider_function
+        (identifier)
+        (identifier))
+      (reference
+        (identifier)))))
+
+================================================================================
 if expression
 ================================================================================
 let x = if env == "prod" then 3 else 1

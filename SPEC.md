@@ -347,11 +347,13 @@ So `a + b | trim` is `a + (b | trim)`.
 
 Functions whose argument is `v` accept a string or a list of strings, applied to each element. `bit --schema` lists the exact signatures.
 
+A function name resolves like a reference: `go.packages` looks up `go`, then `packages` inside it. Built-in functions and providers share one namespace with params, `let` bindings and targets, and those declared names take precedence. After `param env`, calling `env(...)` is an error.
+
 `exec()` runs when the expression is evaluated. In a `let` binding that is at load time. In a target's fields, it runs when that target's inputs are evaluated.
 
 ### Pipes
 
-`a | f(b, c)` is exactly `f(a, b, c)`, so every built-in function can be piped, and `f()` can be written `f`. Only built-in functions can be piped, not provider functions.
+`a | f(b, c)` is exactly `f(a, b, c)`, so every function can be piped, including provider functions such as `go.packages`, and `f()` can be written `f`.
 
 ```
 let git_sha = exec("git rev-parse --short HEAD") | trim

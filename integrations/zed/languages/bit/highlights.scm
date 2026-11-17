@@ -94,6 +94,11 @@
 (pipe_expression
   pipe: (identifier) @function)
 
+(pipe_expression
+  pipe: (provider_function
+    (identifier) @type
+    (identifier) @function))
+
 ; References
 (reference
   (identifier) @variable)

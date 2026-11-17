@@ -8,6 +8,8 @@ module.exports = grammar({
 
   word: $ => $.identifier,
 
+  inline: $ => [$._function_name],
+
   externals: $ => [$._heredoc_label_eol, $._heredoc_end, $._heredoc_content],
 
   rules: {
@@ -221,7 +223,7 @@ module.exports = grammar({
     pipe_expression: $ => prec.left(2, seq(
       field('value', $._pipe_expression),
       '|',
-      field('pipe', $.identifier),
+      field('pipe', $._function_name),
       optional(seq(
         '(',
         optional(seq(
@@ -362,7 +364,7 @@ module.exports = grammar({
     ),
 
     call: $ => seq(
-      field('name', choice($.identifier, $.provider_function)),
+      field('name', $._function_name),
       '(',
       optional(seq(
         $._expression,
@@ -370,6 +372,9 @@ module.exports = grammar({
       )),
       ')',
     ),
+
+    // Calls and pipes share this rule, so every callable function can be piped.
+    _function_name: $ => choice($.identifier, $.provider_function),
 
     provider_function: $ => seq(
       $.identifier,

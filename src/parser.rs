@@ -355,18 +355,18 @@ fn add_expr(input: &mut &str) -> ModalResult<Expr> {
 
 fn pipe_expr(input: &mut &str) -> ModalResult<Expr> {
     let first = cmp_expr.parse_next(input)?;
-    let pipes: Vec<(String, Vec<Expr>)> = repeat(0.., preceded(lex('|'), pipe_segment)).parse_next(input)?;
+    let pipes: Vec<(Vec<String>, Vec<Expr>)> = repeat(0.., preceded(lex('|'), pipe_segment)).parse_next(input)?;
     Ok(pipes
         .into_iter()
         .fold(first, |acc, (name, args)| Expr::Pipe(Box::new(acc), name, args)))
 }
 
-fn pipe_segment(input: &mut &str) -> ModalResult<(String, Vec<Expr>)> {
-    let name = ident_string.parse_next(input)?;
+fn pipe_segment(input: &mut &str) -> ModalResult<(Vec<String>, Vec<Expr>)> {
+    let path = name_path.parse_next(input)?;
     let args = opt(delimited(lex('('), arg_list, lex(')')))
         .map(|a| a.unwrap_or_default())
         .parse_next(input)?;
-    Ok((name, args))
+    Ok((path, args))
 }
 
 fn cmp_expr(input: &mut &str) -> ModalResult<Expr> {
@@ -501,58 +501,57 @@ fn matrix_ref_key(input: &mut &str) -> ModalResult<Expr> {
     expr.parse_next(input)
 }
 
+/// A dotted name such as `trim`, `go.packages` or `server.path`, one segment
+/// per name. Calls, pipes and references all read names with this rule.
+fn name_path(input: &mut &str) -> ModalResult<Vec<String>> {
+    separated(1.., ident_string, lex('.')).parse_next(input)
+}
+
 fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
     let checkpoint = input.checkpoint();
-    let name = ident_string.parse_next(input)?;
+    let path = name_path.parse_next(input)?;
     // Reject keywords so they don't get parsed as references
-    if matches!(name.as_str(), "if" | "then" | "else") {
+    if let [name] = path.as_slice()
+        && matches!(name.as_str(), "if" | "then" | "else")
+    {
         input.reset(&checkpoint);
         return Err(ErrMode::Backtrack(ContextError::new()));
     }
 
-    // A named-argument call is a parameterized target reference. Positional
-    // calls remain built-in functions.
     if opt(lex('(')).parse_next(input)?.is_some() {
-        let args_checkpoint = input.checkpoint();
-        match named_argument_list.parse_next(input) {
-            Ok(args) => {
-                cut_err(lex(')'))
-                    .context(StrContext::Label("closing ')'"))
-                    .parse_next(input)?;
-                let fields: Vec<String> = repeat(0.., preceded(lex('.'), ident_string)).parse_next(input)?;
-                return Ok(Expr::TargetCall {
-                    name,
-                    keys: None,
-                    args,
-                    fields,
-                });
+        // A named-argument call to a bare name is a parameterized target
+        // reference. Positional calls are function calls.
+        if let [name] = path.as_slice() {
+            let args_checkpoint = input.checkpoint();
+            match named_argument_list.parse_next(input) {
+                Ok(args) => {
+                    cut_err(lex(')'))
+                        .context(StrContext::Label("closing ')'"))
+                        .parse_next(input)?;
+                    let fields: Vec<String> = repeat(0.., preceded(lex('.'), ident_string)).parse_next(input)?;
+                    return Ok(Expr::TargetCall {
+                        name: name.clone(),
+                        keys: None,
+                        args,
+                        fields,
+                    });
+                }
+                Err(ErrMode::Backtrack(_)) => input.reset(&args_checkpoint),
+                Err(error) => return Err(error),
             }
-            Err(ErrMode::Backtrack(_)) => input.reset(&args_checkpoint),
-            Err(error) => return Err(error),
         }
         let args = arg_list.parse_next(input)?;
         cut_err(lex(')'))
             .context(StrContext::Label("closing ')'"))
             .parse_next(input)?;
-        return Ok(Expr::Call(name, args));
+        return Ok(Expr::Call(path, args));
     }
 
-    // Provider function call or dotted reference: provider.function(args)
-    if opt(lex('.')).parse_next(input)?.is_some() {
-        let mut parts = vec![name];
-        parts.push(ident_string.parse_next(input)?);
-        if opt(lex('(')).parse_next(input)?.is_some() {
-            let args = arg_list.parse_next(input)?;
-            cut_err(lex(')'))
-                .context(StrContext::Label("closing ')'"))
-                .parse_next(input)?;
-            return Ok(Expr::Call(parts.join("."), args));
-        }
-        while opt(lex('.')).parse_next(input)?.is_some() {
-            parts.push(ident_string.parse_next(input)?);
-        }
-        return Ok(Expr::Ref(parts));
-    }
+    let name = match <[String; 1]>::try_from(path) {
+        Ok([name]) => name,
+        // A dotted name that isn't called is a reference such as `target.field`.
+        Err(path) => return Ok(Expr::Ref(path)),
+    };
 
     // Matrix slice reference: name[expr1, expr2]
     if opt('[').parse_next(input)?.is_some() {
@@ -1261,8 +1260,10 @@ fn infer_type(expr: &Expr, known_types: &HashMap<String, Type>) -> Option<Type> 
                 fields,
             }))
         }
-        Expr::Call(name, _) => crate::expr::builtin_return_type(name),
-        Expr::Pipe(_, name, _) => crate::expr::builtin_return_type(name),
+        Expr::Call(path, _) | Expr::Pipe(_, path, _) => match path.as_slice() {
+            [name] if !known_types.contains_key(name) => crate::expr::builtin_return_type(name),
+            _ => None,
+        },
         Expr::Ref(parts) if parts.len() == 1 => known_types.get(&parts[0]).cloned(),
         Expr::If(_, then_val, _) => infer_type(then_val, known_types),
         Expr::Add(lhs, _) => infer_type(lhs, known_types),
@@ -1636,7 +1637,7 @@ server = exec {
                     assert_eq!(parts.len(), 1);
                     match &parts[0] {
                         StringPart::Interpolation(Expr::Pipe(inner, name, _)) => {
-                            assert_eq!(name, "trim");
+                            assert_eq!(name, &["trim"]);
                             assert!(matches!(inner.as_ref(), Expr::Call(..)));
                         }
                         _ => panic!("expected interpolated pipe"),
@@ -1792,7 +1793,7 @@ server = exec {
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Call(name, args) => {
-                    assert_eq!(name, "exec");
+                    assert_eq!(name, &["exec"]);
                     assert_eq!(args.len(), 1);
                 }
                 _ => panic!("expected Call"),
@@ -1807,7 +1808,7 @@ server = exec {
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Call(name, args) => {
-                    assert_eq!(name, "go.packages");
+                    assert_eq!(name, &["go", "packages"]);
                     assert_eq!(args.len(), 1);
                 }
                 _ => panic!("expected Call"),
@@ -1822,9 +1823,9 @@ server = exec {
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Pipe(inner, name, _) => {
-                    assert_eq!(name, "uniq");
+                    assert_eq!(name, &["uniq"]);
                     match inner.as_ref() {
-                        Expr::Pipe(_, name, _) => assert_eq!(name, "lines"),
+                        Expr::Pipe(_, name, _) => assert_eq!(name, &["lines"]),
                         _ => panic!("expected inner Pipe"),
                     }
                 }
@@ -1835,12 +1836,36 @@ server = exec {
     }
 
     #[test]
+    fn parse_pipe_into_provider_function() {
+        let result = parse(r#"let x = "./..." | go.packages("example")"#, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => match &l.value {
+                Expr::Pipe(_, name, args) => {
+                    assert_eq!(name, &["go", "packages"]);
+                    assert_eq!(args.len(), 1);
+                }
+                _ => panic!("expected Pipe"),
+            },
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
+    fn parse_call_keeps_each_name_in_its_path() {
+        let result = parse(r#"let x = a.b.c(1)"#, "<test>").unwrap();
+        match &result.statements[0] {
+            Statement::Let(l) => assert!(matches!(&l.value, Expr::Call(path, _) if path == &["a", "b", "c"])),
+            _ => panic!("expected Let"),
+        }
+    }
+
+    #[test]
     fn parse_pipe_with_args() {
         let result = parse(r#"let x = "a:b:c" | split(":")"#, "<test>").unwrap();
         match &result.statements[0] {
             Statement::Let(l) => match &l.value {
                 Expr::Pipe(_, name, args) => {
-                    assert_eq!(name, "split");
+                    assert_eq!(name, &["split"]);
                     assert_eq!(args.len(), 1);
                 }
                 _ => panic!("expected Pipe"),
@@ -2755,7 +2780,7 @@ tests[module, package = go.packages("./...", module)] = exec {
         assert_eq!(b.matrix_key_names(), vec!["module", "package"]);
         assert_eq!(b.matrix_keys[0].values, None);
         assert!(
-            matches!(&b.matrix_keys[1].values, Some(Expr::Call(name, args)) if name == "go.packages" && args.len() == 2)
+            matches!(&b.matrix_keys[1].values, Some(Expr::Call(name, args)) if name == &["go", "packages"] && args.len() == 2)
         );
     }
 

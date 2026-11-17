@@ -1842,6 +1842,10 @@
           {
             "type": "identifier",
             "named": true
+          },
+          {
+            "type": "provider_function",
+            "named": true
           }
         ]
       },
