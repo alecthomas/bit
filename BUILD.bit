@@ -199,8 +199,8 @@ explicit bump = exec {
   command = <<-EOF
     test "$(svu current)" = "$(svu next)" && exit 0
     git tag "$(svu next)"
-    echo "Bumped to $(svu next)"
     git push --tags
+    echo "::success::bumped to $(svu next)"
   EOF
   resolve = "svu next"
 }
