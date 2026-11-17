@@ -8,5 +8,5 @@ repository = "https://github.com/alecthomas/bit"
 
 [grammars.bit]
 repository = "file:///Users/alec/dev/bit"
-rev = "35c84d25ab1951f360a2619459b61cf1a4f90ba0"
+rev = "622420caaf7708dfd4bcbf4acc16ae79d9a2a39d"
 path = "integrations/tree-sitter"
