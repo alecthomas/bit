@@ -597,6 +597,10 @@ impl OutputInner {
         self.term_width.saturating_sub(prefix_width + 1)
     }
 
+    /// Format streamed `content` as one entry per terminal row.
+    ///
+    /// The live region counts one row per entry to move the cursor before a
+    /// redraw, so multi-line content is split at its newlines.
     fn fmt_stream_line(
         &self,
         name: &str,
@@ -607,10 +611,11 @@ impl OutputInner {
     ) -> Vec<String> {
         let head_prefix = self.prefix(name, "│", indent);
         let cont_prefix = self.prefix(name, "┆", indent);
-        let chunks = Self::wrap_content(content, self.content_width(&head_prefix));
-        chunks
-            .into_iter()
-            .enumerate()
+        let width = self.content_width(&head_prefix);
+        // `lines` yields nothing for empty content, which is still one row.
+        let logical_lines = content.lines().chain(content.is_empty().then_some(""));
+        logical_lines
+            .flat_map(|logical| Self::wrap_content(logical, width).into_iter().enumerate())
             .map(|(i, chunk)| {
                 let prefix = if i == 0 { &head_prefix } else { &cont_prefix };
                 if stderr {
@@ -1467,6 +1472,31 @@ mod tests {
         for cont in &lines[1..] {
             assert!(cont.contains('┆'), "continuation should use ┆, got {cont:?}");
         }
+    }
+
+    #[test]
+    fn fmt_stream_line_emits_one_row_per_embedded_line() {
+        let inner = inner_tty(4, 30);
+        let content = format!("warning: failed\n  |\n\n  = note: {}\n", "x".repeat(20));
+        let lines = inner.fmt_stream_line("backend", color_for_name("backend"), None, &content, true);
+        assert_eq!(lines.len(), 5, "{lines:?}");
+        for line in &lines {
+            assert!(!line.contains('\n'), "row spans lines: {line:?}");
+            assert!(console::measure_text_width(line) <= 30, "row too wide: {line:?}");
+        }
+        // Each embedded line starts with │; only the wrapped remainder uses ┆.
+        let separators: String = lines
+            .iter()
+            .flat_map(|line| line.chars().find(|c| "│┆".contains(*c)))
+            .collect();
+        assert_eq!(separators, "││││┆");
+    }
+
+    #[test]
+    fn fmt_stream_line_keeps_empty_content_as_one_row() {
+        let inner = inner_tty(4, 30);
+        let lines = inner.fmt_stream_line("backend", color_for_name("backend"), None, "", false);
+        assert_eq!(lines.len(), 1);
     }
 
     #[test]
