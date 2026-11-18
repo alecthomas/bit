@@ -10,11 +10,12 @@ on:
   schedule:
     - cron: "17 0 * * *"
 env:
-  # bit's build cache, kache's compiler cache, and Cargo's registry, which
-  # Hermit keeps under CARGO_HOME in the checkout.
+  # bit's build cache, kache's compiler cache, Hermit's installed packages,
+  # and Cargo's registry, which Hermit keeps under CARGO_HOME in the checkout.
   BUILD_CACHE_PATHS: |
     ~/.cache/bit
     ~/.cache/kache
+    ~/.cache/hermit/pkg
     .hermit/rust/registry
 # Only the default branch saves the build cache, so every branch restores its
 # latest entry and branches never evict it with entries nothing else reads.
@@ -27,8 +28,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-        with:
-          cache: true
       - id: cache-day
         run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
@@ -43,14 +42,12 @@ jobs:
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
           key: build-default-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
-  integration-test:
-    name: "integration-test"
+  integration-test-1:
+    name: "'integration-test[1]'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-        with:
-          cache: true
       - id: cache-day
         run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
       # Reads the test job's cache, which holds most of the crates this
@@ -61,15 +58,64 @@ jobs:
           key: build-test-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
           restore-keys: build-test-${{ steps.cache-day.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
-      - run: "bin/bit integration-test"
+      - run: "bin/bit 'integration-test[1]'"
+  integration-test-2:
+    name: "'integration-test[2]'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - id: cache-day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      # Reads the test job's cache, which holds most of the crates this
+      # job compiles. Only the test job saves it.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ${{ env.BUILD_CACHE_PATHS }}
+          key: build-test-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          restore-keys: build-test-${{ steps.cache-day.outputs.day }}-
+      # Use the Hermit-pinned bit rather than one built from this checkout.
+      - run: "bin/bit 'integration-test[2]'"
+  integration-test-3:
+    name: "'integration-test[3]'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - id: cache-day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      # Reads the test job's cache, which holds most of the crates this
+      # job compiles. Only the test job saves it.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ${{ env.BUILD_CACHE_PATHS }}
+          key: build-test-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          restore-keys: build-test-${{ steps.cache-day.outputs.day }}-
+      # Use the Hermit-pinned bit rather than one built from this checkout.
+      - run: "bin/bit 'integration-test[3]'"
+  integration-test-4:
+    name: "'integration-test[4]'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - id: cache-day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      # Reads the test job's cache, which holds most of the crates this
+      # job compiles. Only the test job saves it.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ${{ env.BUILD_CACHE_PATHS }}
+          key: build-test-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          restore-keys: build-test-${{ steps.cache-day.outputs.day }}-
+      # Use the Hermit-pinned bit rather than one built from this checkout.
+      - run: "bin/bit 'integration-test[4]'"
   release:
     name: "release"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-        with:
-          cache: true
       - id: cache-day
         run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
@@ -90,8 +136,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-        with:
-          cache: true
       - id: cache-day
         run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
@@ -111,7 +155,7 @@ jobs:
   ci:
     name: "ci"
     if: always()
-    needs: ["default", "integration-test", "release", "test"]
+    needs: ["default", "integration-test-1", "integration-test-2", "integration-test-3", "integration-test-4", "release", "test"]
     runs-on: ubuntu-latest
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')

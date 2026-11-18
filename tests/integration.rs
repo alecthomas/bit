@@ -1,7 +1,8 @@
 //! End-to-end tests of the `bit` binary, one per script in `tests/testdata`.
 //!
 //! Cargo runs these only when asked, with `cargo test --test integration`,
-//! or `bit integration-test`.
+//! or `bit integration-test`. `BIT_TEST_SHARD=index/count` runs every
+//! `count`th script from the `index`th, so CI can split them across jobs.
 //!
 //! A script is a txtar file, as Go's testscript uses: commands, one per
 //! line, then the files to create, each after a `-- path --` line. Every
@@ -57,14 +58,33 @@ fn main() {
         .filter(|path| path.extension().is_some_and(|e| e == "txt"))
         .collect();
     scripts.sort();
+    let (shard, shards) = shard();
     let trials = scripts
         .into_iter()
-        .map(|path| {
+        .enumerate()
+        .filter(|(index, _)| index % shards == shard)
+        .map(|(_, path)| {
             let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
             Trial::ignorable_test(name, move || run(&path))
         })
         .collect();
     libtest_mimic::run(&args, trials).exit();
+}
+
+/// The zero-based shard to run and the number of shards, from
+/// `BIT_TEST_SHARD=index/count` with a one-based index, or every script when
+/// it is unset.
+fn shard() -> (usize, usize) {
+    let Ok(spec) = std::env::var("BIT_TEST_SHARD") else {
+        return (0, 1);
+    };
+    let parsed = spec
+        .split_once('/')
+        .and_then(|(index, count)| Some((index.parse::<usize>().ok()?, count.parse::<usize>().ok()?)));
+    match parsed {
+        Some((index, count)) if (1..=count).contains(&index) => (index - 1, count),
+        _ => panic!("BIT_TEST_SHARD must be index/count with 1 <= index <= count, not {spec:?}"),
+    }
 }
 
 /// Run the script at `path`, failing with its log.

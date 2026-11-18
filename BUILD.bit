@@ -38,9 +38,15 @@ clippy = rust.clippy {
 
 # End-to-end tests of the binary, one per script in tests/testdata, which
 # `cargo test` leaves out unless named.
-large integration-test = rust.test {
+#
+# Each shard runs a quarter of the scripts, so CI runs them as four parallel
+# jobs. The 4 in BIT_TEST_SHARD must match the number of shards.
+let shard = [1, 2, 3, 4]
+
+large integration-test[shard] = rust.test {
   flags = ["--test", "integration"]
   report = "tests"
+  env = { BIT_TEST_SHARD = "#{shard}/4" }
 }
 
 # An S3-compatible server for testing the S3 client. rclone is MIT licensed
