@@ -9,6 +9,10 @@
 # HOME is empty, so the docker CLI finds no user-installed buildx plugin.
 exec sh -c 'p=$(command -v docker-buildx) || exit 0; mkdir -p "$HOME/.docker/cli-plugins" && ln -s "$p" "$HOME/.docker/cli-plugins/docker-buildx"'
 
+# TEMPORARY: time Go's first use and compile apart from the first bit run.
+exec go version
+exec go build -o /dev/null ./registry
+
 bit
 stdout 'registry ✔ ok'
 stdout 'push ▶ docker tag bit-test-payload-[0-9a-f]{12}:[0-9a-f]{64} localhost:[0-9]+/bit-test-payload-[0-9a-f]{12}:v1 && docker push localhost:[0-9]+/bit-test-payload-[0-9a-f]{12}:v1$'

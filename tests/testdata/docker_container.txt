@@ -10,6 +10,10 @@
 # HOME is empty, so the docker CLI finds no user-installed buildx plugin.
 exec sh -c 'p=$(command -v docker-buildx) || exit 0; mkdir -p "$HOME/.docker/cli-plugins" && ln -s "$p" "$HOME/.docker/cli-plugins/docker-buildx"'
 
+# TEMPORARY: time Go's first use and compile apart from the first bit run.
+exec go version
+exec go build -o /dev/null .
+
 bit
 stdout 'server ✔ ok'
 stdout 'image ✔ ok'
