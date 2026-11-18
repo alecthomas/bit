@@ -5,6 +5,7 @@ mod classfile;
 mod jar;
 mod junit;
 pub mod library;
+pub mod maven;
 pub mod test;
 
 use crate::process::CommandExt;
@@ -20,14 +21,18 @@ use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider, T
 use crate::sha256::SHA256;
 use crate::value::Value;
 
-/// Java provider with `library`, `binary` and `test` resources.
+/// Java provider with `library`, `binary`, `test` and `maven` resources.
 pub struct JavaProvider {
     tracker: Arc<FileTracker>,
+    maven: maven::MavenDirs,
 }
 
 impl JavaProvider {
     pub fn new(tracker: Arc<FileTracker>) -> Self {
-        Self { tracker }
+        Self {
+            tracker,
+            maven: maven::MavenDirs::new(),
+        }
     }
 }
 
@@ -38,9 +43,13 @@ impl Provider for JavaProvider {
 
     fn resources(&self) -> Vec<Box<dyn DynResource>> {
         vec![
-            Box::new(library::JavaLibraryResource::new(self.tracker.clone())),
+            Box::new(library::JavaLibraryResource::new(
+                self.tracker.clone(),
+                self.maven.clone(),
+            )),
             Box::new(binary::JavaBinaryResource::new(self.tracker.clone())),
-            Box::new(test::JavaTestResource::new(self.tracker.clone())),
+            Box::new(test::JavaTestResource::new(self.tracker.clone(), self.maven.clone())),
+            Box::new(maven::JavaMavenResource::new(self.tracker.clone(), self.maven.clone())),
         ]
     }
 
@@ -119,14 +128,9 @@ fn join_classpath(entries: &[PathBuf]) -> Result<String, BoxError> {
     Ok(std::env::join_paths(entries)?.to_string_lossy().into_owned())
 }
 
-/// javac's options other than the class path, output directory and
-/// sources.
+/// The javac options a target sets.
 fn javac_options(release: Option<u32>, flags: &[String]) -> Vec<String> {
-    // Annotation processors found on the class path would otherwise run
-    // on JDKs before 23, which changed the default, making the output
-    // depend on the JDK. Sources found on the class path are compiled only
-    // as far as checking them, so no class file of theirs is written.
-    let mut args = vec!["-proc:none".to_owned(), "-implicit:none".to_owned()];
+    let mut args = Vec::new();
     if let Some(release) = release {
         args.extend(["--release".to_owned(), release.to_string()]);
     }
@@ -134,26 +138,83 @@ fn javac_options(release: Option<u32>, flags: &[String]) -> Vec<String> {
     args
 }
 
-/// Compile `sources` against `classpath` into `classes` with javac.
-fn compile<T>(
-    sources: &[PathBuf],
-    classpath: &[PathBuf],
-    options: &[String],
-    classes: &Path,
-    target: &Target<T>,
-    writer: &TargetWriter,
-) -> Result<(), BoxError> {
+/// What javac compiles and against what.
+struct Compile<'a> {
+    sources: &'a [PathBuf],
+    classpath: &'a [PathBuf],
+    /// Annotation processors to run.
+    processors: &'a [PathBuf],
+    /// [`javac_options`].
+    options: &'a [String],
+}
+
+/// Compile into `classes` with javac.
+fn compile<T>(compile: &Compile, classes: &Path, target: &Target<T>, writer: &TargetWriter) -> Result<(), BoxError> {
     let work = tempfile::tempdir()?;
     let argfile = work.path().join("sources");
-    write_argfile(&argfile, sources)?;
+    write_argfile(&argfile, compile.sources)?;
     let mut cmd = Command::new("javac");
     cmd.arg("-d").arg(classes);
-    if !classpath.is_empty() {
-        cmd.arg("-classpath").arg(join_classpath(classpath)?);
+    if !compile.classpath.is_empty() {
+        cmd.arg("-classpath").arg(join_classpath(compile.classpath)?);
     }
-    cmd.args(options);
+    // Only the processors named run: those found on the class path would
+    // otherwise also run on JDKs before 23, which changed the default,
+    // making the output depend on the JDK. Generated sources are compiled
+    // with the rest and not kept.
+    if compile.processors.is_empty() {
+        cmd.arg("-proc:none");
+    } else {
+        cmd.arg("-processorpath").arg(join_classpath(compile.processors)?);
+        cmd.arg("-s").arg(work.path().join("generated"));
+        std::fs::create_dir_all(work.path().join("generated"))?;
+    }
+    // Sources found on the class path are compiled only as far as checking
+    // them, so no class file of theirs is written.
+    cmd.arg("-implicit:none");
+    cmd.args(compile.options);
     cmd.arg(format!("@{}", argfile.display()));
     run(cmd, target, writer)
+}
+
+/// The jars the lockfile at `lock`, relative to the target's `dir`, names
+/// for `artifacts`, each a `group:artifact` key, with everything they
+/// depend on. Each is its path in bit's Maven cache and the hash the
+/// lockfile records for it, which [`fetch_maven_jars`] checks.
+fn maven_jars<T>(
+    target: &Target<T>,
+    lock: Option<&str>,
+    artifacts: &[String],
+    dirs: &maven::MavenDirs,
+) -> Result<Vec<(PathBuf, SHA256)>, BoxError> {
+    if artifacts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let lock =
+        lock.ok_or("set `lock` to the lockfile Maven artifacts come from, such as a java.maven target's `lock`")?;
+    let keys = artifacts
+        .iter()
+        .map(|artifact| artifact.parse::<maven::Key>())
+        .collect::<Result<Vec<_>, _>>()?;
+    maven::jars(&absolute(target, lock)?, &keys, dirs)
+}
+
+/// [`maven_jars`], fetched into the cache unless they are already there.
+fn fetch_maven_jars<T>(
+    target: &Target<T>,
+    lock: Option<&str>,
+    artifacts: &[String],
+    dirs: &maven::MavenDirs,
+) -> Result<Vec<PathBuf>, BoxError> {
+    if artifacts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let lock = absolute(target, lock.unwrap_or_default())?;
+    let keys = artifacts
+        .iter()
+        .map(|artifact| artifact.parse::<maven::Key>())
+        .collect::<Result<Vec<_>, _>>()?;
+    maven::fetch_jars(&lock, &keys, dirs)
 }
 
 /// Write a javac argument file naming `files`, so that a large source tree

@@ -968,6 +968,9 @@ target = java.library {
   sources = (string | [string])?    # Source directories, relative to `dir` (defaults to `src/main/java`)
   resources = (string | [string])?  # Resource directories, relative to `dir` (defaults to `src/main/resources`)
   classpath = [string]?             # Jars and class directories to compile against, relative to `dir`, such as another library's `classpath` output. Each is tracked as an input.
+  maven = [string]?                 # Maven artifacts to compile against, as `group:artifact` keys in `lock`, each with everything it depends on
+  processors = [string]?            # Annotation processors to run, as `group:artifact` keys in `lock`. Only these run, not processors found on the class path.
+  lock = string?                    # Lockfile that `maven` and `processors` come from, relative to `dir`, such as a java.maven target's `lock` output
   release = number?                 # Java release to compile for, passed as `--release`
   flags = [string]?                 # Extra flags passed to javac
   output = string?                  # Output jar path, relative to `dir` (defaults to `build/<name>.jar`, where `<name>` is the last element of `dir`)
@@ -977,10 +980,10 @@ target = java.library {
 
 **Outputs:**
 
-| Field       | Type       | Description                                                                                                                       |
-| ----------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `jar`       | `string`   | Absolute path to the built jar                                                                                                    |
-| `classpath` | `[string]` | Absolute paths of the jar followed by the class path it was compiled against: what code using this library compiles and runs with |
+| Field       | Type       | Description                                                                                                                                      |
+| ----------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `jar`       | `string`   | Absolute path to the built jar                                                                                                                   |
+| `classpath` | `[string]` | Absolute paths of the jar followed by the class path and Maven jars it was compiled against: what code using this library compiles and runs with |
 
 **`java.binary`** (build) — Package a runnable Java application into a directory: `<name>.jar`, whose manifest names the main class and the jars copied into `lib/`. Run it with `java -jar`, and copy the whole directory to deploy it.
 
@@ -999,13 +1002,15 @@ target = java.binary {
 | `jar` | `string` | Absolute path to the runnable jar                             |
 | `dir` | `string` | Absolute path to the directory holding the jar and its `lib/` |
 
-**`java.test`** (test) — Compile tests with javac and run them with the JUnit Platform console launcher, which `classpath` must provide: `junit-platform-console-standalone`, or `junit-platform-console` with an engine such as `junit-jupiter-engine`. Every test class compiled from `sources` runs, with `resources` on the class path, and results are read from the launcher's XML reports.
+**`java.test`** (test) — Compile tests with javac and run them with the JUnit Platform console launcher. A lockfile from java.maven provides the launcher when it holds a JUnit Platform engine; otherwise `classpath` must, with `junit-platform-console-standalone`, or `junit-platform-console` and an engine such as `junit-jupiter-engine`. Every test class compiled from `sources` runs, with `resources` on the class path, and results are read from the launcher's XML reports.
 
 ```bit
 target = java.test {
   sources = (string | [string])?        # Test source directories, relative to `dir` (defaults to `src/test/java`)
   resources = (string | [string])?      # Test resource directories, relative to `dir` (defaults to `src/test/resources`)
-  classpath = [string]?                 # Jars and class directories the tests compile and run with, relative to `dir`, such as the tested library's `classpath` output and the JUnit jars. Each is tracked as an input.
+  classpath = [string]?                 # Jars and class directories the tests compile and run with, relative to `dir`, such as the tested library's `classpath` output. Each is tracked as an input.
+  maven = [string]?                     # Maven artifacts the tests compile and run with, such as `org.junit.jupiter:junit-jupiter`, as `group:artifact` keys in `lock`, each with everything it depends on
+  lock = string?                        # Lockfile that `maven` comes from, relative to `dir`, such as a java.maven target's `lock` output
   release = number?                     # Java release to compile for, passed as `--release`
   flags = [string]?                     # Extra flags passed to javac
   args = [string]?                      # Extra arguments passed to the launcher's `execute` command, such as `--include-tag=fast`
@@ -1019,6 +1024,24 @@ target = java.test {
 | Field    | Type   | Description              |
 | -------- | ------ | ------------------------ |
 | `passed` | `bool` | Whether all tests passed |
+
+**`java.maven`** (build) — Resolve Maven dependencies into a lockfile, with Maven 3's rules: the nearest version of an artifact wins, then the first declared, and requested BOMs manage transitive versions. Resolution reruns only when `artifacts`, `boms` or `repositories` change; otherwise the jars the lockfile names are downloaded and checked against their recorded hashes. Libraries and tests take their jars from the lockfile by `group:artifact`. When JUnit Platform is resolved, its console launcher is added at the same version, for `java.test`. Version ranges and snapshots are not supported.
+
+```bit
+target = java.maven {
+  artifacts = [string]      # Artifacts to resolve, as `group:artifact:version`, or `group:artifact[:extension[:classifier]]:version`. The version may be left out when a BOM in `boms` manages it.
+  boms = [string]?          # BOMs whose managed versions apply to the artifacts and their dependencies, as `group:artifact:version`
+  repositories = [string]?  # Repository URLs, searched in order (defaults to Maven Central). Mirrors and credentials come from `~/.m2/settings.xml`, whose `<server>` and `<mirrorOf>` ids name Maven Central as `central` and any other repository by its URL.
+  lock = string?            # Lockfile path, relative to `dir` (defaults to `maven.lock.json`)
+  frozen = bool?            # Fail rather than resolve when the lockfile is out of date, as CI should
+}
+```
+
+**Outputs:**
+
+| Field  | Type     | Description                                                                |
+| ------ | -------- | -------------------------------------------------------------------------- |
+| `lock` | `string` | Absolute path to the lockfile, for the `lock` field of libraries and tests |
 
 ### pnpm
 

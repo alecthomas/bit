@@ -14,6 +14,7 @@ use crate::provider::{
 use crate::sha256::SHA256;
 
 use super::jar::Jar;
+use super::maven::MavenDirs;
 
 const DEFAULT_SOURCES: &str = "src/main/java";
 const DEFAULT_RESOURCES: &str = "src/main/resources";
@@ -32,6 +33,15 @@ pub struct JavaLibraryInputs {
     /// Jars and class directories to compile against, relative to `dir`, such as another library's `classpath` output. Each is tracked as an input.
     #[serde(default)]
     pub classpath: Vec<String>,
+    /// Maven artifacts to compile against, as `group:artifact` keys in `lock`, each with everything it depends on
+    #[serde(default)]
+    pub maven: Vec<String>,
+    /// Annotation processors to run, as `group:artifact` keys in `lock`. Only these run, not processors found on the class path.
+    #[serde(default)]
+    pub processors: Vec<String>,
+    /// Lockfile that `maven` and `processors` come from, relative to `dir`, such as a java.maven target's `lock` output
+    #[serde(default)]
+    pub lock: Option<String>,
     /// Java release to compile for, passed as `--release`
     #[serde(default)]
     pub release: Option<u32>,
@@ -51,7 +61,7 @@ pub struct JavaLibraryInputs {
 pub struct JavaLibraryOutputs {
     /// Absolute path to the built jar
     pub jar: String,
-    /// Absolute paths of the jar followed by the class path it was compiled against: what code using this library compiles and runs with
+    /// Absolute paths of the jar followed by the class path and Maven jars it was compiled against: what code using this library compiles and runs with
     pub classpath: Vec<String>,
 }
 
@@ -61,6 +71,12 @@ pub struct JavaLibraryState {
     pub sources: Vec<String>,
     pub resources: Vec<String>,
     pub classpath: Vec<String>,
+    #[serde(default)]
+    pub maven: Vec<String>,
+    #[serde(default)]
+    pub processors: Vec<String>,
+    #[serde(default)]
+    pub lock: Option<String>,
     pub release: Option<u32>,
     pub flags: Vec<String>,
     /// The jar, relative to the target's `dir`.
@@ -69,11 +85,41 @@ pub struct JavaLibraryState {
 
 pub struct JavaLibraryResource {
     tracker: Arc<FileTracker>,
+    maven: MavenDirs,
 }
 
 impl JavaLibraryResource {
-    pub fn new(tracker: Arc<FileTracker>) -> Self {
-        Self { tracker }
+    pub(super) fn new(tracker: Arc<FileTracker>, maven: MavenDirs) -> Self {
+        Self { tracker, maven }
+    }
+
+    fn maven_jars(
+        &self,
+        inputs: &Target<JavaLibraryInputs>,
+        artifacts: &[String],
+    ) -> Result<Vec<(PathBuf, SHA256)>, BoxError> {
+        super::maven_jars(inputs, inputs.lock.as_deref(), artifacts, &self.maven)
+    }
+
+    fn outputs_for(&self, inputs: &Target<JavaLibraryInputs>) -> Result<JavaLibraryOutputs, BoxError> {
+        let jar = super::absolute(inputs, &output_name(inputs)?)?
+            .to_string_lossy()
+            .into_owned();
+        let maven = self
+            .maven_jars(inputs, &inputs.maven)?
+            .into_iter()
+            .map(|(path, _)| path);
+        let mut entries = vec![jar.clone()];
+        for entry in classpath(inputs)?.into_iter().chain(maven) {
+            let entry = entry.to_string_lossy().into_owned();
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
+        Ok(JavaLibraryOutputs {
+            jar,
+            classpath: entries,
+        })
     }
 }
 
@@ -132,32 +178,21 @@ fn state_for(inputs: &Target<JavaLibraryInputs>) -> Result<JavaLibraryState, Box
         sources: inputs.sources.clone(),
         resources: inputs.resources.clone(),
         classpath: inputs.classpath.clone(),
+        maven: inputs.maven.clone(),
+        processors: inputs.processors.clone(),
+        lock: inputs.lock.clone(),
         release: inputs.release,
         flags: inputs.flags.clone(),
         output: output_name(inputs)?,
     })
 }
 
-fn outputs_for(inputs: &Target<JavaLibraryInputs>) -> Result<JavaLibraryOutputs, BoxError> {
-    let jar = super::absolute(inputs, &output_name(inputs)?)?
-        .to_string_lossy()
-        .into_owned();
-    let mut entries = vec![jar.clone()];
-    for entry in classpath(inputs)? {
-        let entry = entry.to_string_lossy().into_owned();
-        if !entries.contains(&entry) {
-            entries.push(entry);
-        }
-    }
-    Ok(JavaLibraryOutputs {
-        jar,
-        classpath: entries,
-    })
-}
-
 /// Explicitly named directories must exist. The defaults are conventions,
 /// so a library without resources simply has none.
 fn check_dirs(inputs: &Target<JavaLibraryInputs>) -> Result<(), BoxError> {
+    if (!inputs.maven.is_empty() || !inputs.processors.is_empty()) && inputs.lock.is_none() {
+        return Err("set `lock` to the lockfile `maven` and `processors` come from".into());
+    }
     for (field, dirs) in [("sources", &inputs.sources), ("resources", &inputs.resources)] {
         for dir in dirs.iter() {
             if !Path::new(&inputs.path(dir)).is_dir() {
@@ -194,6 +229,18 @@ impl Resource for JavaLibraryResource {
                 .hash_files(&super::files_in(&resource_dirs(inputs)?, None)?)?,
         );
         files.extend(super::hash_classpath(&classpath(inputs)?, &self.tracker)?);
+        // Maven jars are known by the hash the lockfile records, which
+        // fetching them checks, so they aren't read here.
+        let maven = [&inputs.maven, &inputs.processors];
+        for (path, sha256) in maven
+            .iter()
+            .map(|keys| self.maven_jars(inputs, keys))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+        {
+            files.insert(path.to_string_lossy().into_owned(), sha256);
+        }
         for glob in &inputs.inputs {
             files.extend(self.tracker.hash_glob(&inputs.glob(glob))?);
         }
@@ -236,16 +283,25 @@ impl Resource for JavaLibraryResource {
         // Compiled into a fresh directory, so classes of deleted sources
         // can't reach the jar.
         let work = tempfile::tempdir()?;
+        // Fetched even with nothing to compile, as the `classpath` output
+        // names them.
+        let mut classpath = classpath(inputs)?;
+        classpath.extend(super::fetch_maven_jars(
+            inputs,
+            inputs.lock.as_deref(),
+            &inputs.maven,
+            &self.maven,
+        )?);
         if !sources.is_empty() {
             let classes = work.path().join("classes");
-            super::compile(
-                &sources,
-                &classpath(inputs)?,
-                &option_args(inputs),
-                &classes,
-                inputs,
-                writer,
-            )?;
+            let processors = super::fetch_maven_jars(inputs, inputs.lock.as_deref(), &inputs.processors, &self.maven)?;
+            let compile = super::Compile {
+                sources: &sources,
+                classpath: &classpath,
+                processors: &processors,
+                options: &option_args(inputs),
+            };
+            super::compile(&compile, &classes, inputs, writer)?;
             jar.add_dir(&classes)?;
         }
         for dir in &resource_dirs {
@@ -254,7 +310,7 @@ impl Resource for JavaLibraryResource {
         jar.write(Path::new(&inputs.path(&output_name(inputs)?)))?;
 
         Ok(ApplyResult {
-            outputs: outputs_for(inputs)?,
+            outputs: self.outputs_for(inputs)?,
             state: Some(state_for(inputs)?),
         })
     }
@@ -274,7 +330,9 @@ impl Resource for JavaLibraryResource {
     }
 
     /// The outputs are absolute paths in the worktree that built them, so
-    /// they are rebuilt from the current inputs.
+    /// they are rebuilt from the current inputs. The Maven jars the
+    /// `classpath` output names are fetched, as another machine may have
+    /// built the jar.
     fn materialize(
         &self,
         inputs: &Target<JavaLibraryInputs>,
@@ -285,8 +343,9 @@ impl Resource for JavaLibraryResource {
         writer: &TargetWriter,
     ) -> MaterializeResult<JavaLibraryState, JavaLibraryOutputs> {
         restore_output_files(outputs, artifacts, cas, writer)?;
+        super::fetch_maven_jars(inputs, inputs.lock.as_deref(), &inputs.maven, &self.maven)?;
         Ok(Some(ApplyResult {
-            outputs: outputs_for(inputs)?,
+            outputs: self.outputs_for(inputs)?,
             state: Some(state_for(inputs)?),
         }))
     }
@@ -301,7 +360,7 @@ mod tests {
     use crate::output::Output;
 
     fn resource() -> JavaLibraryResource {
-        JavaLibraryResource::new(Arc::new(FileTracker::default()))
+        JavaLibraryResource::new(Arc::new(FileTracker::default()), MavenDirs::new())
     }
 
     fn library(dir: &Path) -> Target<JavaLibraryInputs> {
@@ -311,6 +370,9 @@ mod tests {
                 sources: vec![],
                 resources: vec![],
                 classpath: vec![],
+                maven: vec![],
+                processors: vec![],
+                lock: None,
                 release: None,
                 flags: vec![],
                 output: None,
@@ -364,8 +426,17 @@ mod tests {
         assert!(
             plan(&changed, None)
                 .description
-                .starts_with("javac -proc:none -implicit:none --release 21 src/main/java → "),
+                .starts_with("javac --release 21 src/main/java → "),
         );
+    }
+
+    #[test]
+    fn maven_artifacts_need_a_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inputs = library(dir.path());
+        inputs.maven = vec!["com.google.guava:guava".into()];
+        let error = Resource::plan(&resource(), &inputs, None).unwrap_err().to_string();
+        assert!(error.contains("set `lock`"), "{error}");
     }
 
     #[test]

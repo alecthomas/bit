@@ -15,11 +15,13 @@ use crate::provider::{
 use crate::providers::ReportMode;
 use crate::sha256::SHA256;
 
+use super::maven::MavenDirs;
+
 const DEFAULT_SOURCES: &str = "src/test/java";
 const DEFAULT_RESOURCES: &str = "src/test/resources";
 const LAUNCHER: &str = "org.junit.platform.console.ConsoleLauncher";
 
-/// Compile tests with javac and run them with the JUnit Platform console launcher, which `classpath` must provide: `junit-platform-console-standalone`, or `junit-platform-console` with an engine such as `junit-jupiter-engine`. Every test class compiled from `sources` runs, with `resources` on the class path, and results are read from the launcher's XML reports.
+/// Compile tests with javac and run them with the JUnit Platform console launcher. A lockfile from java.maven provides the launcher when it holds a JUnit Platform engine; otherwise `classpath` must, with `junit-platform-console-standalone`, or `junit-platform-console` and an engine such as `junit-jupiter-engine`. Every test class compiled from `sources` runs, with `resources` on the class path, and results are read from the launcher's XML reports.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct JavaTestInputs {
     /// Test source directories, relative to `dir` (defaults to `src/test/java`)
@@ -30,9 +32,15 @@ pub struct JavaTestInputs {
     #[serde(default, deserialize_with = "crate::providers::string_or_vec")]
     #[schema(typ = crate::schema::optional_string_or_list())]
     pub resources: Vec<String>,
-    /// Jars and class directories the tests compile and run with, relative to `dir`, such as the tested library's `classpath` output and the JUnit jars. Each is tracked as an input.
+    /// Jars and class directories the tests compile and run with, relative to `dir`, such as the tested library's `classpath` output. Each is tracked as an input.
     #[serde(default)]
     pub classpath: Vec<String>,
+    /// Maven artifacts the tests compile and run with, such as `org.junit.jupiter:junit-jupiter`, as `group:artifact` keys in `lock`, each with everything it depends on
+    #[serde(default)]
+    pub maven: Vec<String>,
+    /// Lockfile that `maven` comes from, relative to `dir`, such as a java.maven target's `lock` output
+    #[serde(default)]
+    pub lock: Option<String>,
     /// Java release to compile for, passed as `--release`
     #[serde(default)]
     pub release: Option<u32>,
@@ -63,6 +71,10 @@ pub struct JavaTestState {
     pub sources: Vec<String>,
     pub resources: Vec<String>,
     pub classpath: Vec<String>,
+    #[serde(default)]
+    pub maven: Vec<String>,
+    #[serde(default)]
+    pub lock: Option<String>,
     pub release: Option<u32>,
     pub flags: Vec<String>,
     pub args: Vec<String>,
@@ -70,11 +82,26 @@ pub struct JavaTestState {
 
 pub struct JavaTestResource {
     tracker: Arc<FileTracker>,
+    maven: MavenDirs,
 }
 
 impl JavaTestResource {
-    pub fn new(tracker: Arc<FileTracker>) -> Self {
-        Self { tracker }
+    pub(super) fn new(tracker: Arc<FileTracker>, maven: MavenDirs) -> Self {
+        Self { tracker, maven }
+    }
+
+    /// The console launcher, when the lockfile holds one: the tests run
+    /// with it, but don't compile against it.
+    fn launcher(inputs: &Target<JavaTestInputs>) -> Result<Vec<String>, BoxError> {
+        let Some(lock) = &inputs.lock else {
+            return Ok(Vec::new());
+        };
+        let console = super::maven::junit_console();
+        if super::maven::has(&super::absolute(inputs, lock)?, &console)? {
+            Ok(vec![console.to_string()])
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 
@@ -106,6 +133,8 @@ fn state_for(inputs: &JavaTestInputs) -> JavaTestState {
         sources: inputs.sources.clone(),
         resources: inputs.resources.clone(),
         classpath: inputs.classpath.clone(),
+        maven: inputs.maven.clone(),
+        lock: inputs.lock.clone(),
         release: inputs.release,
         flags: inputs.flags.clone(),
         args: inputs.args.clone(),
@@ -214,6 +243,13 @@ impl Resource for JavaTestResource {
                 .hash_files(&super::files_in(&resource_dirs(inputs)?, None)?)?,
         );
         files.extend(super::hash_classpath(&classpath(inputs)?, &self.tracker)?);
+        // Maven jars are known by the hash the lockfile records, which
+        // fetching them checks, so they aren't read here.
+        let mut maven = inputs.maven.clone();
+        maven.extend(Self::launcher(inputs)?);
+        for (path, sha256) in super::maven_jars(inputs, inputs.lock.as_deref(), &maven, &self.maven)? {
+            files.insert(path.to_string_lossy().into_owned(), sha256);
+        }
         for glob in &inputs.inputs {
             files.extend(self.tracker.hash_glob(&inputs.glob(glob))?);
         }
@@ -229,6 +265,9 @@ impl Resource for JavaTestResource {
             if let Some(dir) = dirs.iter().find(|dir| !Path::new(&inputs.path(dir)).is_dir()) {
                 return Err(format!("{field} directory `{dir}` does not exist").into());
             }
+        }
+        if !inputs.maven.is_empty() && inputs.lock.is_none() {
+            return Err("set `lock` to the lockfile `maven` comes from".into());
         }
         let sources = if inputs.sources.is_empty() {
             vec![DEFAULT_SOURCES.to_owned()]
@@ -262,11 +301,15 @@ impl Resource for JavaTestResource {
         if sources.is_empty() {
             return Err("no Java test sources to run".into());
         }
-        let classpath = classpath(inputs)?;
-        if !has_launcher(&classpath) {
+        let lock = inputs.lock.as_deref();
+        let mut classpath = classpath(inputs)?;
+        classpath.extend(super::fetch_maven_jars(inputs, lock, &inputs.maven, &self.maven)?);
+        let runtime_jars = super::fetch_maven_jars(inputs, lock, &Self::launcher(inputs)?, &self.maven)?;
+        if !has_launcher(&classpath) && !has_launcher(&runtime_jars) {
             return Err(format!(
-                "`classpath` has no JUnit console launcher ({LAUNCHER}): add the \
-                 junit-platform-console-standalone jar, or junit-platform-console and a test engine"
+                "there is no JUnit console launcher ({LAUNCHER}): resolve a JUnit engine such as \
+                 org.junit.jupiter:junit-jupiter with java.maven and add it to `maven`, or add the \
+                 junit-platform-console-standalone jar to `classpath`"
             )
             .into());
         }
@@ -274,12 +317,18 @@ impl Resource for JavaTestResource {
         let work = tempfile::tempdir()?;
         let classes = work.path().join("classes");
         let reports = work.path().join("reports");
-        let options = super::javac_options(inputs.release, &inputs.flags);
-        super::compile(&sources, &classpath, &options, &classes, inputs, writer)?;
+        let compile = super::Compile {
+            sources: &sources,
+            classpath: &classpath,
+            processors: &[],
+            options: &super::javac_options(inputs.release, &inputs.flags),
+        };
+        super::compile(&compile, &classes, inputs, writer)?;
 
         let mut runtime = vec![classes.clone()];
         runtime.extend(resource_dirs(inputs)?.into_iter().filter(|dir| dir.is_dir()));
         runtime.extend(classpath);
+        runtime.extend(runtime_jars);
         let mut cmd = Command::new("java");
         cmd.arg("-classpath")
             .arg(super::join_classpath(&runtime)?)
@@ -386,6 +435,9 @@ public class ConsoleLauncher {
                 sources: vec![],
                 resources: vec![],
                 classpath: vec![],
+                maven: vec![],
+                processors: vec![],
+                lock: None,
                 release: None,
                 flags: vec![],
                 output: None,
@@ -393,7 +445,7 @@ public class ConsoleLauncher {
             },
         );
         let output = Output::new(&[]);
-        let resource = JavaLibraryResource::new(Arc::new(FileTracker::default()));
+        let resource = JavaLibraryResource::new(Arc::new(FileTracker::default()), MavenDirs::new());
         Resource::apply(&resource, &inputs, None, &Changes::All, &output.writer("launcher"))
             .unwrap()
             .outputs
@@ -407,6 +459,8 @@ public class ConsoleLauncher {
                 sources: vec![],
                 resources: vec![],
                 classpath,
+                maven: vec![],
+                lock: None,
                 release: None,
                 flags: vec![],
                 args: vec!["--include-tag=fast".into()],
@@ -418,7 +472,7 @@ public class ConsoleLauncher {
 
     fn apply(inputs: &Target<JavaTestInputs>) -> Result<bool, BoxError> {
         let output = Output::new(&[]);
-        let resource = JavaTestResource::new(Arc::new(FileTracker::default()));
+        let resource = JavaTestResource::new(Arc::new(FileTracker::default()), MavenDirs::new());
         Ok(
             Resource::apply(&resource, inputs, None, &Changes::All, &output.writer("test"))?
                 .outputs
@@ -492,7 +546,7 @@ public class ConsoleLauncher {
         write(dir.path(), "src/test/resources/fixture.json", "{}");
         write(dir.path(), "libs/junit.jar", "jar");
         let inputs = test_target(dir.path(), vec!["libs/junit.jar".into()]);
-        let resource = JavaTestResource::new(Arc::new(FileTracker::default()));
+        let resource = JavaTestResource::new(Arc::new(FileTracker::default()), MavenDirs::new());
         let files = Resource::resolve(&resource, &inputs).unwrap();
         for name in ["ATest.java", "fixture.json", "libs/junit.jar"] {
             assert!(files.keys().any(|path| path.ends_with(name)), "{name}: {files:?}");

@@ -294,6 +294,7 @@ mod tests {
     use super::*;
     use crate::output::Output;
     use crate::providers::java::library::{JavaLibraryInputs, JavaLibraryResource};
+    use crate::providers::java::maven::MavenDirs;
 
     fn write(dir: &Path, name: &str, content: &str) {
         let path = dir.join(name);
@@ -312,6 +313,9 @@ mod tests {
                 sources: vec![],
                 resources: vec![],
                 classpath,
+                maven: vec![],
+                processors: vec![],
+                lock: None,
                 release: None,
                 flags: vec![],
                 output: None,
@@ -319,7 +323,7 @@ mod tests {
             },
         );
         let output = Output::new(&[]);
-        let resource = JavaLibraryResource::new(Arc::new(FileTracker::default()));
+        let resource = JavaLibraryResource::new(Arc::new(FileTracker::default()), MavenDirs::new());
         Resource::apply(&resource, &inputs, None, &Changes::All, &output.writer("lib"))
             .unwrap()
             .outputs

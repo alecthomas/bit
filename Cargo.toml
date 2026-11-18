@@ -38,3 +38,6 @@ bit-s3 = { version = "0.1.0", path = "bit-s3" }
 pulldown-cmark = { version = "0.13.6", default-features = false }
 zip = { version = "9.7.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 roxmltree = "0.21.2"
+ureq = "3.5.0"
+sha1 = "0.11.0"
+base64 = "0.23"
