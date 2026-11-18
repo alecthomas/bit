@@ -45,7 +45,8 @@ let shard = [1, 2, 3, 4]
 
 large integration-test[shard] = rust.test {
   flags = ["--test", "integration"]
-  report = "tests"
+  # TEMPORARY: stream stderr so CI shows the runner's per-command timings.
+  report = "verbose"
   env = { BIT_TEST_SHARD = "#{shard}/4" }
   concurrency = 1 # Should only shard on CI
 }

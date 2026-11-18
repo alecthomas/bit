@@ -98,7 +98,18 @@ fn run(path: &Path) -> Result<Completion, Failed> {
             continue;
         }
         let _ = writeln!(state.log, "> {line}");
-        match state.execute(line) {
+        // TEMPORARY: per-command timings for diagnosing slow Docker scripts on CI.
+        let started = std::time::Instant::now();
+        let result = state.execute(line);
+        let secs = started.elapsed().as_secs_f64();
+        let name = path.file_stem().unwrap_or_default().to_string_lossy();
+        eprintln!("TIMING {name} {secs:>6.2}s {line}");
+        if secs > 1.0 && line.trim_start_matches("! ").starts_with("bit") {
+            for out in state.stdout.lines() {
+                eprintln!("TIMING {name}         | {out}");
+            }
+        }
+        match result {
             Ok(Flow::Continue) => {}
             Ok(Flow::Skip(reason)) => return Ok(Completion::ignored_with(reason)),
             Err(e) => {
