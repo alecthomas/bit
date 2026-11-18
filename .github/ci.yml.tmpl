@@ -17,9 +17,6 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
         with:
           cache: true
-      # Install every package now. Hermit installs one on first use, and
-      # tests that start the same tool at once can fail mid-install.
-      - run: bin/hermit install
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: {{ ("bin/" ~ job.command) | tojson }}
 {% endfor %}
