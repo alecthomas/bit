@@ -23,10 +23,12 @@ const MANIFEST: &str = "META-INF/MANIFEST.MF";
 /// specification requires.
 const MANIFEST_LINE_BYTES: usize = 72;
 
-/// A jar to write: files keyed by their entry name.
+/// A jar to write: files keyed by their entry name, and manifest attributes.
 #[derive(Debug, Default)]
 pub(super) struct Jar {
     entries: BTreeMap<String, PathBuf>,
+    main_class: Option<String>,
+    class_path: Vec<String>,
 }
 
 impl Jar {
@@ -54,6 +56,15 @@ impl Jar {
             }
         }
         Ok(())
+    }
+
+    pub fn main_class(&mut self, class: &str) {
+        self.main_class = Some(class.to_owned());
+    }
+
+    /// Jars, relative to this one, that `java -jar` adds to the class path.
+    pub fn class_path(&mut self, entries: Vec<String>) {
+        self.class_path = entries;
     }
 
     /// Write the jar to `path`, replacing it only once complete.
@@ -99,6 +110,12 @@ impl Jar {
         let mut manifest = String::new();
         manifest_attribute(&mut manifest, "Manifest-Version", "1.0");
         manifest_attribute(&mut manifest, "Created-By", "bit");
+        if let Some(main_class) = &self.main_class {
+            manifest_attribute(&mut manifest, "Main-Class", main_class);
+        }
+        if !self.class_path.is_empty() {
+            manifest_attribute(&mut manifest, "Class-Path", &self.class_path.join(" "));
+        }
         manifest.push_str("\r\n");
         manifest
     }
@@ -225,6 +242,17 @@ mod tests {
         let resources = tree(&[("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")]);
         let error = Jar::default().add_dir(resources.path()).unwrap_err().to_string();
         assert!(error.contains("would replace the manifest"), "{error}");
+    }
+
+    #[test]
+    fn manifest_names_the_main_class_and_class_path() {
+        let mut jar = Jar::default();
+        jar.main_class("com.example.Main");
+        jar.class_path(vec!["lib/a.jar".into(), "lib/b.jar".into()]);
+        assert_eq!(
+            jar.manifest(),
+            "Manifest-Version: 1.0\r\nCreated-By: bit\r\nMain-Class: com.example.Main\r\nClass-Path: lib/a.jar lib/b.jar\r\n\r\n"
+        );
     }
 
     #[test]

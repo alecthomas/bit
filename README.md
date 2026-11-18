@@ -982,6 +982,23 @@ target = java.library {
 | `jar`       | `string`   | Absolute path to the built jar                                                                                                    |
 | `classpath` | `[string]` | Absolute paths of the jar followed by the class path it was compiled against: what code using this library compiles and runs with |
 
+**`java.binary`** (build) — Package a runnable Java application into a directory: `<name>.jar`, whose manifest names the main class and the jars copied into `lib/`. Run it with `java -jar`, and copy the whole directory to deploy it.
+
+```bit
+target = java.binary {
+  classpath = [string]  # Jars the application runs with, relative to `dir`, such as a library's `classpath` output
+  main = string?        # Main class (defaults to the only class in the first `classpath` jar with a `main` method; one declared `public static void main(String[])` is preferred over JDK 25's instance and parameterless forms)
+  output = string?      # Output directory, relative to `dir` (defaults to `build/<name>`, where `<name>` is the last element of `dir`). The jar takes the directory's name.
+}
+```
+
+**Outputs:**
+
+| Field | Type     | Description                                                   |
+| ----- | -------- | ------------------------------------------------------------- |
+| `jar` | `string` | Absolute path to the runnable jar                             |
+| `dir` | `string` | Absolute path to the directory holding the jar and its `lib/` |
+
 ### pnpm
 
 **`pnpm.install`** (build) — Install the dependencies of the pnpm workspace in `dir`.

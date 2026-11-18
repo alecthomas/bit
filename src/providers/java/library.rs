@@ -83,13 +83,7 @@ fn output_name(inputs: &Target<JavaLibraryInputs>) -> Result<String, BoxError> {
     if let Some(output) = &inputs.output {
         return Ok(output.clone());
     }
-    let dir = super::absolute(inputs, ".")?;
-    let dir = dir.canonicalize().unwrap_or(dir);
-    let name = dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "library".to_owned());
-    Ok(format!("build/{name}.jar"))
+    Ok(format!("build/{}.jar", super::dir_name(inputs)?))
 }
 
 /// `dirs`, or `default` when empty, as absolute paths.

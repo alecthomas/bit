@@ -1,5 +1,7 @@
 //! Java built directly with the JDK's tools, without Gradle or Maven.
 
+pub mod binary;
+mod classfile;
 mod jar;
 pub mod library;
 
@@ -16,7 +18,7 @@ use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider, T
 use crate::sha256::SHA256;
 use crate::value::Value;
 
-/// Java provider with `library` resources.
+/// Java provider with `library` and `binary` resources.
 pub struct JavaProvider {
     tracker: Arc<FileTracker>,
 }
@@ -33,7 +35,10 @@ impl Provider for JavaProvider {
     }
 
     fn resources(&self) -> Vec<Box<dyn DynResource>> {
-        vec![Box::new(library::JavaLibraryResource::new(self.tracker.clone()))]
+        vec![
+            Box::new(library::JavaLibraryResource::new(self.tracker.clone())),
+            Box::new(binary::JavaBinaryResource::new(self.tracker.clone())),
+        ]
     }
 
     fn functions(&self) -> Vec<FuncSignature> {
@@ -62,6 +67,16 @@ fn ambient<T>(program: &str, target: &Target<T>) -> Vec<Ambient> {
 /// the shared cache key.
 fn absolute<T>(target: &Target<T>, path: &str) -> Result<PathBuf, BoxError> {
     Ok(std::env::current_dir()?.join(target.path(path)))
+}
+
+/// The last element of the target's `dir`, which names its default output.
+fn dir_name<T>(target: &Target<T>) -> Result<String, BoxError> {
+    let dir = absolute(target, ".")?;
+    let dir = dir.canonicalize().unwrap_or(dir);
+    Ok(dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "java".to_owned()))
 }
 
 /// Every file beneath each directory in `dirs` whose name ends in
