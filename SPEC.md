@@ -340,6 +340,7 @@ So `a + b | trim` is `a + (b | trim)`.
 | `basename(v)`, `dirname(v)` | File name or directory of a path |
 | `replace(v, pattern, replacement)` | Replace regular expression matches. `replacement` may use `$1` or `${name}` |
 | `filter(list, pattern)` | Keep strings matching a regular expression |
+| `seq(start, finish?, step?)` | Count from `start` to `finish` by `step` (default 1). With one argument, count from 1 to it |
 | `uniq(list)` | Deduplicate, preserving order |
 | `sha256(s)` | SHA-256 of a string |
 | `shell_join(v)` | Quote as POSIX shell words joined by spaces |

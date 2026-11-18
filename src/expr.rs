@@ -395,6 +395,11 @@ fn builtins() -> &'static HashMap<String, BuiltinDef> {
                 __bit_signature_shell_split(),
             ),
             BuiltinDef::new(
+                __bit_call_seq,
+                Type::List(Box::new(Type::Number)),
+                __bit_signature_seq(),
+            ),
+            BuiltinDef::new(
                 __bit_call_uniq,
                 Type::List(Box::new(Type::String)),
                 __bit_signature_uniq(),
@@ -637,6 +642,27 @@ fn shell_join(value: StringOrList) -> Result<String, EvalError> {
 #[bit_derive::provider_function]
 fn shell_split(value: String) -> Result<Vec<String>, EvalError> {
     shlex::split(&value).ok_or_else(|| EvalError::Shell(format!("unbalanced quotes or trailing escape in {value:?}")))
+}
+
+/// Count from start to finish by step (default 1), including finish if a step lands on it. A negative step counts down. With one argument, count from 1 to it.
+#[bit_derive::provider_function]
+fn seq(start: i64, finish: Option<i64>, step: Option<i64>) -> Result<Vec<i64>, EvalError> {
+    let (start, finish) = match finish {
+        Some(finish) => (start, finish),
+        None => (1, start),
+    };
+    let step = step.unwrap_or(1);
+    if step == 0 {
+        return Err(EvalError::Type("seq step cannot be 0".into()));
+    }
+    let mut numbers = Vec::new();
+    let mut n = start;
+    while (step > 0 && n <= finish) || (step < 0 && n >= finish) {
+        numbers.push(n);
+        let Some(next) = n.checked_add(step) else { break };
+        n = next;
+    }
+    Ok(numbers)
 }
 
 /// Deduplicate a list while preserving order.
@@ -1270,6 +1296,23 @@ mod tests {
                 Value::Str("c".into()),
             ])
         );
+    }
+
+    #[test]
+    fn eval_seq() {
+        let scope = Scope::new();
+        let seq = |args: &[i64]| {
+            let args = args.iter().map(|&n| Expr::Number(n.into())).collect();
+            eval(&Expr::Call(vec!["seq".into()], args), &scope)
+        };
+        let numbers = |ns: &[i64]| Value::List(Type::Number, ns.iter().map(|&n| Value::Number(n.into())).collect());
+        assert_eq!(seq(&[3]).unwrap(), numbers(&[1, 2, 3]));
+        assert_eq!(seq(&[0]).unwrap(), numbers(&[]));
+        assert_eq!(seq(&[2, 4]).unwrap(), numbers(&[2, 3, 4]));
+        assert_eq!(seq(&[0, 7, 3]).unwrap(), numbers(&[0, 3, 6]));
+        assert_eq!(seq(&[5, 1, -2]).unwrap(), numbers(&[5, 3, 1]));
+        assert_eq!(seq(&[5, 1]).unwrap(), numbers(&[]));
+        assert!(seq(&[1, 5, 0]).unwrap_err().to_string().contains("step cannot be 0"));
     }
 
     #[test]

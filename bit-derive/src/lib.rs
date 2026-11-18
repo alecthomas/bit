@@ -85,7 +85,9 @@ fn expand_provider_function(function: ItemFn) -> syn::Result<TokenStream2> {
 
     let argument_bindings = params.iter().enumerate().map(|(index, (param, typ, optional, _))| {
         let param_name = param.to_string();
-        let deserialize = if is_dynamic_json_type(typ) {
+        // The plain decoder passes numbers as BigDecimal's string form, which
+        // a Rust number can't read; the dynamic one writes JSON numbers.
+        let deserialize = if is_dynamic_json_type(typ) || is_numeric_type(typ) {
             quote! { crate::provider::deserialize_dynamic_function_value }
         } else {
             quote! { crate::provider::deserialize_function_value }
@@ -186,6 +188,21 @@ fn is_dynamic_json_type(ty: &Type) -> bool {
         return false;
     };
     (segment.ident == "Vec" || segment.ident == "Option") && is_dynamic_json_type(&extract_generic_arg(segment))
+}
+
+const NUMERIC_TYPES: &[&str] = &[
+    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "usize", "isize",
+];
+
+/// Whether `ty` is a Rust number, or a list or option of one.
+fn is_numeric_type(ty: &Type) -> bool {
+    let Type::Path(path) = ty else { return false };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    let ident = segment.ident.to_string();
+    NUMERIC_TYPES.contains(&ident.as_str())
+        || ((ident == "Vec" || ident == "Option") && is_numeric_type(&extract_generic_arg(segment)))
 }
 
 fn option_inner(ty: &Type) -> Option<Type> {
@@ -600,9 +617,7 @@ fn required_schema_type(ty: &Type) -> TokenStream2 {
                 "String" => quote! { crate::value::Type::String },
                 "TargetRef" => quote! { crate::value::Type::TargetRef },
                 "bool" => quote! { crate::value::Type::Bool },
-                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "usize" | "isize" => {
-                    quote! { crate::value::Type::Number }
-                }
+                ident if NUMERIC_TYPES.contains(&ident) => quote! { crate::value::Type::Number },
                 "Duration" => quote! { crate::value::Type::Duration },
                 "Option" => {
                     let inner = required_schema_type(&extract_generic_arg(seg));

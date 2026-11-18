@@ -426,6 +426,8 @@ its unqualified name, for example `bit --schema env`.
 
 **`secret(name: string) -> string`** — Read a secret by name. `bit` shows the secret as this call, never its value. A secret cannot be passed as a target or group argument.
 
+**`seq(start: number, finish: number?, step: number?) -> [number]`** — Count from start to finish by step (default 1), including finish if a step lands on it. A negative step counts down. With one argument, count from 1 to it.
+
 **`sha256(value: string) -> string`** — Hash a string with SHA-256.
 
 **`shell_join(value: string | [string]) -> string`** — Quote a string, or each string in a list, as POSIX shell words joined by spaces.
