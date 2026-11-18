@@ -37,6 +37,10 @@ jobs:
           restore-keys: build-default-${{ steps.cache-day.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit clippy fmt-check s3-cache-test s3-test"
+      # The build leaves kache's daemon running, and its writes to the cache
+      # make tar fail the save. Stopping it waits until it releases the cache.
+      - if: github.ref == 'refs/heads/master'
+        run: bin/kache daemon stop
       - if: github.ref == 'refs/heads/master'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
         with:
@@ -125,6 +129,10 @@ jobs:
           restore-keys: build-release-${{ steps.cache-day.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit release"
+      # The build leaves kache's daemon running, and its writes to the cache
+      # make tar fail the save. Stopping it waits until it releases the cache.
+      - if: github.ref == 'refs/heads/master'
+        run: bin/kache daemon stop
       - if: github.ref == 'refs/heads/master'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
         with:
@@ -145,6 +153,10 @@ jobs:
           restore-keys: build-test-${{ steps.cache-day.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit test"
+      # The build leaves kache's daemon running, and its writes to the cache
+      # make tar fail the save. Stopping it waits until it releases the cache.
+      - if: github.ref == 'refs/heads/master'
+        run: bin/kache daemon stop
       - if: github.ref == 'refs/heads/master'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
         with:

@@ -50,6 +50,10 @@ jobs:
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: {{ ("bin/" ~ job.command) | tojson }}
 {% if default_branch and cache == job.id %}
+      # The build leaves kache's daemon running, and its writes to the cache
+      # make tar fail the save. Stopping it waits until it releases the cache.
+      - if: github.ref == 'refs/heads/{{ default_branch }}'
+        run: bin/kache daemon stop
       - if: github.ref == 'refs/heads/{{ default_branch }}'
         uses: actions/cache/save@v6
         with:
