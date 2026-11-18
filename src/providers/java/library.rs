@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -113,16 +112,7 @@ fn classpath(inputs: &Target<JavaLibraryInputs>) -> Result<Vec<PathBuf>, BoxErro
 /// The arguments to javac other than the class path, output directory and
 /// sources: the target's options.
 fn option_args(inputs: &JavaLibraryInputs) -> Vec<String> {
-    // Annotation processors found on the class path would otherwise run
-    // on JDKs before 23, which changed the default, making the jar depend
-    // on the JDK. Sources found on the class path are compiled only as
-    // far as checking them, so no class file of theirs enters the jar.
-    let mut args = vec!["-proc:none".to_owned(), "-implicit:none".to_owned()];
-    if let Some(release) = inputs.release {
-        args.extend(["--release".to_owned(), release.to_string()]);
-    }
-    args.extend(inputs.flags.iter().cloned());
-    args
+    super::javac_options(inputs.release, &inputs.flags)
 }
 
 fn describe(inputs: &Target<JavaLibraryInputs>) -> Result<String, BoxError> {
@@ -192,7 +182,7 @@ impl Resource for JavaLibraryResource {
     }
 
     fn ambient(&self, inputs: &Target<JavaLibraryInputs>) -> Vec<Ambient> {
-        super::ambient("javac", inputs)
+        super::ambient(&["javac"], inputs)
     }
 
     fn resolve(&self, inputs: &Target<JavaLibraryInputs>) -> Result<BTreeMap<String, SHA256>, BoxError> {
@@ -248,17 +238,14 @@ impl Resource for JavaLibraryResource {
         let work = tempfile::tempdir()?;
         if !sources.is_empty() {
             let classes = work.path().join("classes");
-            let argfile = work.path().join("sources");
-            super::write_argfile(&argfile, &sources)?;
-            let mut cmd = Command::new("javac");
-            cmd.arg("-d").arg(&classes);
-            let classpath = classpath(inputs)?;
-            if !classpath.is_empty() {
-                cmd.arg("-classpath").arg(super::join_classpath(&classpath)?);
-            }
-            cmd.args(option_args(inputs));
-            cmd.arg(format!("@{}", argfile.display()));
-            super::run(cmd, inputs, writer)?;
+            super::compile(
+                &sources,
+                &classpath(inputs)?,
+                &option_args(inputs),
+                &classes,
+                inputs,
+                writer,
+            )?;
             jar.add_dir(&classes)?;
         }
         for dir in &resource_dirs {

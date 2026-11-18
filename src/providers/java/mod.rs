@@ -3,7 +3,9 @@
 pub mod binary;
 mod classfile;
 mod jar;
+mod junit;
 pub mod library;
+pub mod test;
 
 use crate::process::CommandExt;
 use std::collections::BTreeMap;
@@ -18,7 +20,7 @@ use crate::provider::{Ambient, BoxError, DynResource, FuncSignature, Provider, T
 use crate::sha256::SHA256;
 use crate::value::Value;
 
-/// Java provider with `library` and `binary` resources.
+/// Java provider with `library`, `binary` and `test` resources.
 pub struct JavaProvider {
     tracker: Arc<FileTracker>,
 }
@@ -38,6 +40,7 @@ impl Provider for JavaProvider {
         vec![
             Box::new(library::JavaLibraryResource::new(self.tracker.clone())),
             Box::new(binary::JavaBinaryResource::new(self.tracker.clone())),
+            Box::new(test::JavaTestResource::new(self.tracker.clone())),
         ]
     }
 
@@ -50,15 +53,18 @@ impl Provider for JavaProvider {
     }
 }
 
-/// The JDK tool `program`'s version, run in the target's `dir`, where a
-/// version manager such as jenv or asdf selects the JDK, plus the variables
-/// every JVM reads its options from, which change how the tool behaves.
-fn ambient<T>(program: &str, target: &Target<T>) -> Vec<Ambient> {
-    vec![
-        crate::providers::version(program, &["-version"], target.dir.as_deref()),
-        Ambient::Variable("JAVA_TOOL_OPTIONS".into()),
-        Ambient::Variable("_JAVA_OPTIONS".into()),
-    ]
+/// The versions of the JDK tools in `programs`, run in the target's `dir`,
+/// where a version manager such as jenv or asdf selects the JDK, plus the
+/// variables every JVM reads its options from, which change how the tools
+/// behave. `--version` rather than `-version`, which prints to stderr.
+fn ambient<T>(programs: &[&str], target: &Target<T>) -> Vec<Ambient> {
+    let mut ambient: Vec<Ambient> = programs
+        .iter()
+        .map(|program| crate::providers::version(program, &["--version"], target.dir.as_deref()))
+        .collect();
+    ambient.push(Ambient::Variable("JAVA_TOOL_OPTIONS".into()));
+    ambient.push(Ambient::Variable("_JAVA_OPTIONS".into()));
+    ambient
 }
 
 /// `path`, relative to the target's `dir`, as an absolute path. Paths are
@@ -111,6 +117,43 @@ fn hash_classpath(classpath: &[PathBuf], tracker: &FileTracker) -> Result<BTreeM
 /// `entries` joined into a class path argument.
 fn join_classpath(entries: &[PathBuf]) -> Result<String, BoxError> {
     Ok(std::env::join_paths(entries)?.to_string_lossy().into_owned())
+}
+
+/// javac's options other than the class path, output directory and
+/// sources.
+fn javac_options(release: Option<u32>, flags: &[String]) -> Vec<String> {
+    // Annotation processors found on the class path would otherwise run
+    // on JDKs before 23, which changed the default, making the output
+    // depend on the JDK. Sources found on the class path are compiled only
+    // as far as checking them, so no class file of theirs is written.
+    let mut args = vec!["-proc:none".to_owned(), "-implicit:none".to_owned()];
+    if let Some(release) = release {
+        args.extend(["--release".to_owned(), release.to_string()]);
+    }
+    args.extend(flags.iter().cloned());
+    args
+}
+
+/// Compile `sources` against `classpath` into `classes` with javac.
+fn compile<T>(
+    sources: &[PathBuf],
+    classpath: &[PathBuf],
+    options: &[String],
+    classes: &Path,
+    target: &Target<T>,
+    writer: &TargetWriter,
+) -> Result<(), BoxError> {
+    let work = tempfile::tempdir()?;
+    let argfile = work.path().join("sources");
+    write_argfile(&argfile, sources)?;
+    let mut cmd = Command::new("javac");
+    cmd.arg("-d").arg(classes);
+    if !classpath.is_empty() {
+        cmd.arg("-classpath").arg(join_classpath(classpath)?);
+    }
+    cmd.args(options);
+    cmd.arg(format!("@{}", argfile.display()));
+    run(cmd, target, writer)
 }
 
 /// Write a javac argument file naming `files`, so that a large source tree

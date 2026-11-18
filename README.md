@@ -999,6 +999,27 @@ target = java.binary {
 | `jar` | `string` | Absolute path to the runnable jar                             |
 | `dir` | `string` | Absolute path to the directory holding the jar and its `lib/` |
 
+**`java.test`** (test) — Compile tests with javac and run them with the JUnit Platform console launcher, which `classpath` must provide: `junit-platform-console-standalone`, or `junit-platform-console` with an engine such as `junit-jupiter-engine`. Every test class compiled from `sources` runs, with `resources` on the class path, and results are read from the launcher's XML reports.
+
+```bit
+target = java.test {
+  sources = (string | [string])?        # Test source directories, relative to `dir` (defaults to `src/test/java`)
+  resources = (string | [string])?      # Test resource directories, relative to `dir` (defaults to `src/test/resources`)
+  classpath = [string]?                 # Jars and class directories the tests compile and run with, relative to `dir`, such as the tested library's `classpath` output and the JUnit jars. Each is tracked as an input.
+  release = number?                     # Java release to compile for, passed as `--release`
+  flags = [string]?                     # Extra flags passed to javac
+  args = [string]?                      # Extra arguments passed to the launcher's `execute` command, such as `--include-tag=fast`
+  report = ("suites" | "tests" | "verbose")?  # What to show: a line per test class (`suites`), a line per test (`tests`), or a line per test plus the launcher's output as it arrives (`verbose`). Outside `verbose`, the launcher's output is shown only when it fails without a failing test to explain it.
+  inputs = [string]?                    # Extra input file globs, relative to `dir` (in addition to test sources, resources and the class path). Add files tests read from elsewhere.
+}
+```
+
+**Outputs:**
+
+| Field    | Type   | Description              |
+| -------- | ------ | ------------------------ |
+| `passed` | `bool` | Whether all tests passed |
+
 ### pnpm
 
 **`pnpm.install`** (build) — Install the dependencies of the pnpm workspace in `dir`.
