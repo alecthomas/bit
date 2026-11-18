@@ -416,6 +416,8 @@ its unqualified name, for example `bit --schema env`.
 
 **`glob(pattern: string) -> [string]`** — Expand a filesystem glob.
 
+**`len(value: any) -> number`** — Count the items in a list, the fields in a map, or the characters in a string.
+
 **`lines(value: string) -> [string]`** — Split a string into nonempty lines.
 
 **`prefix(value: string | [string], text: string) -> string | [string]`** — Prepend text to a string or each string in a list.

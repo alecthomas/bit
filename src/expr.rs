@@ -394,6 +394,7 @@ fn builtins() -> &'static HashMap<String, BuiltinDef> {
                 Type::List(Box::new(Type::String)),
                 __bit_signature_shell_split(),
             ),
+            BuiltinDef::new(__bit_call_len, Type::Number, __bit_signature_len()),
             BuiltinDef::new(
                 __bit_call_seq,
                 Type::List(Box::new(Type::Number)),
@@ -642,6 +643,19 @@ fn shell_join(value: StringOrList) -> Result<String, EvalError> {
 #[bit_derive::provider_function]
 fn shell_split(value: String) -> Result<Vec<String>, EvalError> {
     shlex::split(&value).ok_or_else(|| EvalError::Shell(format!("unbalanced quotes or trailing escape in {value:?}")))
+}
+
+/// Count the items in a list, the fields in a map, or the characters in a string.
+#[bit_derive::provider_function]
+fn len(value: serde_json::Value) -> Result<usize, EvalError> {
+    match value {
+        serde_json::Value::Array(items) => Ok(items.len()),
+        serde_json::Value::Object(fields) => Ok(fields.len()),
+        serde_json::Value::String(s) => Ok(s.chars().count()),
+        other => Err(EvalError::Type(format!(
+            "len requires a list, map or string, got {other}"
+        ))),
+    }
 }
 
 /// Count from start to finish by step (default 1), including finish if a step lands on it. A negative step counts down. With one argument, count from 1 to it.
@@ -1295,6 +1309,39 @@ mod tests {
                 Value::Str("b".into()),
                 Value::Str("c".into()),
             ])
+        );
+    }
+
+    #[test]
+    fn eval_len() {
+        let scope = Scope::new();
+        let len = |value: Expr| eval(&Expr::Call(vec!["len".into()], vec![value]), &scope);
+        let s = |text: &str| Expr::Str(vec![StringPart::Literal(text.into())]);
+        assert_eq!(
+            len(Expr::List(vec![s("a"), s("b"), s("c")])).unwrap(),
+            Value::Number(3.into())
+        );
+        assert_eq!(len(Expr::List(vec![])).unwrap(), Value::Number(0.into()));
+        assert_eq!(len(s("héllo")).unwrap(), Value::Number(5.into()));
+        assert_eq!(len(s("")).unwrap(), Value::Number(0.into()));
+        let map = Expr::Map(vec![
+            MapEntry {
+                name: "a".into(),
+                typ: None,
+                value: s("1"),
+            },
+            MapEntry {
+                name: "b".into(),
+                typ: None,
+                value: s("2"),
+            },
+        ]);
+        assert_eq!(len(map).unwrap(), Value::Number(2.into()));
+        assert!(
+            len(Expr::Number(4.into()))
+                .unwrap_err()
+                .to_string()
+                .contains("len requires a list, map or string")
         );
     }
 
