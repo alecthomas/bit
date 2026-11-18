@@ -1049,7 +1049,7 @@ target = java.maven {
 
 ```bit
 target = pnpm.install {
-  frozen = bool?  # Pass `--frozen-lockfile` (reproducible installs, default `true`)
+  frozen = bool?  # Pass `--frozen-lockfile` (reproducible installs, default `true`), or `--no-frozen-lockfile`, which updates an outdated lockfile even where pnpm would freeze it, as in CI
 }
 ```
 

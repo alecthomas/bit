@@ -17,10 +17,22 @@ fn default_frozen() -> bool {
     true
 }
 
+/// The `pnpm install` arguments. pnpm freezes the lockfile by default when
+/// `CI` is set, so unfrozen is passed explicitly for `frozen` to mean the
+/// same everywhere.
+fn install_args(frozen: bool) -> Vec<String> {
+    let lockfile = if frozen {
+        "--frozen-lockfile"
+    } else {
+        "--no-frozen-lockfile"
+    };
+    vec!["install".to_owned(), lockfile.to_owned()]
+}
+
 /// Install the dependencies of the pnpm workspace in `dir`.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct PnpmInstallInputs {
-    /// Pass `--frozen-lockfile` (reproducible installs, default `true`)
+    /// Pass `--frozen-lockfile` (reproducible installs, default `true`), or `--no-frozen-lockfile`, which updates an outdated lockfile even where pnpm would freeze it, as in CI
     #[serde(default = "default_frozen")]
     pub frozen: bool,
 }
@@ -166,11 +178,7 @@ impl Resource for PnpmInstallResource {
         inputs: &Target<PnpmInstallInputs>,
         prior_state: Option<&PnpmInstallState>,
     ) -> Result<PlanResult, BoxError> {
-        let description = if inputs.frozen {
-            "pnpm install --frozen-lockfile".to_owned()
-        } else {
-            "pnpm install".to_owned()
-        };
+        let description = format!("pnpm {}", install_args(inputs.frozen).join(" "));
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -198,11 +206,7 @@ impl Resource for PnpmInstallResource {
         _changes: &Changes,
         writer: &TargetWriter,
     ) -> Result<ApplyResult<PnpmInstallState, PnpmInstallOutputs>, BoxError> {
-        let mut args = vec!["install".to_owned()];
-        if inputs.frozen {
-            args.push("--frozen-lockfile".to_owned());
-        }
-        run_pnpm(&args, inputs, writer)?;
+        run_pnpm(&install_args(inputs.frozen), inputs, writer)?;
 
         let ws = workspace::workspace(&self.tracker, Path::new(workspace_dir(inputs)), &inputs.env)?;
         let mut node_modules_dirs: Vec<String> = vec![ws.root.to_string_lossy().into_owned()];
@@ -360,6 +364,8 @@ mod tests {
         };
         let result = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
         assert_eq!(result.action, PlanAction::Update);
+        // Explicit, as pnpm's own default depends on `CI`.
+        assert_eq!(result.description, "pnpm install --no-frozen-lockfile");
     }
 
     #[test]

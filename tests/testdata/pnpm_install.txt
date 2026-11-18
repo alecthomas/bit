@@ -27,8 +27,11 @@ cp app.package.json packages/app/package.json
 stdout 'deps │ Error: ERR_PNPM_OUTDATED_LOCKFILE'
 stderr 'target ''deps'' apply failed'
 cp BUILD.unfrozen BUILD.bit
+# pnpm freezes the lockfile by default when CI is set, which `frozen = false`
+# overrides.
+env CI=true
 bit deps
-stdout 'deps ▶ pnpm install$'
+stdout 'deps ▶ pnpm install --no-frozen-lockfile$'
 stdout 'deps ✔ ok'
 grep '^ +other:\n +specifier: workspace:\*' pnpm-lock.yaml
 exists packages/app/node_modules/other/package.json

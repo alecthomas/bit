@@ -38,9 +38,11 @@ clippy = rust.clippy {
 
 # End-to-end tests of the binary, one per script in tests/testdata, which
 # `cargo test` leaves out unless named.
-large integration-test = rust.test {
-  flags = ["--test", "integration"]
-  report = "tests"
+#
+# Temporarily cargo directly: the pinned bit 0.61.1 drops libtest-mimic's
+# failure logs. Return to rust.test once a release that reads them is pinned.
+large integration-test = exec.test {
+  command = "cargo test --test integration"
 }
 
 # An S3-compatible server for testing the S3 client. rclone is MIT licensed
