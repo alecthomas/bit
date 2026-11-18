@@ -24,7 +24,9 @@ const MANIFEST_ROLE: &str = "manifest.json";
 
 /// Build a Docker image (auto-detects inputs from Dockerfile). Changes to a
 /// base image tag, a file `ADD` downloads, or a `# syntax=` frontend are not
-/// detected, so pin them by digest.
+/// detected, so pin them by digest. A rebuild removes the tags it created for
+/// the previous image once no container uses them, and `--clean` removes
+/// every tag it created, leaving other tags of the same image alone.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct ImageInputs {
     /// Image tag
@@ -73,6 +75,48 @@ pub struct ImageState {
     pub platform: Vec<String>,
     #[serde(default)]
     pub pinned_tag: Option<String>,
+    /// Tags this target created for images it has since replaced, kept
+    /// because a container still used them, and removed by a later build or
+    /// `--clean`.
+    #[serde(default)]
+    pub retained: Vec<ImageTag>,
+}
+
+/// A local tag and the image it was created for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageTag {
+    pub tag: String,
+    pub image_id: String,
+}
+
+impl ImageState {
+    /// The local tags this target created: the user's tag and the pinned
+    /// tag, then those kept from replaced images. A multi-platform build
+    /// creates none, since its image only exists in the registry.
+    fn local_tags(&self) -> Vec<ImageTag> {
+        let mut tags = Vec::new();
+        if self.platform.len() <= 1 {
+            let pinned = self
+                .pinned_tag
+                .clone()
+                .unwrap_or_else(|| pinned_tag(&self.tag, &self.image_id));
+            for tag in [self.tag.clone(), pinned] {
+                tags.push(ImageTag {
+                    tag,
+                    image_id: self.image_id.clone(),
+                });
+            }
+        }
+        tags.extend(self.retained.iter().cloned());
+        tags
+    }
+}
+
+/// Whether [`ImageResource::untag`] removed a tag or left it in use.
+#[derive(Debug, PartialEq)]
+enum Untag {
+    Removed,
+    InUse,
 }
 
 fn strip_docker_prefix(id: &str) -> &str {
@@ -324,7 +368,10 @@ fn build_args(inputs: &Target<ImageInputs>, metadata_path: Option<&Path>) -> Vec
         }
         args.push("--load".into());
     }
-    for (key, val) in &inputs.build_args {
+    // Sorted, so the displayed command is the same on every run.
+    let mut build_args: Vec<_> = inputs.build_args.iter().collect();
+    build_args.sort();
+    for (key, val) in build_args {
         args.push("--build-arg".into());
         args.push(format!("{key}={val}"));
     }
@@ -403,13 +450,56 @@ impl ImageResource {
         Ok(())
     }
 
-    fn remove_image(&self, env: &super::Env, image: &str) -> Result<(), BoxError> {
+    /// Remove `tag` if it still names the image this target created it for.
+    /// Removing a name, never an image ID, leaves other tags of the image,
+    /// such as another project's, in place, and Docker deletes the image
+    /// with its last tag. Without `force`, Docker refuses to remove the last
+    /// tag of an image a container uses, and the tag is left in use.
+    fn untag(&self, env: &super::Env, tag: &ImageTag, force: bool, writer: &TargetWriter) -> Result<Untag, BoxError> {
+        use crate::output::Event;
+        if self.inspect_image_id(env, &tag.tag).as_deref() != Some(tag.image_id.as_str()) {
+            return Ok(Untag::Removed);
+        }
+        let args = if force {
+            vec!["rmi", "-f", &tag.tag]
+        } else {
+            vec!["rmi", &tag.tag]
+        };
+        writer.event(Event::Starting, &crate::providers::display_command("docker", &args));
         let output = self
             .command(env)
-            .args(["rmi", "-f", image])
+            .args(&args)
             .logged_output()
             .map_err(|e| format!("docker rmi failed: {e}"))?;
-        super::check_remove_output("docker rmi", output)
+        if !force && !output.status.success() && String::from_utf8_lossy(&output.stderr).contains("conflict") {
+            return Ok(Untag::InUse);
+        }
+        super::check_remove_output("docker rmi", output).map(|()| Untag::Removed)
+    }
+
+    /// Remove the tags `prior` created that `current` no longer uses, and
+    /// return those a container still uses. A container built from the old
+    /// image, such as a `docker.container` this build is about to recreate,
+    /// still runs it, so its tag is kept for a later build or `--clean` to
+    /// remove rather than forced away from under it.
+    fn remove_replaced_tags(
+        &self,
+        env: &super::Env,
+        prior: &ImageState,
+        current: &ImageState,
+        writer: &TargetWriter,
+    ) -> Result<Vec<ImageTag>, BoxError> {
+        let current_tags: Vec<String> = current.local_tags().into_iter().map(|tag| tag.tag).collect();
+        let mut retained = Vec::new();
+        for tag in prior.local_tags() {
+            if current_tags.contains(&tag.tag) {
+                continue;
+            }
+            if self.untag(env, &tag, false, writer)? == Untag::InUse {
+                retained.push(tag);
+            }
+        }
+        Ok(retained)
     }
 }
 
@@ -551,7 +641,7 @@ impl Resource for ImageResource {
     fn apply(
         &self,
         inputs: &Target<ImageInputs>,
-        _prior_state: Option<&ImageState>,
+        prior_state: Option<&ImageState>,
         _changes: &Changes,
         writer: &TargetWriter,
     ) -> Result<ApplyResult<ImageState, ImageOutputs>, BoxError> {
@@ -599,13 +689,19 @@ impl Resource for ImageResource {
             (image_id, pinned)
         };
 
+        let mut state = ImageState {
+            tag: inputs.tag.clone(),
+            image_id: image_id.clone(),
+            platform: inputs.platform.clone(),
+            pinned_tag: Some(pinned.clone()),
+            retained: Vec::new(),
+        };
+        if let Some(prior) = prior_state {
+            state.retained = self.remove_replaced_tags(&inputs.env, prior, &state, writer)?;
+        }
+
         Ok(ApplyResult {
-            state: Some(ImageState {
-                tag: inputs.tag.clone(),
-                image_id: image_id.clone(),
-                platform: inputs.platform.clone(),
-                pinned_tag: Some(pinned.clone()),
-            }),
+            state: Some(state),
             outputs: ImageOutputs {
                 image_ref: pinned,
                 image_id,
@@ -614,18 +710,14 @@ impl Resource for ImageResource {
     }
 
     fn destroy(&self, prior_state: &Target<ImageState>, writer: &TargetWriter) -> Result<(), BoxError> {
-        use crate::output::Event;
-        // Multi-platform builds never enter the local image store, and this
-        // build resource does not own deletion from an external registry.
-        if prior_state.platform.len() > 1 {
-            return Ok(());
+        // A multi-platform build has no local tags, and this build resource
+        // does not own deletion from an external registry. Dependent
+        // containers are destroyed first, so a container that still uses a
+        // tag is not bit's, and --clean removes the tag anyway.
+        for tag in prior_state.local_tags() {
+            self.untag(&prior_state.env, &tag, true, writer)?;
         }
-        if let Some(pinned) = &prior_state.pinned_tag {
-            writer.event(Event::Starting, &format!("docker rmi -f {pinned}"));
-            self.remove_image(&prior_state.env, pinned)?;
-        }
-        writer.event(Event::Starting, &format!("docker rmi -f {}", prior_state.image_id));
-        self.remove_image(&prior_state.env, &prior_state.image_id)
+        Ok(())
     }
 
     fn cache_policy(&self, inputs: &Target<ImageInputs>) -> CachePolicy {
@@ -740,6 +832,9 @@ impl Resource for ImageResource {
                 image_id: state.image_id.clone(),
                 platform: inputs.platform.clone(),
                 pinned_tag: Some(pinned.clone()),
+                // The receipt's retained tags belong to the build that
+                // recorded it, possibly in another worktree, not to this one.
+                retained: Vec::new(),
             }),
             outputs: ImageOutputs {
                 image_ref: pinned,
@@ -803,6 +898,7 @@ mod tests {
             image_id: "abc123".into(),
             platform: vec![],
             pinned_tag: Some("myapp:abc123".into()),
+            retained: vec![],
         }
     }
 
@@ -929,27 +1025,158 @@ mod tests {
     }
 
     #[test]
-    fn destroy_removes_pinned_tag_and_image() {
-        let dir = tempfile::tempdir().unwrap();
-        let docker = dir.path().join("docker");
+    fn build_args_are_sorted() {
+        let mut inputs = test_inputs();
+        let keys = ["H", "C", "A", "F", "B", "G", "E", "D"];
+        inputs.build_args = keys.iter().map(|key| (key.to_string(), key.to_lowercase())).collect();
+        let shown: Vec<_> = build_args(&inputs, None)
+            .into_iter()
+            .filter(|arg| arg.contains('='))
+            .collect();
+        assert_eq!(shown, ["A=a", "B=b", "C=c", "D=d", "E=e", "F=f", "G=g", "H=h"]);
+    }
+
+    /// An image resource whose docker keeps tags as files in `dir/tags`,
+    /// each holding its image ID. `buildx build` tags the ID in `dir/next`,
+    /// and `rmi` without `-f` refuses a tag with a file in `dir/in-use`, as
+    /// Docker refuses the last tag of an image a container uses.
+    fn resource_with_tags(dir: &Path, tags: &[(&str, &str)]) -> ImageResource {
+        fs::create_dir_all(dir.join("tags")).unwrap();
+        fs::create_dir_all(dir.join("in-use")).unwrap();
+        for (tag, id) in tags {
+            fs::write(dir.join("tags").join(tag), id).unwrap();
+        }
+        let docker = dir.join("docker");
         crate::process::write_test_executable(
             &docker,
             r#"#!/bin/sh
-printf '%s\n' "$*" >> "$(dirname "$0")/docker.log"
-exit 0
+d=$(dirname "$0")
+printf '%s\n' "$*" >> "$d/docker.log"
+case "$1" in
+buildx) cp "$d/next" "$d/tags/$4" ;;
+image)
+  if [ -f "$d/tags/$5" ]; then echo "sha256:$(cat "$d/tags/$5")"; exit 0; fi
+  echo "Error: No such image: $5" >&2; exit 1 ;;
+tag) cp "$d/tags/$2" "$d/tags/$3" ;;
+rmi)
+  if [ "$2" = -f ]; then ref=$3; else
+    ref=$2
+    if [ -f "$d/in-use/$ref" ]; then
+      echo "Error response from daemon: conflict: unable to remove repository reference \"$ref\" (must force)" >&2
+      exit 1
+    fi
+  fi
+  rm "$d/tags/$ref" 2>/dev/null || { echo "Error: No such image: $ref" >&2; exit 1; } ;;
+*) exit 91 ;;
+esac
 "#,
         );
-        let resource = ImageResource {
+        ImageResource {
             tracker: Arc::new(FileTracker::default()),
             docker,
-        };
+        }
+    }
+
+    fn tags_in(dir: &Path) -> BTreeMap<String, String> {
+        fs::read_dir(dir.join("tags"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let tag = path.file_name().unwrap().to_string_lossy().into_owned();
+                (tag, fs::read_to_string(&path).unwrap())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn destroy_removes_only_the_tags_it_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_tags(
+            dir.path(),
+            &[
+                ("myapp:latest", "abc123"),
+                ("myapp:abc123", "abc123"),
+                ("other:v1", "abc123"),
+                ("myapp:old", "old"),
+                ("myapp:moved", "def456"),
+            ],
+        );
+        let mut state = test_state();
+        state.retained = vec![
+            ImageTag {
+                tag: "myapp:old".into(),
+                image_id: "old".into(),
+            },
+            ImageTag {
+                tag: "myapp:moved".into(),
+                image_id: "old".into(),
+            },
+        ];
         let output = crate::output::Output::new(&[]);
 
-        Resource::destroy(&resource, &Target::new(None, test_state()), &output.writer("image")).unwrap();
+        Resource::destroy(&resource, &Target::new(None, state), &output.writer("image")).unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("docker.log")).unwrap(),
-            "rmi -f myapp:abc123\nrmi -f abc123\n"
+            tags_in(dir.path()),
+            BTreeMap::from([
+                ("myapp:moved".to_owned(), "def456".to_owned()),
+                ("other:v1".to_owned(), "abc123".to_owned()),
+            ])
+        );
+        let log = fs::read_to_string(dir.path().join("docker.log")).unwrap();
+        assert!(!log.contains("rmi -f abc123"), "{log}");
+    }
+
+    #[test]
+    fn rebuild_removes_the_replaced_images_tags_once_unused() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = resource_with_tags(
+            dir.path(),
+            &[
+                ("myapp:latest", "abc123"),
+                ("myapp:abc123", "abc123"),
+                ("other:v1", "abc123"),
+            ],
+        );
+        fs::write(dir.path().join("next"), "def456").unwrap();
+        fs::write(dir.path().join("in-use/myapp:abc123"), "").unwrap();
+        let output = crate::output::Output::new(&[]);
+        let apply = |prior: &ImageState| {
+            Resource::apply(
+                &resource,
+                &test_inputs(),
+                Some(prior),
+                &Changes::All,
+                &output.writer("image"),
+            )
+            .unwrap()
+            .state
+            .unwrap()
+        };
+
+        // A container still uses the old pinned tag, so it is kept.
+        let state = apply(&test_state());
+        assert_eq!(
+            state.retained,
+            [ImageTag {
+                tag: "myapp:abc123".into(),
+                image_id: "abc123".into(),
+            }]
+        );
+        assert_eq!(tags_in(dir.path())["myapp:abc123"], "abc123");
+
+        // Once nothing uses it, the next build removes it.
+        fs::remove_file(dir.path().join("in-use/myapp:abc123")).unwrap();
+        fs::write(dir.path().join("next"), "fed789").unwrap();
+        let state = apply(&state);
+        assert_eq!(state.retained, []);
+        assert_eq!(
+            tags_in(dir.path()),
+            BTreeMap::from([
+                ("myapp:fed789".to_owned(), "fed789".to_owned()),
+                ("myapp:latest".to_owned(), "fed789".to_owned()),
+                ("other:v1".to_owned(), "abc123".to_owned()),
+            ])
         );
     }
 
@@ -961,6 +1188,7 @@ exit 0
             image_id: "nonexistent".into(),
             platform: vec![],
             pinned_tag: None,
+            retained: vec![],
         };
         let result = Resource::plan(
             &ImageResource::new(Arc::new(FileTracker::default())),
@@ -1044,6 +1272,7 @@ exit 0
             image_id: "abc".into(),
             platform: vec![],
             pinned_tag: None,
+            retained: vec![],
         };
         let result = Resource::plan(
             &ImageResource::new(Arc::new(FileTracker::default())),
@@ -1072,6 +1301,7 @@ exit 0
             image_id: "abc".into(),
             platform: vec!["linux/amd64".into()],
             pinned_tag: None,
+            retained: vec![],
         };
         let result = Resource::plan(
             &ImageResource::new(Arc::new(FileTracker::default())),
@@ -1280,6 +1510,7 @@ printf '%s\n' "$*" > "$(dirname "$0")/docker.log"
             image_id: digest.clone(),
             platform: vec!["linux/amd64".into(), "linux/arm64".into()],
             pinned_tag: Some(format!("registry.example.com:5000/team/myapp@sha256:{digest}")),
+            retained: vec![],
         };
 
         let plan = Resource::plan(&resource, &multi_platform_inputs(), Some(&state)).unwrap();
@@ -1302,6 +1533,7 @@ printf '%s\n' "$*" > "$(dirname "$0")/docker.log"
             image_id: "a".repeat(64),
             platform: vec!["linux/amd64".into(), "linux/arm64".into()],
             pinned_tag: Some(format!("registry.example.com/team/myapp@sha256:{}", "a".repeat(64))),
+            retained: vec![],
         };
         let output = crate::output::Output::new(&[]);
 

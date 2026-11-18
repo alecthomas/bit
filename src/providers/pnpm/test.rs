@@ -26,7 +26,7 @@ pub struct PnpmTestInputs {
     /// Package name from its `package.json`. Omit to run the script of the project in `dir`; at the workspace root, the script may touch any package, so every project's sources are tracked.
     #[serde(default)]
     pub package: Option<String>,
-    /// Additional arguments passed to the script after `--`
+    /// Additional arguments passed to the script, exactly as given
     #[serde(default)]
     pub args: Vec<String>,
     /// Extra input file globs, relative to `dir` (added to the files at the workspace root, and the sources of the package and of its `workspace:`, `link:` and `file:` dependencies)

@@ -1,0 +1,73 @@
+# Module params come from -P, with typed defaults; a missing required param
+# or a value of the wrong type is an error.
+! bit show
+stderr 'missing required param .stage. \(use -P stage=VALUE\)'
+! exists show.txt
+
+bit -P stage=prod show
+grep '\Aprod-2 false\z' show.txt
+
+bit -P stage=prod -P replicas=3 -P verbose=true show
+stdout 'show ▶'
+grep '\Aprod-3 true\z' show.txt
+
+! bit -P stage=prod -P replicas=many show
+stderr 'replicas: expected number, got string'
+
+! bit -P stage=prod -P unknown=1 show
+stderr 'unknown param: unknown'
+
+bit -P stage=prod --info
+stdout 'stage \(string\)'
+stdout 'replicas \(number = 2\)'
+stdout 'verbose \(bool = false\)'
+
+# A parameterized target's defaults may use earlier parameters. Equal calls
+# share one node, and different values make independent ones.
+bit -P stage=prod both
+stdout 'job\(name="a", out="a.out"\) ▶'
+! stdout 'job\(name="a".*▶[\s\S]*job\(name="a".*▶'
+stdout 'job\(name="b", out="b.out"\) ▶'
+grep '\Aa\z' a.out
+grep '\Ab\z' b.out
+grep '\Aa\z' consumer.txt
+
+bit -P stage=prod 'job' name=b
+stdout 'job\(name="b", out="b.out"\) · no changes'
+
+! bit -P stage=prod job
+stderr 'invalid invocation of .job.: missing required argument .name.'
+
+# A let that uses a missing param names the param to set, not the let.
+cp let.bit BUILD.bit
+! bit
+stderr 'missing required param .p. \(use -P p=VALUE\)'
+bit -P p=hi
+stdout 't ✔'
+
+-- let.bit --
+param p : string
+let l = p
+t = exec { command = "echo #{l}" }
+-- BUILD.bit --
+param stage : string
+param replicas : int = 2
+param verbose = false
+
+show = exec {
+  command = "printf '%s-%s %s' #{stage} #{replicas} #{verbose} > show.txt"
+  outputs = "show.txt"
+}
+
+job(name : string, out = "#{name}.out") = exec {
+  command = "printf #{name} > #{out}"
+  outputs = out
+}
+
+consumer = exec {
+  command = "cat #{job(name = "a").path} > consumer.txt"
+  outputs = "consumer.txt"
+  depends_on = [job(name = "a")]
+}
+
+group both = [job(name = "a"), job(name = "b"), consumer]

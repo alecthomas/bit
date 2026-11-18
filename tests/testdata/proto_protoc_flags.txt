@@ -1,0 +1,84 @@
+# protoc.generate searches the -I paths in flags for imports after include,
+# leaves well-known types to protoc, and tracks a -o descriptor set.
+[!exec:protoc] skip
+[!exec:protoc-gen-go] skip
+
+bit
+stdout 'gen ✔ ok'
+exists gen/api/event.pb.go desc.pb
+# The runner's grep reads text only, and a descriptor set is binary.
+exec grep -q google/protobuf/timestamp.proto desc.pb
+
+bit
+stdout 'gen · no changes'
+
+cp tag.proto.changed vendor/ext/tag.proto
+bit
+stdout '''vendor/ext/tag\.proto'' changed'
+exec grep -q Label desc.pb
+
+rm desc.pb
+bit
+stdout '''desc\.pb'' \(removed\) changed'
+exists desc.pb
+
+# A descriptor set the flags no longer name is removed, and --clean removes
+# the one they do.
+cp BUILD.bit.renamed BUILD.bit
+bit
+stdout 'gen ✔ ok'
+exists set.pb
+! exists desc.pb
+
+bit --clean
+! exists set.pb gen/api/event.pb.go
+exists api/event.proto
+
+-- BUILD.bit.renamed --
+gen = protoc.generate {
+  sources = ["api/*.proto"]
+  include = ["."]
+  out     = { go = "gen" }
+  opt     = { go = "paths=source_relative" }
+  flags   = ["-Ivendor", "--include_imports", "--descriptor_set_out=set.pb"]
+}
+-- BUILD.bit --
+gen = protoc.generate {
+  sources = ["api/*.proto"]
+  include = ["."]
+  out     = { go = "gen" }
+  opt     = { go = "paths=source_relative" }
+  flags   = ["-Ivendor", "--include_imports", "-odesc.pb"]
+}
+-- api/event.proto --
+syntax = "proto3";
+package api;
+option go_package = "example.com/api";
+
+import "google/protobuf/timestamp.proto";
+import "ext/tag.proto";
+
+message Event {
+  google.protobuf.Timestamp at = 1;
+  ext.Tag tag = 2;
+}
+-- vendor/ext/tag.proto --
+syntax = "proto3";
+package ext;
+option go_package = "example.com/ext";
+
+message Tag {
+  string value = 1;
+}
+-- tag.proto.changed --
+syntax = "proto3";
+package ext;
+option go_package = "example.com/ext";
+
+message Tag {
+  string value = 1;
+}
+
+message Label {
+  string name = 1;
+}

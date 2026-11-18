@@ -156,7 +156,15 @@ pub fn resolve_module_path(
     resource: &str,
 ) -> Option<std::path::PathBuf> {
     let root = import_roots.iter().find(|r| r.provider == provider)?;
-    let path = root.path.join(format!("{resource}.bit"));
+    // The parser reads a bare `g { … }` as `g.g`. That names the default
+    // resource, whose file keeps the import path's name when `as` renames the
+    // provider.
+    let file = if resource == root.provider {
+        &root.default_resource
+    } else {
+        resource
+    };
+    let path = root.path.join(format!("{file}.bit"));
     if path.exists() { Some(path) } else { None }
 }
 
@@ -784,10 +792,32 @@ mod tests {
         std::fs::write(dir.path().join("res.bit"), "").unwrap();
         let roots = vec![crate::import::ImportRoot {
             provider: "prov".into(),
+            default_resource: "prov".into(),
             path: dir.path().to_path_buf(),
         }];
         let result = resolve_module_path(&roots, "prov", "res");
         assert_eq!(result, Some(dir.path().join("res.bit")));
+    }
+
+    #[test]
+    fn resolve_aliased_default_resource() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("greeter.bit"), "").unwrap();
+        // `import "./greeter" as g`
+        let roots = vec![crate::import::ImportRoot {
+            provider: "g".into(),
+            default_resource: "greeter".into(),
+            path: dir.path().to_path_buf(),
+        }];
+        // A bare `g { … }` parses as `g.g`.
+        assert_eq!(
+            resolve_module_path(&roots, "g", "g"),
+            Some(dir.path().join("greeter.bit"))
+        );
+        assert_eq!(
+            resolve_module_path(&roots, "g", "greeter"),
+            Some(dir.path().join("greeter.bit"))
+        );
     }
 
     #[test]
@@ -799,10 +829,12 @@ mod tests {
         let roots = vec![
             crate::import::ImportRoot {
                 provider: "alpha".into(),
+                default_resource: "alpha".into(),
                 path: a.path().to_path_buf(),
             },
             crate::import::ImportRoot {
                 provider: "beta".into(),
+                default_resource: "beta".into(),
                 path: b.path().to_path_buf(),
             },
         ];

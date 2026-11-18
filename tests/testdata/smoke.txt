@@ -1,6 +1,15 @@
-# Project for the end-to-end smoke test of the debug binary, kept apart from
-# the repository's own BUILD.bit so the test doesn't depend on how bit builds.
+# The binary plans matrix targets, and groups with arguments.
+bit --version
+stdout '\Abit \d'
 
+bit --plan ...
+stdout 'greet\["a"\]'
+stdout 'greet\["b"\]'
+
+bit --plan release name=b
+stdout 'publish\(name="b"\)'
+
+-- BUILD.bit --
 let names = ["a", "b"]
 
 # Greet each name.

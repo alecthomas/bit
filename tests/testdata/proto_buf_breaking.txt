@@ -1,0 +1,71 @@
+# buf.breaking compares against a Git tag: an added field passes, a deleted
+# one fails, and moving the tag reruns the check with no file changed.
+[!exec:buf] skip
+[!exec:git] skip
+
+exec git init -q
+exec git add .
+exec git -c user.email=test@example.com -c user.name=Test commit -qm base
+exec git tag base
+
+bit
+stdout 'breaking ▶ buf breaking --against \.git#tag=base'
+stdout 'breaking ✔ ok'
+
+bit
+stdout 'breaking · no changes'
+
+cp user.proto.added proto/acme/v1/user.proto
+bit
+stdout 'breaking ✔ ok'
+
+exec git -c user.email=test@example.com -c user.name=Test commit -qam 'add phone'
+exec git tag -f base
+bit
+stdout 'baseline moved'
+stdout 'breaking ✔ ok'
+
+cp user.proto.deleted proto/acme/v1/user.proto
+! bit
+stdout 'Previously present field "3" with name "phone" on message "User" was deleted'
+stdout 'breaking ✘ tests failed'
+
+-- BUILD.bit --
+breaking = buf.breaking {
+  against = ".git#tag=base"
+}
+-- buf.yaml --
+version: v2
+modules:
+  - path: proto
+breaking:
+  use:
+    - FILE
+-- proto/acme/v1/user.proto --
+syntax = "proto3";
+
+package acme.v1;
+
+message User {
+  string name = 1;
+  string email = 2;
+}
+-- user.proto.added --
+syntax = "proto3";
+
+package acme.v1;
+
+message User {
+  string name = 1;
+  string email = 2;
+  string phone = 3;
+}
+-- user.proto.deleted --
+syntax = "proto3";
+
+package acme.v1;
+
+message User {
+  string name = 1;
+  string email = 2;
+}

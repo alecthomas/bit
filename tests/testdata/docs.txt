@@ -1,0 +1,17 @@
+# --docs prints the embedded README, and a topic one of its sections, as
+# plain Markdown when piped.
+bit --docs
+cmp stdout $ROOT/README.md
+
+bit --docs ci
+stdout '\A## CI workflows\n'
+stdout '\[`large`\]\(#targets\)'
+! stdout '\x1b'
+! stdout '## Providers'
+
+# An unknown topic is an error listing the topics there are.
+! bit --docs no-such-topic
+! stdout .
+stderr '\Aerror: '
+stderr 'unknown docs topic ''no-such-topic''; available topics:'
+stderr '^  ci-workflows$'

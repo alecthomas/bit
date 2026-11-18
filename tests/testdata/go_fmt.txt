@@ -1,0 +1,54 @@
+# go.fmt-l fails on unformatted files and passes once go.fmt rewrites them;
+# `package` limits both to the matching packages.
+[!exec:go] skip
+
+! bit check
+stdout 'check ▶ gofmt -l'
+stdout 'ugly\.go$'
+! stdout 'other/'
+stderr 'test target ''check'' failed'
+
+bit fmt
+stdout 'fmt ▶ gofmt -w'
+cmp ugly.go ugly.go.want
+cmp other/other.go other.go.orig
+
+bit check
+stdout 'check ✔ ok'
+
+bit fmt
+stdout 'fmt · no changes'
+
+-- BUILD.bit --
+explicit fmt = go.fmt {
+  package = "."
+}
+
+explicit check = go.fmt-l {
+  package = "."
+}
+-- go.mod --
+module example.com/m
+
+go 1.22
+-- ok.go --
+package m
+
+func OK() {}
+-- ugly.go --
+package m
+func  Ugly( ) int {
+return 1
+}
+-- ugly.go.want --
+package m
+
+func Ugly() int {
+	return 1
+}
+-- other/other.go --
+package other
+func  Other( ) {}
+-- other.go.orig --
+package other
+func  Other( ) {}

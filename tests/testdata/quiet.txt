@@ -1,0 +1,44 @@
+# --quiet prints nothing on success, whatever else is asked for.
+bit -q
+! stdout .
+! stderr .
+bit --quiet --debug --long
+! stdout .
+! stderr .
+bit -q --plan
+! stdout .
+! stderr .
+bit -q --list
+! stdout .
+! stderr .
+bit -q -ll
+! stdout .
+! stderr .
+bit -q --graph
+! stdout .
+! stderr .
+bit -q --graph --json
+! stdout .
+! stderr .
+bit -q --dump
+! stdout .
+! stderr .
+bit -q --info
+! stdout .
+! stderr .
+bit -q --schema go
+! stdout .
+! stderr .
+bit -q --schema --json
+! stdout .
+! stderr .
+bit -q --update missing
+! stdout .
+! stderr .
+bit -q --cache disk://elsewhere --clean
+! stdout .
+! stderr .
+
+-- BUILD.bit --
+task = exec { command = "printf build-output" }
+group build = [task]

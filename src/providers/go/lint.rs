@@ -113,11 +113,30 @@ fn affected_packages(
         return Ok(None);
     }
     // golangci-lint resolves a bare import path as a directory, so packages
-    // are named by their absolute directories.
+    // are named by their directories: see [`relative_package`].
     Ok(Some(Affected {
         dirs: affected.packages.into_iter().map(|p| p.dir).collect(),
         total: affected.total,
     }))
+}
+
+/// The canonical package directory `dir` as a `./` or `../` path from
+/// `lint_dir`, the canonical directory golangci-lint runs in. A canonical
+/// absolute path would not do: the go command it runs takes its working
+/// directory from `PWD`, which keeps any symlink bit was started through,
+/// and then rejects the canonical path as outside the main module.
+fn relative_package(lint_dir: &Path, dir: &Path) -> String {
+    let common = lint_dir
+        .components()
+        .zip(dir.components())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut relative = PathBuf::from(".");
+    for _ in lint_dir.components().skip(common) {
+        relative.push("..");
+    }
+    relative.extend(dir.components().skip(common));
+    relative.to_string_lossy().into_owned()
 }
 
 /// The arguments to `golangci-lint` that lint `packages`.
@@ -234,10 +253,15 @@ impl Resource for GoLintResource {
             });
         }
         let (packages, shown) = match &affected {
-            Some(Affected { dirs, .. }) => (
-                dirs.iter().map(|dir| dir.to_string_lossy().into_owned()).collect(),
-                super::display_paths(dirs.iter().map(PathBuf::as_path)),
-            ),
+            Some(Affected { dirs, .. }) => {
+                let lint_dir = std::env::current_dir()?
+                    .join(inputs.dir.as_deref().unwrap_or(""))
+                    .canonicalize()?;
+                (
+                    dirs.iter().map(|dir| relative_package(&lint_dir, dir)).collect(),
+                    super::display_paths(dirs.iter().map(PathBuf::as_path)),
+                )
+            }
             None => (inputs.package.clone(), inputs.package.clone()),
         };
         let args = lint_args(inputs, &packages);
@@ -309,6 +333,14 @@ mod tests {
 
     fn test_resource() -> GoLintResource {
         GoLintResource::new(Arc::new(FileTracker::default()))
+    }
+
+    #[test]
+    fn packages_are_named_relative_to_the_lint_dir() {
+        let lint_dir = Path::new("/work/m");
+        assert_eq!(relative_package(lint_dir, Path::new("/work/m")), ".");
+        assert_eq!(relative_package(lint_dir, Path::new("/work/m/a/b")), "./a/b");
+        assert_eq!(relative_package(lint_dir, Path::new("/work/other/c")), "./../other/c");
     }
 
     #[test]

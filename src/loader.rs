@@ -83,9 +83,10 @@ pub enum LoadError {
 pub struct BaseScope {
     pub scope: Scope,
     /// Params that were declared without defaults and not provided via -p,
-    /// plus let bindings that transitively depend on them. Active targets
-    /// referencing these will produce errors at execution time.
-    pub missing_params: std::collections::HashSet<String>,
+    /// plus let bindings that transitively depend on them, each mapped to the
+    /// param the user must provide. Active targets referencing these will
+    /// produce errors at execution time.
+    pub missing_params: HashMap<String, String>,
 }
 
 /// Parse a module and build a fully wired DAG.
@@ -124,7 +125,7 @@ pub fn load_selected(
     let mut concrete_targets = Vec::new();
     let mut matrix_targets: HashMap<String, Vec<String>> = HashMap::new();
     let mut deferred_matrix: Vec<crate::ast::Target> = Vec::new();
-    let mut missing_params: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut missing_params: HashMap<String, String> = HashMap::new();
     let mut declared_params: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for stmt in &module.statements {
@@ -138,14 +139,15 @@ pub fn load_selected(
                     match expr::eval(default, &scope) {
                         Ok(v) => Some(v),
                         Err(_) => {
-                            // Default depends on a missing param — defer
-                            missing_params.insert(p.name.clone());
+                            // Default depends on a missing param — defer. The
+                            // param itself can be provided to satisfy it.
+                            missing_params.insert(p.name.clone(), p.name.clone());
                             None
                         }
                     }
                 } else {
                     // Required param not provided — defer, don't error
-                    missing_params.insert(p.name.clone());
+                    missing_params.insert(p.name.clone(), p.name.clone());
                     None
                 };
                 if let Some(value) = value {
@@ -181,9 +183,12 @@ pub fn load_selected(
                                 existing: existing.as_str(),
                             })?;
                     }
-                    Err(EvalError::UndefinedVar(name)) if missing_params.contains(&name) => {
-                        // Let depends on a missing param or an earlier deferred let.
-                        missing_params.insert(l.name.clone());
+                    Err(EvalError::UndefinedVar(name)) if missing_params.contains_key(&name) => {
+                        // Let depends on a missing param or an earlier deferred
+                        // let. A let can't be set with -P, so it inherits the
+                        // param the user must provide.
+                        let param = missing_params[&name].clone();
+                        missing_params.insert(l.name.clone(), param);
                     }
                     Err(source) => {
                         return Err(LoadError::Eval {
@@ -395,7 +400,7 @@ pub fn load_selected(
             if scope.get(&name).is_none()
                 && !dag.has_target(&name)
                 && !matrix_targets.contains_key(&name)
-                && !missing_params.contains(&name)
+                && !missing_params.contains_key(&name)
             {
                 return Err(LoadError::UnknownTarget {
                     pos: target_pos.clone(),
@@ -645,7 +650,7 @@ server = exec {
         let input = "param env : string\n";
         let module = parser::parse(input, "<test>").unwrap();
         let (_dag, base) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
-        assert!(base.missing_params.contains("env"));
+        assert_eq!(base.missing_params.get("env").map(String::as_str), Some("env"));
     }
 
     #[test]
@@ -657,9 +662,10 @@ let command = "#{prefix} echo"
         let module = parser::parse(input, "<test>").unwrap();
         let (_dag, base) = load(&module, &Map::new(), &test_registry(), &EmptyStore, &[]).unwrap();
 
-        assert!(base.missing_params.contains("env"));
-        assert!(base.missing_params.contains("prefix"));
-        assert!(base.missing_params.contains("command"));
+        // Each deferred let names the param the user must provide.
+        for name in ["env", "prefix", "command"] {
+            assert_eq!(base.missing_params.get(name).map(String::as_str), Some("env"), "{name}");
+        }
         assert!(base.scope.get("prefix").is_none());
         assert!(base.scope.get("command").is_none());
     }
@@ -896,36 +902,43 @@ group publish(tag : string) = [image(tag = tag)]
     fn secrets_cannot_be_bound_to_parameters() {
         // SAFETY: only this test reads or writes this variable.
         unsafe { std::env::set_var("BIT_TEST_LOADER_SECRET", "hunter2") };
+        // Each case names the line that passes the secret: the calling group,
+        // or the declaration for a default.
         let cases = [
             (
                 "argument",
                 "job(token : string) = exec { command = token outputs = \"out\" }\n\
                  group run = [job(token = secret(\"BIT_TEST_LOADER_SECRET\"))]\n",
+                "<test>:2:1:",
             ),
             (
                 "nested argument",
                 "job(tokens : [string]) = exec { command = \"x\" outputs = \"out\" }\n\
                  group run = [job(tokens = [secret(\"BIT_TEST_LOADER_SECRET\")])]\n",
+                "<test>:2:1:",
             ),
             (
                 "default",
                 "job(token = secret(\"BIT_TEST_LOADER_SECRET\")) = exec { command = token outputs = \"out\" }\n\
                  group run = [job()]\n",
+                "<test>:1:1:",
             ),
             (
                 "group argument",
                 "job(token : string) = exec { command = token outputs = \"out\" }\n\
                  group run(token : string) = [job(token = token)]\n\
                  group outer = [run(token = secret(\"BIT_TEST_LOADER_SECRET\"))]\n",
+                "<test>:3:1:",
             ),
         ];
-        for (case, input) in cases {
+        for (case, input, pos) in cases {
             let module = parser::parse(input, "<test>").unwrap();
             let error = match load_selected(&module, &Map::new(), &test_registry(), &EmptyStore, &[], &[]) {
                 Err(error) => error.to_string(),
                 Ok(_) => panic!("{case}: a secret argument must be rejected"),
             };
             assert!(error.contains("cannot receive a secret"), "{case}: {error}");
+            assert!(error.starts_with(pos), "{case}: {error}");
             assert!(!error.contains("hunter2"), "{case}: {error}");
         }
 
@@ -1292,6 +1305,7 @@ group build = [server]
     fn roots(dir: &std::path::Path, provider: &str) -> Vec<crate::import::ImportRoot> {
         vec![crate::import::ImportRoot {
             provider: provider.into(),
+            default_resource: provider.into(),
             path: dir.join(provider),
         }]
     }

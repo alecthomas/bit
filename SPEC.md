@@ -167,7 +167,7 @@ State is keyed per slice by its full name.
 
 A `.bit` file is itself a provider. It declares parameters, contains `let` bindings and targets, and exposes outputs and groups. Expressions outside the module can reach only its declared outputs and groups.
 
-Modules are made available through `import` statements in a project's `BUILD.bit`. Imports in a module's resource files are ignored. **Each import brings exactly one provider into scope.** Resources are `<resource>.bit` files at the root of the imported directory, called as `provider.resource`. A `<provider>.bit` at the root is the default resource, callable bare. An imported module with the same name as a built-in provider shadows it for the resources the module defines.
+Modules are made available through `import` statements in a project's `BUILD.bit`. Imports in a module's resource files are ignored. **Each import brings exactly one provider into scope.** Resources are `<resource>.bit` files at the root of the imported directory, called as `provider.resource`. A `.bit` file at the root named after the import path's last segment is the default resource, callable bare by the provider name. An `as` alias keeps that file as the default, so `import "./mods/greeter" as g` calls `greeter.bit` as `g { … }`, and also as `g.greeter`. An imported module with the same name as a built-in provider shadows it for the resources the module defines.
 
 ```
 import "./.bit/modules/app"  # provider "app"
@@ -497,7 +497,7 @@ The engine upgrades `none` to `update`, with a generated reason, when:
 
 `--force` upgrades `none` to `update` or `create` and bypasses the shared cache.
 
-If the target can use the shared build cache (§8.1), the engine then looks for a receipt. A valid receipt skips the target as cached. A receipt whose outputs are missing locally becomes `restore`, which rebuilds them from the cache.
+If the target can use the shared build cache (§8.1), the engine then looks for a receipt. A valid receipt skips the target as cached. A receipt whose outputs are missing locally becomes `restore`, which rebuilds them from the cache. A missing `uncached` output has nothing to restore it from, so the target runs.
 
 **Protected targets**: a plan to `destroy` a protected target is an error.
 
@@ -669,6 +669,8 @@ On a hit, `check_receipt()` decides the result:
 The receipt's outputs and state are bound to the target. If binding fails, the target runs.
 
 After a successful apply, the engine captures the outputs with `capture_artifacts()` and publishes a receipt containing state, outputs, artifacts, and the content hash. Publishing is best-effort. A different receipt with the same recorded fingerprints is a conflict and produces a warning. Outputs listed in `uncached` are not stored. Failed tests are never published.
+
+Since a receipt cannot recreate an `uncached` output, the cache is not consulted while one is missing, or differs from what this checkout recorded after its last run. The target runs instead. A restore rehashes the checkout's own `uncached` outputs. So plan takes the receipt's content hash as the restored result only when the target has no `uncached` outputs, or when this checkout last recorded that same hash. Otherwise dependents are planned as dirty.
 
 A remote cache can sit behind the local one. A lookup that misses locally reads the remote's receipts and copies them to disk. Before checking a receipt, the engine copies any tree manifests it needs. Before restoring, it copies the artifact blobs, checking each against its digest. Planning never downloads artifact contents. Results are published to the remote only when it is writable, blobs before the receipt that references them. A remote failure is a cache miss; the first in a run is shown as a warning message and later ones only in the debug log. An S3 remote stores objects under its prefix with the disk cache's layout.
 
@@ -904,7 +906,7 @@ A target's `concurrency` field caps how many of its matrix slices run at once. A
 
 `pre` targets run before every default-phase target, and `post` targets after them, through ordering-only edges.
 
-The first error or failed test stops the run. No new targets start, including targets on independent branches. Targets already running finish and their state is saved. Then bit exits with the error.
+The first error or failed test stops the run. No new targets start, including targets on independent branches. Targets already running finish and their state is saved. Then bit exits with the error, which names every test target that failed.
 
 `--since <ref>` narrows the selection to targets affected by changes since `merge-base(ref, HEAD)`, plus the targets they require. A target is affected when a changed path is one of its inputs, or when it depends on an affected target. bit falls back to wider selections when `.bit` files changed, a target's inputs were never recorded, or targets were removed.
 

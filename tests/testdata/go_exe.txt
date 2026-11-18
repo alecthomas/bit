@@ -1,0 +1,95 @@
+# go.exe builds a binary named after its package or at `output`, passes
+# `flags` to go build, rebuilds when a Go source it imports or an extra input
+# changes but not for an unrelated package, and --clean removes the binary.
+[!exec:go] skip
+
+bit
+stdout 'hello ▶ go build -o hello -trimpath \./cmd/hello'
+stdout 'stamped ▶ go build -o bin/stamped -trimpath -ldflags=-X main\.version=1\.2\.3 \./cmd/hello'
+exec ./hello
+stdout '\Ahello dev\n\z'
+exec ./bin/stamped
+stdout '\Ahello 1\.2\.3\n\z'
+
+bit
+stdout 'hello · no changes'
+stdout 'stamped · no changes'
+
+# A package outside the binary's imports changes nothing.
+cp other.go.changed other/other.go
+bit
+! stdout '▶'
+
+# A package the binary imports rebuilds both.
+cp greet.go.changed greet/greet.go
+bit
+stdout 'hello ▶ go build .*\(''greet/greet\.go'' changed\)'
+stdout 'stamped ▶ go build .*\(''greet/greet\.go'' changed\)'
+exec ./hello
+stdout '\Ahi dev\n\z'
+
+# Extra inputs rebuild only the target that names them.
+cp asset.txt.changed assets/logo.txt
+bit
+stdout 'stamped ▶ go build .*\(''assets/logo\.txt'' changed\)'
+! stdout 'hello ▶'
+
+bit --clean
+! exists hello
+! exists bin/stamped
+
+# `-o` belongs in `output`.
+cp BUILD.bit.output-flag BUILD.bit
+! bit
+stderr '`flags` must not contain `-o`: set `output` instead'
+
+-- BUILD.bit --
+hello = go.exe {
+  package = "./cmd/hello"
+}
+
+stamped = go.exe {
+  package = "./cmd/hello"
+  output  = "bin/stamped"
+  flags   = ["-ldflags=-X main.version=1.2.3"]
+  inputs  = ["assets/*.txt"]
+}
+-- BUILD.bit.output-flag --
+hello = go.exe {
+  package = "./cmd/hello"
+  flags   = ["-o=elsewhere"]
+}
+-- go.mod --
+module example.com/m
+
+go 1.22
+-- cmd/hello/main.go --
+package main
+
+import (
+	"fmt"
+
+	"example.com/m/greet"
+)
+
+var version = "dev"
+
+func main() { fmt.Println(greet.Word, version) }
+-- greet/greet.go --
+package greet
+
+const Word = "hello"
+-- greet.go.changed --
+package greet
+
+const Word = "hi"
+-- other/other.go --
+package other
+-- other.go.changed --
+package other
+
+const X = 1
+-- assets/logo.txt --
+logo
+-- asset.txt.changed --
+new logo

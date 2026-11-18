@@ -47,6 +47,26 @@ impl GoEnv {
         merged
     }
 
+    /// The suffix `go build` gives executables for the target OS, with
+    /// these overrides applied over the target's `env` and bit's own
+    /// environment. An unset or empty GOOS is the host's, which is the
+    /// default GOOS of a native toolchain. A GOOS set with `go env -w` is
+    /// not seen, since asking the go command would cost a process each time
+    /// an output is named.
+    fn exe_suffix(&self, env: &BTreeMap<String, String>) -> &'static str {
+        let goos = self
+            .over(env)
+            .get("GOOS")
+            .cloned()
+            .or_else(|| std::env::var("GOOS").ok())
+            .filter(|goos| !goos.is_empty());
+        if goos.as_deref().unwrap_or(std::env::consts::OS) == "windows" {
+            ".exe"
+        } else {
+            ""
+        }
+    }
+
     /// The environment variables these overrides set.
     fn vars(&self) -> Vec<(&'static str, String)> {
         let mut vars = Vec::new();
@@ -545,6 +565,22 @@ mod tests {
                 ("GOFLAGS".to_owned(), "-mod=mod".to_owned()),
             ])
         );
+    }
+
+    #[test]
+    fn exe_suffix_follows_goos_from_the_field_or_env() {
+        let env = |goos: &str| BTreeMap::from([("GOOS".to_owned(), goos.to_owned())]);
+        let field = |goos: &str| GoEnv {
+            goos: Some(goos.to_owned()),
+            ..GoEnv::default()
+        };
+        assert_eq!(field("windows").exe_suffix(&BTreeMap::new()), ".exe");
+        assert_eq!(GoEnv::default().exe_suffix(&env("windows")), ".exe");
+        assert_eq!(field("linux").exe_suffix(&env("windows")), "");
+        assert_eq!(GoEnv::default().exe_suffix(&env("linux")), "");
+        // An empty GOOS is unset to the go command, so the host's applies.
+        let host = if cfg!(windows) { ".exe" } else { "" };
+        assert_eq!(GoEnv::default().exe_suffix(&env("")), host);
     }
 
     #[test]

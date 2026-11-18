@@ -1,0 +1,41 @@
+# rust.exe without `bin` builds the binary `cargo run` would: with several
+# binaries and no `default-run`, it fails listing them, and with
+# `default-run` it builds only that one. `greet` does not compile, so
+# building every binary fails.
+[!exec:cargo] skip
+
+! bit
+stderr 'set `bin`, or `default-run` in Cargo.toml \(available binaries: greet, other\)'
+! exists out.txt
+
+cp Cargo.toml.default-run Cargo.toml
+bit
+stdout 'run ✔ ok'
+grep '\Aother\n\z' out.txt
+
+-- BUILD.bit --
+app = rust.exe {}
+
+run = exec {
+  command = "#{app.path} > out.txt"
+  outputs = ["out.txt"]
+}
+-- Cargo.toml --
+[package]
+name = "greet"
+version = "0.1.0"
+edition = "2021"
+-- Cargo.toml.default-run --
+[package]
+name = "greet"
+version = "0.1.0"
+edition = "2021"
+default-run = "other"
+-- src/main.rs --
+fn main() {
+    compile_error!("greet is not built");
+}
+-- src/bin/other.rs --
+fn main() {
+    println!("other");
+}

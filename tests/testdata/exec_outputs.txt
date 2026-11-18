@@ -1,0 +1,69 @@
+# exec outputs: `dir`, the `path` and `paths` outputs, rerunning or restoring
+# a deleted output, and removing outputs on --clean.
+bit
+stdout '^ *show │ paths=\[sub/out\.txt, sub/gen/\] path=one\.txt$'
+grep '\Ain\n\z' sub/out.txt
+grep '/sub$' sub/pwd.txt
+exists sub/gen
+
+# A deleted output reruns a local-only target.
+rm local.txt
+bit --plan local
+stdout '^local ~ .*''local\.txt'' \(removed\) changed\)$'
+bit local
+stdout '^local ▶ '
+grep '\Arun\nrun\n\z' local.log
+exists local.txt
+
+# A cacheable target restores it from the shared cache instead.
+rm sub/out.txt
+bit build
+stdout '^build ⇣ .*\(cached\)$'
+stdout '^build │ restore sub/out\.txt$'
+grep '\Ain\n\z' sub/out.txt
+grep '\Arun\n\z' build.log
+
+# --clean removes outputs, or runs `clean` instead when it is set.
+bit --clean
+stdout '^ *build ▶ rm sub/out\.txt$'
+stdout '^ *custom │ cleaning$'
+! exists sub/out.txt
+! exists one.txt
+! exists local.txt
+exists custom.txt
+exists cleaned.txt
+exists sub/in.txt
+
+bit --clean
+stdout '^ *build · no state$'
+
+-- BUILD.bit --
+build = exec {
+  dir = "sub"
+  command = "echo run >> ../build.log; pwd > pwd.txt; cat in.txt > out.txt; test -d gen"
+  inputs = ["in.txt"]
+  outputs = ["out.txt", "gen/"]
+}
+
+one = exec {
+  command = "echo one > one.txt"
+  outputs = "one.txt"
+}
+
+show = exec {
+  command = "echo paths=#{build.paths} path=#{one.path}"
+}
+
+local = exec {
+  command = "echo run >> local.log; echo local > local.txt"
+  outputs = "local.txt"
+  resolve = "echo present"
+}
+
+custom = exec {
+  command = "touch custom.txt"
+  outputs = "custom.txt"
+  clean = "echo cleaning; touch cleaned.txt"
+}
+-- sub/in.txt --
+in

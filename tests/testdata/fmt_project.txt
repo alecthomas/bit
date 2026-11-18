@@ -1,0 +1,22 @@
+# --fmt without a path formats the project's BUILD.bit, found from a
+# subdirectory, and no other .bit file.
+mkdir nested
+cd nested
+bit --fmt
+! stdout .
+cd ..
+cmp BUILD.bit BUILD.bit.want
+cmp other.bit other.bit.orig
+
+-- BUILD.bit --
+# Comment
+job=exec{command='true'}
+-- BUILD.bit.want --
+# Comment
+job = exec {
+  command = 'true'
+}
+-- other.bit --
+let x=1
+-- other.bit.orig --
+let x=1

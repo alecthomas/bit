@@ -1,0 +1,89 @@
+# go.build compiles a pattern or a list of them, reruns only when a matching
+# package changes, and tracks the file `-o` in `flags` writes as an output
+# that the cache restores.
+[!exec:go] skip
+
+bit
+stdout 'all ▶ go build \./\.\.\.'
+stdout 'listed ▶ go build \./a \./b'
+stdout 'archive ▶ go build -o build/a\.a \./a'
+exists build/a.a
+
+cp c.go.changed c/c.go
+bit
+stdout 'all ▶ go build \./\.\.\. \(''c/c\.go'' changed\)'
+! stdout 'listed ▶'
+! stdout 'archive ▶'
+
+# A broken package fails the targets that compile it.
+cp b.go.broken b/b.go
+! bit
+stdout 'listed ✘'
+stdout 'all ✘'
+! stdout 'archive ✘'
+
+cp b.go.fixed b/b.go
+bit
+
+rm build
+bit
+stdout 'archive │ restore build/a\.a'
+exists build/a.a
+
+# Cleaning removes the files `-o` wrote. Into a directory, `go build` writes
+# only the main packages' executables, so the rest of it stays.
+exists bin/tool bin/keep
+bit --clean
+! exists build/a.a
+! exists bin/tool
+exists bin/keep
+
+-- BUILD.bit --
+all = go.build {
+  package = "./..."
+}
+
+listed = go.build {
+  package = ["./a", "./b"]
+}
+
+archive = go.build {
+  package = "./a"
+  flags   = ["-o", "build/a.a"]
+}
+
+tools = go.build {
+  package = ["./a", "./cmd/tool"]
+  flags   = ["-o", "bin/"]
+}
+-- bin/keep --
+-- cmd/tool/main.go --
+package main
+
+func main() {}
+-- go.mod --
+module example.com/m
+
+go 1.22
+-- a/a.go --
+package a
+
+func A() int { return 1 }
+-- b/b.go --
+package b
+
+func B() int { return 2 }
+-- b.go.broken --
+package b
+
+func B() int { return "two" }
+-- b.go.fixed --
+package b
+
+func B() int { return 3 }
+-- c/c.go --
+package c
+-- c.go.changed --
+package c
+
+const C = 1

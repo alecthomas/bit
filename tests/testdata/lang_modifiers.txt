@@ -1,0 +1,63 @@
+# bit runs the default group; ... runs every target that isn't explicit.
+bit
+stdout 'main ✔'
+! stdout 'keep'
+! exists keep.txt
+
+bit ...
+stdout 'keep ✔'
+stdout 'heavy ✔'
+! stdout 'manual'
+! exists manual.txt
+
+# An explicit target runs when named, or as a dependency.
+bit needs-manual
+stdout 'manual ✔'
+grep '\Amanual\z' manual.txt
+
+# --clean skips protected targets unless named, and explicit ones under ...
+bit --clean ...
+stdout 'keep ⊘ protected'
+stdout 'heavy ▶ rm heavy.txt'
+exists keep.txt manual.txt
+! exists heavy.txt main.txt
+
+bit --clean keep
+stdout 'keep ▶ rm keep.txt'
+! exists keep.txt
+
+# A large target gets its own CI job.
+exec git init -q
+bit --ci github heavy main
+stdout '^  heavy:'
+stdout 'run: "bit heavy"'
+stdout 'run: "bit main"'
+
+-- BUILD.bit --
+main = exec {
+  command = "printf main > main.txt"
+  outputs = "main.txt"
+}
+
+explicit manual = exec {
+  command = "printf manual > manual.txt"
+  outputs = "manual.txt"
+}
+
+explicit needs-manual = exec {
+  command = "true"
+  depends_on = [manual]
+}
+
+protected keep = exec {
+  command = "printf keep > keep.txt"
+  outputs = "keep.txt"
+}
+
+large heavy = exec {
+  command = "printf heavy > heavy.txt"
+  outputs = "heavy.txt"
+}
+
+# Build the main file.
+group default = [main]

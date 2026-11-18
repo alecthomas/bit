@@ -1,0 +1,18 @@
+# --help points to the docs, and explains BUILD.bit with an example whose
+# sections are set apart by blank lines.
+bit --help
+stdout 'Use --docs to read the full documentation'
+stdout 'See `bit --docs ci`'
+stdout 'BUILD\.bit example \(illustrative\):'
+stdout 'import "\./modules/app" as app'
+stdout 'import "github\.com/acme/build" as tools'
+stdout 'param version: string = "dev"'
+stdout 'name: string = "Bob", retries = 2, age: int = null'
+stdout 'binary\[arch\] = go\.exe'
+stdout 'group default = \[binary\]'
+stdout 'output artifact = binary\["amd64"\]\.path'
+stdout 'Use --schema to list all available resources and functions\.'
+stdout '\n\n  param version'
+stdout '\n\n  let arch'
+stdout '\n\n  binary\[arch\]'
+stdout '\n\n  output artifact'

@@ -1,0 +1,73 @@
+# --since lists the targets whose inputs changed since a commit, staged,
+# unstaged or untracked, and those depending on their content.
+exec git init -q
+exec git add .
+exec git -c user.email=test@example.com -c user.name=Test commit -qm base
+
+cp a.txt.changed a.txt
+exec git add a.txt
+cp e.txt.changed e.txt
+cp d.txt.new d.txt
+
+! bit --list --since HEAD
+stderr '--since requires -ll'
+
+bit -ll --since HEAD
+! stdout '\A\s'
+stdout 'a \('
+stdout 'c \('
+stdout 'd \('
+stdout 'e \('
+! stdout 'b \('
+cp stdout since-head.txt
+
+# Without a commit, --since compares with the remote's default branch.
+exec git update-ref refs/remotes/origin/master HEAD
+exec git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/master
+bit -ll --since
+cmp stdout since-head.txt
+
+bit -ll --since c
+stdout 'c \('
+! stdout 'e \('
+
+-- BUILD.bit --
+a = exec {
+  command = "true"
+  inputs = ["a.txt"]
+}
+
+b = exec {
+  command = "true"
+  inputs = ["b.txt"]
+}
+
+c = exec {
+  command = "true"
+  inputs = ["c.txt"]
+  depends_on = [a]
+}
+
+d = exec {
+  command = "true"
+  inputs = ["d.txt"]
+}
+
+e = exec {
+  command = "true"
+  inputs = ["e.txt"]
+}
+-- a.txt --
+a
+-- b.txt --
+b
+-- c.txt --
+c
+-- e.txt --
+e
+-- a.txt.changed --
+changed
+-- e.txt.changed --
+changed
+-- d.txt.new --
+untracked

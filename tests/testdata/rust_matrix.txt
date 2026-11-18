@@ -1,0 +1,100 @@
+# rust.packages() lists the workspace members for a matrix, and
+# rust.dependencies() each member's local dependencies, without
+# development ones, as names or as references through a template.
+[!exec:cargo] skip
+
+bit --graph --json crate
+cp stdout graph.json
+[exec:jq] exec jq -e '. == {"crate[\"app\"]": ["crate[\"util\"]"], "crate[\"core\"]": [], "crate[\"util\"]": ["crate[\"core\"]"]}' graph.json
+
+bit deps packages
+grep '\Aapp core util\n\z' out/packages.txt
+grep '\Autil\n\z' out/deps-app.txt
+grep '\Acore\n\z' out/deps-util.txt
+grep '\A\n\z' out/deps-core.txt
+
+# Each slice builds its package after its dependencies.
+bit -j1 crate
+stdout 'crate\["core"\] ▶ cargo build -p core$(?s:.*)crate\["util"\] ▶ cargo build -p util$(?s:.*)crate\["app"\] ▶ cargo build -p app$'
+exists target/debug/app
+
+# A change in a package reruns the slices that build it.
+exec cp main.rs.changed app/src/main.rs
+bit crate
+stdout 'crate\["core"\] · no changes'
+stdout 'crate\["util"\] · no changes'
+stdout 'crate\["app"\] ▶ .*app/src/main\.rs'
+
+exec cp lib.rs.changed core/src/lib.rs
+bit crate
+stdout 'crate\["core"\] ✔ ok'
+stdout 'crate\["util"\] ✔ ok'
+stdout 'crate\["app"\] ✔ ok'
+exec target/debug/app
+stdout '\Autil\+core 2!\n\z'
+
+-- BUILD.bit --
+let package = rust.packages()
+
+crate[package] = rust.build {
+  package    = package
+  depends_on = rust.dependencies(package, "crate[$]")
+}
+
+explicit deps[package] = exec {
+  command = "mkdir -p out && echo #{shell_join(rust.dependencies(package))} > out/deps-#{package}.txt"
+  outputs = ["out/deps-#{package}.txt"]
+}
+
+explicit packages = exec {
+  command = "mkdir -p out && echo #{shell_join(rust.packages())} > out/packages.txt"
+  outputs = ["out/packages.txt"]
+}
+-- Cargo.toml --
+[workspace]
+members = ["core", "util", "app"]
+resolver = "2"
+-- core/Cargo.toml --
+[package]
+name = "core"
+version = "0.1.0"
+edition = "2021"
+-- core/src/lib.rs --
+pub fn word() -> &'static str {
+    "core"
+}
+-- lib.rs.changed --
+pub fn word() -> &'static str {
+    "core 2"
+}
+-- util/Cargo.toml --
+[package]
+name = "util"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core = { path = "../core" }
+-- util/src/lib.rs --
+pub fn word() -> String {
+    format!("util+{}", core::word())
+}
+-- app/Cargo.toml --
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+util = { path = "../util" }
+
+[dev-dependencies]
+core = { path = "../core" }
+-- app/src/main.rs --
+fn main() {
+    println!("{}", util::word());
+}
+-- main.rs.changed --
+fn main() {
+    println!("{}!", util::word());
+}

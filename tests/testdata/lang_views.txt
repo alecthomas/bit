@@ -1,0 +1,67 @@
+# --plan, --dump, --info and --graph describe the build without running it,
+# and --dump shows a secret as its call, never its value.
+env API_TOKEN=s3cr3t-value
+bit --plan
+stdout '^lib \+ printf lib > lib.txt'
+# An output not yet produced shows as its reference.
+stdout '^app \+ cat #\{lib\.path\} > app.txt'
+! exists lib.txt
+
+bit --info
+stdout 'region \(string = "eu"\)'
+stdout 'default — Build the app\.'
+stdout '^Outputs:'
+stdout 'result'
+
+bit --graph app
+stdout 'lib──.*app'
+
+bit
+stdout 'app ✔'
+grep '\Alib\z' app.txt
+
+bit --plan
+stdout '^lib · '
+stdout '^app · '
+
+bit --dump token
+stdout 'TOKEN: secret\("API_TOKEN"\)'
+! stdout 's3cr3t'
+grep '\As3cr3t-value\z' token.txt
+
+bit --dump app
+stdout 'command: cat lib.txt > app.txt'
+stdout 'path: app.txt'
+
+# --clean destroys in reverse order, and a second clean has nothing to do.
+bit --clean
+stdout 'app ▶ rm app.txt'
+stdout 'lib ▶ rm lib.txt'
+! exists app.txt lib.txt
+bit --clean
+stdout 'app · no state'
+stdout 'lib · no state'
+
+-- BUILD.bit --
+param region = "eu"
+
+lib = exec {
+  command = "printf lib > lib.txt"
+  outputs = "lib.txt"
+}
+
+app = exec {
+  command = "cat #{lib.path} > app.txt"
+  outputs = "app.txt"
+}
+
+token = exec {
+  env = { TOKEN = secret("API_TOKEN"), REGION = region }
+  command = "printf %s \"$TOKEN\" > token.txt"
+  outputs = "token.txt"
+}
+
+# Build the app.
+group default = [app, token]
+
+output result = app.path

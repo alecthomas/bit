@@ -1,0 +1,99 @@
+# go.lint runs golangci-lint with the project's config: an issue fails the
+# target, only the changed package is linted again, and fixing it passes.
+[!exec:go] skip
+[!exec:golangci-lint] skip
+
+bit
+stdout 'lint ▶ golangci-lint run \./\.\.\.'
+stdout 'lint ✔ ok'
+
+bit
+stdout 'lint · no changes'
+
+cp bad.go.new a/bad.go
+! bit
+stdout 'lint ▶ golangci-lint run (\./)?a \(''a/bad\.go'' \(new\) changed\)'
+stdout '1 of 2 packages affected'
+stdout 'a/bad\.go:3:6: func unusedThing is unused \(unused\)'
+stdout 'lint ✘'
+stderr 'test target ''lint'' failed'
+
+rm a/bad.go
+bit
+stdout 'lint ✔ ok'
+
+# The config is an input.
+cp golangci.yml.strict .golangci.yml
+bit
+stdout 'lint ▶ golangci-lint run \./\.\.\. \(''\.golangci\.yml'' changed\)'
+
+# Narrowed runs work when bit starts through a symlinked directory, whose
+# path the go command keeps from PWD.
+exec ln -s sym link
+exec sh -c 'cd link && exec '$BIT
+cp bad.go.new sym/a/bad.go
+! exec sh -c 'cd link && exec '$BIT
+stdout 'lint ▶ golangci-lint run (\./)?a '
+stdout 'test ▶ go test -json \./a '
+stdout 'a/bad\.go:3:6: func unusedThing is unused \(unused\)'
+! stdout 'outside main module'
+stdout 'test ✔'
+
+-- BUILD.bit --
+lint = go.lint {}
+-- .golangci.yml --
+version: "2"
+linters:
+  default: none
+  enable:
+    - unused
+-- golangci.yml.strict --
+version: "2"
+linters:
+  default: none
+  enable:
+    - unused
+    - ineffassign
+-- go.mod --
+module example.com/m
+
+go 1.22
+-- a/a.go --
+package a
+
+func A() int { return 1 }
+-- b/b.go --
+package b
+-- sym/BUILD.bit --
+lint = go.lint {}
+test = go.test { package = "./..." }
+-- sym/.golangci.yml --
+version: "2"
+linters:
+  default: none
+  enable:
+    - unused
+-- sym/go.mod --
+module example.com/s
+
+go 1.22
+-- sym/a/a.go --
+package a
+
+func A() int { return 1 }
+-- sym/a/a_test.go --
+package a
+
+import "testing"
+
+func TestA(t *testing.T) {
+	if A() != 1 {
+		t.Fatal("A")
+	}
+}
+-- sym/b/b.go --
+package b
+-- bad.go.new --
+package a
+
+func unusedThing() {}

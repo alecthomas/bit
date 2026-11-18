@@ -10,6 +10,7 @@ use crate::provider::{
     Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanAction, PlanResult, Provider,
     Resource, ResourceKind, Target,
 };
+use crate::providers::files_under;
 use crate::sha256::SHA256;
 use crate::value::Value;
 
@@ -453,23 +454,6 @@ fn stage(inputs: &Target<ProtocGenerateInputs>, files: &[String], writer: &Targe
     })
 }
 
-fn files_under(dir: &Path) -> Result<Vec<PathBuf>, BoxError> {
-    let mut files = Vec::new();
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                pending.push(entry.path());
-            } else {
-                files.push(entry.path());
-            }
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
 /// Remove generated `files`, then the directories this empties below the
 /// output `roots`. Only files a generator wrote are removed, so anything
 /// else kept in an output directory survives.
@@ -604,6 +588,20 @@ fn run_full(
         // `dir` changed are removed but their emptied directories remain.
         let prior_inputs = Target::new(inputs.dir.clone(), prior.inputs.clone());
         remove_generated(&stale, &prior_inputs.outputs(), writer)?;
+
+        // protoc writes descriptor sets itself, so they are not among the
+        // staged files above, and one the flags no longer name would stay.
+        let written: BTreeSet<PathBuf> = inputs
+            .descriptor_outputs()
+            .into_iter()
+            .chain(generated.iter().map(PathBuf::from))
+            .map(|path| super::normalize(&path))
+            .collect();
+        for descriptor in prior_inputs.descriptor_outputs() {
+            if !written.contains(&super::normalize(&descriptor)) {
+                crate::providers::remove_path(&descriptor, writer)?;
+            }
+        }
     }
     Ok(generated)
 }
@@ -715,7 +713,12 @@ impl Resource for ProtocGenerateResource {
 
     fn destroy(&self, prior_state: &Target<ProtocGenerateState>, writer: &TargetWriter) -> Result<(), BoxError> {
         let inputs = Target::new(prior_state.dir.clone(), prior_state.inputs.clone());
-        remove_generated(&prior_state.generated, &inputs.outputs(), writer)
+        remove_generated(&prior_state.generated, &inputs.outputs(), writer)?;
+        // protoc writes descriptor sets itself, outside `generated`.
+        for descriptor in inputs.descriptor_outputs() {
+            crate::providers::remove_path(&descriptor, writer)?;
+        }
+        Ok(())
     }
 
     /// Incremental runs compile only the sources that changed.
@@ -1104,5 +1107,27 @@ mod tests {
         Resource::destroy(&test_resource(), &state, &output.writer("generate")).unwrap();
         assert!(!out.join("acme").exists());
         assert!(out.join("go.mod").exists());
+    }
+
+    #[test]
+    fn destroy_removes_descriptor_sets() {
+        let (dir, mut inputs) = project();
+        inputs.flags = vec!["--descriptor_set_out=desc.pb".into(), "-o".into(), "set.pb".into()];
+        for name in ["desc.pb", "set.pb"] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        let state = ProtocGenerateState {
+            inputs: inputs.value.clone(),
+            compiled: vec![],
+            protos: BTreeMap::new(),
+            tools: BTreeMap::new(),
+            generated: vec![],
+            generated_hashes: BTreeMap::new(),
+        };
+        let output = crate::output::Output::new(&[]);
+        let state = Target::new(inputs.dir.clone(), state);
+        Resource::destroy(&test_resource(), &state, &output.writer("generate")).unwrap();
+        assert!(!dir.path().join("desc.pb").exists());
+        assert!(!dir.path().join("set.pb").exists());
     }
 }

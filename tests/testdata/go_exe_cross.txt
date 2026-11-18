@@ -1,0 +1,90 @@
+# go.exe cross-compiles with `goos`, `goarch` and `cgo`, and changing them
+# rebuilds. A Windows binary's default name ends in `.exe`, as `go build`
+# names it, whether `goos` or `env` sets GOOS.
+[!exec:go] skip
+
+bit
+stdout 'default ▶ go build -o hello\.exe '
+stdout 'from-env ▶ go build -o greet\.exe '
+exists hello.exe greet.exe
+! exists hello greet
+exec go version -m windows
+stdout 'GOOS=windows'
+stdout 'GOARCH=arm64'
+exec go version -m linux
+stdout 'GOOS=linux'
+stdout 'GOARCH=amd64'
+stdout 'CGO_ENABLED=0'
+
+bit
+! stdout '▶'
+
+cp BUILD.bit.riscv BUILD.bit
+bit
+stdout 'linux ▶ go build'
+! stdout 'windows ▶'
+exec go version -m linux
+stdout 'GOARCH=riscv64'
+
+-- BUILD.bit --
+windows = go.exe {
+  package = "./cmd/hello"
+  output  = "windows"
+  goos    = "windows"
+  goarch  = "arm64"
+}
+
+linux = go.exe {
+  package = "./cmd/hello"
+  output  = "linux"
+  goos    = "linux"
+  goarch  = "amd64"
+  cgo     = false
+}
+
+default = go.exe {
+  package = "./cmd/hello"
+  goos    = "windows"
+}
+
+from-env = go.exe {
+  package = "./cmd/greet"
+  env     = { GOOS = "windows" }
+}
+-- BUILD.bit.riscv --
+windows = go.exe {
+  package = "./cmd/hello"
+  output  = "windows"
+  goos    = "windows"
+  goarch  = "arm64"
+}
+
+linux = go.exe {
+  package = "./cmd/hello"
+  output  = "linux"
+  goos    = "linux"
+  goarch  = "riscv64"
+  cgo     = false
+}
+
+default = go.exe {
+  package = "./cmd/hello"
+  goos    = "windows"
+}
+
+from-env = go.exe {
+  package = "./cmd/greet"
+  env     = { GOOS = "windows" }
+}
+-- go.mod --
+module example.com/m
+
+go 1.22
+-- cmd/hello/main.go --
+package main
+
+func main() { println("hello") }
+-- cmd/greet/main.go --
+package main
+
+func main() { println("greet") }

@@ -1,0 +1,65 @@
+# bit checks BUILD.bit when it loads, naming the offending target and field.
+cp unknown_field.bit BUILD.bit
+! bit --plan
+stderr 'target .t.: unknown field .bogus.; valid fields: command,'
+
+cp wrong_type.bit BUILD.bit
+! bit --plan
+stderr 'target .t.: field .command.: expected string, got number'
+
+cp missing_field.bit BUILD.bit
+! bit --plan
+stderr 'target .t.: missing required field .command.'
+
+cp undefined.bit BUILD.bit
+! bit --plan
+stderr 'undefined .nope. referenced in target .t.'
+
+cp duplicate.bit BUILD.bit
+! bit --plan
+stderr 'name .t. is already used by a variable'
+
+cp cycle.bit BUILD.bit
+! bit --plan
+stderr 'dependency cycle detected: a -> b -> a'
+
+cp argument_type.bit BUILD.bit
+! bit --plan
+stderr 'n: expected string, got number'
+
+cp secret_argument.bit BUILD.bit
+! bit --plan
+stderr 'BUILD.bit:2:1: .*secret .API_TOKEN. not found'
+env API_TOKEN=value
+! bit --plan
+stderr 'BUILD.bit:2:1: invalid invocation of .t.: parameter .n. cannot receive a secret'
+
+-- unknown_field.bit --
+t = exec {
+  command = "true"
+  bogus = 1
+}
+-- wrong_type.bit --
+t = exec { command = 1 }
+-- missing_field.bit --
+t = exec {}
+-- undefined.bit --
+t = exec { command = "#{nope}" }
+-- duplicate.bit --
+let t = 1
+t = exec { command = "true" }
+-- cycle.bit --
+a = exec {
+  command = "true"
+  depends_on = [b]
+}
+b = exec {
+  command = "true"
+  depends_on = [a]
+}
+-- argument_type.bit --
+t(n : string) = exec { command = n }
+group g = [t(n = 1)]
+-- secret_argument.bit --
+t(n : string) = exec { command = "echo #{n}" }
+group g = [t(n = secret("API_TOKEN"))]

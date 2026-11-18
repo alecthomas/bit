@@ -1,0 +1,108 @@
+# pnpm.install installs a workspace from its committed lockfile, linking
+# `workspace:` dependencies, and reruns only when a manifest changes.
+[!exec:pnpm] skip
+
+bit
+stdout 'deps ✔ ok'
+stdout '│ path=/\S*/work/node_modules$'
+exists node_modules/.modules.yaml
+exists packages/app/node_modules/lib/package.json
+cmp pnpm-lock.yaml lock.orig
+
+bit
+! stdout '✔ ok'
+
+cp other.package.json packages/other/package.json
+bit
+stdout 'deps ✔ ok'
+
+bit --clean
+! exists node_modules
+! exists packages/app/node_modules
+
+# A manifest the lockfile doesn't match fails a frozen install, and an
+# unfrozen one updates the lockfile.
+cp app.package.json packages/app/package.json
+! bit deps
+stdout 'deps │ Error: ERR_PNPM_OUTDATED_LOCKFILE'
+stderr 'target ''deps'' apply failed'
+cp BUILD.unfrozen BUILD.bit
+# pnpm freezes the lockfile by default when CI is set, which `frozen = false`
+# overrides.
+env CI=true
+bit deps
+stdout 'deps ▶ pnpm install --no-frozen-lockfile$'
+stdout 'deps ✔ ok'
+grep '^ +other:\n +specifier: workspace:\*' pnpm-lock.yaml
+exists packages/app/node_modules/other/package.json
+
+-- BUILD.unfrozen --
+deps = pnpm.install {
+  frozen = false
+}
+
+-- BUILD.bit --
+deps = pnpm.install {}
+
+show = exec {
+  command = "echo path=#{deps.path}"
+  inputs = []
+}
+
+-- lock.orig --
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  packages/app:
+    dependencies:
+      lib:
+        specifier: workspace:*
+        version: link:../lib
+
+  packages/lib: {}
+
+  packages/other: {}
+-- pnpm-lock.yaml --
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  packages/app:
+    dependencies:
+      lib:
+        specifier: workspace:*
+        version: link:../lib
+
+  packages/lib: {}
+
+  packages/other: {}
+-- pnpm-workspace.yaml --
+packages:
+  - "packages/*"
+-- package.json --
+{ "name": "root", "private": true }
+-- packages/lib/package.json --
+{ "name": "lib", "version": "1.0.0", "main": "index.js" }
+-- packages/lib/index.js --
+module.exports = "lib";
+-- packages/app/package.json --
+{ "name": "app", "version": "1.0.0", "dependencies": { "lib": "workspace:*" } }
+-- packages/other/package.json --
+{ "name": "other", "version": "1.0.0" }
+-- app.package.json --
+{ "name": "app", "version": "1.0.0", "dependencies": { "lib": "workspace:*", "other": "workspace:*" } }
+-- other.package.json --
+{ "name": "other", "version": "1.0.0", "description": "changed" }

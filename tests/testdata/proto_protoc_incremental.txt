@@ -1,0 +1,98 @@
+# An incremental protoc.generate compiles only the sources that changed or
+# import a changed file, compiles new sources alone, and falls back to a
+# full run that removes stale outputs when a source is deleted.
+[!exec:protoc] skip
+[!exec:protoc-gen-go] skip
+
+bit
+stdout 'gen ▶ protoc -I\. -Ishared --go_out=gen --go_opt=paths=source_relative api/\*\.proto$'
+exists gen/api/a.pb.go gen/api/b.pb.go gen/api/c.pb.go
+
+# Only b imports ids.proto.
+cp ids.proto.changed shared/ids.proto
+bit
+stdout 'gen ▶ protoc .* api/b\.proto \('
+stdout 'compiling 1 of 3 sources'
+
+cp a.proto.changed api/a.proto
+bit
+stdout 'gen ▶ protoc .* api/a\.proto \('
+stdout 'compiling 1 of 3 sources'
+grep 'AExtra' gen/api/a.pb.go
+
+cp d.proto.new api/d.proto
+bit
+stdout 'gen ▶ protoc .* api/d\.proto \('
+stdout 'compiling 1 of 4 sources'
+exists gen/api/d.pb.go
+
+rm api/d.proto
+bit
+stdout 'gen ▶ protoc .* api/\*\.proto \('
+! stdout 'compiling'
+stdout 'gen ▶ rm gen/api/d\.pb\.go'
+! exists gen/api/d.pb.go
+exists gen/api/a.pb.go gen/api/b.pb.go gen/api/c.pb.go
+
+bit
+stdout 'gen · no changes'
+
+-- BUILD.bit --
+gen = protoc.generate {
+  sources     = ["api/*.proto"]
+  include     = [".", "shared"]
+  out         = { go = "gen" }
+  opt         = { go = "paths=source_relative" }
+  incremental = true
+}
+-- api/a.proto --
+syntax = "proto3";
+package api;
+option go_package = "example.com/api";
+
+message A {}
+-- a.proto.changed --
+syntax = "proto3";
+package api;
+option go_package = "example.com/api";
+
+message A {}
+
+message AExtra {}
+-- api/b.proto --
+syntax = "proto3";
+package api;
+option go_package = "example.com/api";
+
+import "ids.proto";
+
+message B {
+  Id id = 1;
+}
+-- api/c.proto --
+syntax = "proto3";
+package api;
+option go_package = "example.com/api";
+
+message C {}
+-- d.proto.new --
+syntax = "proto3";
+package api;
+option go_package = "example.com/api";
+
+message D {}
+-- shared/ids.proto --
+syntax = "proto3";
+option go_package = "example.com/ids";
+
+message Id {
+  string value = 1;
+}
+-- ids.proto.changed --
+syntax = "proto3";
+option go_package = "example.com/ids";
+
+message Id {
+  string value = 1;
+  int64 version = 2;
+}

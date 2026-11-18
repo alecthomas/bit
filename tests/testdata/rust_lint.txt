@@ -1,0 +1,71 @@
+# rust.clippy passes on warnings unless flags deny them, rust.fmt-check
+# fails on unformatted code, and rust.fmt formats it in place.
+[!exec:cargo] skip
+
+bit lax
+stdout 'lax ▶ cargo clippy$'
+stdout 'lax │ warning: writing `&Vec` instead of `&\[_\]`'
+stdout 'lax ✔ ok'
+
+! bit strict
+stdout 'strict ▶ cargo clippy -- -D warnings$'
+stdout 'strict │ error: writing `&Vec` instead of `&\[_\]`'
+stderr 'test target ''strict'' failed'
+
+! bit check
+stdout 'check ▶ cargo fmt --check$'
+stdout 'check │ Diff in .*src/lib\.rs'
+stderr 'test target ''check'' failed'
+
+bit fmt
+stdout 'fmt ▶ cargo fmt$'
+stdout 'fmt ✔ ok'
+cmp src/lib.rs formatted.rs
+bit fmt
+stdout 'fmt · no changes'
+bit check
+stdout 'check ✔ ok'
+
+# The runner's cp keeps the file's older mtime on macOS, which cargo reads as
+# unchanged, so the system cp writes the fix.
+exec cp fixed.rs src/lib.rs
+bit strict
+stdout 'strict ✔ ok'
+
+-- BUILD.bit --
+explicit lax = rust.clippy {}
+
+explicit strict = rust.clippy {
+  flags = ["--", "-D", "warnings"]
+}
+
+explicit fmt = rust.fmt {}
+
+explicit check = rust.fmt-check {}
+-- Cargo.toml --
+[package]
+name = "lint"
+version = "0.1.0"
+edition = "2021"
+-- src/lib.rs --
+pub fn f(x: &Vec<i32>) -> usize {
+    x.len()
+}
+
+pub fn  g( )->i32{1}
+-- formatted.rs --
+pub fn f(x: &Vec<i32>) -> usize {
+    x.len()
+}
+
+pub fn g() -> i32 {
+    1
+}
+-- fixed.rs --
+pub fn f(x: &[i32]) -> usize {
+    x.len()
+}
+
+pub fn g() -> i32 {
+    1
+}

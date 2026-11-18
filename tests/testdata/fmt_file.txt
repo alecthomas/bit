@@ -1,0 +1,34 @@
+# --fmt formats a named file, outside any project, keeping its comments,
+# and a formatted file stays as it is.
+bit --fmt example.bit
+! stdout .
+cmp example.bit formatted.bit.want
+bit --fmt example.bit
+! stdout .
+cmp example.bit formatted.bit.want
+
+# Invalid input is reported and left as it was.
+cp invalid.bit.orig broken.bit
+! bit --fmt broken.bit
+stderr 'broken\.bit'
+cmp broken.bit invalid.bit.orig
+
+! bit --fmt example.bit another.bit
+stderr 'accepts zero or one \.bit file'
+
+-- example.bit --
+# Header
+
+# Command
+job=exec{
+command='echo # hello' # inline
+}
+-- formatted.bit.want --
+# Header
+
+# Command
+job = exec {
+  command = 'echo # hello'  # inline
+}
+-- invalid.bit.orig --
+job = exec {

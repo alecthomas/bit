@@ -415,12 +415,28 @@ mod tests {
         assert!(format("job = exec {", "BUILD.bit").is_err());
     }
 
+    /// A computed matrix key, parameters, and a group with arguments, which
+    /// the example project doesn't have.
+    const PARAMETERIZED: &str = r#"let names = ["a", "b"]
+
+# Greet each name.
+greet[name = names] = exec {
+  command = "echo hello #{name}"
+}
+
+# Publish one name.
+publish(name : string) = exec {
+  command = "echo publish #{name}"
+  depends_on = [greet]
+}
+
+# Greet everyone and publish a name.
+group release(name : string = "a") = [publish(name = name)]
+"#;
+
     #[test]
     fn formats_example_build_files_without_changing_their_meaning() {
-        for source in [
-            include_str!("../example/BUILD.bit"),
-            include_str!("../tests/smoke/BUILD.bit"),
-        ] {
+        for source in [include_str!("../example/BUILD.bit"), PARAMETERIZED] {
             let formatted = format(source, "BUILD.bit").unwrap();
             assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
         }

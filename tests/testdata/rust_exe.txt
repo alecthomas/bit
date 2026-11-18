@@ -1,0 +1,112 @@
+# rust.exe builds the binary `bin` names, with the profile and features
+# given, and passes its path to targets that run it. A second run does
+# nothing, a file Git ignores changes nothing, a source change rebuilds and
+# reruns what uses the binary, and a cleaned binary restores from the cache.
+[!exec:cargo] skip
+[!exec:git] skip
+
+# Files Git ignores are not inputs, so the outputs of `run` are not.
+exec git init -q
+
+bit
+stdout 'plain ▶ cargo build --bin greet --message-format json'
+stdout 'loud ▶ cargo build --profile release --bin greet --features loud --message-format json'
+stdout 'all ▶ cargo build --profile fast --bin greet --all-features --message-format json'
+stdout 'count ▶ cargo build --bin count --message-format json'
+stdout 'run ✔ ok'
+grep '\Ahello\n\z' out/plain.txt
+grep '\AHELLO\n\z' out/loud.txt
+grep '\AHELLO!\n\z' out/all.txt
+grep '\Acounting\n\z' out/count.txt
+exists target/debug/greet target/release/greet target/fast/greet target/debug/count
+
+bit
+! stdout '✔ ok'
+stdout 'plain · no changes'
+stdout 'run · no changes'
+
+cp main.rs.changed out/notes.txt
+bit
+! stdout '✔ ok'
+
+# The runner's cp keeps the file's older mtime on macOS, which cargo reads as
+# unchanged, so the system cp writes the change.
+exec cp main.rs.changed src/main.rs
+bit
+stdout 'plain ▶ .*src/main\.rs'
+stdout 'loud ✔ ok'
+stdout 'all ✔ ok'
+stdout 'run ✔ ok'
+grep '\Ahi\n\z' out/plain.txt
+grep '\AHI\n\z' out/loud.txt
+grep '\AHI!\n\z' out/all.txt
+
+bit --clean plain loud
+! exists target/debug/greet target/release/greet
+exists target/debug/count
+bit
+stdout 'plain ⇣ .*\(cached\)'
+stdout 'loud ⇣ .*\(cached\)'
+exec target/debug/greet
+stdout '\Ahi\n\z'
+exec target/release/greet
+stdout '\AHI\n\z'
+
+-- .gitignore --
+/target
+/out
+-- BUILD.bit --
+plain = rust.exe {
+  bin = "greet"
+}
+
+loud = rust.exe {
+  bin      = "greet"
+  features = ["loud"]
+  profile  = "release"
+}
+
+all = rust.exe {
+  bin          = "greet"
+  all_features = true
+  profile      = "fast"
+}
+
+count = rust.exe {
+  bin = "count"
+}
+
+run = exec {
+  command = "mkdir -p out && #{plain.path} > out/plain.txt && #{loud.path} > out/loud.txt && #{all.path} > out/all.txt && #{count.path} > out/count.txt"
+  outputs = ["out/plain.txt", "out/loud.txt", "out/all.txt", "out/count.txt"]
+}
+-- Cargo.toml --
+[package]
+name = "greet"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+loud = []
+excited = []
+
+[profile.fast]
+inherits = "dev"
+-- src/main.rs --
+fn main() {
+    let word = "hello";
+    let word = if cfg!(feature = "loud") { word.to_uppercase() } else { word.to_owned() };
+    let mark = if cfg!(feature = "excited") { "!" } else { "" };
+    println!("{word}{mark}");
+}
+-- main.rs.changed --
+fn main() {
+    let word = "hi";
+    let word = if cfg!(feature = "loud") { word.to_uppercase() } else { word.to_owned() };
+    let mark = if cfg!(feature = "excited") { "!" } else { "" };
+    println!("{word}{mark}");
+}
+-- src/bin/count.rs --
+fn main() {
+    println!("counting");
+}

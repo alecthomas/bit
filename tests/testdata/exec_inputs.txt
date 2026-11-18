@@ -1,0 +1,67 @@
+# exec reruns when a file its inputs match changes, appears or disappears,
+# and passes the changed files in BIT_CHANGED_FILES. Other files don't count.
+bit
+stdout '^gen ▶ '
+stdout '^gen │ changed=unset$'
+grep '\Aa\nb\ni\n\z' all.txt
+
+bit
+stdout '^gen · no changes$'
+
+# Files outside the globs are not inputs.
+cp new.txt src/notes.md
+cp new.txt unrelated.txt
+bit
+stdout '^gen · no changes$'
+
+# Each changed input is listed, one absolute path per line.
+cp new.txt src/a.txt
+cp new.txt assets/img/i.png
+bit
+stdout '^gen ▶ .*changed\)$'
+stdout '^gen │ changed=\S*/assets/img/i\.png$'
+stdout '^gen │ \S*/src/a\.txt$'
+! stdout 'b\.txt'
+grep '\Anew\nb\nnew\n\z' all.txt
+
+# A new file matching a glob is an input.
+cp new.txt src/c.txt
+bit
+stdout '''src/c\.txt'' \(new\) changed'
+stdout '^gen │ changed=\S*/src/c\.txt$'
+
+# Removing it returns to inputs built before, so the shared cache restores
+# that result.
+rm src/c.txt
+bit
+stdout '^gen ⇣ .*\(cached\)$'
+stdout '^gen │ restore all\.txt$'
+grep '\Anew\nb\nnew\n\z' all.txt
+
+# Changing the command plans an update, which runs it in full.
+cp BUILD.bit.changed BUILD.bit
+bit --plan
+stdout '^gen ~ '
+bit
+stdout '^gen │ changed=unset$'
+
+-- BUILD.bit --
+gen = exec {
+  command = "echo \"changed=${BIT_CHANGED_FILES-unset}\"; cat src/*.txt assets/img/* > all.txt"
+  inputs = ["src/*.txt", "assets"]
+  outputs = "all.txt"
+}
+-- BUILD.bit.changed --
+gen = exec {
+  command = "echo \"changed=${BIT_CHANGED_FILES-unset}\"; cat src/*.txt assets/img/* > all.txt; true"
+  inputs = ["src/*.txt", "assets"]
+  outputs = "all.txt"
+}
+-- src/a.txt --
+a
+-- src/b.txt --
+b
+-- assets/img/i.png --
+i
+-- new.txt --
+new

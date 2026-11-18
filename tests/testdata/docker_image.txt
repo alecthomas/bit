@@ -1,0 +1,137 @@
+# docker.image builds from a Dockerfile at a given path and finds its inputs
+# there: COPY sources, with ARG and ENV expanded in their paths. Changing a
+# copied file rebuilds, changing any other file doesn't, ref pins the tag to
+# the image ID, a rebuild removes the previous image, and --clean removes
+# the image's tags this target created, but not another project's.
+[!docker] skip
+
+# HOME is empty, so the docker CLI finds no user-installed buildx plugin.
+exec sh -c 'p=$(command -v docker-buildx) || exit 0; mkdir -p "$HOME/.docker/cli-plugins" && ln -s "$p" "$HOME/.docker/cli-plugins/docker-buildx"'
+
+bit
+stdout 'image ▶ docker buildx build -t bit-test-image-[0-9a-f]{12}:v1 -f \./docker/Dockerfile --load --build-arg ID=[0-9a-f]{12} --build-arg VARIANT=blue \.$'
+stdout 'image ✔ ok'
+bit names
+grep '^ref=bit-test-image-[0-9a-f]{12}:[0-9a-f]{64}$' names.sh
+exec sh show.sh /variant.txt
+stdout '\Ablue\n\z'
+exec sh show.sh /app.txt
+stdout '\Aapp\n\z'
+exec sh -c '. ./names.sh && test "$(docker image inspect --format "{{.Id}}" "$tag")" = "sha256:${ref##*:}"'
+cp names.sh first.sh
+
+bit
+stdout 'image · no changes'
+
+# Neither the unselected variant nor a file outside the Dockerfile is an input.
+cp changed.txt assets/red.txt
+cp changed.txt unrelated.txt
+bit
+stdout 'image · no changes'
+
+# A rebuild removes the previous image's pinned tag, and with it the image.
+cp changed.txt app.txt
+bit
+stdout 'image ▶ docker rmi bit-test-image-[0-9a-f]{12}:[0-9a-f]{64}$'
+stdout 'image ✔ ok'
+bit names
+exec sh show.sh /app.txt
+stdout '\Achanged\n\z'
+! exec sh -c '. ./first.sh && docker image inspect "$ref"'
+
+cp changed.txt assets/blue.txt
+bit
+stdout 'image ✔ ok'
+bit names
+exec sh show.sh /variant.txt
+stdout '\Achanged\n\z'
+
+# A build argument selects another file.
+cp BUILD.bit.red BUILD.bit
+cp red.txt assets/red.txt
+bit
+stdout 'image ▶ .*--build-arg VARIANT=red'
+stdout 'image ✔ ok'
+bit names
+exec sh show.sh /variant.txt
+stdout '\Ared\n\z'
+cp names.sh saved.sh
+
+# Another project's tag for the same image, used by its container, is left.
+exec sh -c '. ./saved.sh && docker tag "$ref" "${tag%:*}-other:v1" && docker create --name "${tag%:*}-other" "${tag%:*}-other:v1" none >/dev/null'
+bit --clean
+stdout 'image ▶ docker rmi -f bit-test-image-[0-9a-f]{12}:[0-9a-f]{64}$'
+! exec sh -c '. ./saved.sh && docker image inspect "$ref"'
+! exec sh -c '. ./saved.sh && docker image inspect "$tag"'
+exec sh -c '. ./saved.sh && docker image inspect "${tag%:*}-other:v1" >/dev/null'
+exec sh -c '. ./saved.sh && docker rm "${tag%:*}-other" >/dev/null && docker rmi "${tag%:*}-other:v1" >/dev/null'
+
+# The build cache loads the removed image back under both tags.
+bit
+stdout 'image ⇣ .*\(cached\)$'
+stdout 'image │ docker image load'
+! stdout '#[0-9]+ '
+exec sh show.sh /variant.txt
+stdout '\Ared\n\z'
+exec sh -c '. ./saved.sh && docker image inspect "$tag"'
+bit --clean
+! exec sh -c '. ./saved.sh && docker image inspect "$ref"'
+! exec sh -c '. ./saved.sh && repo=${tag%:*} && docker images -q --filter "label=id=${repo##*-}" | grep .'
+
+-- BUILD.bit --
+let id = replace(sha256(project_dir()), "^(.{12}).*$", "$1")
+
+image = docker.image {
+  tag        = "bit-test-image-#{id}:v1"
+  dockerfile = "docker/Dockerfile"
+  build_args = { ID = id, VARIANT = "blue" }
+}
+
+explicit names = exec {
+  command = "printf 'tag=%s\nref=%s\n' bit-test-image-#{id}:v1 #{image.ref} > names.sh"
+  outputs = "names.sh"
+  inputs  = []
+}
+-- BUILD.bit.red --
+let id = replace(sha256(project_dir()), "^(.{12}).*$", "$1")
+
+image = docker.image {
+  tag        = "bit-test-image-#{id}:v1"
+  dockerfile = "docker/Dockerfile"
+  build_args = { ID = id, VARIANT = "red" }
+}
+
+explicit names = exec {
+  command = "printf 'tag=%s\nref=%s\n' bit-test-image-#{id}:v1 #{image.ref} > names.sh"
+  outputs = "names.sh"
+  inputs  = []
+}
+-- show.sh --
+# Print a file from the image that names.sh refers to.
+. ./names.sh
+c=$(docker create "$ref" none) || exit 1
+docker cp "$c:$1" - | tar -xO
+status=$?
+docker rm "$c" >/dev/null
+exit $status
+-- docker/Dockerfile --
+FROM scratch
+# A label unique to the project gives its image an ID no other run shares.
+ARG ID
+LABEL id=$ID
+ARG VARIANT
+ENV DIR=assets
+COPY app.txt /app.txt
+COPY ${DIR}/${VARIANT}.txt /variant.txt
+-- app.txt --
+app
+-- assets/blue.txt --
+blue
+-- assets/red.txt --
+unused
+-- red.txt --
+red
+-- unrelated.txt --
+unrelated
+-- changed.txt --
+changed

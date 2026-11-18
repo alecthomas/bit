@@ -23,10 +23,10 @@ pub(super) fn pnpm_args(script: &str, package: Option<&str>, script_args: &[Stri
     }
     args.push("run".to_owned());
     args.push(script.to_owned());
-    if !script_args.is_empty() {
-        args.push("--".to_owned());
-        args.extend(script_args.iter().cloned());
-    }
+    // pnpm 10 and 12 pass everything after the script name to the script
+    // as is, a `--` and its own options included, so a `--` here would
+    // reach the script too.
+    args.extend(script_args.iter().cloned());
     args
 }
 
@@ -116,7 +116,7 @@ pub struct PnpmRunInputs {
     /// Package name from its `package.json`. Omit to run the script of the project in `dir`; at the workspace root, the script may touch any package, so every project's sources are tracked.
     #[serde(default)]
     pub package: Option<String>,
-    /// Additional arguments passed to the script after `--`
+    /// Additional arguments passed to the script, exactly as given
     #[serde(default)]
     pub args: Vec<String>,
     /// Output file or list of output files/directories produced by the script, relative to `dir`
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn build_args_with_package_and_script_args() {
         let args = pnpm_args("build", Some("bff"), &["--mode=production".to_owned()]);
-        assert_eq!(args, vec!["--filter", "bff", "run", "build", "--", "--mode=production"]);
+        assert_eq!(args, vec!["--filter", "bff", "run", "build", "--mode=production"]);
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(describe("build", Some("bff"), &[]), "pnpm --filter bff run build");
         assert_eq!(
             describe("build", None, &["--watch".to_owned()]),
-            "pnpm run build -- --watch"
+            "pnpm run build --watch"
         );
     }
 

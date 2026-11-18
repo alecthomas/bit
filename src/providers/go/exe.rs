@@ -25,7 +25,7 @@ use super::scanner::{self, Tests};
 pub struct GoExeInputs {
     /// Go package to build (e.g. "./cmd/myapp")
     pub package: String,
-    /// Output binary path, relative to `dir` (defaults to the name `go build` gives it: the last element of the package's import path)
+    /// Output binary path, relative to `dir` (defaults to the name `go build` gives it: the last element of the package's import path, with `.exe` when GOOS, from `goos`, `env` or bit's environment, is `windows`)
     #[serde(default)]
     pub output: Option<String>,
     /// Extra flags passed to go build, except `-o`, which `output` sets. The files `-modfile`, `-overlay` and `-pgo` name are tracked as inputs. go runs in the directory `-C` names.
@@ -66,7 +66,8 @@ impl GoExeResource {
 
     /// The binary as bit's process sees it: `output`, relative to `dir`, or
     /// the name `go build` gives it there, the last element of the
-    /// package's import path. A relative pattern such as `.` names a
+    /// package's import path, with the target OS's executable suffix. A
+    /// relative pattern such as `.` names a
     /// directory, so taking its text instead would make the output the
     /// directory itself.
     fn output_path(inputs: &Target<GoExeInputs>) -> String {
@@ -96,7 +97,8 @@ impl GoExeResource {
             } else {
                 package.clone()
             };
-            default_exec_name(&import_path).to_owned()
+            let suffix = inputs.go_env.exe_suffix(&inputs.env);
+            format!("{}{suffix}", default_exec_name(&import_path))
         })
     }
 
@@ -135,7 +137,7 @@ impl GoExeResource {
 
 /// The last element of `import_path`, skipping a major version suffix such
 /// as `/v2`, as `go build` names a binary.
-fn default_exec_name(import_path: &str) -> &str {
+pub(super) fn default_exec_name(import_path: &str) -> &str {
     let import_path = import_path.trim_end_matches('/');
     let (parent, elem) = import_path.rsplit_once('/').unwrap_or(("", import_path));
     // `v0` and `v1` are never major version suffixes.
@@ -525,6 +527,24 @@ mod tests {
             },
         );
         assert_eq!(GoExeResource::output_path(&inputs), "foo");
+    }
+
+    #[test]
+    fn output_path_default_has_the_windows_suffix() {
+        let inputs = Target::new(
+            None,
+            GoExeInputs {
+                package: "./cmd/foo".into(),
+                output: None,
+                flags: vec![],
+                inputs: vec![],
+                go_env: GoEnv {
+                    goos: Some("windows".into()),
+                    ..GoEnv::default()
+                },
+            },
+        );
+        assert_eq!(GoExeResource::output_path(&inputs), "foo.exe");
     }
 
     #[test]

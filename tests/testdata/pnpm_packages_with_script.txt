@@ -1,0 +1,91 @@
+# pnpm.packages_with_script lists the packages that define a script, to drive
+# one pnpm.run slice per package; a change reruns only its package's slice.
+# The workspace root's own script tracks every package.
+[!exec:pnpm] skip
+
+bit
+stdout 'build\["alpha"\] ✔ ok'
+stdout 'build\["beta"\] ✔ ok'
+! stdout 'gamma'
+stdout 'names │ alpha beta$'
+stdout 'everything ▶ pnpm run build-all$'
+stdout 'everything ✔ ok'
+grep '\Aalpha\n\z' packages/alpha/out.txt
+grep '\Abeta\n\z' packages/beta/out.txt
+exists out/all.txt
+
+bit
+! stdout '✔ ok'
+
+cp alpha.changed.js packages/alpha/name.js
+bit
+stdout 'build\["alpha"\] ✔ ok'
+! stdout 'build\["beta"\] ✔'
+stdout 'everything ✔ ok'
+grep '\Aalpha 2\n\z' packages/alpha/out.txt
+
+cp gamma.changed.js packages/gamma/index.js
+bit
+! stdout 'build\[.* ✔'
+stdout 'everything ✔ ok'
+
+-- BUILD.bit --
+let pkg = pnpm.packages_with_script("build")
+let built = pnpm.packages_with_script("build")
+
+deps = pnpm.install {}
+
+build[pkg] = pnpm.run {
+  script     = "build"
+  package    = pkg
+  outputs    = "packages/#{pkg}/out.txt"
+  depends_on = [deps]
+}
+
+names = exec {
+  command = "echo #{shell_join(built)}"
+  inputs  = []
+}
+
+everything = pnpm.run {
+  script     = "build-all"
+  outputs    = "out"
+  depends_on = [deps, build]
+}
+-- pnpm-lock.yaml --
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  packages/alpha: {}
+
+  packages/beta: {}
+
+  packages/gamma: {}
+-- pnpm-workspace.yaml --
+packages:
+  - "packages/*"
+-- package.json --
+{ "name": "root", "private": true, "scripts": { "build-all": "mkdir -p out && echo all > out/all.txt" } }
+-- packages/alpha/package.json --
+{ "name": "alpha", "version": "1.0.0", "scripts": { "build": "node -p 'require(\"./name\")' > out.txt" } }
+-- packages/alpha/name.js --
+module.exports = "alpha";
+-- alpha.changed.js --
+module.exports = "alpha 2";
+-- packages/beta/package.json --
+{ "name": "beta", "version": "1.0.0", "scripts": { "build": "node -p 'require(\"./name\")' > out.txt" } }
+-- packages/beta/name.js --
+module.exports = "beta";
+-- packages/gamma/package.json --
+{ "name": "gamma", "version": "1.0.0", "scripts": { "lint": "true" } }
+-- packages/gamma/index.js --
+module.exports = "gamma";
+-- gamma.changed.js --
+module.exports = "gamma 2";

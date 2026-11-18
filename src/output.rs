@@ -1,5 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, IsTerminal, StdoutLock, Write};
 use std::sync::{Arc, Mutex};
@@ -270,6 +270,10 @@ struct OutputInner {
     live_rows: usize,
     /// Targets that printed a [`Message`] since they started.
     messaged: HashSet<String>,
+    /// Whether output is held back until a target fails; see [`Output::with_quiet`].
+    quiet: bool,
+    /// In quiet mode, the lines of each target that has not finished yet.
+    held: HashMap<String, Vec<String>>,
 }
 
 /// The byte length of the longest prefix of `text` whose display width is at
@@ -353,6 +357,8 @@ impl Output {
                 active: IndexMap::new(),
                 live_rows: 0,
                 messaged: HashSet::new(),
+                quiet: false,
+                held: HashMap::new(),
             })),
             debug: false,
             silent: false,
@@ -381,6 +387,19 @@ impl Output {
     pub fn with_long(self, long: bool) -> Self {
         if long {
             let mut inner = self.inner.lock().expect("output lock poisoned");
+            inner.live = false;
+            inner.term_width = 0;
+        }
+        self
+    }
+
+    /// Print only what a failure needs: each target's lines are held until it
+    /// finishes, then dropped if it succeeds, or printed with its failure as
+    /// `--long` would print them. Output from outside any target is dropped.
+    pub fn with_quiet(self, quiet: bool) -> Self {
+        if quiet {
+            let mut inner = self.inner.lock().expect("output lock poisoned");
+            inner.quiet = true;
             inner.live = false;
             inner.term_width = 0;
         }
@@ -434,6 +453,9 @@ impl Output {
         }
         let mut inner = self.inner.lock().unwrap();
         let lines = inner.fmt_stream_line(name, color, indent, content, stderr);
+        if inner.quiet {
+            return inner.hold(name, lines);
+        }
         let stdout = io::stdout();
         let mut out = stdout.lock();
         inner.push_stream_many(&mut out, name, lines);
@@ -448,6 +470,9 @@ impl Output {
             .iter()
             .flat_map(|line| inner.fmt_stream_line(name, color, indent, line, true))
             .collect::<Vec<_>>();
+        if inner.quiet {
+            return inner.hold(name, lines);
+        }
         let stdout = io::stdout();
         let mut out = stdout.lock();
         inner.print_detached(&mut out, &lines);
@@ -465,6 +490,9 @@ impl Output {
         };
         let stdout = io::stdout();
         let mut out = stdout.lock();
+        if inner.quiet {
+            return inner.hold_event(&mut out, name, event, raw, lines);
+        }
         // `event_raw` is used by providers for *intermediate* progress events
         // (e.g. per-suite `test_suite_passed`). These flow through the task's
         // live region so they scroll within the 5-line window and are gone
@@ -496,6 +524,9 @@ impl Output {
         }
         let mut inner = self.inner.lock().unwrap();
         let lines = inner.fmt_event(name, message.level.event(), indent, &message.text);
+        if inner.quiet {
+            return inner.hold(name, lines);
+        }
         inner.messaged.insert(name.to_owned());
         let stdout = io::stdout();
         let mut out = stdout.lock();
@@ -504,6 +535,31 @@ impl Output {
 }
 
 impl OutputInner {
+    /// Keep a target's lines until it finishes, in quiet mode.
+    fn hold(&mut self, name: &str, lines: Vec<String>) {
+        if !name.is_empty() {
+            self.held.entry(name.to_owned()).or_default().extend(lines);
+        }
+    }
+
+    /// Handle an event in quiet mode. A target's terminal event drops the
+    /// lines held for it when it succeeds and prints them when it fails, so
+    /// the failure keeps the output that explains it. Other events are held.
+    fn hold_event(&mut self, out: &mut impl Write, name: &str, event: Event, raw: bool, lines: Vec<String>) {
+        match (event, raw) {
+            (Event::Failed, false) => {
+                let held = self.held.remove(name).unwrap_or_default();
+                for line in held.iter().chain(&lines) {
+                    let _ = writeln!(out, "{line}");
+                }
+            }
+            (Event::Ok | Event::Skipped | Event::NoChange | Event::Protected, false) => {
+                self.held.remove(name);
+            }
+            _ => self.hold(name, lines),
+        }
+    }
+
     /// Return the lines to print for a target's terminal event and stop
     /// tracking its messages. A bare "ok" is dropped when the target printed
     /// messages, because they say more.
@@ -1243,6 +1299,8 @@ mod tests {
             active: IndexMap::new(),
             live_rows: 0,
             messaged: HashSet::new(),
+            quiet: false,
+            held: HashMap::new(),
         }
     }
 
@@ -1332,6 +1390,27 @@ mod tests {
         );
         assert!(!inner.messaged.contains("a"));
         inner.live = false;
+    }
+
+    #[test]
+    fn quiet_prints_held_lines_only_on_failure() {
+        let mut inner = inner_tty(4, 0);
+        inner.live = false;
+        inner.quiet = true;
+        let mut out = Vec::new();
+        for name in ["ok", "bad"] {
+            inner.hold_event(&mut out, name, Event::Starting, false, vec![format!("{name} ▶ run")]);
+            inner.hold(name, vec![format!("{name} │ output")]);
+        }
+        inner.hold("", vec!["engine debug".into()]);
+        inner.hold_event(&mut out, "ok", Event::Ok, false, vec!["ok ✔ ok".into()]);
+        assert!(out.is_empty());
+        inner.hold_event(&mut out, "bad", Event::Failed, false, vec!["bad ✘ failed".into()]);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "bad ▶ run\nbad │ output\nbad ✘ failed\n"
+        );
+        assert!(inner.held.is_empty());
     }
 
     #[test]

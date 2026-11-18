@@ -1,0 +1,23 @@
+# A rerun narrowed to the changed files prints only the command it runs.
+bit
+stdout 'gofmt -l a\.go b\.go'
+! stdout 'gofmt -l[^\n]*\n(?s:.*)gofmt -l'
+
+cp b.go.changed b.go
+bit
+stdout 'gofmt -l b\.go'
+! stdout 'gofmt -l a\.go'
+! stdout 'gofmt -l[^\n]*\n(?s:.*)gofmt -l'
+
+-- BUILD.bit --
+check = go.fmt-l {}
+-- go.mod --
+module example.com/m
+-- a.go --
+package m
+-- b.go --
+package m
+-- b.go.changed --
+package m
+
+const B = 1

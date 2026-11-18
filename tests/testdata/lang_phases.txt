@@ -1,0 +1,25 @@
+# Every pre target finishes before any default target starts, and every
+# default target before any post target, without declared dependencies.
+bit
+grep '\Asetup\n(main|other)\n(main|other)\nreport\n\z' order.log
+
+-- BUILD.bit --
+pre setup = exec {
+  command = "sleep 0.3; echo setup >> order.log"
+  inputs = []
+}
+
+post report = exec {
+  command = "echo report >> order.log"
+  inputs = []
+}
+
+main = exec {
+  command = "echo main >> order.log"
+  inputs = []
+}
+
+other = exec {
+  command = "sleep 0.3; echo other >> order.log"
+  inputs = []
+}

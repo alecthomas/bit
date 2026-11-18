@@ -1,0 +1,22 @@
+# --quiet still reports errors, with the output and messages of the target
+# that failed, but nothing from targets that succeeded.
+! bit -q
+stdout '^ *task ▶ echo out; echo ::error::bad; false$'
+stdout '^ *task │ out$'
+stdout '^ *task ✘ bad$'
+stdout '^ *task ✘ .*exit'
+! stdout 'fine'
+! stdout 'quiet_ok'
+stderr 'error:'
+
+! bit --quiet --schema missing
+! stdout .
+stderr 'unknown resource/function'
+
+-- BUILD.bit --
+quiet_ok = exec { command = "echo fine" }
+
+task = exec {
+  command = "echo out; echo ::error::bad; false"
+  after = [quiet_ok]
+}

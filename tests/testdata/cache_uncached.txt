@@ -1,0 +1,52 @@
+# The shared cache holds nothing for an `uncached` output, so a target whose
+# uncached output is missing or changed runs to produce it again, while a
+# missing cached output is still restored.
+bit
+grep '\Arun\n\z' gen.log
+grep '\Arun\n\z' both.log
+
+rm out.txt
+bit --plan gen
+stdout '^gen ~ .*''out\.txt'' \(removed\) changed\)$'
+bit gen
+stdout '^gen ▶ '
+grep '\Arun\nrun\n\z' gen.log
+exists out.txt
+bit gen
+stdout '^gen · no changes$'
+
+rm skipped.txt
+bit --plan both
+stdout '^both ~ '
+! stdout 'cached'
+bit both
+stdout '^both ▶ '
+grep '\Arun\nrun\n\z' both.log
+exists skipped.txt
+
+cp other.txt skipped.txt
+bit both
+stdout '^both ▶ '
+grep '\Arun\nrun\nrun\n\z' both.log
+grep '\Askipped\n\z' skipped.txt
+
+rm kept.txt
+bit both
+stdout '^both │ restore kept\.txt$'
+grep '\Arun\nrun\nrun\n\z' both.log
+exists kept.txt
+
+-- BUILD.bit --
+gen = exec {
+  command = "echo run >> gen.log; echo out > out.txt"
+  outputs = "out.txt"
+  uncached = ["out.txt"]
+}
+
+both = exec {
+  command = "echo run >> both.log; echo kept > kept.txt; echo skipped > skipped.txt"
+  outputs = ["kept.txt", "skipped.txt"]
+  uncached = ["skipped.txt"]
+}
+-- other.txt --
+edited
