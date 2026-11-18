@@ -36,3 +36,4 @@ dashmap = "6.2.1"
 minijinja = { version = "3.0.5", features = ["json", "serde"] }
 bit-s3 = { version = "0.1.0", path = "bit-s3" }
 pulldown-cmark = { version = "0.13.6", default-features = false }
+zip = { version = "9.7.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

@@ -15,6 +15,7 @@ use crate::sha256::{Hasher, SHA256};
 pub mod docker;
 pub mod exec;
 pub mod go;
+pub mod java;
 pub mod pnpm;
 pub mod protobuf;
 pub mod rust;
@@ -138,6 +139,25 @@ pub(crate) fn remove_path(path: &Path, writer: &TargetWriter) -> Result<(), BoxE
         fs::remove_file(path).map_err(|error| format!("failed to remove {}: {error}", path.display()))?;
     }
     Ok(())
+}
+
+/// Every file beneath `dir`, sorted. Symlinked directories are not
+/// followed, so a link cycle cannot recurse forever.
+pub(crate) fn files_under(dir: &Path) -> Result<Vec<PathBuf>, BoxError> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                pending.push(entry.path());
+            } else {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 /// Symlink hops `hash_file` follows before treating the chain as a cycle.

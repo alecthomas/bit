@@ -959,6 +959,29 @@ target = go.fmt-l {
 
 **`go.modules(dir: string?) -> [string]`** — List Go modules at or below a directory. Returns each `go.mod` directory relative to `bit`'s working directory, skipping `vendor`, `testdata`, and directories starting with `.` or `_`, as `./...` does.
 
+### java
+
+**`java.library`** (build) — Compile Java sources with javac into a jar. Every `.java` file beneath `sources` is compiled, and every file beneath `resources` is copied into the jar. The jar is reproducible: equal inputs give an identical file.
+
+```bit
+target = java.library {
+  sources = (string | [string])?    # Source directories, relative to `dir` (defaults to `src/main/java`)
+  resources = (string | [string])?  # Resource directories, relative to `dir` (defaults to `src/main/resources`)
+  classpath = [string]?             # Jars and class directories to compile against, relative to `dir`, such as another library's `classpath` output. Each is tracked as an input.
+  release = number?                 # Java release to compile for, passed as `--release`
+  flags = [string]?                 # Extra flags passed to javac
+  output = string?                  # Output jar path, relative to `dir` (defaults to `build/<name>.jar`, where `<name>` is the last element of `dir`)
+  inputs = [string]?                # Extra input file globs, relative to `dir` (in addition to sources, resources and the class path)
+}
+```
+
+**Outputs:**
+
+| Field       | Type       | Description                                                                                                                       |
+| ----------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `jar`       | `string`   | Absolute path to the built jar                                                                                                    |
+| `classpath` | `[string]` | Absolute paths of the jar followed by the class path it was compiled against: what code using this library compiles and runs with |
+
 ### pnpm
 
 **`pnpm.install`** (build) — Install the dependencies of the pnpm workspace in `dir`.

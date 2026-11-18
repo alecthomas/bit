@@ -10,6 +10,7 @@ use crate::provider::{
     Ambient, ApplyResult, BoxError, CachePolicy, Changes, DynResource, FuncSignature, PlanAction, PlanResult, Provider,
     Resource, ResourceKind, Target,
 };
+use crate::providers::files_under;
 use crate::sha256::SHA256;
 use crate::value::Value;
 
@@ -451,23 +452,6 @@ fn stage(inputs: &Target<ProtocGenerateInputs>, files: &[String], writer: &Targe
         _dir: staging,
         files: staged,
     })
-}
-
-fn files_under(dir: &Path) -> Result<Vec<PathBuf>, BoxError> {
-    let mut files = Vec::new();
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                pending.push(entry.path());
-            } else {
-                files.push(entry.path());
-            }
-        }
-    }
-    files.sort();
-    Ok(files)
 }
 
 /// Remove generated `files`, then the directories this empties below the

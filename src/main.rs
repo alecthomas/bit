@@ -14,6 +14,7 @@ use bit::provider::{FuncSignature, ProviderRegistry, ResourceSchema};
 use bit::providers::docker::DockerProvider;
 use bit::providers::exec::ExecProvider;
 use bit::providers::go::GoProvider;
+use bit::providers::java::JavaProvider;
 use bit::providers::pnpm::PnpmProvider;
 use bit::providers::protobuf::buf::BufProvider;
 use bit::providers::protobuf::protoc::ProtocProvider;
@@ -186,6 +187,7 @@ fn default_registry(tracker: &Arc<FileTracker>) -> ProviderRegistry {
     reg.register(Box::new(BufProvider::new(tracker.clone())));
     reg.register(Box::new(ProtocProvider::new(tracker.clone())));
     reg.register(Box::new(GoProvider::new(tracker.clone())));
+    reg.register(Box::new(JavaProvider::new(tracker.clone())));
     reg.register(Box::new(PnpmProvider::new(tracker.clone())));
     reg.register(Box::new(RustProvider::new(tracker.clone())));
     reg
