@@ -40,10 +40,7 @@ clippy = rust.clippy {
 # `cargo test` leaves out unless named.
 large integration-test = rust.test {
   flags = ["--test", "integration"]
-  # The pinned bit 0.61.1 can't read libtest-mimic's failure logs, so it
-  # streams everything. Return to "tests" once a release that reads them is
-  # pinned.
-  report = "verbose"
+  report = "tests"
 }
 
 # An S3-compatible server for testing the S3 client. rclone is MIT licensed

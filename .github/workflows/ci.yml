@@ -13,6 +13,9 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
         with:
           cache: true
+      # Install every package now. Hermit installs one on first use, and
+      # tests that start the same tool at once can fail mid-install.
+      - run: bin/hermit install
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit clippy fmt-check s3-cache-test s3-test"
   integration-test:
@@ -23,6 +26,9 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
         with:
           cache: true
+      # Install every package now. Hermit installs one on first use, and
+      # tests that start the same tool at once can fail mid-install.
+      - run: bin/hermit install
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit integration-test"
   release:
@@ -33,6 +39,9 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
         with:
           cache: true
+      # Install every package now. Hermit installs one on first use, and
+      # tests that start the same tool at once can fail mid-install.
+      - run: bin/hermit install
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit release"
   test:
@@ -43,6 +52,9 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
         with:
           cache: true
+      # Install every package now. Hermit installs one on first use, and
+      # tests that start the same tool at once can fail mid-install.
+      - run: bin/hermit install
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit test"
   # The one check for rulesets to require. It runs even when a job fails,
