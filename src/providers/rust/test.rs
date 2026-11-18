@@ -1,7 +1,6 @@
 use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -212,14 +211,11 @@ fn running_suite_name(rest: &str) -> String {
 ///
 /// Consumes lines lazily from `lines`, so callers that feed it from a live
 /// pipe (see `apply`) will see events emitted as each suite finishes — not
-/// all at once at the end. The boolean marks stderr. Lines it doesn't
-/// recognise, from either stream, are retained as diagnostics until Cargo's
-/// exit status is known; in verbose mode they stream instead.
-fn process_test_output(
-    lines: impl IntoIterator<Item = (String, bool)>,
-    writer: &TargetWriter,
-    mode: ReportMode,
-) -> TestResult {
+/// all at once at the end. `lines` holds cargo's stdout and stderr in the
+/// order they were written. Lines it doesn't recognise are retained as
+/// diagnostics until Cargo's exit status is known; in verbose mode they
+/// stream instead.
+fn process_test_output(lines: impl IntoIterator<Item = String>, writer: &TargetWriter, mode: ReportMode) -> TestResult {
     let verbose = mode == ReportMode::Verbose;
     let per_test = mode.per_test();
     let mut all_passed = true;
@@ -230,15 +226,7 @@ fn process_test_output(
     // every test in the suite, so their per-test lines wait for it.
     let mut failed_tests: Vec<String> = Vec::new();
     let mut in_failures_section = false;
-    let log = |line: &str, stderr: bool| {
-        if stderr {
-            writer.stderr_line(line);
-        } else {
-            writer.line(line);
-        }
-    };
-
-    for (line, stderr) in lines {
+    for line in lines {
         // Detect the "failures:" section that cargo test prints with full output.
         if line.trim() == "failures:" {
             in_failures_section = true;
@@ -268,12 +256,12 @@ fn process_test_output(
             || trimmed.starts_with("Downloaded ")
         {
             if verbose {
-                log(&line, stderr);
+                writer.line(&line);
             }
             continue;
         }
 
-        // Track which test binary is running (these come from stderr).
+        // Track which test binary is running.
         if let Some(rest) = trimmed.strip_prefix("Running ") {
             current_suite = running_suite_name(rest);
             continue;
@@ -325,10 +313,10 @@ fn process_test_output(
                 failure_lines.clear();
             }
             TestEvent::SuiteStart => {}
-            TestEvent::Other if verbose => log(&line, stderr),
-            // Kept from stdout too: a test's own writes to the stdout handle,
-            // and its child processes, bypass libtest's capture, so they are
-            // in no failure section, yet they can be what explains it.
+            TestEvent::Other if verbose => writer.line(&line),
+            // Cargo's diagnostics, and what a test writes to the stdout handle
+            // itself or through child processes, which bypasses libtest's
+            // capture and so is in no failure section, can explain a failure.
             TestEvent::Other => {
                 if !line.trim().is_empty() {
                     diagnostics.push(line);
@@ -427,45 +415,26 @@ impl Resource for RustTestResource {
         writer: &TargetWriter,
     ) -> Result<ApplyResult<RustTestState, RustTestOutputs>, BoxError> {
         let cargo = test_command(inputs);
-        let mut child = cargo
-            .command()
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .logged_spawn()
-            .map_err(|e| format!("failed to execute `{}`: {e}", cargo.display()))?;
+        // Cargo writes each suite's header ("Running …", "Doc-tests …") to
+        // stderr, and the test binary its results to stdout. Read from two
+        // pipes, a header can arrive before the previous suite's results and
+        // name them wrongly, so both streams share one pipe, which keeps the
+        // order they were written in.
+        let (output, output_writer) =
+            std::io::pipe().map_err(|e| format!("failed to create a pipe for `{}`: {e}", cargo.display()))?;
+        let mut child = {
+            let mut cmd = cargo.command();
+            cmd.stdout(output_writer.try_clone()?).stderr(output_writer);
+            // Dropped once spawned, as the child's are then the only write
+            // ends: reading ends when cargo exits.
+            cmd.logged_spawn()
+                .map_err(|e| format!("failed to execute `{}`: {e}", cargo.display()))?
+        };
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        // Stream lines from both pipes through a channel so the parser can
-        // emit `test_suite_passed` / etc. events as each suite finishes,
+        // Read as cargo writes, so a suite's line shows as it finishes,
         // giving the live region something to show during a long test run.
-        // Stderr carries suite headers ("Running ...", "Doc-tests ...") and
-        // compiler diagnostics; stdout carries results. Both are interleaved
-        // by arrival time, so each line retains its source.
-        let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
-        let result = std::thread::scope(|s| {
-            if let Some(out) = stdout {
-                let tx = tx.clone();
-                s.spawn(move || {
-                    for line in BufReader::new(out).lines().map_while(Result::ok) {
-                        let _ = tx.send((line, false));
-                    }
-                });
-            }
-            if let Some(err) = stderr {
-                let tx = tx.clone();
-                s.spawn(move || {
-                    for line in BufReader::new(err).lines().map_while(Result::ok) {
-                        let _ = tx.send((line, true));
-                    }
-                });
-            }
-            // Drop the original sender so `rx` closes once both pipe threads
-            // have finished and dropped their clones.
-            drop(tx);
-            process_test_output(rx, writer, inputs.report)
-        });
+        let lines = BufReader::new(output).lines().map_while(Result::ok);
+        let result = process_test_output(lines, writer, inputs.report);
 
         let status = child
             .wait()
@@ -665,11 +634,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(
-            output.lines().map(|line| (line.into(), false)),
-            &writer,
-            ReportMode::Suites,
-        );
+        let result = process_test_output(output.lines().map(String::from), &writer, ReportMode::Suites);
         assert!(result.passed);
         assert!(result.diagnostics.is_empty());
     }
@@ -684,11 +649,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(
-            output.lines().map(|line| (line.into(), false)),
-            &writer,
-            ReportMode::Suites,
-        );
+        let result = process_test_output(output.lines().map(String::from), &writer, ReportMode::Suites);
         assert!(!result.passed);
         assert!(result.diagnostics.is_empty());
     }
@@ -717,11 +678,7 @@ mod tests {
         );
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(
-            output.lines().map(|line| (line.into(), false)),
-            &writer,
-            ReportMode::Suites,
-        );
+        let result = process_test_output(output.lines().map(String::from), &writer, ReportMode::Suites);
         assert!(!result.passed);
         assert!(result.diagnostics.is_empty());
     }
@@ -782,7 +739,7 @@ mod tests {
     fn process_output_no_events() {
         let out = Output::new(&[]);
         let writer = out.writer("test");
-        let result = process_test_output(std::iter::empty::<(String, bool)>(), &writer, ReportMode::Suites);
+        let result = process_test_output(std::iter::empty::<String>(), &writer, ReportMode::Suites);
         assert!(result.passed);
         assert!(result.diagnostics.is_empty());
     }
@@ -790,19 +747,14 @@ mod tests {
     #[test]
     fn process_output_retains_compiler_diagnostics_after_passing_suite() {
         let lines = [
-            ("Running unittests src/lib.rs (target/debug/deps/example)".into(), true),
-            (
-                "test result: ok. 1 passed; 0 failed; 0 ignored; finished in 0.1s".into(),
-                false,
-            ),
-            ("   Compiling broken-crate v0.1.0".into(), true),
-            ("error[E0283]: type annotations needed".into(), true),
-            (" --> src/lib.rs:318:13".into(), true),
-            (
-                "error: could not compile `broken-crate` due to 1 previous error".into(),
-                true,
-            ),
-        ];
+            "Running unittests src/lib.rs (target/debug/deps/example)",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; finished in 0.1s",
+            "   Compiling broken-crate v0.1.0",
+            "error[E0283]: type annotations needed",
+            " --> src/lib.rs:318:13",
+            "error: could not compile `broken-crate` due to 1 previous error",
+        ]
+        .map(String::from);
         let out = Output::silent();
         let writer = out.writer("test");
         let result = process_test_output(lines.clone(), &writer, ReportMode::Suites);
@@ -825,18 +777,13 @@ mod tests {
     #[test]
     fn process_output_retains_uncaptured_stdout() {
         let lines = [
-            ("running 1 test".into(), false),
-            (
-                "lib │ Broken.java:1: error: reached end of file while parsing".into(),
-                false,
-            ),
-            ("".into(), false),
-            ("test compiles ... FAILED".into(), false),
-            (
-                "test result: FAILED. 0 passed; 1 failed; 0 ignored; finished in 0.1s".into(),
-                false,
-            ),
-        ];
+            "running 1 test",
+            "lib │ Broken.java:1: error: reached end of file while parsing",
+            "",
+            "test compiles ... FAILED",
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; finished in 0.1s",
+        ]
+        .map(String::from);
         let out = Output::silent();
         let writer = out.writer("test");
         let result = process_test_output(lines, &writer, ReportMode::Suites);
