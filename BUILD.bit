@@ -25,6 +25,10 @@ large image = docker.image {
 large test = rust.test {
   all_features = true
   flags = ["--workspace"]
+  # The pinned bit 0.61.1 drops output tests write past libtest's capture
+  # unless it streams everything. Return to the default once a release
+  # that keeps it is pinned.
+  report = "verbose"
 }
 
 # Lint every crate in the workspace with clippy, treating warnings as errors.
@@ -36,7 +40,10 @@ clippy = rust.clippy {
 # `cargo test` leaves out unless named.
 large integration-test = rust.test {
   flags = ["--test", "integration"]
-  report = "tests"
+  # The pinned bit 0.61.1 can't read libtest-mimic's failure logs, so it
+  # streams everything. Return to "tests" once a release that reads them is
+  # pinned.
+  report = "verbose"
 }
 
 # An S3-compatible server for testing the S3 client. rclone is MIT licensed

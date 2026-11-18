@@ -28,8 +28,8 @@ pub struct RustTestInputs {
     pub flags: Vec<String>,
     /// What to show: a line per test binary (`suites`), a line per test
     /// (`tests`), or a line per test plus cargo's output as it arrives
-    /// (`verbose`). Outside `verbose`, cargo's diagnostics are shown only on
-    /// failure.
+    /// (`verbose`). Outside `verbose`, cargo's diagnostics, and output tests
+    /// write past libtest's capture, are shown only on failure.
     #[serde(default)]
     pub report: ReportMode,
     #[serde(flatten)]
@@ -212,9 +212,9 @@ fn running_suite_name(rest: &str) -> String {
 ///
 /// Consumes lines lazily from `lines`, so callers that feed it from a live
 /// pipe (see `apply`) will see events emitted as each suite finishes — not
-/// all at once at the end. The boolean marks stderr so Cargo diagnostics can
-/// be retained until its exit status is known; in verbose mode they stream
-/// instead.
+/// all at once at the end. The boolean marks stderr. Lines it doesn't
+/// recognise, from either stream, are retained as diagnostics until Cargo's
+/// exit status is known; in verbose mode they stream instead.
 fn process_test_output(
     lines: impl IntoIterator<Item = (String, bool)>,
     writer: &TargetWriter,
@@ -326,8 +326,11 @@ fn process_test_output(
             }
             TestEvent::SuiteStart => {}
             TestEvent::Other if verbose => log(&line, stderr),
+            // Kept from stdout too: a test's own writes to the stdout handle,
+            // and its child processes, bypass libtest's capture, so they are
+            // in no failure section, yet they can be what explains it.
             TestEvent::Other => {
-                if stderr {
+                if !line.trim().is_empty() {
                     diagnostics.push(line);
                 }
             }
@@ -815,5 +818,32 @@ mod tests {
         // Verbose mode streams the same diagnostics instead of retaining them.
         let result = process_test_output(lines, &writer, ReportMode::Verbose);
         assert!(result.diagnostics.is_empty());
+    }
+
+    /// What a test writes to the stdout handle itself, rather than through
+    /// `print!`, escapes libtest's capture, as does a child process's output.
+    #[test]
+    fn process_output_retains_uncaptured_stdout() {
+        let lines = [
+            ("running 1 test".into(), false),
+            (
+                "lib │ Broken.java:1: error: reached end of file while parsing".into(),
+                false,
+            ),
+            ("".into(), false),
+            ("test compiles ... FAILED".into(), false),
+            (
+                "test result: FAILED. 0 passed; 1 failed; 0 ignored; finished in 0.1s".into(),
+                false,
+            ),
+        ];
+        let out = Output::silent();
+        let writer = out.writer("test");
+        let result = process_test_output(lines, &writer, ReportMode::Suites);
+        assert!(!result.passed);
+        assert_eq!(
+            result.diagnostics,
+            ["lib │ Broken.java:1: error: reached end of file while parsing"]
+        );
     }
 }
