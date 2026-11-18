@@ -7,8 +7,26 @@ on:
     branches: [{{ default_branch | tojson }}]
 {% endif %}
   pull_request:
+  # Fills the day's build cache on the default branch, so the first branch
+  # builds each day do not start empty. Off the hour, when GitHub delays
+  # scheduled runs most.
+  schedule:
+    - cron: "17 0 * * *"
+env:
+  # bit's build cache, kache's compiler cache, and Cargo's registry, which
+  # Hermit keeps under CARGO_HOME in the checkout.
+  BUILD_CACHE_PATHS: |
+    ~/.cache/bit
+    ~/.cache/kache
+    .hermit/rust/registry
+# Only the default branch saves the build cache, so every branch restores its
+# latest entry and branches never evict it with entries nothing else reads.
+# Keys include the UTC date and never fall back to an earlier day, so the
+# cache starts empty each day instead of accumulating old builds.
 jobs:
 {% for job in jobs %}
+{# The integration tests compile the same crates as the unit tests. #}
+{% set cache = "test" if job.id == "integration-test" else job.id %}
   {{ job.id }}:
     name: {{ job.name | tojson }}
     runs-on: ubuntu-latest
@@ -17,8 +35,30 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
         with:
           cache: true
+      - id: cache-day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+{% if cache != job.id %}
+      # Reads the {{ cache }} job's cache, which holds most of the crates this
+      # job compiles. Only the {{ cache }} job saves it.
+{% endif %}
+      - uses: actions/cache/restore@v6
+        with:
+          path: {% raw %}${{ env.BUILD_CACHE_PATHS }}{% endraw %}
+
+          key: build-{{ cache }}-{% raw %}${{ steps.cache-day.outputs.day }}-${{ github.sha }}{% endraw %}
+
+          restore-keys: build-{{ cache }}-{% raw %}${{ steps.cache-day.outputs.day }}{% endraw %}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: {{ ("bin/" ~ job.command) | tojson }}
+{% if default_branch and cache == job.id %}
+      - if: github.ref == 'refs/heads/{{ default_branch }}'
+        uses: actions/cache/save@v6
+        with:
+          path: {% raw %}${{ env.BUILD_CACHE_PATHS }}{% endraw %}
+
+          key: build-{{ cache }}-{% raw %}${{ steps.cache-day.outputs.day }}-${{ github.sha }}{% endraw %}
+
+{% endif %}
 {% endfor %}
   # The one check for rulesets to require. It runs even when a job fails,
   # because GitHub counts a skipped required check as passing.

@@ -4,6 +4,22 @@ on:
   push:
     branches: ["master"]
   pull_request:
+  # Fills the day's build cache on the default branch, so the first branch
+  # builds each day do not start empty. Off the hour, when GitHub delays
+  # scheduled runs most.
+  schedule:
+    - cron: "17 0 * * *"
+env:
+  # bit's build cache, kache's compiler cache, and Cargo's registry, which
+  # Hermit keeps under CARGO_HOME in the checkout.
+  BUILD_CACHE_PATHS: |
+    ~/.cache/bit
+    ~/.cache/kache
+    .hermit/rust/registry
+# Only the default branch saves the build cache, so every branch restores its
+# latest entry and branches never evict it with entries nothing else reads.
+# Keys include the UTC date and never fall back to an earlier day, so the
+# cache starts empty each day instead of accumulating old builds.
 jobs:
   default:
     name: "default"
@@ -13,8 +29,20 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
         with:
           cache: true
+      - id: cache-day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ${{ env.BUILD_CACHE_PATHS }}
+          key: build-default-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          restore-keys: build-default-${{ steps.cache-day.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit clippy fmt-check s3-cache-test s3-test"
+      - if: github.ref == 'refs/heads/master'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
+        with:
+          path: ${{ env.BUILD_CACHE_PATHS }}
+          key: build-default-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
   integration-test:
     name: "integration-test"
     runs-on: ubuntu-latest
@@ -23,6 +51,15 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
         with:
           cache: true
+      - id: cache-day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      # Reads the test job's cache, which holds most of the crates this
+      # job compiles. Only the test job saves it.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ${{ env.BUILD_CACHE_PATHS }}
+          key: build-test-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          restore-keys: build-test-${{ steps.cache-day.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit integration-test"
   release:
@@ -33,8 +70,20 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
         with:
           cache: true
+      - id: cache-day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ${{ env.BUILD_CACHE_PATHS }}
+          key: build-release-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          restore-keys: build-release-${{ steps.cache-day.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit release"
+      - if: github.ref == 'refs/heads/master'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
+        with:
+          path: ${{ env.BUILD_CACHE_PATHS }}
+          key: build-release-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
   test:
     name: "test"
     runs-on: ubuntu-latest
@@ -43,8 +92,20 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
         with:
           cache: true
+      - id: cache-day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ${{ env.BUILD_CACHE_PATHS }}
+          key: build-test-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          restore-keys: build-test-${{ steps.cache-day.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit test"
+      - if: github.ref == 'refs/heads/master'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
+        with:
+          path: ${{ env.BUILD_CACHE_PATHS }}
+          key: build-test-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
   # The one check for rulesets to require. It runs even when a job fails,
   # because GitHub counts a skipped required check as passing.
   ci:
