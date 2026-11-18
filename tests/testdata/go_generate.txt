@@ -1,0 +1,63 @@
+# go.generate runs //go:generate directives and tracks `outputs`: a binary
+# built from the generated file rebuilds when the directive changes, a
+# removed output is generated again, and --clean removes it.
+[!exec:go] skip
+
+bit
+stdout 'gen ▶ go generate \./gen'
+grep 'const Answer = 42' gen/answer.go
+exec ./app
+stdout '\A42\n\z'
+
+bit
+stdout 'gen · no changes'
+stdout 'app · no changes'
+
+cp gen.go.changed gen/gen.go
+bit
+stdout 'gen ▶ go generate \./gen \(''gen/gen\.go'' changed\)'
+stdout 'app ▶ go build'
+exec ./app
+stdout '\A7\n\z'
+
+rm gen/answer.go
+bit
+stdout 'gen ▶ go generate \./gen \(''gen/answer\.go'' \(removed\) changed\)'
+grep 'const Answer = 7' gen/answer.go
+
+bit --clean
+! exists gen/answer.go
+exists gen/gen.go
+
+-- BUILD.bit --
+gen = go.generate {
+  package = "./gen"
+  outputs = ["gen/answer.go"]
+}
+
+app = go.exe {
+  package    = "./cmd/app"
+  depends_on = [gen]
+}
+-- go.mod --
+module example.com/m
+
+go 1.22
+-- gen/gen.go --
+package gen
+
+//go:generate sh -c "printf 'package gen\\n\\nconst Answer = 42\\n' > answer.go"
+-- gen.go.changed --
+package gen
+
+//go:generate sh -c "printf 'package gen\\n\\nconst Answer = 7\\n' > answer.go"
+-- cmd/app/main.go --
+package main
+
+import (
+	"fmt"
+
+	"example.com/m/gen"
+)
+
+func main() { fmt.Println(gen.Answer) }

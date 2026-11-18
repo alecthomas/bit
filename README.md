@@ -146,7 +146,7 @@ bit --fmt path/to/file.bit  # format a specified .bit file in place
 bit --cache s3://bucket/prefix  # also use a remote build cache (or set BIT_CACHE)
 bit --cache disk:// --clean  # delete every cached receipt and artifact
 bit --long       # disable live scrolling regions and stream every output line
-bit --quiet      # suppress output unless an error occurs (also -q)
+bit --quiet      # show only errors and failing targets' output (also -q)
 NO_COLOR=1 bit   # disable colour (output is plain and --long when not a terminal or TERM=dumb)
 bit --since origin/master  # apply targets affected since the branch point
 bit --since      # same, using the remote default branch (origin/HEAD)
@@ -521,7 +521,7 @@ production = app {
 # Inner targets are private: staging.server, staging.image are not accessible
 ```
 
-A `<provider>.bit` file at the root of the import directory is the **default** resource — callable bare (just `app { ... }`). All other `<name>.bit` files are addressable as `<provider>.<name>` (e.g. `app.staging`). Two instances of the same module produce independent subgraphs. Modules nest arbitrarily.
+A `.bit` file named after the import directory (here `app.bit`) is the **default** resource — callable bare (just `app { ... }`), or by the alias when the import is renamed with `as`. All other `<name>.bit` files are addressable as `<provider>.<name>` (e.g. `app.staging`). Two instances of the same module produce independent subgraphs. Modules nest arbitrarily.
 
 #### Imports
 
@@ -634,7 +634,7 @@ variable is an error. `tojson` quotes a value for YAML or JSON.
 
 ### buf
 
-**`buf.generate`** (build) — Generate code from Protobuf files with buf generate. The sources, outputs, and plugins are discovered from the buf workspace and generation template. A remote plugin without a version, such as `buf.build/protocolbuffers/go`, does not rerun on a new release, so pin it, as in `buf.build/protocolbuffers/go:v1.36.6`.
+**`buf.generate`** (build) — Generate code from Protobuf files with buf generate. The sources, outputs, and plugins are discovered from the buf workspace and generation template, and output directories the template no longer names are removed on the next run. A remote plugin without a version, such as `buf.build/protocolbuffers/go`, does not rerun on a new release, so pin it, as in `buf.build/protocolbuffers/go:v1.36.6`.
 
 ```bit
 target = buf.generate {
@@ -707,7 +707,7 @@ target = buf.breaking {
 
 ### docker
 
-**`docker.image`** (build) — Build a Docker image (auto-detects inputs from Dockerfile). Changes to a base image tag, a file `ADD` downloads, or a `# syntax=` frontend are not detected, so pin them by digest.
+**`docker.image`** (build) — Build a Docker image (auto-detects inputs from Dockerfile). Changes to a base image tag, a file `ADD` downloads, or a `# syntax=` frontend are not detected, so pin them by digest. A rebuild removes the tags it created for the previous image once no container uses them, and `--clean` removes every tag it created, leaving other tags of the same image alone.
 
 ```bit
 target = docker.image {
@@ -727,7 +727,7 @@ target = docker.image {
 | `ref`      | `string` | Locally pinned tag or registry digest reference                      |
 | `image_id` | `string` | Docker image ID or multi-platform manifest digest, without `sha256:` |
 
-**`docker.push`** (build) — Push a Docker image to a registry. Pushes again only when the image changes, not when the registry copy was deleted or overwritten.
+**`docker.push`** (build) — Push a Docker image to a registry. Pushes again only when the image changes, not when the registry copy was deleted or overwritten. Pushing a new image removes the local digest reference of the one pushed before.
 
 ```bit
 target = docker.push {
@@ -855,7 +855,7 @@ target = exec.test {
 ```bit
 target = go.exe {
   package = string    # Go package to build (e.g. "./cmd/myapp")
-  output = string?    # Output binary path, relative to `dir` (defaults to the name `go build` gives it: the last element of the package's import path)
+  output = string?    # Output binary path, relative to `dir` (defaults to the name `go build` gives it: the last element of the package's import path, with `.exe` when GOOS, from `goos`, `env` or bit's environment, is `windows`)
   flags = [string]?   # Extra flags passed to go build, except `-o`, which `output` sets. The files `-modfile`, `-overlay` and `-pgo` name are tracked as inputs. go runs in the directory `-C` names.
   inputs = [string]?  # Input file glob patterns, relative to `dir` (in addition to Go sources)
   goos = string?      # Target OS
@@ -875,7 +875,7 @@ target = go.exe {
 ```bit
 target = go.build {
   package = string | [string]  # Go package pattern or list of patterns (e.g. "./...")
-  flags = [string]?            # Extra flags passed to go build. The files `-o` writes are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. go runs in the directory `-C` names.
+  flags = [string]?            # Extra flags passed to go build. The files `-o` writes are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. `bit --clean` removes the files `-o` wrote; from a directory, only the executables `go build` wrote there. go runs in the directory `-C` names.
   inputs = [string]?           # Input file glob patterns, relative to `dir` (in addition to Go sources)
   goos = string?               # Target OS
   goarch = string?             # Target architecture
@@ -990,7 +990,7 @@ target = java.library {
 ```bit
 target = java.binary {
   classpath = [string]  # Jars the application runs with, relative to `dir`, such as a library's `classpath` output
-  main = string?        # Main class (defaults to the only class in the first `classpath` jar with a `main` method; one declared `public static void main(String[])` is preferred over JDK 25's instance and parameterless forms)
+  main = string?        # Main class, as a binary name such as `com.example.Main` or `Outer$Inner`, which a `classpath` jar must hold (defaults to the only class in the first `classpath` jar with a `main` method; one declared `public static void main(String[])` is preferred over JDK 25's instance and parameterless forms)
   output = string?      # Output directory, relative to `dir` (defaults to `build/<name>`, where `<name>` is the last element of `dir`). The jar takes the directory's name.
 }
 ```
@@ -1065,7 +1065,7 @@ target = pnpm.install {
 target = pnpm.run {
   script = string                 # Script name from `package.json` (e.g. "build")
   package = string?               # Package name from its `package.json`. Omit to run the script of the project in `dir`; at the workspace root, the script may touch any package, so every project's sources are tracked.
-  args = [string]?                # Additional arguments passed to the script after `--`
+  args = [string]?                # Additional arguments passed to the script, exactly as given
   outputs = (string | [string])?  # Output file or list of output files/directories produced by the script, relative to `dir`
   inputs = [string]?              # Extra input file globs, relative to `dir` (added to the files at the workspace root, and the sources of the package and of its `workspace:`, `link:` and `file:` dependencies)
 }
@@ -1084,7 +1084,7 @@ target = pnpm.run {
 target = pnpm.test {
   script = string?    # Script name from `package.json` (defaults to "test")
   package = string?   # Package name from its `package.json`. Omit to run the script of the project in `dir`; at the workspace root, the script may touch any package, so every project's sources are tracked.
-  args = [string]?    # Additional arguments passed to the script after `--`
+  args = [string]?    # Additional arguments passed to the script, exactly as given
   inputs = [string]?  # Extra input file globs, relative to `dir` (added to the files at the workspace root, and the sources of the package and of its `workspace:`, `link:` and `file:` dependencies)
 }
 ```
@@ -1138,7 +1138,7 @@ target = rust.build {
 
 ```bit
 target = rust.exe {
-  bin = string?         # Binary target name (inferred if omitted)
+  bin = string?         # Binary target name. If omitted, the one `cargo run` would build: the package's only binary, or its `default-run`. With several binaries and no `default-run`, the target fails.
   package = string?     # Package containing the binary (-p flag)
   flags = [string]?     # Extra flags passed to cargo build
   features = [string]?  # Features to enable
@@ -1294,9 +1294,9 @@ build = exec {
 ```
 
 The target still caches `dist/`. Excluding an output does not change when the
-target is considered up to date, only what is stored, so a worktree that reuses
-this result gets `dist/` and no `node_modules/`. Exclude an output when it is
-large and reproducible by other means, not when later targets need it.
+target is considered up to date, only what is stored, so the cache cannot
+restore `node_modules/`: a worktree without it runs the target instead. Exclude
+an output when it is large and usually present already.
 
 Checkouts share an entry when the action is the same in each, including the
 paths of its files relative to the repository root. Restored files are independent copies, so

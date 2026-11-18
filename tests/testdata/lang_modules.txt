@@ -1,0 +1,92 @@
+# A local module is a provider: each instance binds its params, expands
+# to its own targets, and forwards its outputs.
+bit
+stdout 'alice\.message ✔'
+stdout 'bob\.message ✔'
+stdout 'carol\.shout ✔'
+grep '\Ahello alice!hello bob\?CAROL\z' combined.txt
+
+bit
+stdout 'combined · no changes'
+
+# The command line can name an inner target, and -ll shows the nesting.
+bit -ll
+stdout '^  alice \(module\.module\)'
+stdout '^    alice\.message \(exec\.exec\)'
+bit alice.message
+stdout 'alice\.message · no changes'
+
+# Expressions can't reach an inner target.
+cp BUILD.bit.inner BUILD.bit
+! bit
+stderr 'undefined field: alice\.message\.path'
+
+# A required module param must be set.
+cp BUILD.bit.missing BUILD.bit
+! bit
+stderr 'greeter\.bit:1:1: missing required param: name'
+
+# Renamed with `as`, the alias calls the default resource bare.
+cp BUILD.bit.alias BUILD.bit
+bit
+stdout 'dave\.message ✔'
+stdout 'erin\.shout ✔'
+grep '\Ahello dave!\z' greet-dave.txt
+
+# --schema lists the default resource by the alias it's called by.
+bit --schema --json
+cp stdout schema.json
+exec jq -e '.g.resources | map(.name) | sort == ["g", "g.loud"]' schema.json
+
+-- mods/greeter/greeter.bit --
+param name : string
+param punct = "!"
+
+message = exec {
+  command = "printf 'hello %s%s' #{name} '#{punct}' > greet-#{name}.txt"
+  outputs = "greet-#{name}.txt"
+}
+
+output file = message.path
+-- mods/greeter/loud.bit --
+param name : string
+
+shout = exec {
+  command = "printf '%s' #{name} | tr a-z A-Z > loud-#{name}.txt"
+  outputs = "loud-#{name}.txt"
+}
+
+output file = shout.path
+-- BUILD.bit --
+import "./mods/greeter"
+
+alice = greeter { name = "alice" }
+
+bob = greeter {
+  name = "bob"
+  punct = "?"
+}
+
+carol = greeter.loud { name = "carol" }
+
+combined = exec {
+  command = "cat #{alice.file} #{bob.file} #{carol.file} > combined.txt"
+  outputs = "combined.txt"
+}
+-- BUILD.bit.inner --
+import "./mods/greeter"
+
+alice = greeter { name = "alice" }
+
+leak = exec {
+  command = "cat #{alice.message.path}"
+}
+-- BUILD.bit.alias --
+import "./mods/greeter" as g
+
+dave = g { name = "dave" }
+erin = g.loud { name = "erin" }
+-- BUILD.bit.missing --
+import "./mods/greeter"
+
+nobody = greeter { punct = "." }

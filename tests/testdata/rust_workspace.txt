@@ -1,0 +1,114 @@
+# rust.build and rust.exe in a workspace: `package` selects a member, whose
+# inputs are its own files and those of its local dependencies, and rust.exe
+# infers a package's only binary.
+[!exec:cargo] skip
+
+bit
+stdout 'all ▶ cargo build$'
+stdout 'lib ▶ cargo build -p lib$'
+stdout 'app ▶ cargo build -p app --message-format json$'
+stdout 'tool ▶ cargo build -p other --message-format json$'
+exec target/debug/app
+stdout '\Aapp uses lib 1\n\z'
+exec target/debug/tool
+stdout '\Atool\n\z'
+
+bit
+! stdout '✔ ok'
+
+# A file outside every package is no input.
+cp notes.txt.changed notes.txt
+bit
+! stdout '✔ ok'
+
+# A change in one member leaves the others alone. The runner's cp keeps the
+# file's older mtime on macOS, which cargo reads as unchanged, so the system
+# cp writes the changes.
+exec cp tool.rs.changed other/src/main.rs
+bit
+stdout 'tool ▶ .*other/src/main\.rs'
+stdout 'all ✔ ok'
+stdout 'lib · no changes'
+stdout 'app · no changes'
+exec target/debug/tool
+stdout '\Atool 2\n\z'
+
+# A change in a dependency rebuilds what uses it.
+exec cp lib.rs.changed lib/src/lib.rs
+bit
+stdout 'lib ✔ ok'
+stdout 'app ▶ .*lib/src/lib\.rs'
+stdout 'all ✔ ok'
+stdout 'tool · no changes'
+exec target/debug/app
+stdout '\Aapp uses lib 2\n\z'
+
+# An unknown package is an error.
+cp BUILD.bit.missing BUILD.bit
+! bit
+stderr 'Rust package ''missing'' not found in workspace'
+
+-- BUILD.bit --
+all = rust.build {}
+
+lib = rust.build {
+  package = "lib"
+}
+
+app = rust.exe {
+  package = "app"
+}
+
+tool = rust.exe {
+  package = "other"
+}
+-- BUILD.bit.missing --
+missing = rust.build {
+  package = "missing"
+}
+-- notes.txt --
+notes
+-- notes.txt.changed --
+more notes
+-- Cargo.toml --
+[workspace]
+members = ["app", "lib", "other"]
+resolver = "2"
+-- app/Cargo.toml --
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lib = { path = "../lib" }
+-- app/src/main.rs --
+fn main() {
+    println!("app uses lib {}", lib::VERSION);
+}
+-- lib/Cargo.toml --
+[package]
+name = "lib"
+version = "0.1.0"
+edition = "2021"
+-- lib/src/lib.rs --
+pub const VERSION: u32 = 1;
+-- lib.rs.changed --
+pub const VERSION: u32 = 2;
+-- other/Cargo.toml --
+[package]
+name = "other"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tool"
+path = "src/main.rs"
+-- other/src/main.rs --
+fn main() {
+    println!("tool");
+}
+-- tool.rs.changed --
+fn main() {
+    println!("tool 2");
+}

@@ -21,7 +21,9 @@ use super::{CargoCommand, RustEnv, RustFeatures};
 /// Build a Rust binary
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct RustExeInputs {
-    /// Binary target name (inferred if omitted)
+    /// Binary target name. If omitted, the one `cargo run` would build: the
+    /// package's only binary, or its `default-run`. With several binaries
+    /// and no `default-run`, the target fails.
     #[serde(default)]
     pub bin: Option<String>,
     /// Package containing the binary (-p flag)
@@ -94,10 +96,10 @@ fn state_for(inputs: &Target<RustExeInputs>, path: String, target_rel: String, t
     }
 }
 
-fn exe_command(inputs: &Target<RustExeInputs>) -> CargoCommand {
+fn exe_command(inputs: &Target<RustExeInputs>, bin: Option<&str>) -> CargoCommand {
     let mut cargo = inputs.rust_env.cargo("build", inputs.dir.as_deref());
     cargo.envs(&inputs.env);
-    if let Some(bin) = &inputs.bin {
+    if let Some(bin) = bin {
         cargo.arg2("--bin", bin);
     }
     if let Some(pkg) = &inputs.package {
@@ -107,6 +109,33 @@ fn exe_command(inputs: &Target<RustExeInputs>) -> CargoCommand {
     // Apply reads the built binary's path from the JSON messages.
     cargo.arg2("--message-format", "json");
     cargo
+}
+
+/// The binary to build: `bin`, or the one `cargo run` would pick. A
+/// package with several binaries would otherwise build them all, and the
+/// output would be whichever cargo reported last.
+fn binary_to_build(inputs: &Target<RustExeInputs>) -> Result<Option<String>, BoxError> {
+    if inputs.bin.is_some() || selects_targets(&inputs.flags) {
+        return Ok(inputs.bin.clone());
+    }
+    super::Selection {
+        dir: inputs.dir.as_deref(),
+        env: &inputs.env,
+        package: inputs.package.as_deref(),
+        flags: &inputs.flags,
+    }
+    .run_binary()
+}
+
+/// Whether cargo `flags` choose the targets to build themselves.
+fn selects_targets(flags: &[String]) -> bool {
+    const FLAGS: [&str; 5] = ["--bin", "--bins", "--example", "--examples", "--all-targets"];
+    flags.iter().any(|flag| {
+        FLAGS.iter().any(|name| {
+            flag.strip_prefix(name)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+        })
+    })
 }
 
 /// Parse cargo's `--message-format=json` output, forwarding compiler
@@ -172,7 +201,7 @@ impl Resource for RustExeResource {
     }
 
     fn plan(&self, inputs: &Target<RustExeInputs>, prior_state: Option<&RustExeState>) -> Result<PlanResult, BoxError> {
-        let description = exe_command(inputs).display();
+        let description = exe_command(inputs, inputs.bin.as_deref()).display();
 
         let Some(prior) = prior_state else {
             return Ok(PlanResult {
@@ -219,7 +248,7 @@ impl Resource for RustExeResource {
         _changes: &Changes,
         writer: &TargetWriter,
     ) -> Result<ApplyResult<RustExeState, RustExeOutputs>, BoxError> {
-        let cargo = exe_command(inputs);
+        let cargo = exe_command(inputs, binary_to_build(inputs)?.as_deref());
         let mut child = cargo
             .command()
             .stdout(Stdio::piped())

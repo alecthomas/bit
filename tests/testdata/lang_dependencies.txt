@@ -1,0 +1,70 @@
+# A content change propagates through depends_on and output references,
+# but not through after, which only orders.
+bit
+grep '\Aone\n\z' source.out
+grep 'coupled' runs.log
+grep 'ordered' runs.log
+grep '\Ahello\z' sub/out.txt
+grep '\Ahello\z' uses.txt
+
+bit
+stdout 'coupled · no changes'
+stdout 'ordered · no changes'
+
+cp src.txt.changed src.txt
+bit
+stdout 'source ▶ .*\(.src\.txt. changed\)'
+stdout 'coupled ▶ .*\(.source. changed\)'
+stdout 'ordered · no changes'
+grep '\Acoupled\nordered\ncoupled\n\z|\Aordered\ncoupled\ncoupled\n\z' runs.log
+
+# after still orders: the ordered target starts after source finishes.
+bit --graph ordered
+stdout 'source'
+
+# dir sets where commands run and relative paths resolve, env sets the
+# command's environment, and a changed env value reruns the target and
+# those using its outputs.
+env GREETING=bye
+bit sub uses
+stdout 'sub ▶'
+stdout 'uses ▶'
+grep '\Abye\z' sub/out.txt
+grep '\Abye\z' uses.txt
+! exists out.txt
+
+-- BUILD.bit --
+source = exec {
+  command = "cat src.txt > source.out"
+  inputs = ["src.txt"]
+  outputs = "source.out"
+}
+
+coupled = exec {
+  command = "echo coupled >> runs.log"
+  inputs = []
+  depends_on = [source]
+}
+
+ordered = exec {
+  command = "echo ordered >> runs.log"
+  inputs = []
+  after = [source]
+}
+
+sub = exec {
+  dir = "sub"
+  env = { GREETING = env("GREETING", "hello") }
+  command = "printf \"$GREETING\" > out.txt"
+  outputs = "out.txt"
+}
+
+uses = exec {
+  command = "cat #{sub.path} > uses.txt"
+  outputs = "uses.txt"
+}
+-- src.txt --
+one
+-- src.txt.changed --
+two
+-- sub/.keep --

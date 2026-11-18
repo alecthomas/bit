@@ -22,21 +22,35 @@ pub fn deserialize_function_value<T: DeserializeOwned>(value: &Value) -> Result<
 
 #[doc(hidden)]
 pub fn deserialize_dynamic_function_value<T: DeserializeOwned>(value: &Value) -> Result<T, BoxError> {
-    Ok(serde_json::from_value(function_json_value(value)?)?)
+    Ok(serde_json::from_value(json_value(value, TargetRefs::Structs)?)?)
 }
 
-fn function_json_value(value: &Value) -> Result<serde_json::Value, BoxError> {
+/// How [`json_value`] writes a target reference.
+#[derive(Clone, Copy)]
+enum TargetRefs {
+    /// By name, as [`Value`] serializes them: what resource inputs see.
+    Names,
+    /// As a [`crate::value::TargetRef`], which function arguments decode.
+    Structs,
+}
+
+/// `value` as JSON, with numbers as JSON numbers. BigDecimal's serde form
+/// is a string, which a numeric field can't read.
+fn json_value(value: &Value, refs: TargetRefs) -> Result<serde_json::Value, BoxError> {
     match value {
-        // BigDecimal's normal serde representation is a string; dynamic
-        // arguments must keep the original numeric kind.
         Value::Number(number) => Ok(serde_json::Value::Number(number.to_string().parse()?)),
-        Value::TargetRef(name) => Ok(serde_json::to_value(crate::value::TargetRef::new(name))?),
+        Value::TargetRef(name) if matches!(refs, TargetRefs::Structs) => {
+            Ok(serde_json::to_value(crate::value::TargetRef::new(name))?)
+        }
         Value::List(_, items) => Ok(serde_json::Value::Array(
-            items.iter().map(function_json_value).collect::<Result<_, _>>()?,
+            items
+                .iter()
+                .map(|item| json_value(item, refs))
+                .collect::<Result<_, _>>()?,
         )),
         Value::Map(_, map) | Value::Struct(_, map) => Ok(serde_json::Value::Object(
             map.iter()
-                .map(|(key, value)| Ok((key.clone(), function_json_value(value)?)))
+                .map(|(key, value)| Ok((key.clone(), json_value(value, refs)?)))
                 .collect::<Result<_, BoxError>>()?,
         )),
         _ => Ok(serde_json::to_value(value)?),
@@ -653,7 +667,11 @@ fn deserialize_inputs<T: DeserializeOwned>(map: &Map) -> Result<Target<T>, BoxEr
         .get(crate::dag::DIR_FIELD)
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let json = serde_json::to_value(map)?;
+    let json = serde_json::Value::Object(
+        map.iter()
+            .map(|(key, value)| Ok((key.clone(), json_value(value, TargetRefs::Names)?)))
+            .collect::<Result<_, BoxError>>()?,
+    );
     let value: T = serde_json::from_value(json)?;
     Ok(Target::new(dir, value).with_env(target_env(map)))
 }
@@ -1016,6 +1034,51 @@ mod tests {
         assert_eq!(
             __bit_call_typed_target_refs(&[Value::Bool(true)]).unwrap(),
             Value::List(crate::value::Type::TargetRef, Vec::new())
+        );
+    }
+
+    /// Numbers in a target's fields reach numeric input fields, nested or
+    /// not, while target references stay names.
+    #[test]
+    fn inputs_decode_numbers_into_numeric_fields() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Nested {
+            retries: u32,
+        }
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Inputs {
+            release: Option<u32>,
+            priority: i32,
+            ratio: f64,
+            nested: Nested,
+            after: String,
+        }
+        let map: Map = [
+            ("release".to_owned(), Value::Number(17.into())),
+            ("priority".to_owned(), Value::Number((-2).into())),
+            ("ratio".to_owned(), Value::Number("0.5".parse().unwrap())),
+            (
+                "nested".to_owned(),
+                Value::Map(
+                    crate::value::Type::Number,
+                    [("retries".to_owned(), Value::Number(3.into()))].into_iter().collect(),
+                ),
+            ),
+            ("after".to_owned(), Value::TargetRef("build".to_owned())),
+        ]
+        .into_iter()
+        .collect();
+
+        let inputs: Target<Inputs> = deserialize_inputs(&map).unwrap();
+        assert_eq!(
+            inputs.value,
+            Inputs {
+                release: Some(17),
+                priority: -2,
+                ratio: 0.5,
+                nested: Nested { retries: 3 },
+                after: "build".to_owned(),
+            }
         );
     }
 

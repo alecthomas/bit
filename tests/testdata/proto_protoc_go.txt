@@ -1,0 +1,99 @@
+# protoc.generate writes Go code through protoc-gen-go, tracks the files its
+# sources import from the include paths, treats a descriptor set named in
+# flags as an output, and --clean removes the files it generated.
+[!exec:protoc] skip
+[!exec:protoc-gen-go] skip
+
+bit
+stdout 'gen ▶ protoc -Iapi -Ishared --go_out=gen --go_opt=paths=source_relative --descriptor_set_out=desc.pb api/demo/\*\.proto'
+stdout 'gen ✔ ok'
+exists gen/demo/user.pb.go gen/demo/role.pb.go desc.pb
+grep 'package demo' gen/demo/user.pb.go
+! exists gen/ids.pb.go
+
+bit
+stdout 'gen · no changes'
+
+# The imported file is not a source, but changing it regenerates.
+cp ids.proto.changed shared/ids.proto
+bit
+stdout '''shared/ids\.proto'' changed'
+stdout 'gen ✔ ok'
+
+# So does changing a source.
+cp role.proto.changed api/demo/role.proto
+bit
+stdout '''api/demo/role\.proto'' changed'
+grep 'ROLE_ADMIN' gen/demo/role.pb.go
+
+# A removed descriptor set or generated file is written again.
+rm desc.pb
+bit
+stdout '''desc\.pb'' \(removed\) changed'
+exists desc.pb
+
+rm gen/demo/user.pb.go
+bit
+stdout 'gen/demo/user\.pb\.go was changed or removed'
+exists gen/demo/user.pb.go
+
+bit --clean
+stdout 'gen ▶ rm gen/demo/role\.pb\.go'
+stdout 'gen ▶ rm gen/demo/user\.pb\.go'
+! exists gen/demo/role.pb.go gen/demo/user.pb.go
+exists api/demo/user.proto shared/ids.proto
+
+-- BUILD.bit --
+gen = protoc.generate {
+  sources = ["api/demo/*.proto"]
+  include = ["api", "shared"]
+  out     = { go = "gen" }
+  opt     = { go = "paths=source_relative" }
+  flags   = ["--descriptor_set_out=desc.pb"]
+}
+-- api/demo/user.proto --
+syntax = "proto3";
+package demo;
+option go_package = "example.com/demo";
+
+import "ids.proto";
+import "demo/role.proto";
+
+message User {
+  ids.Id id = 1;
+  Role role = 2;
+}
+-- api/demo/role.proto --
+syntax = "proto3";
+package demo;
+option go_package = "example.com/demo";
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+}
+-- role.proto.changed --
+syntax = "proto3";
+package demo;
+option go_package = "example.com/demo";
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_ADMIN = 1;
+}
+-- shared/ids.proto --
+syntax = "proto3";
+package ids;
+option go_package = "example.com/ids";
+
+message Id {
+  string value = 1;
+}
+-- ids.proto.changed --
+syntax = "proto3";
+package ids;
+option go_package = "example.com/ids";
+
+message Id {
+  string value = 1;
+  int64 version = 2;
+}

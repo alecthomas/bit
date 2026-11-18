@@ -1,0 +1,47 @@
+# --cache chooses the build cache, and with --clean deletes it, leaving
+# projects' outputs and state in place.
+env BIT_CACHE=disk://$WORK/cache
+cd repo
+exec git init -q
+exec git add .
+exec git -c user.email=test@example.com -c user.name=Test commit -qm base
+exec git worktree add -q ../wt
+exec git worktree add -q ../other
+bit
+exists $WORK/cache/actions
+
+# A worktree using another cache misses.
+cd $WORK/other
+bit --cache disk://$WORK/elsewhere --plan
+stdout '^lib \+ '
+bit --cache disk://$WORK/elsewhere
+stdout '^lib ▶ '
+exists $WORK/elsewhere/actions
+
+bit --cache $BIT_CACHE --clean
+! stdout .
+! exists $WORK/cache/actions
+! exists $WORK/cache/cas
+exists $WORK/elsewhere/actions
+exists $WORK/repo/lib.txt
+
+# The project that built is still up to date.
+cd $WORK/repo
+bit
+stdout '^lib · no changes$'
+
+# Another worktree now runs the command instead of restoring.
+cd $WORK/wt
+bit --plan
+stdout '^lib \+ '
+bit
+stdout '^lib ▶ '
+grep '\Arun\nrun\nrun\n\z' $WORK/lib.log
+
+-- repo/.gitignore --
+lib.txt
+-- repo/BUILD.bit --
+lib = exec {
+  command = "echo run >> ../lib.log; echo lib > lib.txt"
+  outputs = "lib.txt"
+}

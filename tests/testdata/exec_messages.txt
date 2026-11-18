@@ -1,0 +1,52 @@
+# Commands print messages in GitHub's workflow command syntax. A target that
+# succeeds after printing them ends with them instead of "ok".
+bit release
+stdout '^release │ progress$'
+stdout '^release ▲ CHANGELOG has no entry$'
+stdout '^release ℹ published to crates\.io$'
+stdout '^release ℹ noticed$'
+stdout '^release ✔ released v1\nrelease ┆ second line 100%$'
+! stdout '^release ▲ .*file='
+! stdout '^release ✔ ok$'
+
+# Cached and skipped targets don't repeat them.
+bit release
+stdout '^release · no changes$'
+! stdout 'released'
+
+bit plain
+stdout '^plain ✔ ok$'
+
+# An error message doesn't fail a target; its exit status does.
+bit flagged
+stdout '^flagged ✘ looks bad$'
+
+! bit broken
+stdout '^broken ✘ tag v1 already exists$'
+stdout '^broken ✘ command exited with exit status: 1$'
+
+-- BUILD.bit --
+release = exec {
+  command = <<-EOF
+    echo progress
+    echo "::warning file=src/main.rs,line=12::CHANGELOG has no entry"
+    echo "::info::published to crates.io"
+    echo "::notice::noticed"
+    echo "::success::released v1%0Asecond line 100%25"
+  EOF
+}
+
+plain = exec {
+  command = "echo just output"
+}
+
+flagged = exec {
+  command = "echo '::error::looks bad'"
+}
+
+broken = exec {
+  command = <<-EOF
+    echo "::error::tag v1 already exists"
+    exit 1
+  EOF
+}

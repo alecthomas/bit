@@ -1,0 +1,157 @@
+# java.test options: `report = "tests"`, `args` reaching the launcher, test
+# resources on the class path, custom `sources`, a failing test, no test
+# classes, and no launcher.
+[!exec:javac] skip
+
+# A stand-in for the JUnit console launcher: it calls each test class's
+# static check(String[]) with the launcher's arguments, and reports the
+# results as JUnit's XML reporter would.
+bit launcher
+
+bit unit
+stdout 'unit ▶ junit execute --include-tag=fast src/test/java'
+stdout 'PASS demo\.ArgsTest/check\(\)'
+stdout 'PASS demo\.ResourceTest/check\(\)'
+stdout 'unit ✔ ok'
+
+bit unit
+! stdout 'PASS'
+
+# A changed test resource reruns the tests.
+cp fixture.changed unit/src/test/resources/fixture.txt
+! bit unit
+stdout 'fixture\.txt holds other data'
+
+# A failing test fails the target and shows its failure.
+! bit broken
+stdout 'FAIL demo\.BrokenTest \(.*1 failed\)'
+stdout 'java\.lang\.AssertionError: expected 1 but was 2'
+stdout 'broken ✘'
+
+# Compiled tests without a test class: the launcher finds none, and its
+# output explains the failure.
+! bit empty
+stdout 'No tests found'
+
+# Without a launcher on the class path or in a lockfile.
+! bit nolauncher
+stderr 'there is no JUnit console launcher \(org\.junit\.platform\.console\.ConsoleLauncher\)'
+
+-- BUILD.bit --
+explicit launcher = java.library {
+  dir = "launcher"
+}
+
+explicit unit = java.test {
+  dir       = "unit"
+  classpath = launcher.classpath
+  args      = ["--include-tag=fast"]
+  report    = "tests"
+}
+
+explicit broken = java.test {
+  dir       = "broken"
+  sources   = "tests"
+  classpath = launcher.classpath
+}
+
+explicit empty = java.test {
+  dir       = "empty"
+  classpath = launcher.classpath
+}
+
+explicit nolauncher = java.test {
+  dir = "unit"
+}
+-- launcher/src/main/java/org/junit/platform/console/ConsoleLauncher.java --
+package org.junit.platform.console;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+
+public class ConsoleLauncher {
+    public static void main(String[] args) throws Exception {
+        Path classes = null;
+        Path reports = null;
+        for (String arg : args) {
+            if (arg.startsWith("--scan-class-path=")) classes = Paths.get(arg.substring(18));
+            if (arg.startsWith("--reports-dir=")) reports = Paths.get(arg.substring(14));
+        }
+        List<String> tests = new ArrayList<>();
+        Path root = classes;
+        try (var files = Files.walk(root)) {
+            files.filter(f -> f.toString().endsWith("Test.class"))
+                .forEach(f -> tests.add(root.relativize(f).toString().replace(".class", "").replace('/', '.')));
+        }
+        if (tests.isEmpty()) {
+            System.err.println("No tests found");
+            System.exit(2);
+        }
+        StringBuilder xml = new StringBuilder("<testsuite name=\"JUnit Jupiter\">");
+        boolean failed = false;
+        for (String test : tests) {
+            xml.append("<testcase name=\"check()\" classname=\"").append(test).append("\" time=\"0.01\">");
+            try {
+                Method check = Class.forName(test).getDeclaredMethod("check", String[].class);
+                check.setAccessible(true);
+                check.invoke(null, (Object) args);
+            } catch (InvocationTargetException e) {
+                failed = true;
+                xml.append("<failure message=\"failed\">").append(e.getCause()).append("</failure>");
+            }
+            xml.append("</testcase>");
+        }
+        Files.createDirectories(reports);
+        Files.writeString(reports.resolve("TEST-junit-jupiter.xml"), xml.append("</testsuite>"));
+        System.exit(failed ? 1 : 0);
+    }
+}
+-- unit/src/test/java/demo/ArgsTest.java --
+package demo;
+
+import java.util.Arrays;
+
+class ArgsTest {
+    static void check(String[] args) {
+        if (!Arrays.asList(args).contains("--include-tag=fast")) {
+            throw new AssertionError("missing --include-tag=fast in " + Arrays.toString(args));
+        }
+    }
+}
+-- unit/src/test/java/demo/ResourceTest.java --
+package demo;
+
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+
+class ResourceTest {
+    static void check(String[] args) throws Exception {
+        try (InputStream in = ResourceTest.class.getResourceAsStream("/fixture.txt")) {
+            if (in == null) throw new AssertionError("fixture.txt is not on the class path");
+            String text = new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
+            if (!text.equals("fixture data")) throw new AssertionError("fixture.txt holds " + text);
+        }
+    }
+}
+-- unit/src/test/resources/fixture.txt --
+fixture data
+-- fixture.changed --
+other data
+-- broken/tests/demo/BrokenTest.java --
+package demo;
+
+class BrokenTest {
+    static void check(String[] args) {
+        throw new AssertionError("expected 1 but was 2");
+    }
+}
+-- empty/src/test/java/demo/Helper.java --
+package demo;
+
+class Helper {
+}

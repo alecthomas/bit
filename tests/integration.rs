@@ -1,1067 +1,458 @@
+//! End-to-end tests of the `bit` binary, one per script in `tests/testdata`.
+//!
+//! Cargo runs these only when asked, with `cargo test --test integration`,
+//! or `bit integration-test`.
+//!
+//! A script is a txtar file, as Go's testscript uses: commands, one per
+//! line, then the files to create, each after a `-- path --` line. Every
+//! script runs in a fresh directory, `$WORK`, holding those files.
+//!
+//! ```text
+//! # A comment.
+//! bit --plan
+//! stdout 'build ▶'
+//!
+//! -- BUILD.bit --
+//! build = exec { command = "true" }
+//! ```
+//!
+//! Commands:
+//!
+//! - `bit args…` runs the binary under test, and `exec program args…` any
+//!   other program. Either must succeed, or with `!` must fail.
+//! - `stdout regex` and `stderr regex` match the last command's output, and
+//!   with `!` must not. Patterns are multi-line: `^` and `$` match at lines.
+//! - `exists path…`, `grep regex file` and `cmp a b` check files, and with
+//!   `!` the opposite. `stdout` and `stderr` name the last output in `cmp`
+//!   and `cp`.
+//! - `cp from to`, `rm path…`, `mkdir path…`, `cd dir` and `env NAME=value…`
+//!   change the setup, and `skip reason` ends the test as ignored.
+//!
+//! A command may start with conditions, such as `[exec:go]` to run only when
+//! `go` is on `PATH`, or `[!exec:go] skip`. `[docker]` holds when a Docker
+//! daemon answers. Arguments split on spaces, and
+//! single quotes keep one together, with `''` for a quote. `$NAME` and
+//! `${NAME}` expand outside quotes: `$WORK`, `$HOME`, `$ROOT` for the
+//! repository, `$BIT` for the binary under test, or any environment
+//! variable.
+//!
+//! Each script gets its own `HOME` and build cache, so it never reads or
+//! writes the user's.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use bit::cache::BuildCache;
-use bit::engine;
-use bit::loader;
-use std::sync::Arc;
+use libtest_mimic::{Arguments, Completion, Failed, Trial};
+use regex::Regex;
 
-use bit::file_tracker::FileTracker;
-use bit::output::Output;
-use bit::parser;
-use bit::provider::ProviderRegistry;
-use bit::providers::exec::ExecProvider;
-use bit::state::{StateError, StateStore};
-use bit::value::Map;
-
-fn test_tracker() -> Arc<FileTracker> {
-    Arc::new(FileTracker::new())
+fn main() {
+    let args = Arguments::from_args();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testdata");
+    let mut scripts: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+        .map(|entry| entry.expect("read testdata entry").path())
+        .filter(|path| path.extension().is_some_and(|e| e == "txt"))
+        .collect();
+    scripts.sort();
+    let trials = scripts
+        .into_iter()
+        .map(|path| {
+            let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            Trial::ignorable_test(name, move || run(&path))
+        })
+        .collect();
+    libtest_mimic::run(&args, trials).exit();
 }
 
-fn local_cache() -> BuildCache {
-    BuildCache::local_only(std::path::Path::new("."))
-}
-
-fn registry(tracker: &Arc<FileTracker>) -> ProviderRegistry {
-    let mut reg = ProviderRegistry::new();
-    reg.register(Box::new(ExecProvider::new(tracker.clone())));
-    reg
-}
-
-struct MemoryStore {
-    data: std::sync::RwLock<std::collections::HashMap<String, serde_json::Value>>,
-}
-
-impl MemoryStore {
-    fn new() -> Self {
-        Self {
-            data: std::sync::RwLock::new(std::collections::HashMap::new()),
+/// Run the script at `path`, failing with its log.
+fn run(path: &Path) -> Result<Completion, Failed> {
+    let content = fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let (script, files) = parse_txtar(&content);
+    let mut state = State::new(&files).map_err(|e| format!("setting up {}: {e}", path.display()))?;
+    for (number, line) in script.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let _ = writeln!(state.log, "> {line}");
+        match state.execute(line) {
+            Ok(Flow::Continue) => {}
+            Ok(Flow::Skip(reason)) => return Ok(Completion::ignored_with(reason)),
+            Err(e) => {
+                let _ = writeln!(state.log, "FAIL: {}:{}: {e}", path.display(), number + 1);
+                return Err(state.log.into());
+            }
         }
     }
+    Ok(Completion::Completed)
 }
 
-impl StateStore for MemoryStore {
-    fn load(&self, target: &str) -> Result<Option<serde_json::Value>, StateError> {
-        Ok(self.data.read().unwrap().get(target).cloned())
+/// Split a txtar file into its script and its files.
+fn parse_txtar(content: &str) -> (String, Vec<(String, String)>) {
+    let mut script = String::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for line in content.split_inclusive('\n') {
+        let header = line
+            .trim_end_matches('\n')
+            .strip_prefix("-- ")
+            .and_then(|rest| rest.strip_suffix(" --"));
+        match (header, files.last_mut()) {
+            (Some(name), _) => files.push((name.trim().to_owned(), String::new())),
+            (None, Some((_, file))) => file.push_str(line),
+            (None, None) => script.push_str(line),
+        }
     }
-    fn save(&self, target: &str, state: &serde_json::Value) -> Result<(), StateError> {
-        self.data.write().unwrap().insert(target.into(), state.clone());
-        Ok(())
-    }
-    fn remove(&self, target: &str) -> Result<(), StateError> {
-        self.data.write().unwrap().remove(target);
-        Ok(())
-    }
-    fn list(&self) -> Result<Vec<String>, StateError> {
-        Ok(self.data.read().unwrap().keys().cloned().collect())
-    }
+    (script, files)
 }
 
-fn run_apply(input: &str, store: &MemoryStore) -> Vec<engine::TargetPlan> {
-    let tracker = test_tracker();
-    let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
-    engine::apply(
-        &mut dag,
-        &base,
-        store,
-        &local_cache(),
-        &Output::new(&[]),
-        &[],
-        1,
-        &tracker,
-    )
-    .expect("apply failed")
+enum Flow {
+    Continue,
+    Skip(String),
 }
 
-fn run_plan(input: &str, store: &MemoryStore) -> Vec<engine::TargetPlan> {
-    let tracker = test_tracker();
-    let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
-    engine::plan(&mut dag, &base, &local_cache(), &Output::new(&[]), &[], &tracker).expect("plan failed")
+struct State {
+    /// Holds the work directory, `HOME` and the build cache.
+    _root: tempfile::TempDir,
+    work: PathBuf,
+    cwd: PathBuf,
+    /// Variables set for every command, over the inherited environment.
+    env: BTreeMap<String, String>,
+    stdout: String,
+    stderr: String,
+    log: String,
 }
 
-fn run_dump(input: &str, store: &MemoryStore, targets: &[String]) {
-    let tracker = test_tracker();
-    let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
-    engine::dump(&mut dag, &base, targets).expect("dump failed");
-}
+impl State {
+    fn new(files: &[(String, String)]) -> Result<Self, String> {
+        let root = tempfile::tempdir().map_err(|e| e.to_string())?;
+        // Canonical, as macOS reaches the temporary directory through a
+        // symlink, and bit reports canonical paths.
+        let base = root.path().canonicalize().map_err(|e| e.to_string())?;
+        let work = base.join("work");
+        let home = base.join("home");
+        for dir in [&work, &home] {
+            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        for (name, content) in files {
+            let path = work.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            fs::write(&path, content).map_err(|e| format!("{name}: {e}"))?;
+        }
 
-fn run_destroy(input: &str, store: &MemoryStore) {
-    let tracker = test_tracker();
-    let module = parser::parse(input, "<test>").expect("parse failed");
-    let (mut dag, _base) = loader::load(&module, &Map::new(), &registry(&tracker), store, &[]).expect("load failed");
-    engine::destroy(&mut dag, store, &Output::new(&[]), &[], false).expect("destroy failed");
-}
-
-#[test]
-fn single_exec_target() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("hello.txt");
-    let input = format!(
-        "hello = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        out.display(),
-        out.display(),
-    );
-    let store = MemoryStore::new();
-    let results = run_apply(&input, &store);
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].plan.action, bit::provider::PlanAction::Create);
-    assert!(out.exists());
-    assert_eq!(fs::read_to_string(&out).unwrap().trim(), "hello");
-}
-
-#[test]
-fn chained_targets_with_refs() {
-    let dir = tempfile::tempdir().unwrap();
-    let file_a = dir.path().join("a.txt");
-    let file_b = dir.path().join("b.txt");
-    let input = format!(
-        concat!(
-            "a = exec {{\n  command = \"echo hello > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"cp #{{a.path}} {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        ),
-        file_a.display(),
-        file_a.display(),
-        file_b.display(),
-        file_b.display(),
-    );
-    let store = MemoryStore::new();
-    let results = run_apply(&input, &store);
-    assert_eq!(results.len(), 2);
-    assert!(file_a.exists());
-    // b depends on a.path which should resolve to the output path
-}
-
-#[test]
-fn plan_then_apply() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.txt");
-    let input = format!(
-        "build = exec {{\n  command = \"echo built > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        out.display(),
-        out.display(),
-    );
-    let store = MemoryStore::new();
-
-    let plans = run_plan(&input, &store);
-    assert_eq!(plans[0].plan.action, bit::provider::PlanAction::Create);
-    assert!(!out.exists());
-
-    let results = run_apply(&input, &store);
-    assert_eq!(results[0].plan.action, bit::provider::PlanAction::Create);
-    assert!(out.exists());
-}
-
-#[test]
-fn second_apply_is_noop() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.txt");
-    let input = format!(
-        "build = exec {{\n  command = \"echo built > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        out.display(),
-        out.display(),
-    );
-    let store = MemoryStore::new();
-
-    run_apply(&input, &store);
-    let results = run_apply(&input, &store);
-    assert_eq!(results[0].plan.action, bit::provider::PlanAction::None);
-}
-
-#[test]
-fn destroy_removes_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.txt");
-    let input = format!(
-        "build = exec {{\n  command = \"echo hi > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        out.display(),
-        out.display(),
-    );
-    let store = MemoryStore::new();
-
-    run_apply(&input, &store);
-    assert!(!store.list().unwrap().is_empty());
-
-    run_destroy(&input, &store);
-    assert!(store.list().unwrap().is_empty());
-}
-
-#[test]
-fn explicit_target_excluded_from_default_apply() {
-    let dir = tempfile::tempdir().unwrap();
-    let out_a = dir.path().join("a.txt");
-    let out_b = dir.path().join("b.txt");
-    let input = format!(
-        concat!(
-            "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "explicit b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        ),
-        out_a.display(),
-        out_a.display(),
-        out_b.display(),
-        out_b.display(),
-    );
-    let store = MemoryStore::new();
-
-    // Default apply (no targets, no `default` group) skips the explicit target.
-    run_apply(&input, &store);
-    assert!(out_a.exists());
-    assert!(!out_b.exists());
-
-    // Naming it explicitly runs it.
-    let tracker = test_tracker();
-    let module = parser::parse(&input, "<test>").unwrap();
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), &store, &[]).unwrap();
-    engine::apply(
-        &mut dag,
-        &base,
-        &store,
-        &local_cache(),
-        &Output::new(&[]),
-        &["b".into()],
-        1,
-        &tracker,
-    )
-    .unwrap();
-    assert!(out_b.exists());
-}
-
-#[test]
-fn protected_target_survives_destroy() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.txt");
-    let input = format!(
-        "protected build = exec {{\n  command = \"echo hi > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        out.display(),
-        out.display(),
-    );
-    let store = MemoryStore::new();
-
-    run_apply(&input, &store);
-    run_destroy(&input, &store);
-    assert!(!store.list().unwrap().is_empty());
-}
-
-#[test]
-fn group_filters_execution() {
-    let dir = tempfile::tempdir().unwrap();
-    let out_a = dir.path().join("a.txt");
-    let out_b = dir.path().join("b.txt");
-    let input = format!(
-        concat!(
-            "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "group just_a = [a]\n",
-        ),
-        out_a.display(),
-        out_a.display(),
-        out_b.display(),
-        out_b.display(),
-    );
-    let store = MemoryStore::new();
-    let tracker = test_tracker();
-    let module = parser::parse(&input, "<test>").unwrap();
-    let (mut dag, base) = loader::load(&module, &Map::new(), &registry(&tracker), &store, &[]).unwrap();
-    let results = engine::apply(
-        &mut dag,
-        &base,
-        &store,
-        &local_cache(),
-        &Output::new(&[]),
-        &["just_a".into()],
-        1,
-        &tracker,
-    )
-    .unwrap();
-    assert_eq!(results.len(), 1);
-    assert!(out_a.exists());
-    assert!(!out_b.exists());
-}
-
-#[test]
-fn let_bindings_in_target_fields() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.txt");
-    let input = format!(
-        concat!(
-            "let msg = \"hello world\"\n",
-            "build = exec {{\n  command = \"echo #{{msg}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        ),
-        out.display(),
-        out.display(),
-    );
-    let store = MemoryStore::new();
-    run_apply(&input, &store);
-    assert_eq!(fs::read_to_string(&out).unwrap().trim(), "hello world");
-}
-
-#[test]
-fn params_with_defaults() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.txt");
-    let input = format!(
-        concat!(
-            "param msg : string = \"default\"\n",
-            "build = exec {{\n  command = \"echo #{{msg}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        ),
-        out.display(),
-        out.display(),
-    );
-    let store = MemoryStore::new();
-    run_apply(&input, &store);
-    assert_eq!(fs::read_to_string(&out).unwrap().trim(), "default");
-}
-
-#[test]
-fn pipe_in_let_binding() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.txt");
-    let input = format!(
-        concat!(
-            "let sha = exec(\"echo abc123\") | trim\n",
-            "build = exec {{\n  command = \"echo #{{sha}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        ),
-        out.display(),
-        out.display(),
-    );
-    let store = MemoryStore::new();
-    run_apply(&input, &store);
-    assert_eq!(fs::read_to_string(&out).unwrap().trim(), "abc123");
-}
-
-#[test]
-fn diamond_dependency() {
-    let dir = tempfile::tempdir().unwrap();
-    let out_a = dir.path().join("a.txt");
-    let out_b = dir.path().join("b.txt");
-    let out_c = dir.path().join("c.txt");
-    let out_d = dir.path().join("d.txt");
-    let input = format!(
-        concat!(
-            "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo b #{{a.path}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "c = exec {{\n  command = \"echo c #{{a.path}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "d = exec {{\n  command = \"echo d #{{b.path}} #{{c.path}} > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        ),
-        out_a.display(),
-        out_a.display(),
-        out_b.display(),
-        out_b.display(),
-        out_c.display(),
-        out_c.display(),
-        out_d.display(),
-        out_d.display(),
-    );
-    let store = MemoryStore::new();
-    let results = run_apply(&input, &store);
-    assert_eq!(results.len(), 4);
-    assert!(out_a.exists());
-    assert!(out_b.exists());
-    assert!(out_c.exists());
-    assert!(out_d.exists());
-}
-
-#[test]
-fn dependency_change_propagates_to_plan() {
-    let dir = tempfile::tempdir().unwrap();
-    let out_a = dir.path().join("a.txt");
-    let out_b = dir.path().join("b.txt");
-
-    // Apply both targets
-    let input_v1 = format!(
-        concat!(
-            "a = exec {{\n  command = \"echo v1 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  depends_on = [a]\n}}\n",
-        ),
-        out_a.display(),
-        out_a.display(),
-        out_b.display(),
-        out_b.display(),
-    );
-    let store = MemoryStore::new();
-    run_apply(&input_v1, &store);
-
-    // Second plan is noop
-    let plans = run_plan(&input_v1, &store);
-    assert_eq!(
-        plans[0].plan.action,
-        bit::provider::PlanAction::None,
-        "a should be unchanged"
-    );
-    assert_eq!(
-        plans[1].plan.action,
-        bit::provider::PlanAction::None,
-        "b should be unchanged"
-    );
-
-    // Change a's command (simulating a source change)
-    let input_v2 = format!(
-        concat!(
-            "a = exec {{\n  command = \"echo v2 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  depends_on = [a]\n}}\n",
-        ),
-        out_a.display(),
-        out_a.display(),
-        out_b.display(),
-        out_b.display(),
-    );
-
-    // Plan should show a as Update and b as Update (dependencies changed)
-    let plans = run_plan(&input_v2, &store);
-    assert_eq!(
-        plans[0].plan.action,
-        bit::provider::PlanAction::Update,
-        "a should need update"
-    );
-    assert_eq!(
-        plans[1].plan.action,
-        bit::provider::PlanAction::Update,
-        "b should need update due to dependency"
-    );
-
-    // Apply a only, then plan should still show b as needing update (cross-run)
-    let input_a_only = format!(
-        "a = exec {{\n  command = \"echo v2 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        out_a.display(),
-        out_a.display(),
-    );
-    run_apply(&input_a_only, &store);
-
-    // Now plan the full config — a is clean but b's dep hash should differ
-    let plans = run_plan(&input_v2, &store);
-    assert_eq!(
-        plans[0].plan.action,
-        bit::provider::PlanAction::None,
-        "a should be clean after apply"
-    );
-    assert_eq!(
-        plans[1].plan.action,
-        bit::provider::PlanAction::Update,
-        "b should still need update (dep hash changed)"
-    );
-}
-
-#[test]
-fn after_does_not_propagate_changes() {
-    let dir = tempfile::tempdir().unwrap();
-    let out_a = dir.path().join("a.txt");
-    let out_b = dir.path().join("b.txt");
-
-    // Apply both targets — b runs after a but is not content-coupled
-    let input_v1 = format!(
-        concat!(
-            "a = exec {{\n  command = \"echo v1 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
-        ),
-        out_a.display(),
-        out_a.display(),
-        out_b.display(),
-        out_b.display(),
-    );
-    let store = MemoryStore::new();
-    run_apply(&input_v1, &store);
-
-    // Change a's command
-    let input_v2 = format!(
-        concat!(
-            "a = exec {{\n  command = \"echo v2 > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
-        ),
-        out_a.display(),
-        out_a.display(),
-        out_b.display(),
-        out_b.display(),
-    );
-
-    // Plan should show a as Update but b as None (after is ordering-only)
-    let plans = run_plan(&input_v2, &store);
-    assert_eq!(
-        plans[0].plan.action,
-        bit::provider::PlanAction::Update,
-        "a should need update"
-    );
-    assert_eq!(
-        plans[1].plan.action,
-        bit::provider::PlanAction::None,
-        "b should not be affected by a (after is ordering-only)"
-    );
-}
-
-#[test]
-fn after_ignores_parent_output_values() {
-    let dir = tempfile::tempdir().unwrap();
-    let out_a1 = dir.path().join("a1.txt");
-    let out_a2 = dir.path().join("a2.txt");
-    let out_b = dir.path().join("b.txt");
-    let target_a = |out: &std::path::Path| {
-        format!(
-            "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            out.display(),
-            out.display(),
-        )
-    };
-    let target_b = format!(
-        "b = exec {{\n  command = \"echo ok > {}\"\n  outputs = \"{}\"\n  inputs = []\n  after = [a]\n}}\n",
-        out_b.display(),
-        out_b.display(),
-    );
-    let store = MemoryStore::new();
-    run_apply(&format!("{}{target_b}", target_a(&out_a1)), &store);
-
-    // Rebuild a alone so its stored `path` output changes.
-    run_apply(&target_a(&out_a2), &store);
-
-    let plans = run_plan(&format!("{}{target_b}", target_a(&out_a2)), &store);
-    assert_eq!(
-        plans[1].plan.action,
-        bit::provider::PlanAction::None,
-        "b should not see a's new output values (after is ordering-only)"
-    );
-}
-
-#[test]
-fn doc_comments_preserved() {
-    let input = concat!(
-        "# The server\n",
-        "server = exec {\n  command = \"echo hi\"\n  outputs = \"out\"\n  inputs = []\n}\n",
-        "# Build everything\n",
-        "group build = [server]\n",
-    );
-    let tracker = test_tracker();
-    let module = parser::parse(input, "<test>").unwrap();
-    let store = MemoryStore::new();
-    let (dag, _base) = loader::load(&module, &Map::new(), &registry(&tracker), &store, &[]).unwrap();
-    let node = dag.get_node("server").unwrap();
-    assert_eq!(node.fields.len(), 3);
-    let groups = dag.groups();
-    assert_eq!(groups["build"].doc.as_deref(), Some("Build everything"));
-}
-
-#[test]
-fn dump_before_apply() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.txt");
-    let input = format!(
-        "build = exec {{\n  command = \"echo hi > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        out.display(),
-        out.display(),
-    );
-    let store = MemoryStore::new();
-    // Dump should succeed even with no prior state
-    run_dump(&input, &store, &[]);
-}
-
-#[test]
-fn dump_after_apply() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.txt");
-    let input = format!(
-        "build = exec {{\n  command = \"echo hi > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-        out.display(),
-        out.display(),
-    );
-    let store = MemoryStore::new();
-    run_apply(&input, &store);
-    // Dump should show both inputs and stored outputs
-    run_dump(&input, &store, &[]);
-}
-
-#[test]
-fn dump_with_group() {
-    let dir = tempfile::tempdir().unwrap();
-    let out_a = dir.path().join("a.txt");
-    let out_b = dir.path().join("b.txt");
-    let input = format!(
-        concat!(
-            "a = exec {{\n  command = \"echo a > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "b = exec {{\n  command = \"echo b > {}\"\n  outputs = \"{}\"\n  inputs = []\n}}\n",
-            "group just_a = [a]\n",
-        ),
-        out_a.display(),
-        out_a.display(),
-        out_b.display(),
-        out_b.display(),
-    );
-    let store = MemoryStore::new();
-    run_apply(&input, &store);
-    // Dump filtered to a group should succeed
-    run_dump(&input, &store, &["just_a".into()]);
-}
-
-/// Helper to set up a module file at {dir}/{provider}/{resource}.bit
-fn write_module(dir: &std::path::Path, provider: &str, resource: &str, content: &str) {
-    let module_dir = dir.join(provider);
-    fs::create_dir_all(&module_dir).unwrap();
-    fs::write(module_dir.join(format!("{resource}.bit")), content).unwrap();
-}
-
-fn run_apply_in_dir(dir: &std::path::Path, input: &str, store: &MemoryStore) -> Vec<engine::TargetPlan> {
-    let tracker = test_tracker();
-    let module = parser::parse(input, "<test>").expect("parse failed");
-    // Module-system tests in this file all use the `mymod` provider, mirroring
-    // the per-import-equals-one-provider layout.
-    let import_roots = vec![bit::import::ImportRoot {
-        provider: "mymod".into(),
-        path: dir.join("mymod"),
-    }];
-    let (mut dag, base) =
-        loader::load(&module, &Map::new(), &registry(&tracker), store, &import_roots).expect("load failed");
-    engine::apply(
-        &mut dag,
-        &base,
-        store,
-        &local_cache(),
-        &Output::new(&[]),
-        &[],
-        1,
-        &tracker,
-    )
-    .expect("apply failed")
-}
-
-#[test]
-fn module_end_to_end() {
-    let dir = tempfile::tempdir().unwrap();
-    let out_inner = dir.path().join("inner_out.txt");
-
-    write_module(
-        dir.path(),
-        "mymod",
-        "mymod",
-        &format!(
-            concat!(
-                "param msg : string\n",
-                "inner = exec {{\n",
-                "  command = \"echo #{{msg}} > {}\"\n",
-                "  outputs = \"{}\"\n",
-                "  inputs = []\n",
-                "}}\n",
-                "output result = inner.path\n",
+        let mut env = BTreeMap::from([
+            ("HOME".to_owned(), home.display().to_string()),
+            (
+                "BIT_CACHE".to_owned(),
+                format!("disk://{}", base.join("cache").display()),
             ),
-            out_inner.display(),
-            out_inner.display(),
-        ),
-    );
+            ("NO_COLOR".to_owned(), "1".to_owned()),
+        ]);
+        // Toolchains found through `HOME` stay where they are installed:
+        // Hermit's stubs, rustup and cargo would otherwise install them
+        // again into the empty `HOME`. Go's build and module caches are
+        // content-addressed, so sharing them is safe, and saves compiling
+        // the standard library in every script.
+        let real_home = dirs::home_dir().unwrap_or_default();
+        let cache = dirs::cache_dir().unwrap_or_default();
+        let toolchain_homes = [
+            ("HERMIT_STATE_DIR", cache.join("hermit")),
+            ("RUSTUP_HOME", real_home.join(".rustup")),
+            ("CARGO_HOME", real_home.join(".cargo")),
+            ("GOCACHE", cache.join("go-build")),
+            ("GOMODCACHE", real_home.join("go/pkg/mod")),
+        ];
+        for (name, default) in toolchain_homes {
+            let value = std::env::var(name).unwrap_or_else(|_| default.display().to_string());
+            env.insert(name.to_owned(), value);
+        }
 
-    let input = r#"
-inst = mymod {
-  msg = "hello from module"
-}
-"#;
-    let store = MemoryStore::new();
-    let results = run_apply_in_dir(dir.path(), input, &store);
-
-    // Should have 2 targets: inst.inner (exec) and inst (module outputs)
-    assert_eq!(results.len(), 2);
-    assert!(out_inner.exists());
-    assert_eq!(fs::read_to_string(&out_inner).unwrap().trim(), "hello from module");
-}
-
-#[test]
-fn module_output_forwarding() {
-    let dir = tempfile::tempdir().unwrap();
-    let out_inner = dir.path().join("mod_out.txt");
-    let out_consumer = dir.path().join("consumer_out.txt");
-
-    write_module(
-        dir.path(),
-        "mymod",
-        "mymod",
-        &format!(
-            concat!(
-                "param msg : string\n",
-                "inner = exec {{\n",
-                "  command = \"echo #{{msg}} > {}\"\n",
-                "  outputs = \"{}\"\n",
-                "  inputs = []\n",
-                "}}\n",
-                "output result = inner.path\n",
-            ),
-            out_inner.display(),
-            out_inner.display(),
-        ),
-    );
-
-    let input = format!(
-        concat!(
-            "inst = mymod {{\n",
-            "  msg = \"from module\"\n",
-            "}}\n",
-            "consumer = exec {{\n",
-            "  command = \"cp #{{inst.result}} {}\"\n",
-            "  outputs = \"{}\"\n",
-            "  inputs = []\n",
-            "}}\n",
-        ),
-        out_consumer.display(),
-        out_consumer.display(),
-    );
-    let store = MemoryStore::new();
-    let results = run_apply_in_dir(dir.path(), &input, &store);
-
-    // 3 targets: inst.inner, inst, consumer
-    assert_eq!(results.len(), 3);
-    assert!(out_consumer.exists());
-    assert_eq!(
-        fs::read_to_string(&out_consumer).unwrap().trim(),
-        fs::read_to_string(&out_inner).unwrap().trim(),
-    );
-}
-
-#[test]
-fn module_multiple_instances() {
-    let dir = tempfile::tempdir().unwrap();
-    let out1 = dir.path().join("out1.txt");
-    let out2 = dir.path().join("out2.txt");
-
-    write_module(
-        dir.path(),
-        "mymod",
-        "mymod",
-        "param msg : string\nparam outfile : string\n\
-         inner = exec {\n  command = \"echo #{msg} > #{outfile}\"\n  outputs = outfile\n  inputs = []\n}\n\
-         output result = inner.path\n",
-    );
-
-    let input = format!(
-        concat!(
-            "a = mymod {{\n  msg = \"alpha\"\n  outfile = \"{}\"\n}}\n",
-            "b = mymod {{\n  msg = \"beta\"\n  outfile = \"{}\"\n}}\n",
-        ),
-        out1.display(),
-        out2.display(),
-    );
-    let store = MemoryStore::new();
-    let results = run_apply_in_dir(dir.path(), &input, &store);
-
-    assert_eq!(results.len(), 4); // a.inner, a, b.inner, b
-    assert_eq!(fs::read_to_string(&out1).unwrap().trim(), "alpha");
-    assert_eq!(fs::read_to_string(&out2).unwrap().trim(), "beta");
-}
-
-#[test]
-fn matrix_end_to_end() {
-    let dir = tempfile::tempdir().unwrap();
-    let out_amd64 = dir.path().join("out-amd64.txt");
-    let out_arm64 = dir.path().join("out-arm64.txt");
-
-    let input = format!(
-        concat!(
-            "let arch = [\"amd64\", \"arm64\"]\n",
-            "build[arch] = exec {{\n",
-            "  command = \"echo #{{arch}} > {dir}/out-#{{arch}}.txt\"\n",
-            "  outputs = \"{dir}/out-#{{arch}}.txt\"\n",
-            "  inputs = []\n",
-            "}}\n",
-        ),
-        dir = dir.path().display(),
-    );
-    let store = MemoryStore::new();
-    let results = run_apply(&input, &store);
-
-    assert_eq!(results.len(), 2);
-    assert!(out_amd64.exists());
-    assert!(out_arm64.exists());
-    assert_eq!(fs::read_to_string(&out_amd64).unwrap().trim(), "amd64");
-    assert_eq!(fs::read_to_string(&out_arm64).unwrap().trim(), "arm64");
-}
-
-#[test]
-fn parameterized_matrix_slice_end_to_end() {
-    let dir = tempfile::tempdir().unwrap();
-    let arm_output = dir.path().join("out-arm64.txt");
-    let amd_output = dir.path().join("out-amd64.txt");
-    let chosen_output = dir.path().join("chosen.txt");
-    let input = format!(
-        concat!(
-            "let arch = [\"amd64\", \"arm64\"]\n",
-            "build[arch](tag : string) = exec {{\n",
-            "  command = \"echo #{{tag}}-#{{arch}} > {dir}/out-#{{arch}}.txt\"\n",
-            "  outputs = \"{dir}/out-#{{arch}}.txt\"\n",
-            "  inputs = []\n",
-            "}}\n",
-            "chosen = exec {{\n",
-            "  command = \"cat #{{build[\"arm64\"](tag = \"1.2.3\").path}} > {dir}/chosen.txt\"\n",
-            "  outputs = \"{dir}/chosen.txt\"\n",
-            "  inputs = []\n",
-            "}}\n",
-            "group default = [chosen]\n",
-        ),
-        dir = dir.path().display(),
-    );
-    let store = MemoryStore::new();
-    let results = run_apply(&input, &store);
-
-    assert_eq!(results.len(), 2);
-    assert_eq!(fs::read_to_string(&arm_output).unwrap().trim(), "1.2.3-arm64");
-    assert_eq!(fs::read_to_string(&chosen_output).unwrap().trim(), "1.2.3-arm64");
-    assert!(!amd_output.exists());
-}
-
-// ── Shared build cache: go.exe acceptance ────────────────────────────────
-
-/// Build a Go binary in worktree A, delete A, and confirm worktree B
-/// restores the binary from the shared cache without running `go build`.
-/// Skipped when `go` is not installed.
-#[test]
-fn go_exe_restores_from_shared_cache_after_worktree_deleted() {
-    use std::process::Command;
-
-    if Command::new("go").arg("version").output().is_err() {
-        eprintln!("go not available; skipping");
-        return;
+        Ok(Self {
+            _root: root,
+            cwd: work.clone(),
+            work,
+            env,
+            stdout: String::new(),
+            stderr: String::new(),
+            log: String::new(),
+        })
     }
-    let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
-    let cache_dir = base.join("cache");
 
-    // Linked worktrees of one repository share receipts.
-    fn git(dir: &std::path::Path, args: &[&str]) {
-        let status = bit::git::command()
+    fn execute(&mut self, line: &str) -> Result<Flow, String> {
+        let mut words = self.split(line)?;
+        // Conditions come first, each in brackets.
+        while let Some(condition) = words.first().and_then(|word| word.strip_prefix('[')?.strip_suffix(']')) {
+            let (negated, condition) = match condition.strip_prefix('!') {
+                Some(condition) => (true, condition),
+                None => (false, condition),
+            };
+            let holds = match condition.split_once(':') {
+                Some(("exec", program)) => bit::providers::find_executable(program).is_some(),
+                None if condition == "docker" => docker_running(),
+                _ => return Err(format!("unknown condition [{condition}]")),
+            };
+            if holds == negated {
+                return Ok(Flow::Continue);
+            }
+            words.remove(0);
+        }
+        let negated = words.first().is_some_and(|word| word == "!");
+        if negated {
+            words.remove(0);
+        }
+        let Some((command, args)) = words.split_first() else {
+            return Err("no command".into());
+        };
+        self.command(negated, command, args)
+    }
+
+    fn command(&mut self, negated: bool, command: &str, args: &[String]) -> Result<Flow, String> {
+        match command {
+            "bit" => self.exec(negated, Path::new(env!("CARGO_BIN_EXE_bit")), args)?,
+            "exec" => {
+                let (program, args) = args.split_first().ok_or("exec needs a program")?;
+                self.exec(negated, Path::new(program), args)?;
+            }
+            "stdout" | "stderr" => {
+                let [pattern] = args else {
+                    return Err(format!("{command} needs one pattern"));
+                };
+                let output = if command == "stdout" {
+                    &self.stdout
+                } else {
+                    &self.stderr
+                };
+                let found = regex(pattern)?.is_match(output);
+                check(negated, found, || format!("{command} matches {pattern:?}"))?;
+            }
+            "exists" => {
+                for path in args {
+                    let exists = self.path(path).exists();
+                    check(negated, exists, || format!("{path} exists"))?;
+                }
+            }
+            "grep" => {
+                let [pattern, file] = args else {
+                    return Err("grep needs a pattern and a file".into());
+                };
+                let content = self.read(file)?;
+                let found = regex(pattern)?.is_match(&content);
+                check(negated, found, || format!("{file} matches {pattern:?}"))?;
+            }
+            "cmp" => {
+                let [a, b] = args else {
+                    return Err("cmp needs two files".into());
+                };
+                let (left, right) = (self.read(a)?, self.read(b)?);
+                if (left == right) == negated {
+                    let expectation = if negated { "differ" } else { "match" };
+                    return Err(format!(
+                        "{a} and {b} should {expectation}\n--- {a}\n{left}\n--- {b}\n{right}"
+                    ));
+                }
+            }
+            "cp" => {
+                let [from, to] = args else {
+                    return Err("cp needs a source and a destination".into());
+                };
+                let to = self.path(to);
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                // Files are copied as bytes, as they may be jars. The copy
+                // is modified now: `fs::copy` keeps the source's time on
+                // macOS, and tools such as cargo would then take an edited
+                // file for an unchanged one.
+                let copied = match from.as_str() {
+                    "stdout" | "stderr" => fs::write(&to, self.read(from)?),
+                    _ => fs::copy(self.path(from), &to).and_then(|_| {
+                        fs::File::options()
+                            .write(true)
+                            .open(&to)?
+                            .set_modified(std::time::SystemTime::now())
+                    }),
+                };
+                copied.map_err(|e| format!("cp {from} {}: {e}", to.display()))?;
+            }
+            "rm" => {
+                for path in args {
+                    let path = self.path(path);
+                    let removed = if path.is_dir() {
+                        fs::remove_dir_all(&path)
+                    } else {
+                        fs::remove_file(&path)
+                    };
+                    removed.map_err(|e| format!("{}: {e}", path.display()))?;
+                }
+            }
+            "mkdir" => {
+                for path in args {
+                    fs::create_dir_all(self.path(path)).map_err(|e| format!("{path}: {e}"))?;
+                }
+            }
+            "cd" => {
+                let [dir] = args else {
+                    return Err("cd needs a directory".into());
+                };
+                let dir = self.path(dir);
+                self.cwd = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            "env" => {
+                for assignment in args {
+                    let (name, value) = assignment
+                        .split_once('=')
+                        .ok_or_else(|| format!("env needs NAME=value, not {assignment:?}"))?;
+                    self.env.insert(name.to_owned(), value.to_owned());
+                }
+            }
+            "skip" => return Ok(Flow::Skip(args.join(" "))),
+            _ => return Err(format!("unknown command {command:?}")),
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// Run `program`, recording its output, which must succeed unless
+    /// `negated`.
+    fn exec(&mut self, negated: bool, program: &Path, args: &[String]) -> Result<(), String> {
+        let output = Command::new(program)
             .args(args)
-            .current_dir(dir)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?} failed");
-    }
-    let repo = base.join("repo");
-    fs::create_dir_all(&repo).unwrap();
-    git(&repo, &["init", "-q"]);
-    git(
-        &repo,
-        &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "init",
-        ],
-    );
-
-    fn write_project(root: &std::path::Path) {
-        fs::write(root.join("go.mod"), "module example.com/app\n").unwrap();
-        fs::write(
-            root.join("main.go"),
-            "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"hello from cache\") }\n",
-        )
-        .unwrap();
-    }
-
-    fn build_bit(root: &std::path::Path) -> String {
-        format!(
-            "app = go.exe {{\n  package = \".\"\n  dir = \"{}\"\n  output = \"{}\"\n}}\n",
-            root.display(),
-            root.join("bin/app").display()
-        )
-    }
-
-    fn run(
-        root: &std::path::Path,
-        cache_dir: &std::path::Path,
-        store: &MemoryStore,
-        plan_only: bool,
-    ) -> Vec<engine::TargetPlan> {
-        let tracker = test_tracker();
-        let mut reg = ProviderRegistry::new();
-        reg.register(Box::new(bit::providers::go::GoProvider::new(tracker.clone())));
-        let module = parser::parse(&build_bit(root), "<test>").unwrap();
-        let (mut dag, base) = loader::load(&module, &Map::new(), &reg, store, &[]).unwrap();
-        let cache = BuildCache::open_at(root, cache_dir);
-        let output = Output::new(&[]);
-        if plan_only {
-            engine::plan(&mut dag, &base, &cache, &output, &[], &tracker).unwrap()
-        } else {
-            engine::apply(&mut dag, &base, store, &cache, &output, &[], 1, &tracker).unwrap()
+            .current_dir(&self.cwd)
+            .envs(&self.env)
+            .output()
+            .map_err(|e| format!("cannot run {}: {e}", program.display()))?;
+        self.stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        self.stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        for (name, text) in [("stdout", &self.stdout), ("stderr", &self.stderr)] {
+            if !text.is_empty() {
+                let _ = write!(self.log, "[{name}]\n{text}");
+                if !text.ends_with('\n') {
+                    self.log.push('\n');
+                }
+            }
+        }
+        match (output.status.success(), negated) {
+            (true, true) => Err("succeeded unexpectedly".into()),
+            (false, false) => Err(format!("failed: {}", output.status)),
+            _ => Ok(()),
         }
     }
 
-    let a = base.join("a");
-    git(&repo, &["worktree", "add", "-q", "--detach", a.to_str().unwrap()]);
-    write_project(&a);
-    let store_a = MemoryStore::new();
-    let plans = run(&a, &cache_dir, &store_a, false);
-    assert_eq!(plans[0].plan.action, bit::provider::PlanAction::Create);
-    assert!(a.join("bin/app").is_file());
-    fs::remove_dir_all(&a).unwrap();
+    /// The content of `name`: the last command's output for `stdout` and
+    /// `stderr`, and otherwise a file.
+    fn read(&self, name: &str) -> Result<String, String> {
+        match name {
+            "stdout" => Ok(self.stdout.clone()),
+            "stderr" => Ok(self.stderr.clone()),
+            _ => fs::read_to_string(self.path(name)).map_err(|e| format!("{name}: {e}")),
+        }
+    }
 
-    let b = base.join("b");
-    git(&repo, &["worktree", "add", "-q", "--detach", b.to_str().unwrap()]);
-    write_project(&b);
-    let store_b = MemoryStore::new();
-    let plans = run(&b, &cache_dir, &store_b, true);
-    assert_eq!(plans[0].plan.action, bit::provider::PlanAction::Restore);
-    assert!(!b.join("bin/app").exists(), "plan must not materialize");
+    fn path(&self, path: &str) -> PathBuf {
+        self.cwd.join(path)
+    }
 
-    let plans = run(&b, &cache_dir, &store_b, false);
-    assert_eq!(plans[0].plan.action, bit::provider::PlanAction::Restore);
-    let exe = b.join("bin/app");
-    assert!(exe.is_file());
-    let out = Command::new(&exe).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello from cache");
+    fn lookup(&self, name: &str) -> String {
+        match name {
+            "WORK" => self.work.display().to_string(),
+            "ROOT" => env!("CARGO_MANIFEST_DIR").to_owned(),
+            "BIT" => env!("CARGO_BIN_EXE_bit").to_owned(),
+            _ => self
+                .env
+                .get(name)
+                .cloned()
+                .or_else(|| std::env::var(name).ok())
+                .unwrap_or_default(),
+        }
+    }
 
-    let plans = run(&b, &cache_dir, &store_b, false);
-    assert_eq!(plans[0].plan.action, bit::provider::PlanAction::None);
+    /// Split a command line into words: spaces separate them, single quotes
+    /// keep text together with `''` for a quote, and variables expand
+    /// outside quotes.
+    fn split(&self, line: &str) -> Result<Vec<String>, String> {
+        let mut words = Vec::new();
+        let mut word = String::new();
+        let mut in_word = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                ' ' | '\t' => {
+                    if in_word {
+                        words.push(std::mem::take(&mut word));
+                        in_word = false;
+                    }
+                }
+                '\'' => {
+                    in_word = true;
+                    loop {
+                        match chars.next() {
+                            Some('\'') if chars.peek() == Some(&'\'') => {
+                                chars.next();
+                                word.push('\'');
+                            }
+                            Some('\'') => break,
+                            Some(c) => word.push(c),
+                            None => return Err("unterminated quote".into()),
+                        }
+                    }
+                }
+                '$' => {
+                    in_word = true;
+                    let name: String = if chars.peek() == Some(&'{') {
+                        chars.next();
+                        let name: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                        name
+                    } else {
+                        let mut name = String::new();
+                        while let Some(c) = chars.peek().filter(|c| c.is_ascii_alphanumeric() || **c == '_') {
+                            name.push(*c);
+                            chars.next();
+                        }
+                        name
+                    };
+                    if name.is_empty() {
+                        word.push('$');
+                    } else {
+                        word.push_str(&self.lookup(&name));
+                    }
+                }
+                c => {
+                    in_word = true;
+                    word.push(c);
+                }
+            }
+        }
+        if in_word {
+            words.push(word);
+        }
+        Ok(words)
+    }
 }
 
-/// End to end with the real binary: build a `rust.exe` target in linked
-/// worktree A, delete A, and confirm worktree B restores the binary from the
-/// shared cache without cargo compiling anything. The binary prints the
-/// `file!()` of a file it includes by absolute path, which only the remap
-/// makes relative to the repository.
-#[test]
-fn rust_exe_restores_from_shared_cache_with_remapped_paths() {
-    use std::process::Command;
-
-    fn git(dir: &std::path::Path, args: &[&str]) {
-        let status = bit::git::command()
-            .args(args)
-            .current_dir(dir)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {args:?} failed");
-    }
-    fn write_project(root: &std::path::Path) {
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("src/main.rs"),
-            "include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/here.rs\"));\nfn main() { println!(\"{}\", here()); }\n",
-        )
-        .unwrap();
-        fs::write(root.join("src/here.rs"), "fn here() -> &'static str { file!() }\n").unwrap();
-        fs::write(root.join("BUILD.bit"), "app = rust.exe {}\n").unwrap();
-        // The lockfile is an input. Without one the first build writes it,
-        // so the key A publishes would differ from the one B looks up.
-        let status = Command::new("cargo")
-            .args(["generate-lockfile", "--offline"])
-            .current_dir(root)
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
-    fn bit(root: &std::path::Path, cache: &std::path::Path, args: &[&str]) -> std::process::Output {
-        // When this suite itself runs under bit, cargo hands the
-        // test binary the outer worktree's wrapper; the inner bit must see a
-        // clean environment or it would defer to that wrapper.
-        let out = Command::new(env!("CARGO_BIN_EXE_bit"))
-            .args(args)
-            .current_dir(root)
-            .env("BIT_CACHE", format!("disk://{}", cache.display()))
-            .env_remove("RUSTC_WORKSPACE_WRAPPER")
-            .env_remove("RUSTC_WRAPPER")
+/// Whether a Docker daemon answers, asked once per run.
+fn docker_running() -> bool {
+    static RUNNING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RUNNING.get_or_init(|| {
+        Command::new("docker")
+            .args(["info", "--format", "{{.ServerVersion}}"])
             .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "bit {args:?} failed:\n{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        out
-    }
-
-    let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
-    let cache = base.join("cache");
-    let repo = base.join("repo");
-    fs::create_dir_all(&repo).unwrap();
-    git(&repo, &["init", "-q"]);
-    git(
-        &repo,
-        &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "init",
-        ],
-    );
-
-    let a = base.join("a");
-    git(&repo, &["worktree", "add", "-q", "--detach", a.to_str().unwrap()]);
-    write_project(&a);
-    bit(&a, &cache, &[]);
-    let exe_a = a.join("target/debug/app");
-    assert!(exe_a.is_file());
-    assert_eq!(
-        String::from_utf8_lossy(&Command::new(&exe_a).output().unwrap().stdout).trim(),
-        "src/here.rs"
-    );
-    fs::remove_dir_all(&a).unwrap();
-
-    let b = base.join("b");
-    git(&repo, &["worktree", "add", "-q", "--detach", b.to_str().unwrap()]);
-    write_project(&b);
-    bit(&b, &cache, &["--plan"]);
-    assert!(!b.join("target").exists(), "plan must not materialize");
-
-    bit(&b, &cache, &[]);
-    let exe_b = b.join("target/debug/app");
-    assert!(exe_b.is_file());
-    assert!(
-        !b.join("target/debug/.fingerprint").exists(),
-        "cargo must not have compiled anything in B"
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&Command::new(&exe_b).output().unwrap().stdout).trim(),
-        "src/here.rs"
-    );
+            .is_ok_and(|output| output.status.success())
+    })
 }
 
-#[test]
-fn cache_flag_with_clean_cleans_that_cache() {
-    use std::process::Command;
-    let tmp = tempfile::tempdir().unwrap();
-    let cache = tmp.path().join("cache");
-    fs::create_dir_all(cache.join("cas/v1/sha256/ab")).unwrap();
-    fs::write(cache.join("cas/v1/sha256/ab/abcd"), b"blob").unwrap();
-    fs::create_dir_all(cache.join("actions/v2")).unwrap();
-    fs::write(cache.join("actions/v2/k.json"), b"[]").unwrap();
-    fs::create_dir_all(cache.join("statehash")).unwrap();
-    fs::write(cache.join("statehash/state.json"), b"{}").unwrap();
+fn regex(pattern: &str) -> Result<Regex, String> {
+    Regex::new(&format!("(?m){pattern}")).map_err(|e| format!("bad pattern {pattern:?}: {e}"))
+}
 
-    let bit = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_bit"))
-            .args(args)
-            .current_dir(tmp.path())
-            .env_remove("BIT_CACHE")
-            .output()
-            .unwrap()
-    };
-    let uri = format!("disk://{}", cache.display());
-    let out = bit(&["--cache", &uri, "--clean"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(!cache.join("cas").exists());
-    assert!(!cache.join("actions").exists());
-    assert!(cache.join("statehash/state.json").is_file(), "local state must survive");
-
-    let out = bit(&["--cache", "s3+rw://bucket/prefix", "--clean"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("cannot clean s3+rw://bucket/prefix: bit does not clean this kind of cache"),
-        "{stderr}"
-    );
-
-    let out = bit(&["--cache", "ftp://host", "--plan"]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not a cache URI"));
+/// Fail unless `holds` is what `negated` asks for, describing the
+/// expectation with `what`.
+fn check(negated: bool, holds: bool, what: impl FnOnce() -> String) -> Result<(), String> {
+    match (holds, negated) {
+        (true, true) => Err(format!("unexpectedly, {}", what())),
+        (false, false) => Err(format!("expected: {}", what())),
+        _ => Ok(()),
+    }
 }

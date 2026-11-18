@@ -23,7 +23,7 @@ use super::jar::Jar;
 pub struct JavaBinaryInputs {
     /// Jars the application runs with, relative to `dir`, such as a library's `classpath` output
     pub classpath: Vec<String>,
-    /// Main class (defaults to the only class in the first `classpath` jar with a `main` method; one declared `public static void main(String[])` is preferred over JDK 25's instance and parameterless forms)
+    /// Main class, as a binary name such as `com.example.Main` or `Outer$Inner`, which a `classpath` jar must hold (defaults to the only class in the first `classpath` jar with a `main` method; one declared `public static void main(String[])` is preferred over JDK 25's instance and parameterless forms)
     #[serde(default)]
     pub main: Option<String>,
     /// Output directory, relative to `dir` (defaults to `build/<name>`, where `<name>` is the last element of `dir`). The jar takes the directory's name.
@@ -160,6 +160,30 @@ fn find_main(jar: &Path) -> Result<String, BoxError> {
     }
 }
 
+/// Fail unless a jar in `jars` holds `main`, a binary name such as
+/// `com.example.Main` or `Outer$Inner`, which `java -jar` would otherwise
+/// report only when the application runs.
+fn check_main(jars: &[PathBuf], main: &str) -> Result<(), BoxError> {
+    let entry = format!("{}.class", main.replace('.', "/"));
+    for jar in jars {
+        let archive = zip::ZipArchive::new(fs::File::open(jar)?)
+            .map_err(|e| format!("cannot read {} as a jar: {e}", jar.display()))?;
+        // A multi-release jar may hold a class only for some Java versions,
+        // under `META-INF/versions/<n>/`.
+        for name in archive.file_names() {
+            let name = name.map_err(|e| format!("cannot read {} as a jar: {e}", jar.display()))?;
+            let versioned = name
+                .strip_prefix("META-INF/versions/")
+                .and_then(|rest| rest.split_once('/'))
+                .map(|(_, name)| name);
+            if name == entry || versioned == Some(entry.as_str()) {
+                return Ok(());
+            }
+        }
+    }
+    Err(format!("main class {main} is in no `classpath` jar: no jar holds {entry}").into())
+}
+
 fn state_for(inputs: &Target<JavaBinaryInputs>) -> Result<JavaBinaryState, BoxError> {
     Ok(JavaBinaryState {
         classpath: inputs.classpath.clone(),
@@ -227,7 +251,10 @@ impl Resource for JavaBinaryResource {
             return Err(format!("class path entry {} is not a jar", entry.display()).into());
         }
         let main = match &inputs.main {
-            Some(main) => main.clone(),
+            Some(main) => {
+                check_main(&jars, main)?;
+                main.clone()
+            }
             None => find_main(jars.first().ok_or("`classpath` is empty")?)?,
         };
 
@@ -395,6 +422,39 @@ mod tests {
         assert!(error.contains("set `main` to one of A, B"), "{error}");
 
         let outputs = apply(&binary(&root, classpath, Some("B"))).unwrap();
+        let run = Command::new("java").arg("-jar").arg(&outputs.jar).output().unwrap();
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    }
+
+    #[test]
+    fn main_must_be_a_class_on_the_class_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let core = library(
+            &root.join("core"),
+            &[(
+                "core/Outer.java",
+                "package core; public class Outer { public static class Inner { public static void main(String[] a) {} } }",
+            )],
+            vec![],
+        );
+        let app = library(
+            &root.join("app"),
+            &[("app/Lib.java", "package app; class Lib {}")],
+            core,
+        );
+
+        let error = apply(&binary(&root, app.clone(), Some("core.Missing")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("main class core.Missing is in no `classpath` jar"),
+            "{error}"
+        );
+        assert!(!root.join("build").exists());
+
+        // A nested class in a dependency's jar.
+        let outputs = apply(&binary(&root, app, Some("core.Outer$Inner"))).unwrap();
         let run = Command::new("java").arg("-jar").arg(&outputs.jar).output().unwrap();
         assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     }

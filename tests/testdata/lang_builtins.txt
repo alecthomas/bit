@@ -1,0 +1,84 @@
+# Strings, operators, pipes and every pure built-in function evaluate as
+# documented. The command writes each result to a file to compare.
+env LANG_TEST_VAR=set
+bit
+cmp out.txt want.txt
+
+-- BUILD.bit --
+let name = "world"
+let items = ["a", "b"] + ["b", "c"]
+let raw = 'no #{name} \n here'
+let escaped = "\#{name}"
+let indented = <<-EOF
+  hello #{name | trim}
+    nested
+  EOF
+let verbatim = <<EOF
+  keep
+EOF
+let cond = if name == "world" then "yes" else "no"
+let neq = if name != "world" then "yes" else "no"
+
+out = exec {
+  command = <<-EOF
+    {
+      echo "concat=#{"a" + "b"} #{uniq(items) | shell_join}"
+      echo 'raw=#{raw}'
+      echo "indented=#{indented}"
+      echo "verbatim=#{verbatim}"
+      echo "escape=#{escaped}"
+      echo "cond=#{cond} #{neq}"
+      echo "env=#{env("LANG_TEST_VAR", "fallback")} #{env("LANG_UNSET_VAR", "fallback")}"
+      echo "exec=#{exec("echo  hi ") | trim}"
+      echo "glob=#{glob("src/*.txt") | shell_join}"
+      echo "lines=#{lines("a\n\nb\n") | shell_join}"
+      echo "split=#{split("a,b,c", ",") | shell_join}"
+      echo "trim=#{trim(["  x ", "y  "]) | shell_join}"
+      echo "trim_prefix=#{trim_prefix("libfoo.a", "lib")} #{trim_prefix("foo", "lib")}"
+      echo "trim_suffix=#{trim_suffix(["a.go", "b.rs"], ".go") | shell_join}"
+      echo "prefix=#{prefix(["a", "b"], "-") | shell_join}"
+      echo "suffix=#{suffix("x", ".txt")}"
+      echo "basename=#{basename("/a/b/c.txt")}"
+      echo "dirname=#{dirname(["/a/b/c.txt", "d/e"]) | shell_join}"
+      echo "replace=#{replace("v1.2.3", "v(\\d+)\\..*", "major $1")}"
+      echo "filter=#{filter(["a.go", "b_test.go", "c.go"], "_test\\.go$") | shell_join}"
+      echo "sha256=#{sha256("abc")}"
+      echo "shell_join=#{shell_join(["a b", "c"])}"
+      echo "shell_split=#{shell_split("x 'y z'") | prefix("<") | suffix(">") | shell_join}"
+      echo "project_dir=#{project_dir() | basename}"
+      echo "pipe=#{"  a,b " | trim | split(",") | suffix("!") | shell_join}"
+    } > out.txt
+  EOF
+  outputs = "out.txt"
+}
+-- src/one.txt --
+1
+-- src/two.txt --
+2
+-- want.txt --
+concat=ab a b c
+raw=no #{name} \n here
+indented=hello world
+  nested
+verbatim=  keep
+escape=#{name}
+cond=yes no
+env=set fallback
+exec=hi
+glob=src/one.txt src/two.txt
+lines=a b
+split=a b c
+trim=x y
+trim_prefix=foo.a foo
+trim_suffix=a b.rs
+prefix=-a -b
+suffix=x.txt
+basename=c.txt
+dirname=/a/b d
+replace=major 1
+filter=b_test.go
+sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+shell_join='a b' c
+shell_split='<x>' '<y z>'
+project_dir=work
+pipe='a!' 'b!'

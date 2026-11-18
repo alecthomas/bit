@@ -1,0 +1,252 @@
+# docker.push tags an image and pushes it to a registry, here a minimal one
+# built from Go's standard library and run with docker.container, so nothing
+# is pulled. A second run pushes nothing, a new image pushes again, and
+# --clean removes the local tag.
+[!docker] skip
+[!exec:go] skip
+[!exec:curl] skip
+
+# HOME is empty, so the docker CLI finds no user-installed buildx plugin.
+exec sh -c 'p=$(command -v docker-buildx) || exit 0; mkdir -p "$HOME/.docker/cli-plugins" && ln -s "$p" "$HOME/.docker/cli-plugins/docker-buildx"'
+
+bit
+stdout 'registry ✔ ok'
+stdout 'push ▶ docker tag bit-test-payload-[0-9a-f]{12}:[0-9a-f]{64} localhost:[0-9]+/bit-test-payload-[0-9a-f]{12}:v1 && docker push localhost:[0-9]+/bit-test-payload-[0-9a-f]{12}:v1$'
+stdout 'push ✔ ok'
+bit names
+grep '^ref=localhost:[0-9]+/bit-test-payload-[0-9a-f]{12}:v1$' names.sh
+exec sh pushed.sh
+cp stdout first.txt
+
+bit
+stdout 'push · no changes'
+
+# A new image pushes again.
+cp changed.txt payload/payload.txt
+bit
+stdout 'payload ✔ ok'
+stdout 'push ▶ .*\(image changed\)'
+stdout 'push ✔ ok'
+exec sh pushed.sh
+! cmp stdout first.txt
+
+cp names.sh saved.sh
+bit --clean
+stdout 'push ▶ docker rmi localhost:[0-9]+/bit-test-payload-[0-9a-f]{12}:v1'
+! exec sh -c '. ./saved.sh && docker image inspect "$ref"'
+! exec sh -c '. ./saved.sh && docker container inspect "$registry"'
+# docker push records the pushed digest as a name of the image. Neither the
+# image pushed first nor the last is left under it.
+exec sh -c '. ./saved.sh && docker images -a -q --filter "label=id=$id"'
+! stdout .
+
+-- BUILD.bit --
+let id   = replace(sha256(project_dir()), "^(.{12}).*$", "$1")
+let port = trim(exec("echo $(( 0x#{replace(id, "^(.{4}).*$", "$1")} % 20000 + 30000 ))"))
+let arch = replace(replace(trim(exec("docker info --format '{{.Architecture}}'")), "^aarch64$", "arm64"), "^x86_64$", "amd64")
+
+server = go.exe {
+  package = "./registry"
+  output  = "registry/registry"
+  cgo     = false
+  goos    = "linux"
+  goarch  = arch
+}
+
+registry-image = docker.image {
+  tag        = "bit-test-registry-#{id}:v1"
+  context    = "registry"
+  build_args = { ID = id }
+  depends_on = [server]
+}
+
+registry = docker.container {
+  image       = registry-image.ref
+  name        = "bit-test-registry-#{id}"
+  ports       = ["127.0.0.1:#{port}:5000"]
+  healthcheck = { test = "check", interval = 200ms }
+}
+
+payload = docker.image {
+  tag        = "bit-test-payload-#{id}:v1"
+  context    = "payload"
+  dockerfile = "../payload.Dockerfile"
+  build_args = { ID = id }
+}
+
+push = docker.push {
+  image      = payload.ref
+  tag        = "localhost:#{port}/bit-test-payload-#{id}:v1"
+  depends_on = [registry]
+}
+
+explicit names = exec {
+  command = "printf 'id=%s\nport=%s\nregistry=%s\nref=%s\n' #{id} #{port} bit-test-registry-#{id} #{push.ref} > names.sh"
+  outputs = "names.sh"
+  inputs  = []
+}
+-- pushed.sh --
+# Check that the registry serves the manifest docker recorded pushing for the
+# tag, and print its digest.
+. ./names.sh
+pushed=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref" | grep "^localhost:$port/" | sed 's/.*@//')
+served=$(curl -fsSI -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' "http://127.0.0.1:$port/v2/bit-test-payload-$id/manifests/v1" | tr -d '\r' | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: //p')
+[ -n "$pushed" ] && [ "$pushed" = "$served" ] || { echo "pushed $pushed, served $served" >&2; exit 1; }
+echo "$pushed"
+-- payload.Dockerfile --
+FROM scratch
+# A label unique to the project gives its image an ID no other run shares.
+ARG ID
+LABEL id=$ID
+COPY payload.txt /payload.txt
+-- payload/payload.txt --
+payload
+-- changed.txt --
+changed
+-- registry/Dockerfile --
+FROM scratch
+ARG ID
+LABEL id=$ID
+COPY registry /registry
+# Docker runs a healthcheck with /bin/sh -c, and scratch has no shell.
+COPY registry /bin/sh
+ENTRYPOINT ["/registry"]
+-- go.mod --
+module example.com/registry
+
+go 1.22
+-- registry/main.go --
+// A registry that keeps pushed blobs and manifests in memory: just enough
+// of the distribution API for docker push and a manifest fetch.
+package main
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"sync"
+)
+
+var (
+	uploadPath   = regexp.MustCompile(`^/v2/(.+)/blobs/uploads/([^/]*)$`)
+	blobPath     = regexp.MustCompile(`^/v2/(.+)/blobs/(sha256:[0-9a-f]{64})$`)
+	manifestPath = regexp.MustCompile(`^/v2/(.+)/manifests/([^/]+)$`)
+)
+
+type manifest struct {
+	mediaType string
+	body      []byte
+	digest    string
+}
+
+type registry struct {
+	mu        sync.Mutex
+	blobs     map[string][]byte
+	uploads   map[string][]byte
+	manifests map[string]manifest
+}
+
+func digestOf(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func (reg *registry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
+	body, _ := io.ReadAll(r.Body)
+	if r.URL.Path == "/v2/" {
+		return
+	}
+	if m := uploadPath.FindStringSubmatch(r.URL.Path); m != nil {
+		name, id := m[1], m[2]
+		if r.Method == http.MethodPost {
+			buf := make([]byte, 16)
+			rand.Read(buf)
+			id = hex.EncodeToString(buf)
+		}
+		data := append(reg.uploads[id], body...)
+		if digest := r.URL.Query().Get("digest"); digest != "" {
+			delete(reg.uploads, id)
+			reg.blobs[digest] = data
+			w.Header().Set("Location", "/v2/"+name+"/blobs/"+digest)
+			w.Header().Set("Docker-Content-Digest", digest)
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		reg.uploads[id] = data
+		w.Header().Set("Location", "/v2/"+name+"/blobs/uploads/"+id)
+		w.Header().Set("Docker-Upload-UUID", id)
+		w.Header().Set("Range", fmt.Sprintf("0-%d", max(len(data)-1, 0)))
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	if m := blobPath.FindStringSubmatch(r.URL.Path); m != nil {
+		blob, ok := reg.blobs[m[2]]
+		if !ok {
+			http.Error(w, `{"errors":[{"code":"BLOB_UNKNOWN"}]}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Docker-Content-Digest", m[2])
+		w.Header().Set("Content-Length", strconv.Itoa(len(blob)))
+		if r.Method == http.MethodGet {
+			w.Write(blob)
+		}
+		return
+	}
+	if m := manifestPath.FindStringSubmatch(r.URL.Path); m != nil {
+		name, ref := m[1], m[2]
+		if r.Method == http.MethodPut {
+			man := manifest{r.Header.Get("Content-Type"), body, digestOf(body)}
+			reg.manifests[name+":"+ref] = man
+			reg.manifests[name+"@"+man.digest] = man
+			w.Header().Set("Location", "/v2/"+name+"/manifests/"+man.digest)
+			w.Header().Set("Docker-Content-Digest", man.digest)
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		man, ok := reg.manifests[name+":"+ref]
+		if !ok {
+			man, ok = reg.manifests[name+"@"+ref]
+		}
+		if !ok {
+			http.Error(w, `{"errors":[{"code":"MANIFEST_UNKNOWN"}]}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", man.mediaType)
+		w.Header().Set("Docker-Content-Digest", man.digest)
+		w.Header().Set("Content-Length", strconv.Itoa(len(man.body)))
+		if r.Method == http.MethodGet {
+			w.Write(man.body)
+		}
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func main() {
+	// As /bin/sh -c, run the healthcheck: is the registry answering?
+	if filepath.Base(os.Args[0]) == "sh" {
+		if resp, err := http.Get("http://127.0.0.1:5000/v2/"); err == nil && resp.StatusCode == http.StatusOK {
+			os.Exit(0)
+		}
+		os.Exit(1)
+	}
+	reg := &registry{
+		blobs:     map[string][]byte{},
+		uploads:   map[string][]byte{},
+		manifests: map[string]manifest{},
+	}
+	if err := http.ListenAndServe(":5000", reg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

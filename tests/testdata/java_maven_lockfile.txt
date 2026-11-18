@@ -1,0 +1,97 @@
+# java.maven's lockfile: reused while the request is unchanged, even with
+# the repository's POMs gone; `frozen` refuses an outdated one; and a
+# library asking for an artifact the lockfile lacks gets a clear error.
+[!exec:javac] skip
+
+bit greeting
+cp greeting/build/greeting.jar repo/com/example/greeting/1.0/greeting-1.0.jar
+
+bit app
+stdout 'deps │ resolving 1 artifacts'
+stdout 'deps ✔ ok'
+stdout 'app ✔ ok'
+cp maven.lock.json first.lock.json
+
+# Forced to run with an unchanged request, java.maven uses the lockfile and
+# the cached jars rather than resolving again.
+rm repo
+bit --force deps
+stdout 'deps ✔ ok'
+! stdout 'resolving'
+cmp maven.lock.json first.lock.json
+
+# A changed request with `frozen` fails rather than resolving.
+cp BUILD.frozen BUILD.bit
+! bit deps
+stderr 'maven\.lock\.json is out of date, and `frozen` is set'
+cmp maven.lock.json first.lock.json
+! bit fresh
+stderr 'fresh\.lock\.json does not exist, and `frozen` is set'
+! exists fresh.lock.json
+
+# An artifact the lockfile lacks.
+cp BUILD.absent BUILD.bit
+! bit app
+stderr '`com\.example:absent` is not in the lockfile: add it to the `artifacts` of the java\.maven target'
+
+-- BUILD.bit --
+explicit greeting = java.library {
+  dir = "greeting"
+}
+
+deps = java.maven {
+  artifacts    = ["com.example:greeting:1.0"]
+  repositories = ["file://#{project_dir()}/repo"]
+}
+
+explicit app = java.library {
+  dir   = "app"
+  maven = ["com.example:greeting"]
+  lock  = deps.lock
+}
+-- BUILD.frozen --
+deps = java.maven {
+  artifacts    = ["com.example:greeting:1.0", "com.example:other:1.0"]
+  repositories = ["file://#{project_dir()}/repo"]
+  frozen       = true
+}
+
+explicit fresh = java.maven {
+  artifacts    = ["com.example:greeting:1.0"]
+  repositories = ["file://#{project_dir()}/repo"]
+  lock         = "fresh.lock.json"
+  frozen       = true
+}
+-- BUILD.absent --
+deps = java.maven {
+  artifacts    = ["com.example:greeting:1.0"]
+  repositories = ["file://#{project_dir()}/repo"]
+}
+
+explicit app = java.library {
+  dir   = "app"
+  maven = ["com.example:greeting", "com.example:absent"]
+  lock  = deps.lock
+}
+-- repo/com/example/greeting/1.0/greeting-1.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>greeting</artifactId>
+  <version>1.0</version>
+</project>
+-- greeting/src/main/java/com/example/greeting/Greeting.java --
+package com.example.greeting;
+
+public class Greeting {
+    public static String word() {
+        return "hello";
+    }
+}
+-- app/src/main/java/demo/Main.java --
+package demo;
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println(com.example.greeting.Greeting.word());
+    }
+}

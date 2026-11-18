@@ -1,0 +1,141 @@
+# java.binary options: several main classes need `main`, which picks one
+# and must name a class on the class path;
+# `output` names the directory and the jar; JDK 25's instance `void main()`
+# is found; and two class path jars with the same file name both reach
+# `lib/`.
+[!exec:javac] skip
+
+# Two static main classes and no `main`: the error names both, but not
+# Gamma, whose instance main loses to them.
+! bit ambiguous
+stderr 'several classes in .*tools\.jar have a main method, so set `main` to one of demo\.Alpha, demo\.Beta$'
+
+# A `main` no class path jar holds fails before anything is packaged.
+! bit missing
+stderr 'main class demo\.Delta is in no `classpath` jar: no jar holds demo/Delta\.class$'
+! exists tools/build/tools/tools.jar
+
+bit beta
+stdout 'beta ✔ ok'
+exists dist/beta-app/beta-app.jar
+exec java -jar dist/beta-app/beta-app.jar
+stdout '\Abeta\n\z'
+
+# An instance main method with no parameters, JDK 25's simplest form.
+bit simple
+exec java -jar simple/build/simple/simple.jar
+stdout '\Ainstance main\n\z'
+
+# Two libraries whose jars are both named util.jar.
+bit both
+exec ls both/build/both/lib
+stdout '^util\.jar$'
+stdout '^util-2\.jar$'
+exec java -jar both/build/both/both.jar
+stdout '\Afirst second\n\z'
+
+-- BUILD.bit --
+explicit tools = java.library {
+  dir = "tools"
+}
+
+explicit ambiguous = java.binary {
+  dir       = "tools"
+  classpath = tools.classpath
+}
+
+explicit beta = java.binary {
+  dir       = "tools"
+  classpath = tools.classpath
+  main      = "demo.Beta"
+  output    = "../dist/beta-app"
+}
+
+explicit missing = java.binary {
+  dir       = "tools"
+  classpath = tools.classpath
+  main      = "demo.Delta"
+}
+
+explicit simple-lib = java.library {
+  dir = "simple"
+}
+
+explicit simple = java.binary {
+  dir       = "simple"
+  classpath = simple-lib.classpath
+}
+
+explicit first = java.library {
+  dir = "first/util"
+}
+
+explicit second = java.library {
+  dir = "second/util"
+}
+
+explicit both-lib = java.library {
+  dir       = "both"
+  classpath = first.classpath + second.classpath
+}
+
+explicit both = java.binary {
+  dir       = "both"
+  classpath = both-lib.classpath
+}
+-- tools/src/main/java/demo/Alpha.java --
+package demo;
+
+public class Alpha {
+    public static void main(String[] args) {
+        System.out.println("alpha");
+    }
+}
+-- tools/src/main/java/demo/Beta.java --
+package demo;
+
+public class Beta {
+    public static void main(String[] args) {
+        System.out.println("beta");
+    }
+}
+-- tools/src/main/java/demo/Gamma.java --
+package demo;
+
+public class Gamma {
+    void main() {
+        System.out.println("gamma");
+    }
+}
+-- simple/src/main/java/demo/Simple.java --
+package demo;
+
+public class Simple {
+    void main() {
+        System.out.println("instance main");
+    }
+}
+-- first/util/src/main/java/first/First.java --
+package first;
+
+public class First {
+    public static String word() {
+        return "first";
+    }
+}
+-- second/util/src/main/java/second/Second.java --
+package second;
+
+public class Second {
+    public static String word() {
+        return "second";
+    }
+}
+-- both/src/main/java/demo/Both.java --
+package demo;
+
+public class Both {
+    public static void main(String[] args) {
+        System.out.println(first.First.word() + " " + second.Second.word());
+    }
+}

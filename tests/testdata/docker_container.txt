@@ -1,0 +1,231 @@
+# docker.container runs an image built here from a static Go binary, with
+# ports, environment and a healthcheck. A second run does nothing, a stopped
+# or removed container is created again, a config change or a new image
+# recreates it, a failing healthcheck fails the target, and --clean removes
+# the container.
+[!docker] skip
+[!exec:go] skip
+[!exec:curl] skip
+
+# HOME is empty, so the docker CLI finds no user-installed buildx plugin.
+exec sh -c 'p=$(command -v docker-buildx) || exit 0; mkdir -p "$HOME/.docker/cli-plugins" && ln -s "$p" "$HOME/.docker/cli-plugins/docker-buildx"'
+
+bit
+stdout 'server ✔ ok'
+stdout 'image ✔ ok'
+stdout 'app ▶ docker run -d --name bit-test-app-[0-9a-f]{12} -p 127\.0\.0\.1::8080 -e GREETING=\*\*\* --restart no .*--health-cmd check --health-interval 1s --health-timeout 5s --health-retries 5 bit-test-app-[0-9a-f]{12}:[0-9a-f]{64}$'
+stdout 'app │ healthy'
+stdout 'app ✔ ok'
+bit names
+exec sh get.sh
+stdout '\Ahello\n\z'
+exec sh -c '. ./names.sh && docker inspect --format "{{.State.Health.Status}} {{.HostConfig.RestartPolicy.Name}} {{.Config.Healthcheck.Retries}}" "$name"'
+stdout '\Ahealthy no 5\n\z'
+
+bit
+stdout 'app · no changes'
+
+# A container stopped or removed out of band is created again.
+exec sh -c '. ./names.sh && docker stop -t 0 "$name" >/dev/null'
+bit
+stdout 'app ▶ .*\(container not running\)'
+stdout 'app ✔ ok'
+exec sh get.sh
+stdout '\Ahello\n\z'
+
+exec sh -c '. ./names.sh && docker rm -f "$name" >/dev/null'
+bit
+stdout 'app ▶ .*\(container not running\)'
+stdout 'app ✔ ok'
+exec sh get.sh
+stdout '\Ahello\n\z'
+
+# Another container that took the name is replaced.
+exec sh -c '. ./names.sh && image=$(docker inspect --format "{{.Config.Image}}" "$name") && docker rm -f "$name" >/dev/null && docker run -d --name "$name" -p 127.0.0.1::8080 "$image" >/dev/null'
+exec sh get.sh
+stdout '\A\n\z'
+bit
+stdout 'app ▶ .*\(container replaced\)'
+stdout 'app ✔ ok'
+exec sh get.sh
+stdout '\Ahello\n\z'
+
+# Changed environment recreates the container from the same image.
+cp BUILD.bit.hi BUILD.bit
+bit
+stdout 'image · no changes'
+stdout 'app ✔ ok'
+exec sh get.sh
+stdout '\Ahi\n\z'
+
+# A new binary rebuilds the image, which recreates the container.
+cp main.go.loud main.go
+bit
+stdout 'server ✔ ok'
+stdout 'image ✔ ok'
+stdout 'app ▶ .*\(image changed\)'
+stdout 'app ✔ ok'
+exec sh get.sh
+stdout '\AHI\n\z'
+
+# A healthcheck that fails fails the target and removes its container.
+! bit sick
+stdout 'sick ✘ container healthcheck failed: unhealthy'
+! exec sh -c '. ./names.sh && docker container inspect "$sick"'
+
+cp names.sh saved.sh
+bit --clean
+! exec sh -c '. ./saved.sh && docker container inspect "$name"'
+! exec sh -c '. ./saved.sh && docker image inspect "$name:v1"'
+# The rebuild kept the previous image's pinned tag while the old container
+# used it, and --clean removes that too.
+! exec sh -c '. ./saved.sh && docker images -q --filter "label=id=${name##*-}" | grep .'
+
+-- BUILD.bit --
+let id   = replace(sha256(project_dir()), "^(.{12}).*$", "$1")
+let arch = replace(replace(trim(exec("docker info --format '{{.Architecture}}'")), "^aarch64$", "arm64"), "^x86_64$", "amd64")
+
+server = go.exe {
+  package = "."
+  output  = "server"
+  cgo     = false
+  goos    = "linux"
+  goarch  = arch
+}
+
+image = docker.image {
+  tag        = "bit-test-app-#{id}:v1"
+  build_args = { ID = id }
+  depends_on = [server]
+}
+
+app = docker.container {
+  image       = image.ref
+  name        = "bit-test-app-#{id}"
+  ports       = ["127.0.0.1::8080"]
+  environment = { GREETING = "hello" }
+  healthcheck = { test = "check", retries = 5 }
+}
+
+explicit sick = docker.container {
+  image       = image.ref
+  name        = "bit-test-sick-#{id}"
+  healthcheck = { test = "fail", interval = 100ms, timeout = 1s }
+}
+
+explicit names = exec {
+  command = "printf 'name=%s\nsick=%s\n' bit-test-app-#{id} bit-test-sick-#{id} > names.sh"
+  outputs = "names.sh"
+  inputs  = []
+}
+-- BUILD.bit.hi --
+let id   = replace(sha256(project_dir()), "^(.{12}).*$", "$1")
+let arch = replace(replace(trim(exec("docker info --format '{{.Architecture}}'")), "^aarch64$", "arm64"), "^x86_64$", "amd64")
+
+server = go.exe {
+  package = "."
+  output  = "server"
+  cgo     = false
+  goos    = "linux"
+  goarch  = arch
+}
+
+image = docker.image {
+  tag        = "bit-test-app-#{id}:v1"
+  build_args = { ID = id }
+  depends_on = [server]
+}
+
+app = docker.container {
+  image       = image.ref
+  name        = "bit-test-app-#{id}"
+  ports       = ["127.0.0.1::8080"]
+  environment = { GREETING = "hi" }
+  healthcheck = { test = "check", retries = 5 }
+}
+
+explicit sick = docker.container {
+  image       = image.ref
+  name        = "bit-test-sick-#{id}"
+  healthcheck = { test = "fail", interval = 100ms, timeout = 1s }
+}
+
+explicit names = exec {
+  command = "printf 'name=%s\nsick=%s\n' bit-test-app-#{id} bit-test-sick-#{id} > names.sh"
+  outputs = "names.sh"
+  inputs  = []
+}
+-- get.sh --
+# Fetch the page the container that names.sh names serves.
+. ./names.sh
+curl -fsS --retry 10 --retry-delay 1 --retry-all-errors "http://$(docker port "$name" 8080/tcp | head -n 1)/"
+-- Dockerfile --
+FROM scratch
+# A label unique to the project gives its image an ID no other run shares.
+ARG ID
+LABEL id=$ID
+COPY server /server
+# Docker runs a healthcheck with /bin/sh -c, and scratch has no shell.
+COPY server /bin/sh
+ENTRYPOINT ["/server"]
+-- go.mod --
+module example.com/server
+
+go 1.22
+-- main.go --
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	// As /bin/sh -c, run a healthcheck: "check" probes the server.
+	if filepath.Base(os.Args[0]) == "sh" {
+		if len(os.Args) == 3 && os.Args[2] == "check" {
+			if _, err := http.Get("http://127.0.0.1:8080/"); err == nil {
+				os.Exit(0)
+			}
+		}
+		os.Exit(1)
+	}
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, os.Getenv("GREETING"))
+	})
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+-- main.go.loud --
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	// As /bin/sh -c, run a healthcheck: "check" probes the server.
+	if filepath.Base(os.Args[0]) == "sh" {
+		if len(os.Args) == 3 && os.Args[2] == "check" {
+			if _, err := http.Get("http://127.0.0.1:8080/"); err == nil {
+				os.Exit(0)
+			}
+		}
+		os.Exit(1)
+	}
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, strings.ToUpper(os.Getenv("GREETING")))
+	})
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

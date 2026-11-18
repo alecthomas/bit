@@ -1,0 +1,12 @@
+# --schema --json groups schemas by builtins, provider, and imported module.
+bit --schema --json
+cp stdout schema.json
+exec jq -e '(.builtins.functions | type) == "array"' schema.json
+exec jq -e '(.docker.resources | type) == "array"' schema.json
+exec jq -e '.tools.resources[0].name == "tools.image"' schema.json
+exec jq -e '(.tools.functions | type) == "array"' schema.json
+
+-- BUILD.bit --
+import "./tools" as tools
+-- tools/image.bit --
+param tag: string

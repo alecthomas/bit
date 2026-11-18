@@ -1,0 +1,81 @@
+# pnpm.test runs the `test` script by default, or another named script, of a
+# package; a failing script fails the target, and a fix reruns it.
+[!exec:pnpm] skip
+
+bit good
+stdout 'good ▶ pnpm --filter calc run test$'
+stdout 'good │ 1 \+ 2 = 3'
+stdout 'good ✔ ok'
+
+bit good
+! stdout '✔ ok'
+
+! bit bad
+stdout 'bad ▶ pnpm --filter calc run check$'
+stdout 'bad │ check failed'
+stdout 'bad ✘'
+stderr 'target ''bad'''
+
+# A failed test runs again even when nothing changed.
+! bit bad
+stdout 'bad ▶'
+
+cp check.fixed.js packages/calc/check.js
+bit bad
+stdout 'bad ✔ ok'
+
+cp add.broken.js packages/calc/add.js
+! bit good
+stdout 'good │ 1 \+ 2 = -1'
+stdout 'good ✘'
+
+-- BUILD.bit --
+deps = pnpm.install {}
+
+good = pnpm.test {
+  package    = "calc"
+  depends_on = [deps]
+}
+
+bad = pnpm.test {
+  package    = "calc"
+  script     = "check"
+  depends_on = [deps]
+}
+-- pnpm-lock.yaml --
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  packages/calc: {}
+-- pnpm-workspace.yaml --
+packages:
+  - "packages/*"
+-- package.json --
+{ "name": "root", "private": true }
+-- packages/calc/package.json --
+{
+  "name": "calc",
+  "version": "1.0.0",
+  "scripts": { "test": "node test.js", "check": "node check.js" }
+}
+-- packages/calc/add.js --
+module.exports = (a, b) => a + b;
+-- add.broken.js --
+module.exports = (a, b) => a - b;
+-- packages/calc/test.js --
+const add = require("./add");
+const got = add(1, 2);
+console.log(`1 + 2 = ${got}`);
+process.exit(got === 3 ? 0 : 1);
+-- packages/calc/check.js --
+console.log("check failed");
+process.exit(1);
+-- check.fixed.js --
+console.log("check passed");

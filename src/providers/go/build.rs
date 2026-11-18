@@ -1,6 +1,7 @@
 use crate::process::CommandExt;
 use std::collections::BTreeMap;
 use std::io::BufReader;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ pub struct GoBuildInputs {
     #[serde(deserialize_with = "super::package_patterns")]
     #[schema(typ = crate::schema::string_or_list())]
     pub package: Vec<String>,
-    /// Extra flags passed to go build. The files `-o` writes are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. go runs in the directory `-C` names.
+    /// Extra flags passed to go build. The files `-o` writes are tracked as outputs, and the files `-modfile`, `-overlay` and `-pgo` name as inputs. `bit --clean` removes the files `-o` wrote; from a directory, only the executables `go build` wrote there. go runs in the directory `-C` names.
     #[serde(default)]
     pub flags: Vec<String>,
     /// Input file glob patterns, relative to `dir` (in addition to Go sources)
@@ -60,6 +61,48 @@ fn build_args(inputs: &GoBuildInputs) -> Vec<String> {
 /// The directory `go build` runs in.
 fn go_dir(inputs: &Target<GoBuildInputs>) -> Option<String> {
     super::run_dir(inputs.dir.as_deref(), &inputs.flags)
+}
+
+/// The files `go build` wrote because of `-o` in the target's flags, as
+/// bit's process sees them. As `go build` decides, `-o` names a directory
+/// when it ends in a separator or is one, and then receives only the
+/// executables of the main packages, named as `go.exe` names them. The
+/// directory may be shared, such as `.`, so it and the rest of its contents
+/// are kept.
+fn written_outputs(target: &Target<GoBuildState>) -> Result<Vec<PathBuf>, BoxError> {
+    let go_dir = super::run_dir(target.dir.as_deref(), &target.flags);
+    let mut main_packages = None;
+    let mut written = Vec::new();
+    for output in super::build_outputs(go_dir.as_deref(), &target.flags) {
+        let is_dir =
+            output.ends_with('/') || output.ends_with(std::path::MAIN_SEPARATOR) || Path::new(&output).is_dir();
+        if !is_dir {
+            written.push(PathBuf::from(output));
+            continue;
+        }
+        let packages = match &main_packages {
+            Some(packages) => packages,
+            None => main_packages.insert(list_main_packages(target, go_dir.as_deref())?),
+        };
+        let suffix = target.go_env.exe_suffix(&target.env);
+        written.extend(
+            packages
+                .iter()
+                .map(|package| Path::new(&output).join(format!("{}{suffix}", super::exe::default_exec_name(package)))),
+        );
+    }
+    Ok(written)
+}
+
+/// The import paths of the main packages among the target's patterns, as
+/// `go build` matches them with the target's tags and environment.
+fn list_main_packages(target: &Target<GoBuildState>, go_dir: Option<&str>) -> Result<Vec<String>, BoxError> {
+    let mut args = vec![
+        "-f".to_owned(),
+        r#"{{if eq .Name "main"}}{{.ImportPath}}{{end}}"#.to_owned(),
+    ];
+    args.extend(super::test::tag_flags(&target.flags));
+    super::list_packages(&target.package, &args, go_dir, &target.go_env.over(&target.env))
 }
 
 pub struct GoBuildResource {
@@ -175,7 +218,10 @@ impl Resource for GoBuildResource {
         })
     }
 
-    fn destroy(&self, _prior_state: &Target<GoBuildState>, _writer: &TargetWriter) -> Result<(), BoxError> {
+    fn destroy(&self, prior_state: &Target<GoBuildState>, writer: &TargetWriter) -> Result<(), BoxError> {
+        for path in written_outputs(prior_state)? {
+            crate::providers::remove_path(&path, writer)?;
+        }
         Ok(())
     }
 
@@ -233,6 +279,24 @@ mod tests {
         assert_eq!(Resource::output_keys(&test_resource(), &inputs), ["svc/mod/bin/"]);
         assert_eq!(build_args(&inputs), ["build", "-o", "bin/", "./..."]);
         assert_eq!(go_dir(&inputs).as_deref(), Some("svc/mod"));
+    }
+
+    #[test]
+    fn destroy_removes_the_output_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("build")).unwrap();
+        let archive = dir.path().join("build/a.a");
+        std::fs::write(&archive, "archive").unwrap();
+        let state = GoBuildState {
+            package: vec!["./a".into()],
+            flags: vec!["-o".into(), "build/a.a".into()],
+            go_env: GoEnv::default(),
+        };
+        let output = crate::output::Output::new(&[]);
+        let target = Target::new(Some(dir.path().to_string_lossy().into_owned()), state);
+        Resource::destroy(&test_resource(), &target, &output.writer("build")).unwrap();
+        assert!(!archive.exists());
+        assert!(dir.path().join("build").exists());
     }
 
     #[test]

@@ -41,3 +41,13 @@ roxmltree = "0.21.2"
 ureq = "3.5.0"
 sha1 = "0.11.0"
 base64 = "0.23"
+
+[dev-dependencies]
+libtest-mimic = "0.8.2"
+
+# End-to-end scripts in tests/testdata. They are slow, so `cargo test` runs
+# them only when named: `cargo test --test integration`.
+[[test]]
+name = "integration"
+harness = false
+test = false

@@ -1,0 +1,240 @@
+# docker.network creates networks, docker.container joins one, and
+# docker.network_attach connects a container to another under aliases that
+# other containers there resolve. A second run does nothing, a disconnected
+# container or a removed network is restored, changed aliases reconnect, and
+# --clean removes everything.
+[!docker] skip
+[!exec:go] skip
+
+# HOME is empty, so the docker CLI finds no user-installed buildx plugin.
+exec sh -c 'p=$(command -v docker-buildx) || exit 0; mkdir -p "$HOME/.docker/cli-plugins" && ln -s "$p" "$HOME/.docker/cli-plugins/docker-buildx"'
+
+bit
+stdout 'net ▶ docker network create bit-test-net-[0-9a-f]{12}$'
+stdout 'side ▶ docker network create --driver bridge bit-test-side-[0-9a-f]{12}$'
+stdout 'app ▶ docker run .*--network bit-test-net-[0-9a-f]{12} '
+stdout 'attach ▶ docker network connect --alias web --gw-priority 2 bit-test-side-[0-9a-f]{12} bit-test-app-[0-9a-f]{12}$'
+stdout 'probe ✔ ok'
+stdout 'ip ✔ ok'
+bit names
+exec sh -c '. ./names.sh && docker inspect --format "{{range \$n, \$_ := .NetworkSettings.Networks}}{{\$n}} {{end}}" "$app"'
+stdout 'bit-test-net-[0-9a-f]{12} '
+stdout 'bit-test-side-[0-9a-f]{12} '
+exec sh -c '. ./names.sh && docker inspect --format "{{(index .NetworkSettings.Networks \"$side\").IPAddress}}" "$app"'
+cmp stdout ip.txt
+exec sh -c '. ./names.sh && docker inspect --format "{{(index .NetworkSettings.Networks \"$side\").Aliases}}" "$app"'
+stdout '\bweb\b'
+exec sh -c '. ./names.sh && docker inspect --format "{{(index .NetworkSettings.Networks \"$side\").GwPriority}}" "$app"'
+stdout '\A2\n\z'
+
+bit
+! stdout '✔ ok'
+stdout 'attach · no changes'
+
+# A container disconnected out of band is connected again.
+exec sh -c '. ./names.sh && docker network disconnect "$side" "$app"'
+bit
+stdout 'attach ▶ .*\(endpoint missing\)'
+stdout 'attach ✔ ok'
+! stdout 'app ✔'
+exec sh -c '. ./names.sh && docker inspect --format "{{(index .NetworkSettings.Networks \"$side\").Aliases}}" "$app"'
+stdout '\bweb\b'
+
+# A network removed out of band is created again, the container connected
+# and the probe started on it.
+exec sh -c '. ./names.sh && docker rm -f "$probe" >/dev/null && docker network disconnect "$side" "$app" && docker network rm "$side" >/dev/null'
+bit
+stdout 'side ▶ .*\(network missing\)'
+stdout 'side ✔ ok'
+stdout 'attach ✔ ok'
+stdout 'probe ✔ ok'
+exec sh -c '. ./names.sh && docker network inspect --format "{{range .Containers}}{{.Name}}{{end}}" "$side"'
+stdout 'bit-test-app-[0-9a-f]{12}'
+
+# Changed aliases reconnect the container, and a probe resolves the new one.
+cp BUILD.bit.www BUILD.bit
+bit
+stdout 'attach ▶ docker network connect --alias web --alias www '
+stdout 'attach ✔ ok'
+stdout 'probe ✔ ok'
+exec sh -c '. ./names.sh && docker inspect --format "{{(index .NetworkSettings.Networks \"$side\").Aliases}}" "$app"'
+stdout '\bwww\b'
+
+cp names.sh saved.sh
+bit --clean
+stdout 'attach ▶ docker network disconnect bit-test-side-[0-9a-f]{12} bit-test-app-[0-9a-f]{12}'
+! exec sh -c '. ./saved.sh && docker container inspect "$app"'
+! exec sh -c '. ./saved.sh && docker container inspect "$probe"'
+! exec sh -c '. ./saved.sh && docker network inspect "$net"'
+! exec sh -c '. ./saved.sh && docker network inspect "$side"'
+! exec sh -c '. ./saved.sh && docker image inspect "$app:v1"'
+! exec sh -c '. ./saved.sh && docker images -q --filter "label=id=${app##*-}" | grep .'
+
+-- BUILD.bit --
+let id   = replace(sha256(project_dir()), "^(.{12}).*$", "$1")
+let arch = replace(replace(trim(exec("docker info --format '{{.Architecture}}'")), "^aarch64$", "arm64"), "^x86_64$", "amd64")
+
+server = go.exe {
+  package = "."
+  output  = "server"
+  cgo     = false
+  goos    = "linux"
+  goarch  = arch
+}
+
+image = docker.image {
+  tag        = "bit-test-app-#{id}:v1"
+  build_args = { ID = id }
+  depends_on = [server]
+}
+
+net = docker.network {
+  name = "bit-test-net-#{id}"
+}
+
+side = docker.network {
+  name   = "bit-test-side-#{id}"
+  driver = "bridge"
+}
+
+app = docker.container {
+  image   = image.ref
+  name    = "bit-test-app-#{id}"
+  network = net.name
+}
+
+attach = docker.network_attach {
+  network     = side.name
+  container   = app.name
+  aliases     = ["web"]
+  gw_priority = 2
+}
+
+# Healthy only once it reaches the app by its alias on the side network.
+probe = docker.container {
+  image       = image.ref
+  name        = "bit-test-probe-#{id}"
+  network     = side.name
+  healthcheck = { test = "check http://web:8080/", interval = 200ms }
+  depends_on  = [attach]
+}
+
+ip = exec {
+  command = "printf '%s\n' #{attach.ip_address} > ip.txt"
+  outputs = "ip.txt"
+  inputs  = []
+}
+
+explicit names = exec {
+  command = "printf 'app=%s\nprobe=%s\nnet=%s\nside=%s\n' bit-test-app-#{id} bit-test-probe-#{id} bit-test-net-#{id} bit-test-side-#{id} > names.sh"
+  outputs = "names.sh"
+  inputs  = []
+}
+-- BUILD.bit.www --
+let id   = replace(sha256(project_dir()), "^(.{12}).*$", "$1")
+let arch = replace(replace(trim(exec("docker info --format '{{.Architecture}}'")), "^aarch64$", "arm64"), "^x86_64$", "amd64")
+
+server = go.exe {
+  package = "."
+  output  = "server"
+  cgo     = false
+  goos    = "linux"
+  goarch  = arch
+}
+
+image = docker.image {
+  tag        = "bit-test-app-#{id}:v1"
+  build_args = { ID = id }
+  depends_on = [server]
+}
+
+net = docker.network {
+  name = "bit-test-net-#{id}"
+}
+
+side = docker.network {
+  name   = "bit-test-side-#{id}"
+  driver = "bridge"
+}
+
+app = docker.container {
+  image   = image.ref
+  name    = "bit-test-app-#{id}"
+  network = net.name
+}
+
+attach = docker.network_attach {
+  network     = side.name
+  container   = app.name
+  aliases     = ["www", "web"]
+  gw_priority = 2
+}
+
+# Healthy only once it reaches the app by its alias on the side network.
+probe = docker.container {
+  image       = image.ref
+  name        = "bit-test-probe-#{id}"
+  network     = side.name
+  healthcheck = { test = "check http://www:8080/", interval = 200ms }
+  depends_on  = [attach]
+}
+
+ip = exec {
+  command = "printf '%s\n' #{attach.ip_address} > ip.txt"
+  outputs = "ip.txt"
+  inputs  = []
+}
+
+explicit names = exec {
+  command = "printf 'app=%s\nprobe=%s\nnet=%s\nside=%s\n' bit-test-app-#{id} bit-test-probe-#{id} bit-test-net-#{id} bit-test-side-#{id} > names.sh"
+  outputs = "names.sh"
+  inputs  = []
+}
+-- Dockerfile --
+FROM scratch
+# A label unique to the project gives its image an ID no other run shares.
+ARG ID
+LABEL id=$ID
+COPY server /server
+# Docker runs a healthcheck with /bin/sh -c, and scratch has no shell.
+COPY server /bin/sh
+ENTRYPOINT ["/server"]
+-- go.mod --
+module example.com/server
+
+go 1.22
+-- main.go --
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func main() {
+	// As /bin/sh -c, run a healthcheck: "check [url]" fetches the URL, by
+	// default this server's.
+	if filepath.Base(os.Args[0]) == "sh" {
+		words := strings.Fields(os.Args[len(os.Args)-1])
+		url := "http://127.0.0.1:8080/"
+		if len(words) > 1 {
+			url = words[1]
+		}
+		if len(words) > 0 && words[0] == "check" {
+			if resp, err := http.Get(url); err == nil && resp.StatusCode == http.StatusOK {
+				os.Exit(0)
+			}
+		}
+		os.Exit(1)
+	}
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "ok")
+	})
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

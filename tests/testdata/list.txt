@@ -1,0 +1,51 @@
+# --list shows groups with their doc comments; -ll shows targets with their
+# resources, and indents dependencies beneath their dependents.
+bit -l
+stdout build
+stdout 'Build the project'
+stdout deploy
+! stdout 'exec\.exec'
+
+bit -ll
+stdout alpha
+stdout beta
+stdout 'exec\.exec'
+! stdout 'Build the project'
+
+cp BUILD.bit.deps BUILD.bit
+bit -ll
+stdout '^package '
+stdout '^  binary-a '
+stdout '^    toolchain-a '
+stdout '^  binary-b '
+stdout '^    toolchain-b '
+stdout '^    shared .*\(also: binary-b\)'
+
+-- BUILD.bit --
+alpha = exec {
+  command = "true"
+}
+
+beta = exec {
+  command = "true"
+}
+
+# Build the project
+group build = [alpha, beta]
+group deploy = [beta]
+-- BUILD.bit.deps --
+toolchain-a = exec { command = "true" }
+toolchain-b = exec { command = "true" }
+shared = exec { command = "true" }
+binary-a = exec {
+  command = "true"
+  depends_on = [toolchain-a, shared]
+}
+binary-b = exec {
+  command = "true"
+  depends_on = [toolchain-b, shared]
+}
+package = exec {
+  command = "true"
+  depends_on = [binary-a, binary-b]
+}

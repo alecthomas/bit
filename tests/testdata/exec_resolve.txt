@@ -1,0 +1,43 @@
+# `resolve` captures state: a change in its output reruns the target, and a
+# failing resolve plans a create. `values` turns a JSON object into outputs.
+bit remote
+stdout '^remote ▶ '
+grep '\Av1\n\z' applied.txt
+
+bit remote
+stdout '^remote · no changes$'
+
+cp state.txt.v2 state.txt
+bit --plan remote
+stdout '^remote ~ .*\(resolve: resource state drifted\)$'
+bit remote
+stdout '^remote ▶ .*\(resolve: resource state drifted\)$'
+grep '\Av2\n\z' applied.txt
+
+rm state.txt
+bit --plan remote
+stdout '^remote \+ '
+
+bit show
+stdout '^ *show │ version=1\.2 name=demo$'
+
+-- BUILD.bit --
+remote = exec {
+  command = "cp state.txt applied.txt"
+  resolve = "cat state.txt"
+}
+
+info = exec {
+  command = "true"
+  values = "cat info.json"
+}
+
+show = exec {
+  command = "echo version=#{info.version} name=#{info.name}"
+}
+-- state.txt --
+v1
+-- state.txt.v2 --
+v2
+-- info.json --
+{"version": "1.2", "name": "demo"}

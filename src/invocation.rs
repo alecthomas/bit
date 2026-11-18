@@ -96,14 +96,14 @@ pub(crate) fn materialize(
         .collect();
     plain_groups.sort();
     for name in plain_groups {
-        context.instantiate_group(&name, &[], &context.scope.clone(), &mut Vec::new())?;
+        context.instantiate_group(&name, &[], &context.scope.clone(), None, &mut Vec::new())?;
     }
 
     if invocations.is_empty()
         && let Some(default) = context.groups.get("default").cloned()
         && !default.params.is_empty()
     {
-        let targets = context.instantiate_group("default", &[], &context.scope.clone(), &mut Vec::new())?;
+        let targets = context.instantiate_group("default", &[], &context.scope.clone(), None, &mut Vec::new())?;
         context.dag.add_group("default".into(), targets, default.doc);
     }
 
@@ -112,11 +112,11 @@ pub(crate) fn materialize(
         if let Some(group) = context.groups.get(&invocation.name).cloned() {
             let args = cli_args(&group.params, &invocation.args, &group.name, &group.pos)?;
             let name = context.group_name(&group, &args, &context.scope.clone())?;
-            context.instantiate_group(&group.name, &args, &context.scope.clone(), &mut Vec::new())?;
+            context.instantiate_group(&group.name, &args, &context.scope.clone(), None, &mut Vec::new())?;
             selected.push(name);
         } else if let Some(target) = context.targets.get(&invocation.name).cloned() {
             let args = cli_args(&target.params, &invocation.args, &target.name, &target.pos)?;
-            let name = context.instantiate_target(&target, &args, &context.scope.clone(), &mut Vec::new())?;
+            let name = context.instantiate_target(&target, &args, &context.scope.clone(), None, &mut Vec::new())?;
             if target.matrix_keys.is_empty() {
                 selected.push(name);
             } else {
@@ -170,15 +170,19 @@ impl Instantiator<'_> {
     }
 
     fn group_name(&self, group: &Group, args: &[Field], caller: &Scope) -> Result<String, LoadError> {
-        let bound = bind(&group.name, &group.pos, &group.params, args, caller)?;
+        let bound = bind(&group.name, &group.pos, &group.pos, &group.params, args, caller)?;
         Ok(instance_name(&group.name, &group.params, &bound.values))
     }
 
+    /// Instantiate group `name` with `args`. `call_pos` is the group that
+    /// calls it, or `None` for a call from the command line or the loader,
+    /// which reports argument errors at the declaration.
     fn instantiate_group(
         &mut self,
         name: &str,
         args: &[Field],
         caller: &Scope,
+        call_pos: Option<&crate::ast::Pos>,
         stack: &mut Vec<String>,
     ) -> Result<Vec<String>, LoadError> {
         let Some(group) = self.groups.get(name).cloned() else {
@@ -196,7 +200,14 @@ impl Instantiator<'_> {
                 .map(|group| group.targets.clone())
                 .ok_or_else(|| invalid(&crate::ast::Pos::default(), name, "unknown group"));
         };
-        let bound = bind(name, &group.pos, &group.params, args, caller)?;
+        let bound = bind(
+            name,
+            &group.pos,
+            call_pos.unwrap_or(&group.pos),
+            &group.params,
+            args,
+            caller,
+        )?;
         let instance = instance_name(name, &group.params, &bound.values);
         if let Some(existing) = self.dag.groups().get(&instance) {
             return Ok(existing.targets.clone());
@@ -211,12 +222,26 @@ impl Instantiator<'_> {
                 if call.keys.is_some() {
                     return Err(invalid(&group.pos, &call.name, "a group cannot have matrix keys"));
                 }
-                targets.extend(self.instantiate_group(&call.name, &call.args, &bound.scope, stack)?);
+                targets.extend(self.instantiate_group(
+                    &call.name,
+                    &call.args,
+                    &bound.scope,
+                    Some(&group.pos),
+                    stack,
+                )?);
             } else if let Some(target) = self.targets.get(&call.name).cloned() {
                 if let Some(keys) = &call.keys {
-                    targets.push(self.select_matrix_slice(&target, keys, &call.args, &bound.scope, &mut Vec::new())?);
+                    targets.push(self.select_matrix_slice(
+                        &target,
+                        keys,
+                        &call.args,
+                        &bound.scope,
+                        Some(&group.pos),
+                        &mut Vec::new(),
+                    )?);
                 } else {
-                    let name = self.instantiate_target(&target, &call.args, &bound.scope, &mut Vec::new())?;
+                    let name =
+                        self.instantiate_target(&target, &call.args, &bound.scope, Some(&group.pos), &mut Vec::new())?;
                     if target.matrix_keys.is_empty() {
                         targets.push(name);
                     } else {
@@ -241,6 +266,7 @@ impl Instantiator<'_> {
         keys: &[Expr],
         args: &[Field],
         caller: &Scope,
+        call_pos: Option<&crate::ast::Pos>,
         stack: &mut Vec<String>,
     ) -> Result<String, LoadError> {
         if target.matrix_keys.is_empty() || keys.len() != target.matrix_keys.len() {
@@ -251,7 +277,7 @@ impl Instantiator<'_> {
             .map(|key| self.materialize_expr(key, caller, stack))
             .collect::<Result<_, _>>()?;
         let rewritten_args = self.materialize_fields(args, caller, stack)?;
-        let instance = self.instantiate_target(target, &rewritten_args, caller, stack)?;
+        let instance = self.instantiate_target(target, &rewritten_args, caller, call_pos, stack)?;
         let values: Vec<_> = rewritten_keys
             .iter()
             .map(|key| {
@@ -273,11 +299,14 @@ impl Instantiator<'_> {
         Ok(slice)
     }
 
+    /// Instantiate `target` with `args`. `call_pos` is as for
+    /// [`Self::instantiate_group`].
     fn instantiate_target(
         &mut self,
         target: &Target,
         args: &[Field],
         caller: &Scope,
+        call_pos: Option<&crate::ast::Pos>,
         stack: &mut Vec<String>,
     ) -> Result<String, LoadError> {
         if target.params.is_empty() {
@@ -290,7 +319,14 @@ impl Instantiator<'_> {
             }
             return Ok(target.name.clone());
         }
-        let bound = bind(&target.name, &target.pos, &target.params, args, caller)?;
+        let bound = bind(
+            &target.name,
+            &target.pos,
+            call_pos.unwrap_or(&target.pos),
+            &target.params,
+            args,
+            caller,
+        )?;
         let instance_args = instance_args(&target.params, &bound.values);
         let name = format!("{}{instance_args}", target.name);
         if self.dag.has_target(&name) || self.matrix_targets.contains_key(&name) {
@@ -501,10 +537,10 @@ impl Instantiator<'_> {
                     .cloned()
                     .ok_or_else(|| invalid(&crate::ast::Pos::default(), name, "unknown parameterized target"))?;
                 let instance = if let Some(keys) = keys {
-                    self.select_matrix_slice(&target, keys, args, caller, stack)?
+                    self.select_matrix_slice(&target, keys, args, caller, None, stack)?
                 } else {
                     let rewritten_args = self.materialize_fields(args, caller, stack)?;
-                    self.instantiate_target(&target, &rewritten_args, caller, stack)?
+                    self.instantiate_target(&target, &rewritten_args, caller, None, stack)?
                 };
                 if fields.is_empty() {
                     Expr::TargetRef(instance)
@@ -595,9 +631,13 @@ impl Instantiator<'_> {
     }
 }
 
+/// Bind `args` to `params`. Errors in the arguments are reported at
+/// `call_pos`, where they are written; errors in a default at `pos`, the
+/// declaration.
 fn bind(
     name: &str,
     pos: &crate::ast::Pos,
+    call_pos: &crate::ast::Pos,
     params: &[Param],
     args: &[Field],
     caller: &Scope,
@@ -605,32 +645,36 @@ fn bind(
     let mut given = HashMap::new();
     for arg in args {
         if given.insert(arg.name.as_str(), &arg.value).is_some() {
-            return Err(invalid(pos, name, &format!("duplicate argument '{}'", arg.name)));
+            return Err(invalid(call_pos, name, &format!("duplicate argument '{}'", arg.name)));
         }
     }
     for key in given.keys() {
         if !params.iter().any(|param| &param.name.as_str() == key) {
-            return Err(invalid(pos, name, &format!("unknown argument '{key}'")));
+            return Err(invalid(call_pos, name, &format!("unknown argument '{key}'")));
         }
     }
     let mut scope = caller.clone();
     let mut values = Vec::new();
     let mut substitutions = HashMap::new();
     for param in params {
-        let value = match given.get(param.name.as_str()) {
-            Some(value) => expr::eval(value, caller).map_err(|source| LoadError::Eval {
-                pos: pos.clone(),
-                source,
-            })?,
+        let (value, pos) = match given.get(param.name.as_str()) {
+            Some(value) => {
+                let value = expr::eval(value, caller).map_err(|source| LoadError::Eval {
+                    pos: call_pos.clone(),
+                    source,
+                })?;
+                (value, call_pos)
+            }
             None => {
                 let default = param
                     .default
                     .as_ref()
-                    .ok_or_else(|| invalid(pos, name, &format!("missing required argument '{}'", param.name)))?;
-                expr::eval(default, &scope).map_err(|source| LoadError::Eval {
+                    .ok_or_else(|| invalid(call_pos, name, &format!("missing required argument '{}'", param.name)))?;
+                let value = expr::eval(default, &scope).map_err(|source| LoadError::Eval {
                     pos: pos.clone(),
                     source,
-                })?
+                })?;
+                (value, pos)
             }
         };
         // Bound values name the instance, and an instance must be writable

@@ -1,0 +1,57 @@
+# buf.format-check fails with a diff on unformatted files, and buf.format
+# rewrites them, after which the check passes.
+[!exec:buf] skip
+
+bit check
+stdout 'check ▶ buf format --diff --exit-code'
+stdout 'check ✔ ok'
+
+cp user.proto.messy proto/acme/v1/user.proto
+! bit check
+stdout '-     string name = 1;'
+stdout '\+  string name = 1;'
+stdout 'check ✘ tests failed'
+cmp proto/acme/v1/user.proto user.proto.messy
+
+bit fix
+stdout 'fix ▶ buf format --write'
+stdout 'fix ✔ ok'
+cmp proto/acme/v1/user.proto user.proto.formatted
+
+bit fix
+stdout 'fix · no changes'
+
+bit check
+stdout 'check ✔ ok'
+
+-- BUILD.bit --
+explicit check = buf.format-check {}
+explicit fix = buf.format {}
+-- buf.yaml --
+version: v2
+modules:
+  - path: proto
+-- proto/acme/v1/user.proto --
+syntax = "proto3";
+
+package acme.v1;
+
+message User {
+  string name = 1;
+}
+-- user.proto.messy --
+syntax = "proto3";
+
+package acme.v1;
+
+message User {
+     string name = 1;
+}
+-- user.proto.formatted --
+syntax = "proto3";
+
+package acme.v1;
+
+message User {
+  string name = 1;
+}

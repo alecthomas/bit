@@ -1,0 +1,132 @@
+# rust.test in a workspace of two crates: each report mode, features, a
+# failing test that stays failed until fixed, and a whole-workspace run.
+[!exec:cargo] skip
+
+# `suites` shows a line per test binary, and cargo's diagnostics only on
+# failure.
+bit suites
+stdout 'suites ▶ cargo test -p calc$'
+stdout 'suites ✔ PASS calc \(src/lib\.rs\) \(.*2 passed\)'
+stdout 'suites ✔ PASS doc-tests calc'
+! stdout 'PASS calc \(src/lib\.rs\)/'
+! stdout 'Compiling'
+! stdout 'noisy'
+stdout 'suites ✔ ok'
+
+# `tests` shows a line per test, and features select the tests that build.
+bit tests
+stdout 'tests ▶ cargo test -p calc --features extra$'
+stdout 'tests ✔ PASS calc \(src/lib\.rs\)/tests::adds$'
+stdout 'tests ✔ PASS calc \(src/lib\.rs\)/tests::adds_zero$'
+stdout 'tests ✔ PASS calc \(src/lib\.rs\)/tests::extra$'
+! stdout 'Finished'
+
+# `verbose` adds cargo's own output as it arrives.
+bit verbose
+stdout 'verbose │ .*Finished'
+stdout 'verbose ✔ PASS calc \(src/lib\.rs\)/tests::adds$'
+! stdout 'tests::extra'
+
+bit suites tests verbose
+! stdout '✔ ok'
+
+# A failing test shows its panic and fails the run, and fails again until
+# fixed.
+! bit failing
+stdout 'failing ✔ PASS broken \(src/lib\.rs\)/fine$'
+stdout 'failing ✘ FAIL broken \(src/lib\.rs\)/sum$'
+stdout 'failing ┆ .*math is broken'
+stderr 'test target ''failing'' failed'
+! bit failing
+stdout 'failing ▶ .*previously failed'
+
+# The runner's cp keeps the file's older mtime on macOS, which cargo reads as
+# unchanged, so the system cp writes the fix.
+exec cp fixed.rs broken/src/lib.rs
+bit failing
+stdout 'failing ✔ PASS broken \(src/lib\.rs\)/sum$'
+stdout 'failing ✔ ok'
+
+# Without `package`, every member's tests run.
+bit workspace
+stdout 'workspace ▶ cargo test$'
+stdout 'workspace ✔ PASS calc \(src/lib\.rs\)'
+stdout 'workspace ✔ PASS broken \(src/lib\.rs\)'
+
+-- BUILD.bit --
+explicit suites = rust.test {
+  package = "calc"
+}
+
+explicit tests = rust.test {
+  package  = "calc"
+  report   = "tests"
+  features = ["extra"]
+}
+
+explicit verbose = rust.test {
+  package = "calc"
+  report  = "verbose"
+}
+
+explicit failing = rust.test {
+  package = "broken"
+  report  = "tests"
+}
+
+explicit workspace = rust.test {}
+-- Cargo.toml --
+[workspace]
+members = ["calc", "broken"]
+resolver = "2"
+-- calc/Cargo.toml --
+[package]
+name = "calc"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+extra = []
+-- calc/src/lib.rs --
+pub fn add(x: i32, y: i32) -> i32 {
+    x + y
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adds() {
+        assert_eq!(super::add(1, 2), 3);
+    }
+
+    #[test]
+    fn adds_zero() {
+        println!("noisy");
+        assert_eq!(super::add(0, 2), 2);
+    }
+
+    #[cfg(feature = "extra")]
+    #[test]
+    fn extra() {}
+}
+-- broken/Cargo.toml --
+[package]
+name = "broken"
+version = "0.1.0"
+edition = "2021"
+-- broken/src/lib.rs --
+#[test]
+fn sum() {
+    assert_eq!(1 + 1, 3, "math is broken");
+}
+
+#[test]
+fn fine() {}
+-- fixed.rs --
+#[test]
+fn sum() {
+    assert_eq!(1 + 1, 2, "math is broken");
+}
+
+#[test]
+fn fine() {}

@@ -168,7 +168,7 @@ struct Cli {
     #[arg(short = 'D', long)]
     debug: bool,
 
-    /// Suppress all output unless an error occurs
+    /// Suppress all output except errors and the output of failing targets
     #[arg(short = 'q', long)]
     quiet: bool,
 
@@ -415,11 +415,11 @@ fn make_output(dag: &bit::dag::Dag, targets: &[String], debug: bool, long: bool,
 }
 
 fn output_for_names(names: &[String], debug: bool, long: bool, quiet: bool) -> Output {
-    if quiet {
-        return Output::silent();
-    }
     let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    Output::new(&name_refs).with_debug(debug).with_long(long)
+    Output::new(&name_refs)
+        .with_debug(debug)
+        .with_long(long)
+        .with_quiet(quiet)
 }
 
 /// Compute per-node graph styles that reflect each target's planned action.
@@ -1492,7 +1492,9 @@ fn scan_module_schemas(
     let mut results: Vec<(String, String, bit::provider::ResourceSchema)> = Vec::new();
     for root in import_roots {
         for (resource, schema) in scan_one_provider(&root.path) {
-            let display = if root.provider == resource {
+            // The default resource is called bare, by the provider's name,
+            // which an `as` alias may have changed.
+            let display = if root.default_resource == resource {
                 root.provider.clone()
             } else {
                 format!("{}.{resource}", root.provider)
@@ -1593,6 +1595,32 @@ mod tests {
 
     fn registry() -> ProviderRegistry {
         default_registry(&Arc::new(FileTracker::new()))
+    }
+
+    /// The `--help` example must stay valid BUILD.bit, with its comments
+    /// aligned in one column.
+    #[test]
+    fn help_example_parses_with_aligned_comments() {
+        let help = Cli::command().render_long_help().to_string();
+        let example = help
+            .split_once("BUILD.bit example (illustrative):\n")
+            .unwrap()
+            .1
+            .split_once("\nUse --schema")
+            .unwrap()
+            .0
+            .lines()
+            .map(|line| line.strip_prefix("  ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let comment_columns: Vec<_> = example
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("# "))
+            .filter_map(|line| line.find("# "))
+            .collect();
+        assert!(!comment_columns.is_empty());
+        assert!(comment_columns.iter().all(|column| *column == comment_columns[0]));
+        bit::parser::parse(&example, "BUILD.bit").unwrap();
     }
 
     #[test]

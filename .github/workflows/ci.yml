@@ -15,6 +15,16 @@ jobs:
           cache: true
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit clippy fmt-check s3-cache-test s3-test"
+  integration-test:
+    name: "integration-test"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+        with:
+          cache: true
+      # Use the Hermit-pinned bit rather than one built from this checkout.
+      - run: "bin/bit integration-test"
   release:
     name: "release"
     runs-on: ubuntu-latest
@@ -40,7 +50,7 @@ jobs:
   ci:
     name: "ci"
     if: always()
-    needs: ["default", "release", "test"]
+    needs: ["default", "integration-test", "release", "test"]
     runs-on: ubuntu-latest
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')

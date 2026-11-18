@@ -1,0 +1,118 @@
+# exec.test passes or fails by exit status, and `results` maps the command's
+# JSON output to suites and tests, shown as `report` selects.
+bit plain_pass
+stdout '^plain_pass ✔ ok$'
+
+! bit plain_fail
+stdout '^plain_fail │ broken$'
+stdout '^plain_fail ✘ tests failed$'
+stderr '^error: BUILD\.bit:\d+:1: test target ''plain_fail'' failed$'
+
+# Tests already running when one fails still finish, and the error names
+# every test that failed.
+! bit -j2 plain_fail also_fails
+stdout '^ *also_fails ✘ tests failed$'
+stdout '^ *plain_fail ✘ tests failed$'
+stderr '^error: 2 test targets failed:\n  BUILD\.bit:\d+:1: ''also_fails''\n  BUILD\.bit:\d+:1: ''plain_fail''$'
+
+# suites, the default: a line per suite. Logs of passing tests are hidden.
+bit suites
+stdout '^suites ✔ PASS math \(\d+ms, 1 passed, 1 skipped\)$'
+stdout '^suites ✔ PASS strings \(\d+ms, 1 passed\)$'
+! stdout 'adds'
+! stdout 'adding numbers'
+! stdout 'a plain log line'
+
+# tests: a line per test.
+bit tests
+stdout '^tests ✔ PASS math/adds \(500ms\)$'
+stdout '^tests · SKIP math/skips$'
+stdout '^tests ✔ PASS strings/joins \(250ms\)$'
+! stdout 'PASS math \('
+! stdout 'adding numbers'
+
+# verbose: a line per test, and logs as they arrive.
+bit verbose
+stdout '^verbose │ adding numbers\n(.*\n)?verbose ✔ PASS math/adds \(500ms\)$'
+stdout '^verbose │ a plain log line$'
+stdout '^verbose ✔ PASS strings/joins \(250ms\)$'
+
+# A failed test fails the target, though the command succeeded, and shows
+# its logs.
+cp failing.jsonl results.jsonl
+! bit suites
+stdout '^suites ✘ FAIL math \(\d+ms, 1 passed, 1 failed\)$'
+stdout '^suites ┆   divides \(100ms\)$'
+stdout '^suites ┆     division by zero$'
+stdout '^suites ✔ PASS strings \(\d+ms, 1 passed\)$'
+stdout '^suites ✘ tests failed$'
+! stdout 'adding numbers'
+
+! bit tests
+stdout '^tests ✘ FAIL math/divides \(100ms\)$'
+stdout '^tests ┆   division by zero$'
+stdout '^tests ✔ PASS math/adds \(500ms\)$'
+
+# A failed test runs again, though nothing changed.
+! bit suites
+stdout '^suites ▶ .*\(previously failed\)$'
+
+# A failing exit status fails the target, though every test passed.
+! bit exit_fails
+stdout '^exit_fails ✔ PASS only/one'
+stdout '^exit_fails ✘ '
+
+-- BUILD.bit --
+let filter = <<-EOF
+  {suite: .s}
+    + (if .t then {name: .t} else {} end)
+    + (if .o then {output: .o} else {} end)
+    + (if .st then {status: .st, duration: .d} else {} end)
+EOF
+
+plain_pass = exec.test { command = "echo fine" }
+plain_fail = exec.test { command = "echo broken; exit 1" }
+also_fails = exec.test { command = "exit 1" }
+
+suites = exec.test {
+  command = "cat results.jsonl"
+  inputs = ["results.jsonl"]
+  results = filter
+}
+
+tests = exec.test {
+  command = "cat results.jsonl"
+  inputs = ["results.jsonl"]
+  results = filter
+  report = "tests"
+}
+
+verbose = exec.test {
+  command = "cat results.jsonl"
+  inputs = ["results.jsonl"]
+  results = filter
+  report = "verbose"
+}
+
+exit_fails = exec.test {
+  command = "echo '{\"s\":\"only\",\"t\":\"one\",\"st\":\"pass\",\"d\":0}'; exit 1"
+  results = filter
+  report = "tests"
+}
+-- results.jsonl --
+{"s":"math","t":"adds","o":"adding numbers\n"}
+{"s":"math","t":"adds","st":"pass","d":0.5}
+{"s":"math","t":"skips","st":"skip","d":0}
+a plain log line
+{"s":"strings","t":"joins","st":"pass","d":0.25}
+{"s":"math","st":"pass","d":1}
+{"s":"strings","st":"pass","d":1}
+-- failing.jsonl --
+{"s":"math","t":"adds","o":"adding numbers\n"}
+{"s":"math","t":"adds","st":"pass","d":0.5}
+{"s":"math","t":"divides","o":"division by zero\n"}
+{"s":"math","t":"divides","st":"fail","d":0.1}
+a plain log line
+{"s":"strings","t":"joins","st":"pass","d":0.25}
+{"s":"math","st":"fail","d":1}
+{"s":"strings","st":"pass","d":1}

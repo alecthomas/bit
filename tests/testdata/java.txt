@@ -1,0 +1,163 @@
+# Java libraries, binaries and tests with Maven dependencies, through the
+# binary: outputs pass between targets, a second run does nothing, a change
+# reruns what depends on it, and a cleaned project restores from the cache.
+[!exec:javac] skip
+
+# A Maven repository on disk, with jars built here: a library, and a stand-in
+# for the JUnit console launcher that java.maven adds beside JUnit's engine.
+bit greeting console
+cp greeting/build/greeting.jar repo/com/example/greeting/1.0/greeting-1.0.jar
+cp greeting/build/greeting.jar repo/org/junit/platform/junit-platform-engine/1.0/junit-platform-engine-1.0.jar
+cp console/build/console.jar repo/org/junit/platform/junit-platform-console/1.0/junit-platform-console-1.0.jar
+
+bit
+stdout 'deps ✔ ok'
+stdout 'core-test ✔ ok'
+stdout 'server ✔ ok'
+grep '"org\.junit\.platform:junit-platform-console"' maven.lock.json
+exec java -jar app/build/app/app.jar
+stdout '\Ahello, world\n\z'
+
+bit
+! stdout '✔ ok'
+
+cp Greeter.java.changed core/src/main/java/demo/Greeter.java
+bit
+stdout 'core ✔ ok'
+stdout 'core-test ✔ ok'
+stdout 'app ✔ ok'
+stdout 'server ✔ ok'
+! stdout 'deps ✔'
+exec java -jar app/build/app/app.jar
+stdout '\Ahi, world\n\z'
+
+bit --clean
+! exists core/build/core.jar
+! exists app/build/app
+bit
+stdout 'restore'
+exec java -jar app/build/app/app.jar
+stdout '\Ahi, world\n\z'
+
+-- BUILD.bit --
+explicit greeting = java.library {
+  dir = "greeting"
+}
+
+explicit console = java.library {
+  dir = "console"
+}
+
+deps = java.maven {
+  artifacts = [
+    "com.example:greeting:1.0",
+    "org.junit.platform:junit-platform-engine:1.0",
+  ]
+  repositories = ["file://#{project_dir()}/repo"]
+}
+
+core = java.library {
+  dir   = "core"
+  maven = ["com.example:greeting"]
+  lock  = deps.lock
+}
+
+core-test = java.test {
+  dir       = "core"
+  classpath = core.classpath
+  maven     = ["org.junit.platform:junit-platform-engine"]
+  lock      = deps.lock
+}
+
+app = java.library {
+  dir       = "app"
+  classpath = core.classpath
+}
+
+server = java.binary {
+  dir       = "app"
+  classpath = app.classpath
+}
+-- repo/com/example/greeting/1.0/greeting-1.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>greeting</artifactId>
+  <version>1.0</version>
+</project>
+-- repo/org/junit/platform/junit-platform-engine/1.0/junit-platform-engine-1.0.pom --
+<project>
+  <groupId>org.junit.platform</groupId>
+  <artifactId>junit-platform-engine</artifactId>
+  <version>1.0</version>
+</project>
+-- repo/org/junit/platform/junit-platform-console/1.0/junit-platform-console-1.0.pom --
+<project>
+  <groupId>org.junit.platform</groupId>
+  <artifactId>junit-platform-console</artifactId>
+  <version>1.0</version>
+</project>
+-- greeting/src/main/java/com/example/greeting/Greeting.java --
+package com.example.greeting;
+
+public class Greeting {
+    public static String word() {
+        return "hello";
+    }
+}
+-- console/src/main/java/org/junit/platform/console/ConsoleLauncher.java --
+package org.junit.platform.console;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+// Reports one passing test per compiled test class, as JUnit's launcher would.
+public class ConsoleLauncher {
+    public static void main(String[] args) throws Exception {
+        Path classes = null;
+        Path reports = null;
+        for (String arg : args) {
+            if (arg.startsWith("--scan-class-path=")) classes = Paths.get(arg.substring(18));
+            if (arg.startsWith("--reports-dir=")) reports = Paths.get(arg.substring(14));
+        }
+        StringBuilder xml = new StringBuilder("<testsuite>");
+        Path root = classes;
+        try (var files = Files.walk(root)) {
+            files.filter(f -> f.toString().endsWith("Test.class")).forEach(f -> {
+                String name = root.relativize(f).toString().replace(".class", "").replace('/', '.');
+                xml.append("<testcase name=\"works()\" classname=\"").append(name).append("\"/>");
+            });
+        }
+        Files.createDirectories(reports);
+        Files.writeString(reports.resolve("TEST-junit-jupiter.xml"), xml.append("</testsuite>"));
+    }
+}
+-- core/src/main/java/demo/Greeter.java --
+package demo;
+
+public class Greeter {
+    public static String greet(String name) {
+        return com.example.greeting.Greeting.word() + ", " + name;
+    }
+}
+-- Greeter.java.changed --
+package demo;
+
+public class Greeter {
+    public static String greet(String name) {
+        return "hi, " + name;
+    }
+}
+-- core/src/test/java/demo/GreeterTest.java --
+package demo;
+
+class GreeterTest {
+}
+-- app/src/main/java/demo/Main.java --
+package demo;
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println(Greeter.greet("world"));
+    }
+}

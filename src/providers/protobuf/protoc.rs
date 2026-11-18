@@ -588,6 +588,20 @@ fn run_full(
         // `dir` changed are removed but their emptied directories remain.
         let prior_inputs = Target::new(inputs.dir.clone(), prior.inputs.clone());
         remove_generated(&stale, &prior_inputs.outputs(), writer)?;
+
+        // protoc writes descriptor sets itself, so they are not among the
+        // staged files above, and one the flags no longer name would stay.
+        let written: BTreeSet<PathBuf> = inputs
+            .descriptor_outputs()
+            .into_iter()
+            .chain(generated.iter().map(PathBuf::from))
+            .map(|path| super::normalize(&path))
+            .collect();
+        for descriptor in prior_inputs.descriptor_outputs() {
+            if !written.contains(&super::normalize(&descriptor)) {
+                crate::providers::remove_path(&descriptor, writer)?;
+            }
+        }
     }
     Ok(generated)
 }
@@ -699,7 +713,12 @@ impl Resource for ProtocGenerateResource {
 
     fn destroy(&self, prior_state: &Target<ProtocGenerateState>, writer: &TargetWriter) -> Result<(), BoxError> {
         let inputs = Target::new(prior_state.dir.clone(), prior_state.inputs.clone());
-        remove_generated(&prior_state.generated, &inputs.outputs(), writer)
+        remove_generated(&prior_state.generated, &inputs.outputs(), writer)?;
+        // protoc writes descriptor sets itself, outside `generated`.
+        for descriptor in inputs.descriptor_outputs() {
+            crate::providers::remove_path(&descriptor, writer)?;
+        }
+        Ok(())
     }
 
     /// Incremental runs compile only the sources that changed.
@@ -1088,5 +1107,27 @@ mod tests {
         Resource::destroy(&test_resource(), &state, &output.writer("generate")).unwrap();
         assert!(!out.join("acme").exists());
         assert!(out.join("go.mod").exists());
+    }
+
+    #[test]
+    fn destroy_removes_descriptor_sets() {
+        let (dir, mut inputs) = project();
+        inputs.flags = vec!["--descriptor_set_out=desc.pb".into(), "-o".into(), "set.pb".into()];
+        for name in ["desc.pb", "set.pb"] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        let state = ProtocGenerateState {
+            inputs: inputs.value.clone(),
+            compiled: vec![],
+            protos: BTreeMap::new(),
+            tools: BTreeMap::new(),
+            generated: vec![],
+            generated_hashes: BTreeMap::new(),
+        };
+        let output = crate::output::Output::new(&[]);
+        let state = Target::new(inputs.dir.clone(), state);
+        Resource::destroy(&test_resource(), &state, &output.writer("generate")).unwrap();
+        assert!(!dir.path().join("desc.pb").exists());
+        assert!(!dir.path().join("set.pb").exists());
     }
 }

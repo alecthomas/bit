@@ -512,22 +512,45 @@ fn short_value(flag: &str, name: &str, flags: &mut std::slice::Iter<String>) -> 
 }
 
 impl Selection<'_> {
-    /// The discovered workspace and the input paths of the selected packages.
-    fn paths(&self) -> Result<(DiscoveredPaths, InputPaths), BoxError> {
-        let flags = SelectionFlags::parse(self.flags);
-        // `--manifest-path` points cargo at another workspace, which it
-        // resolves from the manifest's directory.
+    /// The directory cargo resolves the workspace from: `dir`, or the
+    /// directory of a `--manifest-path` in `flags`, which points cargo at
+    /// another workspace.
+    fn cargo_dir(&self, flags: &SelectionFlags) -> Option<String> {
         let manifest_dir = flags.manifest_path.as_deref().map(|manifest| {
             let parent = Path::new(manifest).parent().unwrap_or(Path::new(""));
             crate::provider::in_dir(self.dir, &parent.to_string_lossy())
         });
-        let dir = manifest_dir.as_deref().filter(|dir| !dir.is_empty()).or(self.dir);
-        let discovered = discovered(dir, self.env)?;
-        let names: Vec<&str> = self
-            .package
+        manifest_dir
+            .filter(|dir| !dir.is_empty())
+            .or_else(|| self.dir.map(str::to_owned))
+    }
+
+    /// The `package` field and the `-p` specs in `flags`.
+    fn package_names<'a>(&'a self, flags: &'a SelectionFlags) -> Vec<&'a str> {
+        self.package
             .into_iter()
             .chain(flags.packages.iter().map(String::as_str))
-            .collect();
+            .collect()
+    }
+
+    /// The binary `cargo run` would build among the selected packages, when
+    /// cargo must be told which: `None` when they have at most one binary,
+    /// the `default-run` of the selected packages when exactly one sets it,
+    /// and otherwise an error listing the binaries.
+    pub fn run_binary(&self) -> Result<Option<String>, BoxError> {
+        let flags = SelectionFlags::parse(self.flags);
+        let dir = self.cargo_dir(&flags);
+        let metadata = cargo_metadata(dir.as_deref(), self.env)?;
+        let cwd = std::env::current_dir()?.join(dir.as_deref().unwrap_or(""));
+        run_binary(&metadata, &cwd, &self.package_names(&flags), flags.workspace)
+    }
+
+    /// The discovered workspace and the input paths of the selected packages.
+    fn paths(&self) -> Result<(DiscoveredPaths, InputPaths), BoxError> {
+        let flags = SelectionFlags::parse(self.flags);
+        let dir = self.cargo_dir(&flags);
+        let discovered = discovered(dir.as_deref(), self.env)?;
+        let names = self.package_names(&flags);
         if flags.workspace || names.is_empty() {
             let workspace = discovered.workspace.clone();
             return Ok((discovered, workspace));
@@ -557,6 +580,109 @@ impl Selection<'_> {
 /// [`resolve_rust_inputs`] selects them.
 pub fn package_roots(selection: &Selection) -> Result<Vec<PathBuf>, BoxError> {
     Ok(selection.paths()?.1.roots)
+}
+
+/// The binary `cargo run` would build in `cwd`, following cargo's own rules:
+/// the packages are `names`, every member with `workspace`, or else the
+/// package of the manifest cargo finds from `cwd`, or the default members
+/// when that manifest is a virtual workspace.
+fn run_binary(
+    metadata: &serde_json::Value,
+    cwd: &Path,
+    names: &[&str],
+    workspace: bool,
+) -> Result<Option<String>, BoxError> {
+    let members = workspace_packages_by_name(metadata)?;
+    let packages: Vec<&serde_json::Value> = if workspace {
+        members.values().copied().collect()
+    } else if !names.is_empty() {
+        names
+            .iter()
+            .map(|name| {
+                members
+                    .get(*name)
+                    .copied()
+                    .ok_or_else(|| format!("Rust package '{name}' not found in workspace"))
+            })
+            .collect::<Result<_, _>>()?
+    } else if let Some(package) = current_package(&members, cwd) {
+        vec![package]
+    } else {
+        default_members(metadata, &members)
+    };
+
+    let mut bins: Vec<&str> = packages
+        .iter()
+        .filter_map(|package| package.get("targets")?.as_array())
+        .flatten()
+        .filter(|target| {
+            target
+                .get("kind")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("bin")))
+        })
+        .filter_map(|target| target.get("name")?.as_str())
+        .collect();
+    if bins.len() <= 1 {
+        return Ok(None);
+    }
+    let default_runs: Vec<&str> = packages
+        .iter()
+        .filter_map(|package| package.get("default_run")?.as_str())
+        .collect();
+    if let [bin] = default_runs[..] {
+        return Ok(Some(bin.to_owned()));
+    }
+    bins.sort_unstable();
+    Err(format!(
+        "cannot tell which binary to build; set `bin`, or `default-run` in Cargo.toml (available binaries: {})",
+        bins.join(", ")
+    )
+    .into())
+}
+
+/// The workspace member whose manifest cargo finds from `cwd`, the nearest
+/// `Cargo.toml` in it or a parent, or `None` for a virtual manifest.
+fn current_package<'a>(members: &HashMap<String, &'a serde_json::Value>, cwd: &Path) -> Option<&'a serde_json::Value> {
+    // Cargo reports manifest paths with symlinks resolved, as in macOS's
+    // `/tmp`, while `cwd` may still hold them.
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let manifest = cwd
+        .ancestors()
+        .map(|dir| dir.join("Cargo.toml"))
+        .find(|manifest| manifest.is_file())?;
+    members.values().copied().find(|package| {
+        package
+            .get("manifest_path")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|path| Path::new(path).canonicalize().ok())
+            .is_some_and(|path| path == manifest)
+    })
+}
+
+/// The members cargo selects in a virtual workspace without `-p`: its
+/// `default-members`, or every member when cargo is too old to report them.
+fn default_members<'a>(
+    metadata: &serde_json::Value,
+    members: &HashMap<String, &'a serde_json::Value>,
+) -> Vec<&'a serde_json::Value> {
+    let Some(ids) = metadata
+        .get("workspace_default_members")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return members.values().copied().collect();
+    };
+    let ids: HashSet<&str> = ids.iter().filter_map(serde_json::Value::as_str).collect();
+    members
+        .values()
+        .copied()
+        .filter(|package| {
+            package
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| ids.contains(id))
+        })
+        .collect()
 }
 
 /// Each of `names` in every directory from each of `starts` up to the

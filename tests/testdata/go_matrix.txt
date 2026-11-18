@@ -1,0 +1,85 @@
+# go.modules and go.packages expand matrix targets: a test per package in
+# each module, skipping modules under `_` and `testdata` and modules without
+# packages, and a binary per command.
+[!exec:go] skip
+
+bit -ll
+stdout '^tests\[".", "example\.com/root"\] \(go\.test\)$'
+stdout '^tests\["svc", "example\.com/svc/api"\] \(go\.test\)$'
+stdout '^tests\["svc", "example\.com/svc/db"\] \(go\.test\)$'
+stdout '^bins\["example\.com/root/cmd/one"\] \(go\.exe\)$'
+stdout '^bins\["example\.com/root/cmd/two"\] \(go\.exe\)$'
+! stdout 'skip|testdata|tools|cmd/one", "'
+
+bit
+stdout 'tests\["svc", "example\.com/svc/api"\] ✔ PASS \./api '
+grep '\A\.\nsvc\ntools\n\z' modules.txt
+exec ./bin/one
+stderr '\Aone\n\z'
+exec ./bin/two
+stderr '\Atwo\n\z'
+
+# A change in one module reruns only its slices.
+cp api.go.changed svc/api/api.go
+bit
+stdout 'tests\["svc", "example\.com/svc/api"\] ▶'
+! stdout 'tests\["svc", "example\.com/svc/db"\] ▶'
+! stdout 'tests\[".", "example\.com/root"\] ▶'
+
+-- BUILD.bit --
+let module = go.modules()
+
+tests[module, package = go.packages("./...", module)] = go.test {
+  dir     = module
+  package = package
+}
+
+bins[cmd = go.packages("./cmd/...")] = go.exe {
+  package = cmd
+  output  = "bin/#{cmd | basename}"
+}
+
+modules = exec {
+  command = "printf '%s\n' #{go.modules() | shell_join} > modules.txt"
+  outputs = ["modules.txt"]
+}
+-- go.mod --
+module example.com/root
+
+go 1.22
+-- root.go --
+package root
+-- cmd/one/main.go --
+package main
+
+func main() { println("one") }
+-- cmd/two/main.go --
+package main
+
+func main() { println("two") }
+-- svc/go.mod --
+module example.com/svc
+
+go 1.22
+-- svc/api/api.go --
+package api
+-- api.go.changed --
+package api
+
+const Version = 2
+-- svc/api/api_test.go --
+package api
+
+import "testing"
+
+func TestAPI(t *testing.T) {}
+-- svc/db/db.go --
+package db
+-- tools/go.mod --
+module example.com/tools
+
+go 1.22
+-- _skip/go.mod --
+module example.com/skip
+-- testdata/mod/go.mod --
+module example.com/td

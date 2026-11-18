@@ -13,7 +13,8 @@ use crate::provider::{
 use crate::sha256::SHA256;
 
 /// Push a Docker image to a registry. Pushes again only when the image
-/// changes, not when the registry copy was deleted or overwritten.
+/// changes, not when the registry copy was deleted or overwritten. Pushing a
+/// new image removes the local digest reference of the one pushed before.
 #[derive(Debug, Deserialize, bit_derive::Schema)]
 pub struct PushInputs {
     /// Source image reference (e.g. from a docker.image target's ref)
@@ -34,6 +35,58 @@ pub struct PushState {
     pub image: String,
     pub tag: String,
     pub image_id: String,
+    /// The digest references `docker push` gave the image, `repo@sha256:…`,
+    /// which name it locally until removed.
+    #[serde(default)]
+    pub digests: Vec<String>,
+}
+
+/// The repository `tag` names: everything before its tag, if it has one.
+/// A registry's port also follows a `:`, but comes before the last `/`.
+fn repository(tag: &str) -> &str {
+    match tag.rsplit_once(':') {
+        Some((repository, tag)) if !tag.contains('/') => repository,
+        _ => tag,
+    }
+}
+
+/// The digest references image `id` has in the repository `tag` was pushed
+/// to.
+fn pushed_digests(env: &super::Env, id: &str, tag: &str) -> Result<Vec<String>, BoxError> {
+    let output = super::docker(env)
+        .args([
+            "image",
+            "inspect",
+            "--format",
+            "{{range .RepoDigests}}{{println .}}{{end}}",
+            id,
+        ])
+        .logged_output()
+        .map_err(|e| format!("docker image inspect failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("image {id} not found").into());
+    }
+    let prefix = format!("{}@", repository(tag));
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with(&prefix))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Remove the digest references in `digests`, which leave the image itself
+/// to any other name it has.
+fn remove_digests(env: &super::Env, digests: &[String], writer: &TargetWriter) -> Result<(), BoxError> {
+    use crate::output::Event;
+    for digest in digests {
+        writer.event(Event::Starting, &format!("docker rmi {digest}"));
+        let output = super::docker(env)
+            .args(["rmi", digest])
+            .logged_output()
+            .map_err(|e| format!("docker rmi failed: {e}"))?;
+        super::check_remove_output("docker rmi", output)?;
+    }
+    Ok(())
 }
 
 fn inspect_id(env: &super::Env, image: &str) -> Result<String, BoxError> {
@@ -121,7 +174,7 @@ impl Resource for PushResource {
     fn apply(
         &self,
         inputs: &Target<PushInputs>,
-        _prior_state: Option<&PushState>,
+        prior_state: Option<&PushState>,
         _changes: &Changes,
         writer: &TargetWriter,
     ) -> Result<ApplyResult<PushState, PushOutputs>, BoxError> {
@@ -161,12 +214,25 @@ impl Resource for PushResource {
         }
 
         let image_id = inspect_id(&inputs.env, &inputs.tag)?;
+        let digests = pushed_digests(&inputs.env, &image_id, &inputs.tag)?;
+        // The image pushed before keeps its digest reference, and with it
+        // stays on disk, after its other names are gone.
+        if let Some(prior) = prior_state.filter(|prior| prior.image_id != image_id) {
+            let replaced: Vec<String> = prior
+                .digests
+                .iter()
+                .filter(|digest| !digests.contains(digest))
+                .cloned()
+                .collect();
+            remove_digests(&inputs.env, &replaced, writer)?;
+        }
 
         Ok(ApplyResult {
             state: Some(PushState {
                 image: inputs.image.clone(),
                 tag: inputs.tag.clone(),
                 image_id,
+                digests,
             }),
             outputs: PushOutputs {
                 image_ref: inputs.tag.clone(),
@@ -181,7 +247,8 @@ impl Resource for PushResource {
             .args(["rmi", &prior_state.tag])
             .logged_output()
             .map_err(|e| format!("docker rmi failed: {e}"))?;
-        super::check_remove_output("docker rmi", output)
+        super::check_remove_output("docker rmi", output)?;
+        remove_digests(&prior_state.env, &prior_state.digests, writer)
     }
 
     /// A push mutates a remote registry. Another worktree's receipt says
@@ -225,6 +292,7 @@ mod tests {
             image: "myapp:latest".into(),
             tag: "localhost:5000/myapp:abc123".into(),
             image_id: "abc".into(),
+            digests: vec![],
         };
         let result = Resource::plan(
             &PushResource::new(Arc::new(FileTracker::default())),
@@ -233,5 +301,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.action, PlanAction::Update);
+    }
+
+    #[test]
+    fn repository_drops_the_tag_but_not_a_registry_port() {
+        assert_eq!(repository("localhost:5000/myapp:v1"), "localhost:5000/myapp");
+        assert_eq!(repository("localhost:5000/myapp"), "localhost:5000/myapp");
+        assert_eq!(repository("myapp:v1"), "myapp");
+        assert_eq!(repository("ghcr.io/acme/app"), "ghcr.io/acme/app");
     }
 }

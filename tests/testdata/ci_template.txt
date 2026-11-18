@@ -1,0 +1,59 @@
+# --ci with a path renders a MiniJinja template with the jobs and the
+# repository's details. Undefined variables are errors.
+exec git init -q
+bit --ci ./ci.tmpl
+cmp stdout expected.txt
+
+exec git add .
+exec git -c user.email=test@example.com -c user.name=Test commit -qm base
+exec git update-ref refs/remotes/origin/trunk HEAD
+exec git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk
+mkdir sub
+cp BUILD.bit sub/BUILD.bit
+cp ci.tmpl sub/ci.tmpl
+cd sub
+bit --ci ./ci.tmpl image
+stdout '\A# rendered by bit --ci \./ci\.tmpl image\nbranch: "trunk"\ndir: "sub"\n'
+stdout '^- id=image name="image" large=true command="bit image" selection=\["image"\]$'
+! stdout 'id=default'
+
+! bit --ci ../bad.tmpl
+stderr 'undefined value: `nope` is undefined \(in \.\./bad\.tmpl:1\)'
+
+! bit --ci ./missing.tmpl
+stderr 'cannot read CI template \./missing\.tmpl'
+
+-- BUILD.bit --
+lib = exec { command = "true" }
+
+unit = exec.test {
+  command = "true"
+  depends_on = [lib]
+}
+
+large image = exec {
+  command = "true"
+  depends_on = [lib]
+}
+
+publish(name : string) = exec {
+  command = "echo #{name}"
+  depends_on = [image]
+}
+
+group default = [unit, publish(name = "web")]
+-- ci.tmpl --
+# rendered by {{ command }}
+branch: {{ default_branch | tojson }}
+dir: {{ working_directory | tojson }}
+{% for job in jobs %}
+- id={{ job.id }} name={{ job.name | tojson }} large={{ job.large | tojson }} command={{ job.command | tojson }} selection={{ job.selection | tojson }}
+{% endfor %}
+-- bad.tmpl --
+{{ nope }}
+-- expected.txt --
+# rendered by bit --ci ./ci.tmpl
+branch: null
+dir: null
+- id=default name="default" large=false command="bit unit" selection=["unit"]
+- id=image name="image" large=true command="bit publish name=web" selection=["publish","name=web"]

@@ -302,9 +302,9 @@ fn profile_outputs(go_dir: Option<&str>, flags: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// The `-tags` flags among `go test` flags, which `go list` also accepts and
-/// which change the packages a pattern matches.
-fn tag_flags(flags: &[String]) -> Vec<String> {
+/// The `-tags` flags among `go test` or `go build` flags, which `go list`
+/// also accepts and which change the packages a pattern matches.
+pub(super) fn tag_flags(flags: &[String]) -> Vec<String> {
     let mut tags = Vec::new();
     let mut flags = flags.iter();
     while let Some(flag) = flags.next() {

@@ -1,0 +1,79 @@
+# buf.generate runs a local protoc-gen-go plugin from buf.gen.yaml, reruns
+# when a source, the template, or a generated file changes, and --clean
+# removes the plugin's output directory.
+[!exec:buf] skip
+[!exec:protoc-gen-go] skip
+
+bit
+stdout 'gen ▶ buf generate'
+stdout 'gen ✔ ok'
+grep 'package v1' gen/acme/v1/user.pb.go
+
+bit
+stdout 'gen · no changes'
+
+cp user.proto.changed proto/acme/v1/user.proto
+bit
+stdout '''proto/acme/v1/user\.proto'' changed'
+grep 'GetEmail' gen/acme/v1/user.pb.go
+
+rm gen/acme/v1/user.pb.go
+bit
+stdout '''gen/acme/v1/user\.pb\.go'' \(removed\) changed'
+exists gen/acme/v1/user.pb.go
+
+# The output the template no longer names is removed by the run.
+cp buf.gen.yaml.out buf.gen.yaml
+bit
+stdout 'gen ▶ buf generate \(no longer generates ''gen''\)'
+! stdout '\(removed\)'
+exists out/acme/v1/user.pb.go
+! exists gen
+
+bit
+stdout 'gen · no changes'
+
+bit --clean
+stdout 'gen ▶ rm -rf out'
+! exists out
+exists proto/acme/v1/user.proto
+
+-- BUILD.bit --
+gen = buf.generate {}
+-- buf.yaml --
+version: v2
+modules:
+  - path: proto
+-- buf.gen.yaml --
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: gen
+    opt: paths=source_relative
+-- buf.gen.yaml.out --
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: out
+    opt: paths=source_relative
+-- proto/acme/v1/user.proto --
+syntax = "proto3";
+
+package acme.v1;
+
+option go_package = "example.com/acme/v1";
+
+message User {
+  string name = 1;
+}
+-- user.proto.changed --
+syntax = "proto3";
+
+package acme.v1;
+
+option go_package = "example.com/acme/v1";
+
+message User {
+  string name = 1;
+  string email = 2;
+}

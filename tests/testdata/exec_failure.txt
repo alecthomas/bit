@@ -1,0 +1,36 @@
+# A failing command fails the run with its exit status, shows its output,
+# stops its dependents, and runs again next time.
+! bit
+stdout '^ *fail ▶ '
+stdout '^ *fail │ before$'
+stdout '^ *fail │ to stderr$'
+stdout '^ *fail ✘ command exited with exit status: 3$'
+stderr '^error: BUILD\.bit:1:1: target ''fail'' apply failed: command exited with exit status: 3$'
+! stdout 'after ▶'
+! exists after.txt
+
+! bit
+stdout '^ *fail ▶ '
+! exists after.txt
+
+# Once it succeeds, its dependents run.
+cp fixed.txt status.txt
+bit
+stdout '^ *fail ✔ ok$'
+stdout '^ *after ▶ '
+exists after.txt
+
+-- BUILD.bit --
+fail = exec {
+  command = "echo before; echo 'to stderr' >&2; exit $(cat status.txt)"
+  inputs = ["status.txt"]
+}
+
+after = exec {
+  command = "touch after.txt"
+  depends_on = [fail]
+}
+-- status.txt --
+3
+-- fixed.txt --
+0

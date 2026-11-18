@@ -1,0 +1,125 @@
+# go.test reports per package, per test, or verbosely, fails on a failing
+# test, reruns only the packages a change affects (including importers and
+# testdata files), and reruns failed packages until they pass.
+[!exec:go] skip
+
+bit
+stdout 'suites ✔ PASS \./a \(.*2 passed\)'
+stdout 'suites ✔ PASS \./b \(.*1 passed\)'
+stdout 'suites ✔ PASS \./c \(.*1 passed\)'
+! stdout 'suites ✔ PASS \./a/'
+stdout 'tests ✔ PASS \./a/TestA '
+stdout 'tests ✔ PASS \./a/TestLog '
+stdout 'tests ✔ PASS \./b/TestData '
+! stdout 'tests │ .*hello from the log'
+stdout 'verbose ✔ PASS \./a/TestLog '
+stdout 'verbose │ .*hello from the log'
+
+bit
+! stdout '▶'
+
+# A change to a reruns it and c, which imports it, but not b.
+cp a.go.broken a/a.go
+! bit suites
+stdout 'suites ▶ go test -json \./a \./c \(''a/a\.go'' changed\)'
+stdout '2 of 3 packages affected'
+stdout 'suites ✘ FAIL \./a \(.*1 passed, 1 failed\)'
+stdout 'suites ✘ FAIL \./c '
+stdout 'a_test\.go:\d+: A\(\) = 5'
+stderr 'test target ''suites'' failed'
+
+# Failed packages run again until they pass.
+! bit suites
+stdout 'suites ▶ go test -json \./a \./c \(previously failed\)'
+cp a.go.fixed a/a.go
+bit suites
+stdout 'suites ✔ PASS \./a '
+stdout 'suites ✔ PASS \./c '
+
+# A testdata file is an input of the package that holds it.
+cp want.txt.changed b/testdata/want.txt
+! bit suites
+stdout 'suites ▶ go test -json \./b \(''b/testdata/want\.txt'' changed\)'
+stdout '1 of 3 packages affected'
+stdout 'b_test\.go:\d+: testdata = "changed\\n"'
+
+-- BUILD.bit --
+suites = go.test {
+  package = "./..."
+}
+
+tests = go.test {
+  package = "./..."
+  report  = "tests"
+}
+
+verbose = go.test {
+  package = "./a"
+  report  = "verbose"
+}
+-- go.mod --
+module example.com/m
+
+go 1.22
+-- a/a.go --
+package a
+
+func A() int { return 1 }
+-- a.go.broken --
+package a
+
+func A() int { return 5 }
+-- a.go.fixed --
+package a
+
+func A() int { return 1 }
+
+func Unused() {}
+-- a/a_test.go --
+package a
+
+import "testing"
+
+func TestA(t *testing.T) {
+	if got := A(); got != 1 {
+		t.Fatalf("A() = %d", got)
+	}
+}
+
+func TestLog(t *testing.T) { t.Log("hello from the log") }
+-- b/b.go --
+package b
+-- b/b_test.go --
+package b
+
+import (
+	"os"
+	"testing"
+)
+
+func TestData(t *testing.T) {
+	data, err := os.ReadFile("testdata/want.txt")
+	if err != nil || string(data) != "ok\n" {
+		t.Fatalf("testdata = %q, %v", data, err)
+	}
+}
+-- b/testdata/want.txt --
+ok
+-- want.txt.changed --
+changed
+-- c/c.go --
+package c
+
+import "example.com/m/a"
+
+func C() int { return a.A() + 1 }
+-- c/c_test.go --
+package c
+
+import "testing"
+
+func TestC(t *testing.T) {
+	if C() != 2 {
+		t.Fatal("C() != 2")
+	}
+}

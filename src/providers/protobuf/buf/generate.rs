@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::file_tracker::FileTracker;
 use crate::output::TargetWriter;
 use crate::provider::{
-    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanResult, Resource, ResourceKind, Target,
+    Ambient, ApplyResult, BoxError, CachePolicy, Changes, PlanAction, PlanResult, Resource, ResourceKind, Target,
 };
 use crate::sha256::SHA256;
 
@@ -16,7 +16,8 @@ use super::{BufTarget, PluginCommand, Sources};
 const DEFAULT_TEMPLATE: &str = "buf.gen.yaml";
 
 /// Generate code from Protobuf files with buf generate. The sources, outputs, and
-/// plugins are discovered from the buf workspace and generation template. A
+/// plugins are discovered from the buf workspace and generation template, and
+/// output directories the template no longer names are removed on the next run. A
 /// remote plugin without a version, such as `buf.build/protocolbuffers/go`, does
 /// not rerun on a new release, so pin it, as in `buf.build/protocolbuffers/go:v1.36.6`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bit_derive::Schema)]
@@ -107,6 +108,21 @@ impl Target<BufGenerateInputs> {
             })
             .map(|out| Path::new(dir.unwrap_or("")).join(out))
             .collect())
+    }
+
+    /// Outputs `prior` recorded as removable that the template no longer
+    /// names. One that contains or lies within a current output is kept,
+    /// since removing it would delete what this run generates.
+    fn stale_outputs(&self, prior: &BufGenerateState) -> Result<Vec<String>, BoxError> {
+        let current: Vec<PathBuf> = self.outputs()?.iter().map(|out| super::super::normalize(out)).collect();
+        let stale: Vec<PathBuf> = prior
+            .outputs
+            .iter()
+            .map(PathBuf::from)
+            .filter(|old| !current.iter().any(|out| out.starts_with(old) || old.starts_with(out)))
+            .collect();
+        // A recorded output may hold sources by now, which are never removed.
+        super::super::removable_outputs(&stale)
     }
 
     /// buf and the local executables the template's plugins run. A
@@ -275,17 +291,31 @@ impl Resource for BufGenerateResource {
         inputs: &Target<BufGenerateInputs>,
         prior_state: Option<&BufGenerateState>,
     ) -> Result<PlanResult, BoxError> {
-        Ok(super::super::plan(
+        let mut plan = super::super::plan(
             inputs.target.describe(&inputs.args()),
             prior_state.map(|prior| &prior.inputs),
             inputs,
-        ))
+        );
+        // The engine no longer tracks files in a dropped output and reports
+        // them as removed though they still exist; the run is what removes
+        // them. An unreadable template fails the run instead.
+        if let Some(prior) = prior_state
+            && let Ok(stale) = inputs.stale_outputs(prior)
+            && !stale.is_empty()
+        {
+            let quoted: Vec<_> = stale.iter().map(|out| format!("'{out}'")).collect();
+            plan.action = PlanAction::Update;
+            plan.reason = Some(format!("no longer generates {}", quoted.join(", ")));
+        }
+        Ok(plan)
     }
 
+    /// Removes the outputs the previous run recorded that the template no
+    /// longer names, as a fresh generate would not have written them.
     fn apply(
         &self,
         inputs: &Target<BufGenerateInputs>,
-        _prior_state: Option<&BufGenerateState>,
+        prior_state: Option<&BufGenerateState>,
         _changes: &Changes,
         writer: &TargetWriter,
     ) -> Result<ApplyResult<BufGenerateState, BufGenerateOutputs>, BoxError> {
@@ -293,6 +323,11 @@ impl Resource for BufGenerateResource {
         let status = inputs.target.run(inputs, &inputs.args(), writer)?;
         if !status.success() {
             return Err(format!("`buf generate` exited with {status}").into());
+        }
+        if let Some(prior) = prior_state {
+            for stale in inputs.stale_outputs(prior)? {
+                crate::providers::remove_path(Path::new(&stale), writer)?;
+            }
         }
         Ok(ApplyResult {
             outputs: BufGenerateOutputs {
@@ -509,6 +544,24 @@ mod tests {
             inputs.outputs().unwrap(),
             [dir.path().join("gen"), PathBuf::from("/abs")]
         );
+    }
+
+    #[test]
+    fn stale_outputs_skip_current_overlapping_and_source_outputs() {
+        let (dir, inputs) = with_template("version: v2\nplugins:\n  - local: protoc-gen-go\n    out: out/go\n");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("proto")).unwrap();
+        std::fs::write(root.join("proto/a.proto"), "").unwrap();
+        let path = |name: &str| root.join(name).to_string_lossy().into_owned();
+        let prior = BufGenerateState {
+            inputs: inputs.value.clone(),
+            outputs: ["gen", "out/go", "out", "out/go/v1", "proto"].map(path).into(),
+        };
+        assert_eq!(inputs.stale_outputs(&prior).unwrap(), [path("gen")]);
+
+        let plan = Resource::plan(&test_resource(), &inputs, Some(&prior)).unwrap();
+        assert_eq!(plan.action, PlanAction::Update);
+        assert_eq!(plan.reason, Some(format!("no longer generates '{}'", path("gen"))));
     }
 
     #[test]

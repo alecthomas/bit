@@ -80,18 +80,22 @@ enum TestEvent {
     Other,
 }
 
-/// Parse a single line of `cargo test` output.
+/// Parse a single line of `cargo test` output, as libtest or a harness that
+/// mimics it, such as libtest-mimic, prints it.
 fn parse_test_line(line: &str) -> TestEvent {
     let trimmed = line.trim();
-    if let Some(rest) = trimmed.strip_prefix("test ") {
-        if let Some(name) = rest.strip_suffix(" ... ok") {
-            return TestEvent::TestPassed { name: name.to_owned() };
-        }
-        if let Some(name) = rest.strip_suffix(" ... FAILED") {
-            return TestEvent::TestFailed { name: name.to_owned() };
-        }
-        if let Some(name) = rest.strip_suffix(" ... ignored") {
-            return TestEvent::TestIgnored { name: name.to_owned() };
+    if let Some((name, outcome)) = trimmed.strip_prefix("test ").and_then(|rest| rest.rsplit_once(" ... ")) {
+        // libtest-mimic pads names to align the outcomes.
+        let name = name.trim_end().to_owned();
+        match outcome {
+            "ok" => return TestEvent::TestPassed { name },
+            "FAILED" => return TestEvent::TestFailed { name },
+            // libtest appends a reason as `ignored, reason`, libtest-mimic
+            // as `ignored (reason)`.
+            _ if outcome == "ignored" || outcome.starts_with("ignored,") || outcome.starts_with("ignored (") => {
+                return TestEvent::TestIgnored { name };
+            }
+            _ => {}
         }
     }
     if let Some(rest) = trimmed.strip_prefix("running ")
@@ -153,6 +157,7 @@ struct TestResult {
 /// ---- other_test stdout ----
 /// <output lines>
 /// ```
+/// libtest-mimic leaves out ` stdout`.
 fn parse_failure_output(lines: &[String]) -> Vec<(String, String)> {
     let mut results = Vec::new();
     let mut current_name = String::new();
@@ -160,8 +165,9 @@ fn parse_failure_output(lines: &[String]) -> Vec<(String, String)> {
 
     for line in lines {
         if let Some(rest) = line.strip_prefix("---- ")
-            && let Some(name) = rest.strip_suffix(" stdout ----")
+            && let Some(header) = rest.strip_suffix(" ----")
         {
+            let name = header.strip_suffix(" stdout").unwrap_or(header);
             // Save previous test's output if any.
             if !current_name.is_empty() {
                 results.push((current_name.clone(), current_output.join("\n")));
@@ -605,6 +611,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_test_ignored_with_a_reason() {
+        for line in [
+            "test my_test ... ignored, needs network",
+            "test my_test ... ignored (no go)",
+        ] {
+            match parse_test_line(line) {
+                TestEvent::TestIgnored { name } => assert_eq!(name, "my_test"),
+                other => panic!("expected TestIgnored for {line:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_test_trims_libtest_mimic_name_padding() {
+        match parse_test_line("test short      ... ok") {
+            TestEvent::TestPassed { name } => assert_eq!(name, "short"),
+            other => panic!("expected TestPassed, got {other:?}"),
+        }
+        match parse_test_line("test a ... b      ... FAILED") {
+            TestEvent::TestFailed { name } => assert_eq!(name, "a ... b"),
+            other => panic!("expected TestFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_result_pass() {
         match parse_test_line("test result: ok. 10 passed; 0 failed; 2 ignored; finished in 1.5s") {
             TestEvent::SuiteResult {
@@ -707,6 +738,19 @@ mod tests {
         assert_eq!(failures[0].1, "assertion failed\n");
         assert_eq!(failures[1].0, "bar");
         assert_eq!(failures[1].1, "thread panicked");
+    }
+
+    #[test]
+    fn parse_failure_output_reads_libtest_mimic_headers() {
+        let lines: Vec<String> = vec![
+            "---- java_library ----".into(),
+            "> bit".into(),
+            "FAIL: stdout has no match for 'core ✔ ok'".into(),
+        ];
+        let failures = parse_failure_output(&lines);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "java_library");
+        assert_eq!(failures[0].1, "> bit\nFAIL: stdout has no match for 'core ✔ ok'");
     }
 
     #[test]

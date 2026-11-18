@@ -1,0 +1,128 @@
+# pnpm.run runs a package's script with arguments, declares its outputs, and
+# reruns when the package, a `workspace:` dependency of it, or an extra input
+# changes, but not when an unrelated package does.
+[!exec:pnpm] skip
+
+bit
+stdout 'deps ✔ ok'
+stdout 'app ▶ pnpm --filter app run build --greeting hello$'
+stdout 'app ✔ ok'
+stdout 'single │ path=packages/other/stamp\.txt$'
+exists packages/other/stamp.txt
+grep '\A\["--greeting","hello"\]\n\z' packages/app/dist/args.json
+grep '\Ahello from lib v1\n\z' packages/app/dist/out.txt
+grep '\Aconfig v1\n\z' packages/app/meta.txt
+
+bit
+! stdout '✔ ok'
+
+cp other.changed.js packages/other/index.js
+bit
+stdout 'stamp ✔ ok'
+! stdout 'app ✔'
+
+cp lib.changed.js packages/lib/index.js
+bit
+stdout 'app ✔ ok'
+grep '\Ahello from lib v2\n\z' packages/app/dist/out.txt
+
+cp config.changed.txt config/app.txt
+bit
+stdout 'app ✔ ok'
+grep '\Aconfig v2\n\z' packages/app/meta.txt
+
+cp build.changed.js packages/app/build.js
+bit
+stdout 'app ✔ ok'
+grep '\Ahello from lib v2!\n\z' packages/app/dist/out.txt
+
+bit --clean app
+! exists packages/app/dist
+! exists packages/app/meta.txt
+exists node_modules
+
+-- BUILD.bit --
+deps = pnpm.install {}
+
+app = pnpm.run {
+  script     = "build"
+  package    = "app"
+  args       = ["--greeting", "hello"]
+  outputs    = ["packages/app/dist", "packages/app/meta.txt"]
+  inputs     = ["config/*.txt"]
+  depends_on = [deps]
+}
+
+single = exec {
+  command = "echo path=#{stamp.path}"
+  inputs  = []
+}
+
+stamp = pnpm.run {
+  script     = "stamp"
+  package    = "other"
+  outputs    = "packages/other/stamp.txt"
+  depends_on = [deps]
+}
+-- pnpm-lock.yaml --
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  packages/app:
+    dependencies:
+      lib:
+        specifier: workspace:*
+        version: link:../lib
+
+  packages/lib: {}
+
+  packages/other: {}
+-- pnpm-workspace.yaml --
+packages:
+  - "packages/*"
+-- package.json --
+{ "name": "root", "private": true }
+-- config/app.txt --
+config v1
+-- config.changed.txt --
+config v2
+-- packages/lib/package.json --
+{ "name": "lib", "version": "1.0.0", "main": "index.js" }
+-- packages/lib/index.js --
+module.exports = "lib v1";
+-- lib.changed.js --
+module.exports = "lib v2";
+-- packages/app/package.json --
+{
+  "name": "app",
+  "version": "1.0.0",
+  "scripts": { "build": "node build.js" },
+  "dependencies": { "lib": "workspace:*" }
+}
+-- packages/app/build.js --
+const fs = require("fs");
+const args = process.argv.slice(2);
+const greeting = args[1];
+fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/args.json", `${JSON.stringify(args)}\n`);
+fs.writeFileSync("dist/out.txt", `${greeting} from ${require("lib")}\n`);
+fs.copyFileSync("../../config/app.txt", "meta.txt");
+-- build.changed.js --
+const fs = require("fs");
+const greeting = process.argv.slice(2)[1];
+fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/out.txt", `${greeting} from ${require("lib")}!\n`);
+fs.copyFileSync("../../config/app.txt", "meta.txt");
+-- packages/other/package.json --
+{ "name": "other", "version": "1.0.0", "scripts": { "stamp": "echo stamp > stamp.txt" } }
+-- packages/other/index.js --
+module.exports = "other v1";
+-- other.changed.js --
+module.exports = "other v2";

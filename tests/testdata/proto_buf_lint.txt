@@ -1,0 +1,75 @@
+# buf.lint passes on a clean module, fails with buf's findings on a bad one,
+# and reruns when buf.yaml changes its rules.
+[!exec:buf] skip
+
+bit
+stdout 'lint ▶ buf lint'
+stdout 'lint ✔ ok'
+
+bit
+stdout 'lint · no changes'
+
+cp user.proto.bad proto/acme/v1/user.proto
+! bit
+stdout 'Field name "user_Name" should be lower_snake_case'
+stdout 'lint ✘ tests failed'
+stderr 'test target ''lint'' failed'
+
+# A failed check runs again even with nothing changed.
+! bit
+stdout 'previously failed'
+
+cp buf.yaml.except buf.yaml
+bit
+stdout 'lint ✔ ok'
+
+bit
+stdout 'lint · no changes'
+
+# Restoring the rule reruns the check on buf.yaml alone.
+cp buf.yaml.strict buf.yaml
+! bit
+stdout '''buf\.yaml'' changed'
+stdout 'lint ✘ tests failed'
+
+-- BUILD.bit --
+lint = buf.lint {}
+-- buf.yaml --
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+-- buf.yaml.strict --
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+-- buf.yaml.except --
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    - FIELD_LOWER_SNAKE_CASE
+-- proto/acme/v1/user.proto --
+syntax = "proto3";
+
+package acme.v1;
+
+message User {
+  string user_name = 1;
+}
+-- user.proto.bad --
+syntax = "proto3";
+
+package acme.v1;
+
+message User {
+  string user_Name = 1;
+}

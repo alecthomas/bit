@@ -1,0 +1,19 @@
+# --graph --json maps each target to all of its dependencies, including
+# ordering-only ones and pre targets.
+bit --graph --json app setup
+cp stdout graph.json
+exec jq -e '. == {"setup": [], "lib": ["setup"], "docs": ["setup"], "app": ["docs", "lib", "setup"]}' graph.json
+
+# A planned graph has no JSON form.
+! bit --plan --graph --json app
+! stdout .
+
+-- BUILD.bit --
+pre setup = exec { command = "true" }
+lib = exec { command = "true" }
+docs = exec { command = "true" }
+app = exec {
+  command = "true"
+  depends_on = [lib]
+  after = [docs]
+}

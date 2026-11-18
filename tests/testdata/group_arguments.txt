@@ -1,0 +1,13 @@
+# A group's arguments bind by name, without taking the next selector.
+bit --graph show value=hello
+stdout 'job\(value="hello"\)'
+
+bit --list
+stdout 'show\(value : string\)'
+
+-- BUILD.bit --
+job(value : string) = exec {
+  command = "printf #{value}"
+}
+
+group show(value : string) = [job(value = value)]

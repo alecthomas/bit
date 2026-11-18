@@ -32,17 +32,11 @@ clippy = rust.clippy {
   flags = ["--workspace", "--", "-D", "warnings"]
 }
 
-# End-to-end smoke test of the debug binary against the project in
-# tests/smoke.
-large integration-test = exec.test {
-  depends_on = [debug]
-  dir = "tests/smoke"
-  inputs = ["BUILD.bit"]
-  command = <<-EOF
-  #{debug.path} --version
-  #{debug.path} --plan ...
-  #{debug.path} --plan release name=b
-  EOF
+# End-to-end tests of the binary, one per script in tests/testdata, which
+# `cargo test` leaves out unless named.
+large integration-test = rust.test {
+  flags = ["--test", "integration"]
+  report = "tests"
 }
 
 # An S3-compatible server for testing the S3 client. rclone is MIT licensed
@@ -246,7 +240,7 @@ explicit push-release-notes(tag: string = "") = exec {
 }
 
 # The targets CI runs.
-group ci = [release, test, fmt-check, clippy, s3-test, s3-cache-test]
+group ci = [release, test, integration-test, fmt-check, clippy, s3-test, s3-cache-test]
 
 # Default group: CI's targets plus the Zed rev and workflow syncs.
 group default = [ci, sync-zed-rev, sync-ci]

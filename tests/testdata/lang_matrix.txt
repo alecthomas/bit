@@ -1,0 +1,99 @@
+# Matrix targets expand over one key, several keys as a cartesian product,
+# and keys computed from earlier ones.
+bit --plan ...
+stdout '^binary\["amd64"\] \+'
+stdout '^binary\["arm64"\] \+'
+stdout '^cross\["darwin", "amd64"\] \+'
+stdout '^cross\["darwin", "arm64"\] \+'
+stdout '^cross\["linux", "amd64"\] \+'
+stdout '^cross\["linux", "arm64"\] \+'
+stdout '^nested\["linux", "linux-a"\] \+'
+stdout '^nested\["darwin", "darwin-b"\] \+'
+! stdout 'nested\["linux", "darwin'
+
+# A string key may be unquoted on the command line, and selects one slice.
+bit 'binary[arm64]'
+stdout 'binary\["arm64"\] ✔'
+! stdout 'amd64'
+grep '\Aarm64\z' bin-arm64
+! exists bin-amd64
+
+! bit 'binary[riscv]'
+stderr 'unknown target: binary\[riscv\]'
+
+# A slice depends on the matching slice of the matrix target it references,
+# whether indexed by key or not.
+bit 'package[amd64]' 'implicit[arm64]'
+stdout 'binary\["amd64"\] ✔'
+stdout 'binary\["arm64"\] · no changes'
+grep '\Aamd64\z' pkg-amd64
+grep '\Aarm64\z' imp-arm64
+! exists pkg-arm64
+
+# A non-matrix target depending on a matrix target waits for every slice.
+bit --graph all
+stdout 'binary\["amd64"\]'
+stdout 'binary\["arm64"\]'
+
+# Arguments configure an instance of the whole matrix; keys select slices.
+bit release arm
+stdout 'tagged\["amd64"\]\(tag="v1"\) ✔'
+stdout 'tagged\["arm64"\]\(tag="v1"\) ✔'
+stdout 'tagged\["arm64"\]\(tag="v2"\) ✔'
+! stdout 'tagged\["amd64"\]\(tag="v2"\)'
+exists t-amd64-v1 t-arm64-v1 t-arm64-v2
+! exists t-amd64-v2
+
+# concurrency = 1 runs one slice at a time.
+bit serial
+! grep 'start.*\nstart' serial.log
+grep 'end 1' serial.log
+grep 'end 3' serial.log
+
+-- BUILD.bit --
+let arch = ["amd64", "arm64"]
+let os = ["linux", "darwin"]
+
+binary[arch] = exec {
+  command = "printf #{arch} > bin-#{arch}"
+  outputs = "bin-#{arch}"
+}
+
+package[arch] = exec {
+  command = "cp #{binary[arch].path} pkg-#{arch}"
+  outputs = "pkg-#{arch}"
+}
+
+implicit[arch] = exec {
+  command = "cp #{binary.path} imp-#{arch}"
+  outputs = "imp-#{arch}"
+}
+
+cross[os, arch] = exec {
+  command = "printf x > cross-#{os}-#{arch}"
+  outputs = "cross-#{os}-#{arch}"
+}
+
+nested[os, file = ["#{os}-a", "#{os}-b"]] = exec {
+  command = "printf #{os} > n-#{file}"
+  outputs = "n-#{file}"
+}
+
+tagged[arch](tag : string) = exec {
+  command = "printf #{tag} > t-#{arch}-#{tag}"
+  outputs = "t-#{arch}-#{tag}"
+}
+
+serial[n = [1, 2, 3]] = exec {
+  concurrency = 1
+  command = "echo start #{n} >> serial.log; sleep 0.2; echo end #{n} >> serial.log"
+  inputs = []
+}
+
+all = exec {
+  command = "true"
+  depends_on = [binary]
+}
+
+group release = [tagged(tag = "v1")]
+group arm = [tagged["arm64"](tag = "v2")]

@@ -334,8 +334,13 @@ pub struct LockChange {
 /// at the root of `path`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportRoot {
-    /// Provider name (last path segment of the import URL or local path).
+    /// Provider name (last path segment of the import URL or local path, or
+    /// the `as` alias).
     pub provider: String,
+    /// Name of the default resource's file, `<default_resource>.bit`: the
+    /// import path's last segment, even when `as` renames the provider, so a
+    /// bare call to the alias still finds it.
+    pub default_resource: String,
     /// Directory containing this provider's `<resource>.bit` files.
     pub path: PathBuf,
 }
@@ -413,11 +418,16 @@ impl ResolveCtx {
                 path: original.to_owned(),
             });
         }
-        let provider = match alias {
-            Some(a) => a.to_owned(),
-            None => derive_local_provider(path, original)?,
+        let derived = derive_local_provider(path, original);
+        let (provider, default_resource) = match alias {
+            // An alias also names a path like `..` that has no usable segment.
+            Some(a) => (a.to_owned(), derived.unwrap_or_else(|_| a.to_owned())),
+            None => {
+                let name = derived?;
+                (name.clone(), name)
+            }
         };
-        self.try_add(path, provider, format!("local: {original}"))
+        self.try_add(path, provider, default_resource, format!("local: {original}"))
     }
 
     /// Register a git-import-derived provider, checking for SHA conflicts on
@@ -430,6 +440,7 @@ impl ResolveCtx {
         sha: &str,
         provider_path: &Path,
         provider: String,
+        default_resource: String,
         original_url: &str,
     ) -> Result<bool, ImportError> {
         match self.git_shas.get(cache_key) {
@@ -448,13 +459,24 @@ impl ResolveCtx {
                     .insert(cache_key.to_owned(), (sha.to_owned(), format!("git: {original_url}")));
             }
         }
-        self.try_add(provider_path, provider, format!("git: {original_url}"))
+        self.try_add(
+            provider_path,
+            provider,
+            default_resource,
+            format!("git: {original_url}"),
+        )
     }
 
     /// Add an `ImportRoot`. Returns `Ok(false)` on exact-duplicate (same
     /// path, same provider); errors on `AliasMismatch` (same path, different
     /// provider) or `ProviderConflict` (different paths, same provider).
-    fn try_add(&mut self, path: &Path, provider: String, source: String) -> Result<bool, ImportError> {
+    fn try_add(
+        &mut self,
+        path: &Path,
+        provider: String,
+        default_resource: String,
+        source: String,
+    ) -> Result<bool, ImportError> {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_owned());
         if let Some(existing_provider) = self.path_providers.get(&canonical) {
             if existing_provider == &provider {
@@ -477,6 +499,7 @@ impl ResolveCtx {
         self.providers.insert(provider.clone(), source);
         self.roots.push(ImportRoot {
             provider,
+            default_resource,
             path: canonical,
         });
         Ok(true)
@@ -586,7 +609,15 @@ fn process_root_project(
         }
         new_lock.0.insert(resolved.cache_key.clone(), target_sha.clone());
         let (provider_path, provider) = provider_target(&repo_path, &parsed, &resolved, imp.alias.as_deref());
-        if ctx.add_git_provider(&resolved.cache_key, &target_sha, &provider_path, provider, &imp.url)? {
+        let default_resource = provider_name_from_url(&parsed).to_owned();
+        if ctx.add_git_provider(
+            &resolved.cache_key,
+            &target_sha,
+            &provider_path,
+            provider,
+            default_resource,
+            &imp.url,
+        )? {
             // Recurse on the repo root (where BUILD.bit lives), not the subpath.
             queue.push_back(repo_path);
         }
@@ -638,7 +669,15 @@ fn process_child_project(
             .clone();
         let repo_path = ensure_materialized(&ctx.cache_root, &resolved.cache_key, &resolved.repo_url, &sha)?;
         let (provider_path, provider) = provider_target(&repo_path, &parsed, &resolved, imp.alias.as_deref());
-        if ctx.add_git_provider(&resolved.cache_key, &sha, &provider_path, provider, &imp.url)? {
+        let default_resource = provider_name_from_url(&parsed).to_owned();
+        if ctx.add_git_provider(
+            &resolved.cache_key,
+            &sha,
+            &provider_path,
+            provider,
+            default_resource,
+            &imp.url,
+        )? {
             queue.push_back(repo_path);
         }
     }
@@ -1114,6 +1153,8 @@ mod tests {
         let res = resolve_imports(&module, project.path(), cache.path(), UpdateMode::None).unwrap();
         let providers: Vec<&str> = res.roots.iter().map(|r| r.provider.as_str()).collect();
         assert_eq!(providers, vec!["bar"]);
+        // The default resource is still `foo.bit`, called bare as `bar`.
+        assert_eq!(res.roots[0].default_resource, "foo");
     }
 
     #[test]
@@ -1325,10 +1366,24 @@ mod tests {
     fn add_git_provider_errors_on_sha_conflict() {
         let cache = tempfile::tempdir().unwrap();
         let mut ctx = ResolveCtx::new(cache.path());
-        ctx.add_git_provider("github.com/x/y", "sha1", cache.path(), "y".into(), "github.com/x/y")
-            .unwrap();
+        ctx.add_git_provider(
+            "github.com/x/y",
+            "sha1",
+            cache.path(),
+            "y".into(),
+            "y".into(),
+            "github.com/x/y",
+        )
+        .unwrap();
         let err = ctx
-            .add_git_provider("github.com/x/y", "sha2", cache.path(), "y".into(), "github.com/x/y")
+            .add_git_provider(
+                "github.com/x/y",
+                "sha2",
+                cache.path(),
+                "y".into(),
+                "y".into(),
+                "github.com/x/y",
+            )
             .unwrap_err();
         assert!(matches!(err, ImportError::ShaConflict { .. }), "got: {err}");
     }
@@ -1343,12 +1398,26 @@ mod tests {
         fs::create_dir_all(&qux).unwrap();
         let mut ctx = ResolveCtx::new(cache.path());
         assert!(
-            ctx.add_git_provider("github.com/x/y", "sha", &waz, "waz".into(), "github.com/x/y/waz")
-                .unwrap()
+            ctx.add_git_provider(
+                "github.com/x/y",
+                "sha",
+                &waz,
+                "waz".into(),
+                "waz".into(),
+                "github.com/x/y/waz"
+            )
+            .unwrap()
         );
         assert!(
-            ctx.add_git_provider("github.com/x/y", "sha", &qux, "qux".into(), "github.com/x/y/qux")
-                .unwrap()
+            ctx.add_git_provider(
+                "github.com/x/y",
+                "sha",
+                &qux,
+                "qux".into(),
+                "qux".into(),
+                "github.com/x/y/qux"
+            )
+            .unwrap()
         );
         assert_eq!(ctx.roots.len(), 2);
         assert_eq!(ctx.git_shas.len(), 1, "one repo, one lock entry");

@@ -1,0 +1,29 @@
+# --force reruns targets that haven't changed, without the cache: those run
+# by default, and explicit ones when named.
+bit
+bit
+grep '\Ax\z' implicit.txt
+! exists specified.txt
+
+bit --force
+grep '\Axx\z' implicit.txt
+
+bit specified
+bit specified
+grep '\Ax\z' specified.txt
+
+bit --force specified
+grep '\Axx\z' specified.txt
+
+-- BUILD.bit --
+implicit = exec {
+  command = "printf x >> implicit.txt"
+  outputs = "implicit.txt"
+  inputs = []
+}
+
+explicit specified = exec {
+  command = "printf x >> specified.txt"
+  outputs = "specified.txt"
+  inputs = []
+}

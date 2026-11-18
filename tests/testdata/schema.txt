@@ -1,0 +1,16 @@
+# --schema lists builtins under their own header first, then providers,
+# with related functions together, and plain when piped.
+bit --schema
+stdout '\A[^\n]*Builtins[^\n]*\n\n'
+stdout 'env\(name: string'
+stdout 'docker\.image'
+stdout 'basename\(path:[^\n]*\n[^\n]*dirname\(path:'
+stdout '\n\n[^\n]*rust\.packages\([^\n]*\n[^\n]*rust\.dependencies\('
+! stdout '\x1b'
+
+# A filter keeps the header and only what matches.
+bit --schema env
+stdout '\A[^\n]*Builtins[^\n]*\n\n'
+! stdout 'docker\.image'
+
+-- BUILD.bit --

@@ -1,0 +1,271 @@
+# java.maven resolution against a file:// repository of POMs and stand-in
+# jars: a parent POM's properties, nearest-wins and first-declared version
+# conflicts, exclusions, relocation, JDK profiles, classifiers, and a BOM
+# managing versions. The graph beneath com.example:app:
+#
+#   lib ${lib.version} = 2.0 -> shared 1.0, deep 1.0 -> util 9.0, modern 1.0
+#   util 1.0 -> shared 2.0, logging 1.0 (excluded by app)
+#   old.group:moved 1.0, relocated to com.example:moved 3.0
+[!exec:javac] skip
+
+bit deps managed
+stdout 'deps ✔ ok'
+stdout 'managed ✔ ok'
+
+# com.example:app inherits its version and lib's from its parent.
+grep '"com\.example:app": \{\n *"version": "1\.0"' maven.lock.json
+grep '"com\.example:lib": \{\n *"version": "2\.0"' maven.lock.json
+# lib and util are equally near, so lib's shared, declared first, wins.
+grep '"com\.example:shared": \{\n *"version": "1\.0"' maven.lock.json
+# util 9.0, deeper beneath deep, loses to util 1.0.
+grep '"com\.example:util": \{\n *"version": "1\.0"' maven.lock.json
+! grep '9\.0' maven.lock.json
+# app excludes logging from util.
+! grep 'logging' maven.lock.json
+# old.group:moved is relocated to com.example:moved 3.0.
+grep '"com\.example:moved": \{\n *"version": "3\.0"' maven.lock.json
+! grep 'old\.group' maven.lock.json
+# The parent POM is not an artifact of the result.
+! grep 'com\.example:parent' maven.lock.json
+# lib's profile for JDK 11 and later is active; the one for 1.8 is not.
+grep '"com\.example:modern": \{\n *"version": "1\.0"' maven.lock.json
+! grep 'legacy' maven.lock.json
+# An artifact with a classifier is keyed by it, and its jar was fetched
+# from natives-1.0-linux.jar.
+grep '"com\.example:natives:jar:linux": \{\n *"version": "1\.0",\n *"sha256"' maven.lock.json
+
+# The BOM fills in lib's version and overrides shared's beneath it.
+grep '"com\.example:lib": \{\n *"version": "2\.0"' managed.lock.json
+grep '"com\.example:shared": \{\n *"version": "5\.0"' managed.lock.json
+! grep 'com\.example:bom"' managed.lock.json
+
+-- BUILD.bit --
+deps = java.maven {
+  artifacts    = ["com.example:app:1.0", "com.example:natives:jar:linux:1.0"]
+  repositories = ["file://#{project_dir()}/repo"]
+}
+
+managed = java.maven {
+  artifacts    = ["com.example:lib"]
+  boms         = ["com.example:bom:1.0"]
+  repositories = ["file://#{project_dir()}/repo"]
+  lock         = "managed.lock.json"
+}
+-- repo/com/example/parent/1.0/parent-1.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>parent</artifactId>
+  <version>1.0</version>
+  <packaging>pom</packaging>
+  <properties>
+    <lib.version>2.0</lib.version>
+  </properties>
+</project>
+-- repo/com/example/app/1.0/app-1.0.pom --
+<project>
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>parent</artifactId>
+    <version>1.0</version>
+  </parent>
+  <artifactId>app</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>lib</artifactId>
+      <version>${lib.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>util</artifactId>
+      <version>1.0</version>
+      <exclusions>
+        <exclusion>
+          <groupId>com.example</groupId>
+          <artifactId>logging</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>old.group</groupId>
+      <artifactId>moved</artifactId>
+      <version>1.0</version>
+    </dependency>
+  </dependencies>
+</project>
+-- repo/com/example/app/1.0/app-1.0.jar --
+app
+-- repo/com/example/lib/2.0/lib-2.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>lib</artifactId>
+  <version>2.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>shared</artifactId>
+      <version>1.0</version>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>deep</artifactId>
+      <version>1.0</version>
+    </dependency>
+  </dependencies>
+  <profiles>
+    <profile>
+      <activation><jdk>[11,)</jdk></activation>
+      <dependencies>
+        <dependency>
+          <groupId>com.example</groupId>
+          <artifactId>modern</artifactId>
+          <version>1.0</version>
+        </dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <activation><jdk>1.8</jdk></activation>
+      <dependencies>
+        <dependency>
+          <groupId>com.example</groupId>
+          <artifactId>legacy</artifactId>
+          <version>1.0</version>
+        </dependency>
+      </dependencies>
+    </profile>
+  </profiles>
+</project>
+-- repo/com/example/modern/1.0/modern-1.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>modern</artifactId>
+  <version>1.0</version>
+</project>
+-- repo/com/example/modern/1.0/modern-1.0.jar --
+modern
+-- repo/com/example/natives/1.0/natives-1.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>natives</artifactId>
+  <version>1.0</version>
+</project>
+-- repo/com/example/natives/1.0/natives-1.0-linux.jar --
+natives for linux
+-- repo/com/example/lib/2.0/lib-2.0.jar --
+lib
+-- repo/com/example/util/1.0/util-1.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>util</artifactId>
+  <version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>shared</artifactId>
+      <version>2.0</version>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>logging</artifactId>
+      <version>1.0</version>
+    </dependency>
+  </dependencies>
+</project>
+-- repo/com/example/util/1.0/util-1.0.jar --
+util
+-- repo/com/example/util/9.0/util-9.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>util</artifactId>
+  <version>9.0</version>
+</project>
+-- repo/com/example/util/9.0/util-9.0.jar --
+util 9
+-- repo/com/example/deep/1.0/deep-1.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>deep</artifactId>
+  <version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>util</artifactId>
+      <version>9.0</version>
+    </dependency>
+  </dependencies>
+</project>
+-- repo/com/example/deep/1.0/deep-1.0.jar --
+deep
+-- repo/com/example/shared/1.0/shared-1.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>shared</artifactId>
+  <version>1.0</version>
+</project>
+-- repo/com/example/shared/1.0/shared-1.0.jar --
+shared 1
+-- repo/com/example/shared/2.0/shared-2.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>shared</artifactId>
+  <version>2.0</version>
+</project>
+-- repo/com/example/shared/2.0/shared-2.0.jar --
+shared 2
+-- repo/com/example/shared/5.0/shared-5.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>shared</artifactId>
+  <version>5.0</version>
+</project>
+-- repo/com/example/shared/5.0/shared-5.0.jar --
+shared 5
+-- repo/com/example/logging/1.0/logging-1.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>logging</artifactId>
+  <version>1.0</version>
+</project>
+-- repo/com/example/logging/1.0/logging-1.0.jar --
+logging
+-- repo/old/group/moved/1.0/moved-1.0.pom --
+<project>
+  <groupId>old.group</groupId>
+  <artifactId>moved</artifactId>
+  <version>1.0</version>
+  <distributionManagement>
+    <relocation>
+      <groupId>com.example</groupId>
+      <version>3.0</version>
+    </relocation>
+  </distributionManagement>
+</project>
+-- repo/com/example/moved/3.0/moved-3.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>moved</artifactId>
+  <version>3.0</version>
+</project>
+-- repo/com/example/moved/3.0/moved-3.0.jar --
+moved
+-- repo/com/example/bom/1.0/bom-1.0.pom --
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>bom</artifactId>
+  <version>1.0</version>
+  <packaging>pom</packaging>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>com.example</groupId>
+        <artifactId>lib</artifactId>
+        <version>2.0</version>
+      </dependency>
+      <dependency>
+        <groupId>com.example</groupId>
+        <artifactId>shared</artifactId>
+        <version>5.0</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>

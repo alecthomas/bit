@@ -51,14 +51,38 @@ pub enum EngineError {
         target: String,
         action: &'static str,
     },
-    #[error("{pos}: test target '{target}' failed")]
-    TestFailed { pos: crate::ast::Pos, target: String },
+    /// Every test target that failed before the run stopped. Targets already
+    /// running when the first fails still finish, so there can be several.
+    #[error("{}", failed_tests_message(.0))]
+    TestFailed(Vec<FailedTest>),
     #[error("{pos}: target '{target}' concurrency must be a positive integer, got {value}")]
     InvalidConcurrency {
         pos: crate::ast::Pos,
         target: String,
         value: String,
     },
+}
+
+/// A test target whose run reported `passed = false`.
+#[derive(Debug, Clone)]
+pub struct FailedTest {
+    pub pos: crate::ast::Pos,
+    pub target: String,
+}
+
+/// One failure on one line; several as a list, one target per line and in
+/// name order, since they finish in no particular order.
+fn failed_tests_message(failed: &[FailedTest]) -> String {
+    if let [only] = failed {
+        return format!("{}: test target '{}' failed", only.pos, only.target);
+    }
+    let mut sorted: Vec<&FailedTest> = failed.iter().collect();
+    sorted.sort_by(|a, b| a.target.cmp(&b.target));
+    let mut message = format!("{} test targets failed:", failed.len());
+    for test in sorted {
+        message.push_str(&format!("\n  {}: '{}'", test.pos, test.target));
+    }
+    message
 }
 
 #[derive(Clone)]
@@ -327,12 +351,12 @@ fn validate_active_params(dag: &Dag, order: &[String], base: &BaseScope) -> Resu
             continue;
         };
         for r in dag::collect_all_refs(&node.fields) {
-            if base.missing_params.contains(&r) {
+            if let Some(param) = base.missing_params.get(&r) {
                 return Err(EngineError::Eval {
                     pos: node.pos.clone(),
                     target: name.clone(),
                     source: crate::expr::EvalError::UndefinedVar(format!(
-                        "missing required param '{r}' (use -P {r}=VALUE)"
+                        "missing required param '{param}' (use -P {param}=VALUE)"
                     )),
                 });
             }
@@ -558,9 +582,18 @@ impl Prepared {
         match (&self.plan.action, &self.hit) {
             (PlanAction::None, Some(_)) => Some(self.content_hash),
             (PlanAction::None, None) => self.prior.provider_state.is_some().then_some(self.prior.content_hash),
-            (PlanAction::Restore, Some(hit)) => Some(hit.receipt.content_hash),
+            (PlanAction::Restore, Some(hit)) if self.restores_receipt_result(hit) => Some(hit.receipt.content_hash),
             _ => None,
         }
+    }
+
+    /// Whether restoring `hit` leaves exactly the result its receipt records,
+    /// so dependents can be planned against its hash. A restore rehashes this
+    /// checkout's uncached outputs alongside the restored ones, and those
+    /// match the producer's only if this checkout last recorded the same
+    /// result. Otherwise the result is known only once the restore has run.
+    fn restores_receipt_result(&self, hit: &CacheHit) -> bool {
+        self.cached_outputs.len() == self.outputs.len() || self.prior.content_hash == hit.receipt.content_hash
     }
 }
 
@@ -747,6 +780,23 @@ fn is_uncached(uncached: &HashSet<String>, output: &OutputFile) -> bool {
     uncached.contains(output.path.trim_end_matches('/')) || uncached.contains(output.role.trim_end_matches('/'))
 }
 
+/// Whether an uncached output exists and, if this checkout recorded it last
+/// run, still has the files it had then. `tracked` and the prior resolve map
+/// hold a directory output file by file under its role.
+fn uncached_output_intact(output: &OutputFile, tracked: &BTreeMap<String, SHA256>, prior: &PriorState) -> bool {
+    if !Path::new(&output.path).exists() {
+        return false;
+    }
+    if prior.provider_state.is_none() {
+        return true;
+    }
+    let root = output.role.trim_end_matches('/');
+    let under = |(key, _): &(&String, &SHA256)| {
+        key.as_str() == root || key.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
+    };
+    tracked.iter().filter(under).eq(prior.resolve_map.iter().filter(under))
+}
+
 /// Compute the shared action key from provider-resolved source hashes,
 /// which include the ambient fingerprints. Sources are measured before apply
 /// for lookup and after apply for publication.
@@ -914,12 +964,12 @@ fn prepare_target(
         return Ok(prepared);
     }
     let uncached = uncached_outputs(&prepared.inputs);
-    prepared.cached_outputs = prepared
+    let (cached_outputs, excluded): (Vec<_>, Vec<_>) = prepared
         .outputs
         .iter()
-        .filter(|o| !is_uncached(&uncached, o))
         .cloned()
-        .collect();
+        .partition(|o| !is_uncached(&uncached, o));
+    prepared.cached_outputs = cached_outputs;
     let key =
         action_key(name, node, &prepared, &prepared.sources, cache).map_err(provider_error(node, name, "resolve"))?;
     prepared.shared = true;
@@ -928,6 +978,15 @@ fn prepare_target(
     // previously failed test always reruns locally so the failure is
     // observed here rather than masked by another worktree's success.
     if previously_failed || has_dirty_dep {
+        return Ok(prepared);
+    }
+    // A receipt holds nothing for an uncached output, so it cannot recreate
+    // one that is missing or changed. Only running the target can.
+    if let Some(output) = excluded
+        .iter()
+        .find(|o| !uncached_output_intact(o, &resolve_map, &prepared.prior))
+    {
+        crate::debug!(writer, "uncached output '{}' is not in place", output.path);
         return Ok(prepared);
     }
     let receipt = match cache.lookup(&key, |receipt| recorded_variables_match(receipt, cache.paths())) {
@@ -1175,10 +1234,10 @@ fn apply_order(
         let pos = result.pos.clone();
         complete_target(result, store, output, &mut scope, &mut results, &mut plans)?;
         if test_failed {
-            return Err(EngineError::TestFailed {
+            return Err(EngineError::TestFailed(vec![FailedTest {
                 pos,
                 target: name.clone(),
-            });
+            }]));
         }
     }
 
@@ -1336,10 +1395,17 @@ fn apply_order_parallel(
                     }
 
                     if test_failed {
-                        failed = Some(EngineError::TestFailed {
+                        let test = FailedTest {
                             pos,
                             target: name.clone(),
-                        });
+                        };
+                        // Tests still running when the first failed finish
+                        // while the run drains; name every one that fails.
+                        match &mut failed {
+                            Some(EngineError::TestFailed(tests)) => tests.push(test),
+                            Some(_) => {}
+                            None => failed = Some(EngineError::TestFailed(vec![test])),
+                        }
                     }
                     completed += 1;
 
@@ -4053,18 +4119,26 @@ lint[module] = go.lint {
 
         assert!(h.only_receipt().artifacts.is_empty());
 
-        // A second worktree still matches the action, because excluding an
-        // output changes what is stored, not what the target depends on. It
-        // therefore reuses the result without receiving the excluded file --
-        // the cost of opting an output out.
+        // Nothing can restore the excluded file, so a second worktree
+        // without it runs the action rather than reuse the result.
         let b = h.worktree("b");
         b.write_src("v1");
+        h.apply(&b, &b.target("app", "file", "  uncached = [\"out.txt/\"]\n"), 1)
+            .unwrap();
+        assert_eq!(h.applies(), 2);
+        assert!(b.out().exists());
+
+        // One that already has the file still matches the action, because
+        // excluding an output changes what is stored, not what the target
+        // depends on.
+        let c = h.worktree("c");
+        c.write_src("v1");
+        std::fs::copy(a.out(), c.out()).unwrap();
         let plans = h
-            .apply(&b, &b.target("app", "file", "  uncached = [\"out.txt/\"]\n"), 1)
+            .apply(&c, &c.target("app", "file", "  uncached = [\"out.txt/\"]\n"), 1)
             .unwrap();
         assert_eq!(plans[0].plan.action, PlanAction::None);
-        assert_eq!(h.applies(), 1);
-        assert!(!b.out().exists());
+        assert_eq!(h.applies(), 2);
     }
 
     #[test]

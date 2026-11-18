@@ -1,0 +1,98 @@
+# java.library options: custom source and resource directories, `release`,
+# `flags` and `output`, a resources-only library, a reproducible jar, and a
+# missing source directory named explicitly.
+[!exec:javac] skip
+
+bit lib assets
+stdout 'lib ✔ ok'
+stdout 'assets ✔ ok'
+exists out/lib-custom.jar
+! exists lib/build
+
+# `release = 17` compiles to class file version 61, and `-parameters` keeps
+# parameter names.
+exec javap -v -cp out/lib-custom.jar demo.Util
+stdout 'major version: 61$'
+stdout 'MethodParameters'
+stdout 'greeting'
+
+# Both source directories and the resource directory reach the jar, and the
+# default directories, which this library doesn't use, don't.
+exec jar tf out/lib-custom.jar
+stdout '^demo/Util\.class$'
+stdout '^demo/Extra\.class$'
+stdout '^config/app\.properties$'
+! stdout 'Ignored'
+! stdout 'ignored\.txt'
+
+# A library of resources alone is a jar of them.
+exec jar tf assets/build/assets.jar
+stdout '^static/index\.html$'
+! stdout '\.class$'
+
+# Nothing changed, nothing runs.
+bit lib assets
+! stdout '✔ ok'
+
+# Building again from scratch gives an identical jar, its entries dated
+# 1980 rather than when they were built.
+exec unzip -l out/lib-custom.jar
+stdout '01-01-1980 00:00   demo/Util\.class$'
+! stdout '[0-9]{2}-[0-9]{2}-20[0-9]{2}'
+cp out/lib-custom.jar first.jar
+bit --force lib
+stdout 'lib ✔ ok'
+# The runner's cmp reads text, so the system's compares the binary jars.
+exec cmp out/lib-custom.jar first.jar
+
+# A source directory named explicitly must exist.
+! bit missing
+stderr 'sources directory `nowhere` does not exist'
+
+-- BUILD.bit --
+explicit lib = java.library {
+  dir       = "lib"
+  sources   = ["java", "more"]
+  resources = "conf"
+  release   = 17
+  flags     = ["-parameters"]
+  output    = "../out/lib-custom.jar"
+}
+
+explicit assets = java.library {
+  dir = "assets"
+}
+
+explicit missing = java.library {
+  dir     = "lib"
+  sources = ["java", "nowhere"]
+  output  = "build/missing.jar"
+}
+-- lib/java/demo/Util.java --
+package demo;
+
+public class Util {
+    public static String greet(String greeting) {
+        return greeting + " " + Extra.name();
+    }
+}
+-- lib/more/demo/Extra.java --
+package demo;
+
+class Extra {
+    static String name() {
+        return "world";
+    }
+}
+-- lib/conf/config/app.properties --
+name=world
+-- lib/src/main/java/demo/Ignored.java --
+package demo;
+
+class Ignored {
+    does not compile
+}
+-- lib/src/main/resources/ignored.txt --
+ignored
+-- assets/src/main/resources/static/index.html --
+<html></html>
