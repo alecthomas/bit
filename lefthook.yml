@@ -2,13 +2,16 @@ skip_lfs: true
 output:
   - success
   - failure
+# Every job runs without the variables git exports to hooks that pin its
+# repository. Tests that run git in temporary repositories would otherwise
+# act on this checkout instead, rewriting its config or committing to it.
 pre-commit:
   parallel: true
   jobs:
     - name: fmt
       stage_fixed: true
-      run: bin/bit fmt
+      run: env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX bin/bit fmt
 pre-push:
   jobs:
     - name: lint and test
-      run: bin/bit fmt-check clippy test
+      run: env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX bin/bit fmt-check clippy test
