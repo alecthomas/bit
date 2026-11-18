@@ -14,11 +14,13 @@ on:
     - cron: "17 0 * * *"
 env:
   # bit's build cache, kache's compiler cache, Hermit's installed packages,
-  # and Cargo's registry, which Hermit keeps under CARGO_HOME in the checkout.
+  # Go's build cache, which the integration tests share between scripts, and
+  # Cargo's registry, which Hermit keeps under CARGO_HOME in the checkout.
   BUILD_CACHE_PATHS: |
     ~/.cache/bit
     ~/.cache/kache
     ~/.cache/hermit/pkg
+    ~/.cache/go-build
     .hermit/rust/registry
 # Only the default branch saves the build cache, so every branch restores its
 # latest entry and branches never evict it with entries nothing else reads.
@@ -27,7 +29,7 @@ env:
 jobs:
 {% for job in jobs %}
 {# The integration test shards compile the same crates as the unit tests. #}
-{% set cache = "test" if job.id is startingwith("integration-test-") else job.id %}
+{% set fallback = "test" if job.id is startingwith("integration-test-") else none %}
   {{ job.id }}:
     name: {{ job.name | tojson }}
     runs-on: ubuntu-latest
@@ -36,20 +38,24 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - id: cache-day
         run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-{% if cache != job.id %}
-      # Reads the {{ cache }} job's cache, which holds most of the crates this
-      # job compiles. Only the {{ cache }} job saves it.
+{% if fallback %}
+      # Without its own entry for the day, the job starts from the
+      # {{ fallback }} job's, which holds most of the crates it compiles.
 {% endif %}
       - uses: actions/cache/restore@v6
         with:
           path: {% raw %}${{ env.BUILD_CACHE_PATHS }}{% endraw %}
 
-          key: build-{{ cache }}-{% raw %}${{ steps.cache-day.outputs.day }}-${{ github.sha }}{% endraw %}
+          key: build-{{ job.id }}-{% raw %}${{ steps.cache-day.outputs.day }}-${{ github.sha }}{% endraw %}
 
-          restore-keys: build-{{ cache }}-{% raw %}${{ steps.cache-day.outputs.day }}{% endraw %}-
+          restore-keys: |
+            build-{{ job.id }}-{% raw %}${{ steps.cache-day.outputs.day }}{% endraw %}-
+{% if fallback %}
+            build-{{ fallback }}-{% raw %}${{ steps.cache-day.outputs.day }}{% endraw %}-
+{% endif %}
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: {{ ("bin/" ~ job.command) | tojson }}
-{% if default_branch and cache == job.id %}
+{% if default_branch %}
       # The build leaves kache's daemon running, and its writes to the cache
       # make tar fail the save. Stopping it waits until it releases the cache.
       - if: github.ref == 'refs/heads/{{ default_branch }}'
@@ -59,7 +65,7 @@ jobs:
         with:
           path: {% raw %}${{ env.BUILD_CACHE_PATHS }}{% endraw %}
 
-          key: build-{{ cache }}-{% raw %}${{ steps.cache-day.outputs.day }}-${{ github.sha }}{% endraw %}
+          key: build-{{ job.id }}-{% raw %}${{ steps.cache-day.outputs.day }}-${{ github.sha }}{% endraw %}
 
 {% endif %}
 {% endfor %}
