@@ -84,13 +84,13 @@ s3-cache-test = rust.test {
 }
 
 # Demonstrate script messages at every level. The changing `resolve` output
-# makes the block re-run on every invocation.
+# makes the target re-run on every invocation.
 explicit messages-demo = exec {
   command = <<-EOF
     echo "plain output, collapsed on success"
     echo "::info::published to crates.io"
     echo "::warning file=CHANGELOG.md::CHANGELOG has no entry for v1.2.3"
-    echo "::error::example error (does not fail the block)"
+    echo "::error::example error (does not fail the target)"
     echo "::success::released v1.2.3%0Atagged as v1.2.3"
   EOF
   resolve = "date +%s"
@@ -245,8 +245,8 @@ explicit push-release-notes(tag: string = "") = exec {
   EOF
 }
 
-# The blocks CI runs.
-target ci = [release, test, fmt-check, clippy, s3-test, s3-cache-test]
+# The targets CI runs.
+group ci = [release, test, fmt-check, clippy, s3-test, s3-cache-test]
 
-# Default target: CI's blocks plus the Zed rev and workflow syncs.
-target default = [ci, sync-zed-rev, sync-ci]
+# Default group: CI's targets plus the Zed rev and workflow syncs.
+group default = [ci, sync-zed-rev, sync-ci]
