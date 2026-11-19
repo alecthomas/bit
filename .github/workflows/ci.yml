@@ -10,19 +10,28 @@ on:
   schedule:
     - cron: "17 0 * * *"
 env:
-  # bit's build cache, kache's compiler cache, Hermit's installed packages,
-  # Go's build cache, which the integration tests share between scripts, and
-  # Cargo's registry, which Hermit keeps under CARGO_HOME in the checkout.
+  # bit's build cache, kache's compiler cache, and Cargo's registry, which
+  # Hermit keeps under CARGO_HOME in the checkout.
   BUILD_CACHE_PATHS: |
     ~/.cache/bit
     ~/.cache/kache
-    ~/.cache/hermit/pkg
-    ~/.cache/go-build
     .hermit/rust/registry
-# Only the default branch saves the build cache, so every branch restores its
-# latest entry and branches never evict it with entries nothing else reads.
-# Keys include the UTC date and never fall back to an earlier day, so the
-# cache starts empty each day instead of accumulating old builds.
+# Only the default branch saves caches, so every branch restores its latest
+# entries and branches never evict them with entries nothing else reads.
+#
+# Each cache holds one kind of content, so no entry repeats another's:
+#
+# - Hermit's packages change only with the pins in bin/, so every job shares
+#   one entry keyed by them. The test job saves it, with every pinned
+#   package installed.
+# - Build caches are per job, except that the integration test shards read
+#   the test job's, which holds most of the crates they compile.
+# - Each integration test shard keeps Go's build cache, which its scripts
+#   share, in an entry of its own.
+#
+# Build and Go keys include the UTC date and never fall back to an earlier
+# day, so those caches start empty each day instead of accumulating old
+# builds.
 jobs:
   default:
     name: "default"
@@ -30,14 +39,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - id: cache-day
-        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      # The pins are bin/'s symlinks, so hash their names and targets: the
+      # files they point to are all the same Hermit script.
+      - id: cache-keys
+        run: |
+          echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(find bin -printf '%p %l\n' | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - id: hermit-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/hermit/pkg
+          key: hermit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-keys.outputs.pins }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-default-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
-          restore-keys: |
-            build-default-${{ steps.cache-day.outputs.day }}-
+          key: build-default-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: build-default-${{ steps.cache-keys.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit clippy fmt-check s3-cache-test s3-test"
       # The build leaves kache's daemon running, and its writes to the cache
@@ -48,133 +65,165 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-default-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          key: build-default-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
   integration-test-1:
     name: "'integration-test[1]'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - id: cache-day
-        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-      # Without its own entry for the day, the job starts from the
-      # test job's, which holds most of the crates it compiles.
+      # The pins are bin/'s symlinks, so hash their names and targets: the
+      # files they point to are all the same Hermit script.
+      - id: cache-keys
+        run: |
+          echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(find bin -printf '%p %l\n' | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - id: hermit-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/hermit/pkg
+          key: hermit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-keys.outputs.pins }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-integration-test-1-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
-          restore-keys: |
-            build-integration-test-1-${{ steps.cache-day.outputs.day }}-
-            build-test-${{ steps.cache-day.outputs.day }}-
+          key: build-test-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: build-test-${{ steps.cache-keys.outputs.day }}-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-integration-test-1-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: go-integration-test-1-${{ steps.cache-keys.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit 'integration-test[1]'"
-      # The build leaves kache's daemon running, and its writes to the cache
-      # make tar fail the save. Stopping it waits until it releases the cache.
-      - if: github.ref == 'refs/heads/master'
-        run: bin/kache daemon stop
       - if: github.ref == 'refs/heads/master'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
         with:
-          path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-integration-test-1-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          path: ~/.cache/go-build
+          key: go-integration-test-1-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
   integration-test-2:
     name: "'integration-test[2]'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - id: cache-day
-        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-      # Without its own entry for the day, the job starts from the
-      # test job's, which holds most of the crates it compiles.
+      # The pins are bin/'s symlinks, so hash their names and targets: the
+      # files they point to are all the same Hermit script.
+      - id: cache-keys
+        run: |
+          echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(find bin -printf '%p %l\n' | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - id: hermit-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/hermit/pkg
+          key: hermit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-keys.outputs.pins }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-integration-test-2-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
-          restore-keys: |
-            build-integration-test-2-${{ steps.cache-day.outputs.day }}-
-            build-test-${{ steps.cache-day.outputs.day }}-
+          key: build-test-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: build-test-${{ steps.cache-keys.outputs.day }}-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-integration-test-2-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: go-integration-test-2-${{ steps.cache-keys.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit 'integration-test[2]'"
-      # The build leaves kache's daemon running, and its writes to the cache
-      # make tar fail the save. Stopping it waits until it releases the cache.
-      - if: github.ref == 'refs/heads/master'
-        run: bin/kache daemon stop
       - if: github.ref == 'refs/heads/master'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
         with:
-          path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-integration-test-2-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          path: ~/.cache/go-build
+          key: go-integration-test-2-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
   integration-test-3:
     name: "'integration-test[3]'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - id: cache-day
-        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-      # Without its own entry for the day, the job starts from the
-      # test job's, which holds most of the crates it compiles.
+      # The pins are bin/'s symlinks, so hash their names and targets: the
+      # files they point to are all the same Hermit script.
+      - id: cache-keys
+        run: |
+          echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(find bin -printf '%p %l\n' | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - id: hermit-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/hermit/pkg
+          key: hermit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-keys.outputs.pins }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-integration-test-3-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
-          restore-keys: |
-            build-integration-test-3-${{ steps.cache-day.outputs.day }}-
-            build-test-${{ steps.cache-day.outputs.day }}-
+          key: build-test-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: build-test-${{ steps.cache-keys.outputs.day }}-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-integration-test-3-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: go-integration-test-3-${{ steps.cache-keys.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit 'integration-test[3]'"
-      # The build leaves kache's daemon running, and its writes to the cache
-      # make tar fail the save. Stopping it waits until it releases the cache.
-      - if: github.ref == 'refs/heads/master'
-        run: bin/kache daemon stop
       - if: github.ref == 'refs/heads/master'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
         with:
-          path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-integration-test-3-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          path: ~/.cache/go-build
+          key: go-integration-test-3-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
   integration-test-4:
     name: "'integration-test[4]'"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - id: cache-day
-        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-      # Without its own entry for the day, the job starts from the
-      # test job's, which holds most of the crates it compiles.
+      # The pins are bin/'s symlinks, so hash their names and targets: the
+      # files they point to are all the same Hermit script.
+      - id: cache-keys
+        run: |
+          echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(find bin -printf '%p %l\n' | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - id: hermit-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/hermit/pkg
+          key: hermit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-keys.outputs.pins }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-integration-test-4-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
-          restore-keys: |
-            build-integration-test-4-${{ steps.cache-day.outputs.day }}-
-            build-test-${{ steps.cache-day.outputs.day }}-
+          key: build-test-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: build-test-${{ steps.cache-keys.outputs.day }}-
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-integration-test-4-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: go-integration-test-4-${{ steps.cache-keys.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit 'integration-test[4]'"
-      # The build leaves kache's daemon running, and its writes to the cache
-      # make tar fail the save. Stopping it waits until it releases the cache.
-      - if: github.ref == 'refs/heads/master'
-        run: bin/kache daemon stop
       - if: github.ref == 'refs/heads/master'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
         with:
-          path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-integration-test-4-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          path: ~/.cache/go-build
+          key: go-integration-test-4-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
   release:
     name: "release"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - id: cache-day
-        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      # The pins are bin/'s symlinks, so hash their names and targets: the
+      # files they point to are all the same Hermit script.
+      - id: cache-keys
+        run: |
+          echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(find bin -printf '%p %l\n' | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - id: hermit-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/hermit/pkg
+          key: hermit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-keys.outputs.pins }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-release-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
-          restore-keys: |
-            build-release-${{ steps.cache-day.outputs.day }}-
+          key: build-release-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: build-release-${{ steps.cache-keys.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit release"
       # The build leaves kache's daemon running, and its writes to the cache
@@ -185,23 +234,39 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-release-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          key: build-release-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
   test:
     name: "test"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      - id: cache-day
-        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      # The pins are bin/'s symlinks, so hash their names and targets: the
+      # files they point to are all the same Hermit script.
+      - id: cache-keys
+        run: |
+          echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(find bin -printf '%p %l\n' | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - id: hermit-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
+        with:
+          path: ~/.cache/hermit/pkg
+          key: hermit-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-keys.outputs.pins }}
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/restore@v6
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-test-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
-          restore-keys: |
-            build-test-${{ steps.cache-day.outputs.day }}-
+          key: build-test-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
+          restore-keys: build-test-${{ steps.cache-keys.outputs.day }}-
       # Use the Hermit-pinned bit rather than one built from this checkout.
       - run: "bin/bit test"
+      # Install what the run didn't use, so the entry serves every job.
+      - if: github.ref == 'refs/heads/master' && steps.hermit-cache.outputs.cache-hit != 'true'
+        run: bin/hermit install
+      - if: github.ref == 'refs/heads/master' && steps.hermit-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
+        with:
+          path: ~/.cache/hermit/pkg
+          key: ${{ steps.hermit-cache.outputs.cache-primary-key }}
       # The build leaves kache's daemon running, and its writes to the cache
       # make tar fail the save. Stopping it waits until it releases the cache.
       - if: github.ref == 'refs/heads/master'
@@ -210,7 +275,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # ratchet:actions/cache/save@v6
         with:
           path: ${{ env.BUILD_CACHE_PATHS }}
-          key: build-test-${{ steps.cache-day.outputs.day }}-${{ github.sha }}
+          key: build-test-${{ steps.cache-keys.outputs.day }}-${{ github.sha }}
   # The one check for rulesets to require. It runs even when a job fails,
   # because GitHub counts a skipped required check as passing.
   ci:
