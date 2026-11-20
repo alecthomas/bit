@@ -198,16 +198,19 @@ sync-ci = exec {
   outputs = ".github/workflows/ci.yml"
 }
 
-# Tag the next version from conventional commits and push the tag. `svu next`
-# changes only when there is a new version to tag.
+# Tag the next version from conventional commits and push the tag. The release
+# is the resource: it exists while the commits since the latest tag call for
+# no new version, so bump runs only when one is due. Only the new tag is
+# pushed, because each version tag that reaches GitHub publishes a release.
 explicit bump = exec {
   command = <<-EOF
-    test "$(svu current)" = "$(svu next)" && exit 0
-    git tag "$(svu next)"
-    git push --tags
-    echo "::success::bumped to $(svu next)"
+    next=$(svu next)
+    test "$(svu current)" = "$next" && exit 0
+    git tag "$next"
+    git push origin "refs/tags/$next"
+    echo "::success::bumped to $next"
   EOF
-  resolve = "svu next"
+  resolve = 'test "$(svu current)" = "$(svu next)" && svu current'
 }
 
 # Write release notes for `tag`, or the tag at HEAD, from the commits since
