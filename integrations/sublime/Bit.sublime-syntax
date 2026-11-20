@@ -13,6 +13,7 @@ variables:
   constants: '(?:false|null|true)'
   keywords: '(?:as|group|import|let|output|param)'
   modifiers: '(?:explicit|large|post|pre|protected)'
+  operators: '(?:and|not|or)'
   types: '(?:bool|duration|int|number|path|string)'
   # END generated
   ident: '[A-Za-z_][A-Za-z0-9_-]*'
@@ -82,6 +83,8 @@ contexts:
       push: type
     - match: '{{before}}{{conditionals}}{{after}}'
       scope: keyword.control.conditional.bit
+    - match: '{{before}}{{operators}}{{after}}'
+      scope: keyword.operator.logical.bit
     - match: '{{before}}{{constants}}{{after}}'
       scope: constant.language.bit
     - match: '{{before}}\d+(?:\.\d+)?(?:ns|us|ms|s|m|h|d)?{{after}}'
@@ -139,7 +142,7 @@ contexts:
     - include: comments
     - include: expressions
 
-  # Parameter lists and named arguments.
+  # Parameter lists, arguments, and grouped expressions such as `(a | trim)`.
   parens:
     - match: '\)'
       scope: punctuation.section.parens.end.bit

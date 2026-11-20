@@ -193,13 +193,24 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
                 _ => Err(EvalError::Type("if condition must be bool".into())),
             }
         }
+        // `and` and `or` short-circuit: the right operand, which may call
+        // `exec()` or be guarded by the left, is evaluated only when the left
+        // doesn't decide the result.
+        Expr::BinOp(lhs, BinOp::And, rhs) => Ok(Value::Bool(
+            eval_bool(lhs, "and", scope, mode)? && eval_bool(rhs, "and", scope, mode)?,
+        )),
+        Expr::BinOp(lhs, BinOp::Or, rhs) => Ok(Value::Bool(
+            eval_bool(lhs, "or", scope, mode)? || eval_bool(rhs, "or", scope, mode)?,
+        )),
+        Expr::Not(inner) => Ok(Value::Bool(!eval_bool(inner, "not", scope, mode)?)),
         Expr::BinOp(lhs, op, rhs) => {
             let l = eval_inner(lhs, scope, mode)?.into_plain();
             let r = eval_inner(rhs, scope, mode)?.into_plain();
-            match op {
-                BinOp::Eq => Ok(Value::Bool(l == r)),
-                BinOp::Ne => Ok(Value::Bool(l != r)),
-            }
+            Ok(Value::Bool(match op {
+                BinOp::Eq => l == r,
+                BinOp::Ne => l != r,
+                BinOp::And | BinOp::Or => unreachable!("logical operators are evaluated above"),
+            }))
         }
         Expr::Add(lhs, rhs) => {
             let l = eval_inner(lhs, scope, mode)?.into_plain();
@@ -216,6 +227,15 @@ fn eval_inner(expr: &Expr, scope: &Scope, mode: EvalMode) -> Result<Value, EvalE
                 ))),
             }
         }
+    }
+}
+
+fn eval_bool(expr: &Expr, operator: &str, scope: &Scope, mode: EvalMode) -> Result<bool, EvalError> {
+    match eval_inner(expr, scope, mode)? {
+        Value::Bool(value) => Ok(value),
+        other => Err(EvalError::Type(format!(
+            "{operator} requires bool operands, got {other}"
+        ))),
     }
 }
 
@@ -1191,6 +1211,56 @@ mod tests {
             Box::new(Expr::Number(2.into())),
         );
         assert_eq!(eval(&expr, &scope).unwrap(), Value::Number(2.into()));
+    }
+
+    #[test]
+    fn eval_grouped_conditionals_concatenate() {
+        let expr = crate::parser::parse_expr(
+            r#"(if package == "" then ["--workspace"] else []) + (if filter == "" then [] else ["--", filter])"#,
+            "<test>",
+        )
+        .unwrap();
+        let flags = |package: &str, filter: &str| {
+            let mut scope = Scope::new();
+            scope.set("package", Value::Str(package.into()));
+            scope.set("filter", Value::Str(filter.into()));
+            match eval(&expr, &scope).unwrap() {
+                Value::List(_, items) => items.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                other => panic!("expected list, got {other:?}"),
+            }
+        };
+        assert_eq!(flags("", ""), ["--workspace"]);
+        assert_eq!(flags("bit", "parse"), ["--", "parse"]);
+        assert_eq!(flags("", "parse"), ["--workspace", "--", "parse"]);
+    }
+
+    #[test]
+    fn eval_logical_operators() {
+        let eval_source = |source: &str| {
+            let mut scope = Scope::new();
+            scope.set("yes", Value::Bool(true));
+            scope.set("no", Value::Bool(false));
+            scope.set("text", Value::Str("x".into()));
+            eval(&crate::parser::parse_expr(source, "<test>").unwrap(), &scope)
+        };
+        for (source, expected) in [
+            ("yes and yes", true),
+            ("yes and no", false),
+            ("no or yes", true),
+            ("no or no", false),
+            ("not no", true),
+            ("not yes or text == 'x'", true),
+            ("text != 'x' or not (yes and no)", true),
+        ] {
+            assert_eq!(eval_source(source).unwrap(), Value::Bool(expected), "{source}");
+        }
+        // The right operand isn't evaluated when the left decides the result.
+        assert_eq!(eval_source("no and missing").unwrap(), Value::Bool(false));
+        assert_eq!(eval_source("yes or text").unwrap(), Value::Bool(true));
+        assert!(eval_source("yes and missing").is_err());
+        assert!(eval_source("text and yes").is_err());
+        assert!(eval_source("no or text").is_err());
+        assert!(eval_source("not text").is_err());
     }
 
     #[test]

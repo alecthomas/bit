@@ -298,8 +298,10 @@ pub enum Expr {
     Pipe(Box<Expr>, Vec<String>, Vec<Expr>),
     /// `if cond then a else b`
     If(Box<Expr>, Box<Expr>, Box<Expr>),
-    /// `a == b`, `a != b`
+    /// `a == b`, `a != b`, `a and b`, `a or b`
     BinOp(Box<Expr>, BinOp, Box<Expr>),
+    /// `not a`
+    Not(Box<Expr>),
     /// `a + b` for list concatenation
     Add(Box<Expr>, Box<Expr>),
 }
@@ -314,6 +316,8 @@ pub enum StringPart {
 pub enum BinOp {
     Eq,
     Ne,
+    And,
+    Or,
 }
 
 #[cfg(test)]

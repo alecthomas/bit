@@ -379,8 +379,10 @@ let settings = {
 ```hcl
 list1 + list2           # list concatenation
 a == b                  # equality / inequality
+a and not (b or c)      # logic
 expr | trim             # pipes
 if cond then a else b   # conditionals
+(a + b) | trim          # grouping
 func(arg1, arg2)        # function calls
 target.field             # target output references
 target(name = value)     # parameterized target references

@@ -620,6 +620,7 @@ impl Instantiator<'_> {
                 operator.clone(),
                 Box::new(self.materialize_expr(right, caller, stack)?),
             ),
+            Expr::Not(inner) => Expr::Not(Box::new(self.materialize_expr(inner, caller, stack)?)),
             Expr::Add(left, right) => Expr::Add(
                 Box::new(self.materialize_expr(left, caller, stack)?),
                 Box::new(self.materialize_expr(right, caller, stack)?),

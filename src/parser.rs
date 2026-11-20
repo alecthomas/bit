@@ -339,13 +339,48 @@ fn if_expr(input: &mut &str) -> ModalResult<Expr> {
         Ok(Expr::If(Box::new(cond), Box::new(then_val), Box::new(else_val)))
     } else {
         input.reset(&checkpoint);
-        add_expr.parse_next(input)
+        or_expr.parse_next(input)
     }
 }
 
+fn or_expr(input: &mut &str) -> ModalResult<Expr> {
+    logical_chain(input, "or", BinOp::Or, and_expr)
+}
+
+fn and_expr(input: &mut &str) -> ModalResult<Expr> {
+    logical_chain(input, "and", BinOp::And, not_expr)
+}
+
+/// A left-associative chain of `operand (kw operand)*`.
+fn logical_chain(
+    input: &mut &str,
+    kw: &'static str,
+    op: BinOp,
+    mut operand: impl FnMut(&mut &str) -> ModalResult<Expr>,
+) -> ModalResult<Expr> {
+    let mut lhs = operand(input)?;
+    while keyword(kw).parse_next(input).is_ok() {
+        let rhs = cut_err(&mut operand)
+            .context(StrContext::Label("operand"))
+            .parse_next(input)?;
+        lhs = Expr::BinOp(Box::new(lhs), op.clone(), Box::new(rhs));
+    }
+    Ok(lhs)
+}
+
+fn not_expr(input: &mut &str) -> ModalResult<Expr> {
+    if keyword("not").parse_next(input).is_ok() {
+        let operand = cut_err(not_expr)
+            .context(StrContext::Label("operand"))
+            .parse_next(input)?;
+        return Ok(Expr::Not(Box::new(operand)));
+    }
+    add_expr.parse_next(input)
+}
+
 fn add_expr(input: &mut &str) -> ModalResult<Expr> {
-    let first = pipe_expr.parse_next(input)?;
-    repeat(0.., preceded(lex('+'), pipe_expr))
+    let first = cmp_expr.parse_next(input)?;
+    repeat(0.., preceded(lex('+'), cmp_expr))
         .fold(
             move || first.clone(),
             |acc, rhs| Expr::Add(Box::new(acc), Box::new(rhs)),
@@ -354,7 +389,7 @@ fn add_expr(input: &mut &str) -> ModalResult<Expr> {
 }
 
 fn pipe_expr(input: &mut &str) -> ModalResult<Expr> {
-    let first = cmp_expr.parse_next(input)?;
+    let first = primary.parse_next(input)?;
     let pipes: Vec<(Vec<String>, Vec<Expr>)> = repeat(0.., preceded(lex('|'), pipe_segment)).parse_next(input)?;
     Ok(pipes
         .into_iter()
@@ -370,11 +405,11 @@ fn pipe_segment(input: &mut &str) -> ModalResult<(Vec<String>, Vec<Expr>)> {
 }
 
 fn cmp_expr(input: &mut &str) -> ModalResult<Expr> {
-    let lhs = primary.parse_next(input)?;
+    let lhs = pipe_expr.parse_next(input)?;
     let op = opt(alt((lex("==").value(BinOp::Eq), lex("!=").value(BinOp::Ne)))).parse_next(input)?;
     match op {
         Some(op) => {
-            let rhs = cut_err(primary)
+            let rhs = cut_err(pipe_expr)
                 .context(StrContext::Label("comparison rhs"))
                 .parse_next(input)?;
             Ok(Expr::BinOp(Box::new(lhs), op, Box::new(rhs)))
@@ -393,10 +428,25 @@ fn primary(input: &mut &str) -> ModalResult<Expr> {
         null_expr,
         list_expr,
         map_expr,
-        call_or_ref,
+        alt((group_expr, call_or_ref)),
     ))
     .context(StrContext::Label("expression"))
     .parse_next(input)
+}
+
+/// `( expr )`. Grouping is transparent in the AST: the formatter keeps
+/// expression source text verbatim, so it never needs to re-insert parens.
+/// A `(` after a name is a call, consumed by `call_or_ref` and `pipe_segment`
+/// before an operand starts, so it never reaches this rule.
+fn group_expr(input: &mut &str) -> ModalResult<Expr> {
+    lex('(').parse_next(input)?;
+    let inner = cut_err(expr)
+        .context(StrContext::Label("grouped expression"))
+        .parse_next(input)?;
+    cut_err(lex(')'))
+        .context(StrContext::Label("closing ')'"))
+        .parse_next(input)?;
+    Ok(inner)
 }
 
 fn number_expr(input: &mut &str) -> ModalResult<Expr> {
@@ -512,7 +562,7 @@ fn call_or_ref(input: &mut &str) -> ModalResult<Expr> {
     let path = name_path.parse_next(input)?;
     // Reject keywords so they don't get parsed as references
     if let [name] = path.as_slice()
-        && matches!(name.as_str(), "if" | "then" | "else")
+        && matches!(name.as_str(), "if" | "then" | "else" | "and" | "or" | "not")
     {
         input.reset(&checkpoint);
         return Err(ErrMode::Backtrack(ContextError::new()));
@@ -1888,6 +1938,145 @@ server = exec {
             },
             _ => panic!("expected Let"),
         }
+    }
+
+    #[test]
+    fn parse_grouped_if_operands() {
+        let value = parse_expr(
+            r#"(if p == "" then ["--workspace"] else []) + ( if f == "" then [] else ["--", f] )"#,
+            "<test>",
+        )
+        .unwrap();
+        match value {
+            Expr::Add(lhs, rhs) => {
+                assert!(matches!(*lhs, Expr::If(..)));
+                assert!(matches!(*rhs, Expr::If(..)));
+            }
+            other => panic!("expected Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_grouping_is_transparent() {
+        assert_eq!(
+            parse_expr("((1))", "<test>").unwrap(),
+            parse_expr("1", "<test>").unwrap()
+        );
+        assert!(matches!(
+            parse_expr(r#"(x | trim) == "a""#, "<test>").unwrap(),
+            Expr::BinOp(lhs, BinOp::Eq, _) if matches!(*lhs, Expr::Pipe(..))
+        ));
+        assert!(matches!(
+            parse_expr(r#""a" == (x | trim)"#, "<test>").unwrap(),
+            Expr::BinOp(_, BinOp::Eq, rhs) if matches!(*rhs, Expr::Pipe(..))
+        ));
+    }
+
+    #[test]
+    fn parse_grouping_leaves_calls_alone() {
+        assert!(matches!(
+            parse_expr("f (1)", "<test>").unwrap(),
+            Expr::Call(path, args) if path == ["f"] && args.len() == 1
+        ));
+        assert!(matches!(
+            parse_expr(r#"x | split((":"))"#, "<test>").unwrap(),
+            Expr::Pipe(_, name, args) if name == ["split"] && args == [Expr::Str(vec![StringPart::Literal(":".into())])]
+        ));
+        assert!(matches!(
+            parse_expr("t(a = (1))", "<test>").unwrap(),
+            Expr::TargetCall { name, args, .. } if name == "t" && args[0].value == Expr::Number(1.into())
+        ));
+    }
+
+    #[test]
+    fn parse_logical_precedence() {
+        let parsed = |source| parse_expr(source, "<test>").unwrap();
+        let reference = |name: &str| Box::new(Expr::Ref(vec![name.into()]));
+        let binary = |lhs, op, rhs| Box::new(Expr::BinOp(lhs, op, rhs));
+        // or < and < not < +, and both chains are left-associative.
+        assert_eq!(
+            parsed("a or b and not c"),
+            *binary(
+                reference("a"),
+                BinOp::Or,
+                binary(reference("b"), BinOp::And, Box::new(Expr::Not(reference("c"))))
+            )
+        );
+        assert_eq!(
+            parsed("a and b or c"),
+            *binary(
+                binary(reference("a"), BinOp::And, reference("b")),
+                BinOp::Or,
+                reference("c")
+            )
+        );
+        assert_eq!(
+            parsed("a and b and c"),
+            *binary(
+                binary(reference("a"), BinOp::And, reference("b")),
+                BinOp::And,
+                reference("c")
+            )
+        );
+        assert_eq!(
+            parsed("not a == b"),
+            Expr::Not(binary(reference("a"), BinOp::Eq, reference("b")))
+        );
+        assert_eq!(parsed("not not a"), Expr::Not(Box::new(Expr::Not(reference("a")))));
+        assert!(matches!(
+            parsed("if a and b then 1 else 2"),
+            Expr::If(cond, ..) if matches!(*cond, Expr::BinOp(_, BinOp::And, _))
+        ));
+        assert!(matches!(
+            parsed("not (a or b)"),
+            Expr::Not(inner) if matches!(*inner, Expr::BinOp(_, BinOp::Or, _))
+        ));
+    }
+
+    #[test]
+    fn parse_pipe_binds_tighter_than_comparison() {
+        let parsed = |source| parse_expr(source, "<test>").unwrap();
+        let pipe = |value: &str, function: &str| {
+            Box::new(Expr::Pipe(
+                Box::new(Expr::Ref(vec![value.into()])),
+                vec![function.into()],
+                vec![],
+            ))
+        };
+        let reference = |name: &str| Box::new(Expr::Ref(vec![name.into()]));
+        assert_eq!(
+            parsed("a == b | f"),
+            Expr::BinOp(reference("a"), BinOp::Eq, pipe("b", "f"))
+        );
+        assert_eq!(
+            parsed("a | f != b | g"),
+            Expr::BinOp(pipe("a", "f"), BinOp::Ne, pipe("b", "g"))
+        );
+        assert_eq!(parsed("a + b | f"), Expr::Add(reference("a"), pipe("b", "f")));
+        assert_eq!(
+            parsed("a + b == c"),
+            Expr::Add(
+                reference("a"),
+                Box::new(Expr::BinOp(reference("b"), BinOp::Eq, reference("c")))
+            )
+        );
+    }
+
+    #[test]
+    fn parse_logical_keywords_are_reserved() {
+        assert!(parse_expr("and", "<test>").is_err());
+        assert!(parse_expr("a or", "<test>").is_err());
+        assert_eq!(parse_expr("order", "<test>").unwrap(), Expr::Ref(vec!["order".into()]));
+        assert_eq!(
+            parse_expr("nothing", "<test>").unwrap(),
+            Expr::Ref(vec!["nothing".into()])
+        );
+    }
+
+    #[test]
+    fn parse_unclosed_group_errors() {
+        let error = parse_expr("(1 + 2", "<test>").unwrap_err();
+        assert!(error.message.contains("closing ')'"), "{}", error.message);
     }
 
     #[test]

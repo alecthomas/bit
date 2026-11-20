@@ -350,6 +350,7 @@ fn rewrite_matrix_expr(expr: &Expr, key_subs: &HashMap<String, Expr>, target_sub
             op.clone(),
             Box::new(rewrite_matrix_expr(rhs, key_subs, target_subs)),
         ),
+        Expr::Not(inner) => Expr::Not(Box::new(rewrite_matrix_expr(inner, key_subs, target_subs))),
         Expr::Add(lhs, rhs) => Expr::Add(
             Box::new(rewrite_matrix_expr(lhs, key_subs, target_subs)),
             Box::new(rewrite_matrix_expr(rhs, key_subs, target_subs)),

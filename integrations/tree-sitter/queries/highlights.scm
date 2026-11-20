@@ -17,6 +17,12 @@
   "else"
 ] @keyword.conditional
 
+[
+  "and"
+  "or"
+  "not"
+] @keyword.operator
+
 (phase_modifier) @keyword.modifier
 (protected_modifier) @keyword.modifier
 (explicit_modifier) @keyword.modifier

@@ -720,6 +720,7 @@ pub(crate) fn rewrite_expr(
             op.clone(),
             Box::new(rewrite_expr(rhs, inner_targets, substitutions, prefix)),
         ),
+        Expr::Not(inner) => Expr::Not(Box::new(rewrite_expr(inner, inner_targets, substitutions, prefix))),
         Expr::Add(lhs, rhs) => Expr::Add(
             Box::new(rewrite_expr(lhs, inner_targets, substitutions, prefix)),
             Box::new(rewrite_expr(rhs, inner_targets, substitutions, prefix)),

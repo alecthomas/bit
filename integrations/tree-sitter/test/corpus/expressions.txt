@@ -305,6 +305,132 @@ let x = if env == "prod" then 3 else 1
       else: (number))))
 
 ================================================================================
+parenthesized if expressions
+================================================================================
+let x = (if a == "" then ["b"] else []) + (if c then [] else [c])
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (add_expression
+      left: (parenthesized_expression
+        (if_expression
+          condition: (binary_expression
+            left: (reference
+              (identifier))
+            right: (string))
+          then: (list
+            (string))
+          else: (list)))
+      right: (parenthesized_expression
+        (if_expression
+          condition: (reference
+            (identifier))
+          then: (list)
+          else: (list
+            (reference
+              (identifier))))))))
+
+================================================================================
+parenthesized pipe in comparison
+================================================================================
+let x = (y | trim) == f((1))
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (binary_expression
+      left: (parenthesized_expression
+        (pipe_expression
+          value: (reference
+            (identifier))
+          pipe: (identifier)))
+      right: (call
+        name: (identifier)
+        (parenthesized_expression
+          (number))))))
+
+================================================================================
+pipe binds tighter than comparison
+================================================================================
+let x = a | trim == b | f(1)
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (binary_expression
+      left: (pipe_expression
+        value: (reference
+          (identifier))
+        pipe: (identifier))
+      right: (pipe_expression
+        value: (reference
+          (identifier))
+        pipe: (identifier)
+        (number)))))
+
+================================================================================
+logical operator precedence
+================================================================================
+let x = not a == b or c and not d
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (logical_expression
+      left: (not_expression
+        operand: (binary_expression
+          left: (reference
+            (identifier))
+          right: (reference
+            (identifier))))
+      right: (logical_expression
+        left: (reference
+          (identifier))
+        right: (not_expression
+          operand: (reference
+            (identifier)))))))
+
+================================================================================
+logical operators are left-associative and bind looser than plus
+================================================================================
+let x = a and b + c and d
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (logical_expression
+      left: (logical_expression
+        left: (reference
+          (identifier))
+        right: (add_expression
+          left: (reference
+            (identifier))
+          right: (reference
+            (identifier))))
+      right: (reference
+        (identifier)))))
+
+================================================================================
+logical condition in if
+================================================================================
+let x = if a or not (b) then 1 else 2
+--------------------------------------------------------------------------------
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (if_expression
+      condition: (logical_expression
+        left: (reference
+          (identifier))
+        right: (not_expression
+          operand: (parenthesized_expression
+            (reference
+              (identifier)))))
+      then: (number)
+      else: (number))))
+
+================================================================================
 list concatenation
 ================================================================================
 let x = [1, 2] + [3, 4]

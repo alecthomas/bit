@@ -411,6 +411,23 @@ mod tests {
     }
 
     #[test]
+    fn preserves_grouping_parens() {
+        let source = "let x=(1)\njob=exec{\nflags=(if x==1 then ['a'] else [])+( ['b'] | uniq )\n}\n";
+        let expected = "let x = (1)\n\njob = exec {\n  flags = (if x==1 then ['a'] else [])+( ['b'] | uniq )\n}\n";
+        let formatted = format(source, "BUILD.bit").unwrap();
+        assert_eq!(formatted, expected);
+        assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
+    }
+
+    #[test]
+    fn preserves_logical_operators() {
+        let source = "let x=not a and(b or c)\n";
+        let formatted = format(source, "BUILD.bit").unwrap();
+        assert_eq!(formatted, "let x = not a and(b or c)\n");
+        assert_eq!(format(&formatted, "BUILD.bit").unwrap(), formatted);
+    }
+
+    #[test]
     fn rejects_invalid_source() {
         assert!(format("job = exec {", "BUILD.bit").is_err());
     }

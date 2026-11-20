@@ -317,11 +317,24 @@ From loosest to tightest binding:
 | Operator | Meaning |
 |----------|---------|
 | `if c then a else b` | `c` must be a bool |
+| `a or b` | Logical or |
+| `a and b` | Logical and |
+| `not a` | Logical negation |
 | `a + b` | Add numbers, concatenate strings or lists |
+| `a == b`, `a != b` | Equality. Doesn't chain |
 | `a \| f(args)` | Pipe |
-| `a == b`, `a != b` | Equality |
 
-So `a + b | trim` is `a + (b | trim)`.
+So `a + b | trim` is `a + (b | trim)`, `a | trim == b` is `(a | trim) == b`, and `not a == b or c` is `(not (a == b)) or c`.
+
+`and`, `or`, and `not` take bools and return a bool. `and` and `or` short-circuit: the right operand is evaluated only when the left doesn't decide the result. The three words are reserved and can't be used as names.
+
+Parentheses group any expression and can appear wherever an operand can. Use them to override precedence, or to make an `if` an operand:
+
+```
+flags = (if package == "" then ["--workspace"] else []) + (if filter == "" then [] else ["--", filter])
+```
+
+A `(` directly after a name is a call, so `f (x)` calls `f`. Grouping leaves no trace in the parsed expression. The formatter keeps the parentheses as written.
 
 ### Built-in Functions
 

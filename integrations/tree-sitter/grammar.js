@@ -195,8 +195,36 @@ module.exports = grammar({
 
     _expression: $ => choice(
       $.if_expression,
+      $._logical_expression,
+    ),
+
+    // `or` binds looser than `and`, which binds looser than `not`, which
+    // binds looser than `+`. Negative precedences keep both below
+    // add_expression's.
+    _logical_expression: $ => choice(
+      $.logical_expression,
+      $._not_expression,
+    ),
+
+    logical_expression: $ => choice(
+      prec.left(-2, seq(
+        field('left', $._logical_expression),
+        field('op', 'or'),
+        field('right', $._logical_expression),
+      )),
+      prec.left(-1, seq(
+        field('left', $._logical_expression),
+        field('op', 'and'),
+        field('right', $._logical_expression),
+      )),
+    ),
+
+    _not_expression: $ => choice(
+      $.not_expression,
       $._add_expression,
     ),
+
+    not_expression: $ => seq('not', field('operand', $._not_expression)),
 
     if_expression: $ => prec.right(seq(
       'if', field('condition', $._expression),
@@ -206,21 +234,32 @@ module.exports = grammar({
 
     _add_expression: $ => choice(
       $.add_expression,
-      $._pipe_expression,
+      $._cmp_expression,
     ),
 
     add_expression: $ => prec.left(1, seq(
       field('left', $._add_expression),
       '+',
+      field('right', $._cmp_expression),
+    )),
+
+    _cmp_expression: $ => choice(
+      $.binary_expression,
+      $._pipe_expression,
+    ),
+
+    binary_expression: $ => prec.left(2, seq(
+      field('left', $._pipe_expression),
+      field('op', choice('==', '!=')),
       field('right', $._pipe_expression),
     )),
 
     _pipe_expression: $ => choice(
       $.pipe_expression,
-      $._cmp_expression,
+      $._primary,
     ),
 
-    pipe_expression: $ => prec.left(2, seq(
+    pipe_expression: $ => prec.left(3, seq(
       field('value', $._pipe_expression),
       '|',
       field('pipe', $._function_name),
@@ -234,17 +273,6 @@ module.exports = grammar({
       )),
     )),
 
-    _cmp_expression: $ => choice(
-      $.binary_expression,
-      $._primary,
-    ),
-
-    binary_expression: $ => prec.left(3, seq(
-      field('left', $._primary),
-      field('op', choice('==', '!=')),
-      field('right', $._primary),
-    )),
-
     _primary: $ => choice(
       $.string,
       $.raw_string,
@@ -255,10 +283,13 @@ module.exports = grammar({
       $.null,
       $.list,
       $.map,
+      $.parenthesized_expression,
       $.target_call,
       $.call,
       $.reference,
     ),
+
+    parenthesized_expression: $ => seq('(', $._expression, ')'),
 
     // ── Strings ──
 

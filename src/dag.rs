@@ -756,6 +756,7 @@ fn collect_all_expr_refs(expr: &Expr, refs: &mut HashSet<String>) {
             collect_all_expr_refs(lhs, refs);
             collect_all_expr_refs(rhs, refs);
         }
+        Expr::Not(inner) => collect_all_expr_refs(inner, refs),
         _ => {}
     }
 }
@@ -822,6 +823,7 @@ fn collect_expr_refs(expr: &Expr, scope: &Scope, refs: &mut HashSet<String>) -> 
             collect_expr_refs(lhs, scope, refs)?;
             collect_expr_refs(rhs, scope, refs)?;
         }
+        Expr::Not(inner) => collect_expr_refs(inner, scope, refs)?,
         _ => {}
     }
     Ok(())

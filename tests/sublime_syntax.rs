@@ -72,6 +72,7 @@ fn category(rule: &str) -> &'static str {
         "scalar_type" => "types",
         "boolean" | "null" => "constants",
         "if_expression" => "conditionals",
+        "logical_expression" | "not_expression" => "operators",
         _ if rule.ends_with("_modifier") => "modifiers",
         _ => "keywords",
     }

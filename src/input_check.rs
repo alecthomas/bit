@@ -229,7 +229,7 @@ impl Checker<'_> {
                 self.check(then_value, expected, path)?;
                 self.check(else_value, expected, path)
             }
-            Expr::BinOp(..) => check_type(&Type::Bool, expected, path),
+            Expr::BinOp(..) | Expr::Not(_) => check_type(&Type::Bool, expected, path),
             Expr::Add(lhs, rhs) => {
                 self.check(lhs, expected, path)?;
                 self.check(rhs, expected, path)
