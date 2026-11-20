@@ -415,6 +415,131 @@ struct InputPaths {
     /// nested in another's directory is an input only through its own root.
     excluded: Vec<PathBuf>,
     files: Vec<PathBuf>,
+    /// The packages in `roots` whose manifests set `include` or `exclude`.
+    filters: Vec<PackageFilter>,
+}
+
+/// A package whose manifest sets `include` or `exclude`, which leave files
+/// out of it. Cargo reports what is left in through `cargo package --list`,
+/// which applies the patterns, their workspace inheritance and Git's ignore
+/// rules as packaging does.
+///
+/// Cargo uses that list for packaging and to track rustdoc and build scripts
+/// that print no `rerun-if-changed`, but tracks what rustc compiles through
+/// its dep-info. A crate often excludes `tests/` or `examples/` only to keep
+/// them out of the published crate, so every file under the directory of a
+/// target's source counts regardless, or tests, lints and formatting would
+/// miss edits to them.
+#[derive(Clone, Debug)]
+struct PackageFilter {
+    name: String,
+    manifest: PathBuf,
+    root: PathBuf,
+    /// Target source files, and the directories of every target's but a
+    /// build script's, which is usually the package directory itself.
+    sources: Vec<PathBuf>,
+    /// The variables cargo runs with.
+    env: BTreeMap<String, String>,
+}
+
+/// The files each package's [`PackageFilter`] leaves out, by manifest and
+/// variables. Cargo is asked once per process, since a listing costs a
+/// process.
+static PACKAGE_EXCLUSIONS: LazyLock<Mutex<HashMap<String, Arc<HashSet<PathBuf>>>>> = LazyLock::new(Default::default);
+
+impl PackageFilter {
+    /// `None` for a package whose manifest sets neither field, which leaves
+    /// nothing out.
+    fn new(package: &serde_json::Value, env: &BTreeMap<String, String>) -> Option<Self> {
+        let manifest = PathBuf::from(package.get("manifest_path")?.as_str()?);
+        let table: toml::Table = std::fs::read_to_string(&manifest).ok()?.parse().ok()?;
+        let fields = table.get("package")?.as_table()?;
+        // A field inherited from the workspace counts too: cargo resolves it.
+        if !fields.contains_key("include") && !fields.contains_key("exclude") {
+            return None;
+        }
+        let targets = package
+            .get("targets")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let sources = targets
+            .iter()
+            .filter_map(|target| {
+                let source = Path::new(target.get("src_path")?.as_str()?);
+                let build_script = target
+                    .get("kind")?
+                    .as_array()?
+                    .iter()
+                    .any(|kind| kind == "custom-build");
+                Some(if build_script { source } else { source.parent()? }.to_path_buf())
+            })
+            .collect();
+        Some(Self {
+            name: package.get("name")?.as_str()?.to_owned(),
+            root: manifest.parent()?.to_path_buf(),
+            manifest,
+            sources,
+            env: env.clone(),
+        })
+    }
+
+    /// The files of `listed`, the package directory's files, that cargo
+    /// leaves out of the package, other than target sources. A file listed
+    /// after cargo was asked, such as one a target generated, is not among
+    /// them and so counts. When cargo cannot list the package, nothing is
+    /// left out.
+    fn excluded(&self, listed: &[PathBuf]) -> Arc<HashSet<PathBuf>> {
+        let key = format!("{} {:?}", self.manifest.display(), self.env);
+        if let Some(excluded) = PACKAGE_EXCLUSIONS.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return Arc::clone(excluded);
+        }
+        let excluded = Arc::new(self.package_list().map_or_else(HashSet::new, |packaged| {
+            listed
+                .iter()
+                .filter(|file| {
+                    file.strip_prefix(&self.root)
+                        .is_ok_and(|relative| !packaged.contains(relative))
+                        && !self.sources.iter().any(|source| file.starts_with(source))
+                })
+                .cloned()
+                .collect()
+        }));
+        PACKAGE_EXCLUSIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, Arc::clone(&excluded));
+        excluded
+    }
+
+    /// The files `cargo package --list` reports, relative to the package
+    /// directory. It also names files packaging generates, which match no
+    /// file in the directory.
+    fn package_list(&self) -> Option<HashSet<PathBuf>> {
+        let output = Command::new("cargo")
+            .args([
+                "package",
+                "--list",
+                "--allow-dirty",
+                "--offline",
+                "-p",
+                &self.name,
+                "--manifest-path",
+            ])
+            .arg(&self.manifest)
+            .current_dir(&self.root)
+            .envs(&self.env)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .logged_output()
+            .ok()?;
+        output.status.success().then(|| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(PathBuf::from)
+                .collect()
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -561,6 +686,7 @@ impl Selection<'_> {
             roots: vec![],
             excluded: discovered.workspace.excluded.clone(),
             files: vec![],
+            filters: vec![],
         };
         for name in names {
             let paths = discovered
@@ -569,6 +695,7 @@ impl Selection<'_> {
                 .ok_or_else(|| format!("Rust package '{name}' not found in workspace"))?;
             selected.roots.extend(paths.roots.iter().cloned());
             selected.files.extend(paths.files.iter().cloned());
+            selected.filters.extend(paths.filters.iter().cloned());
         }
         selected.roots.sort();
         selected.roots.dedup();
@@ -828,7 +955,8 @@ pub fn hash_existing(files: &[PathBuf], tracker: &FileTracker) -> Result<BTreeMa
 /// Resolve Rust source files for change detection.
 ///
 /// Uses `cargo metadata` in `dir` to discover the local packages, then
-/// hashes every file in their directories that Git does not ignore. Builds
+/// hashes every file in their directories that Git does not ignore and the
+/// package's `include` or `exclude` leaves in (see [`PackageFilter`]). Builds
 /// read more than `.rs` files: `include_str!` and `include_bytes!` data,
 /// `#[path]` modules, files a build script reads, and test fixtures. When
 /// `package` is set, only that package and its transitive local dependencies
@@ -864,11 +992,11 @@ fn discover_paths(dir: Option<&str>, env: &BTreeMap<String, String>) -> Result<D
         .filter_map(|package| package_root(package))
         .collect();
     excluded.push(target_dir.clone());
-    let workspace = discover_input_paths(&workspace_values, &cwd, dir, &excluded);
+    let workspace = discover_input_paths(&workspace_values, &cwd, dir, env, &excluded);
     let mut packages = HashMap::new();
     for (name, member) in workspace_packages_by_name(&meta)? {
         let values = local_closure(&meta, &local, member)?;
-        packages.insert(name, discover_input_paths(&values, &cwd, dir, &excluded));
+        packages.insert(name, discover_input_paths(&values, &cwd, dir, env, &excluded));
     }
 
     // The workspace root holds the lockfile and the `[patch]`, `[profile]`
@@ -912,12 +1040,14 @@ fn package_root(package: &serde_json::Value) -> Option<PathBuf> {
     Some(Path::new(manifest).parent()?.to_path_buf())
 }
 
-/// The input paths of `packages`, found relative to `cwd`, where cargo runs.
-/// Files are returned as bit's process sees them: prefixed by `dir`.
+/// The input paths of `packages`, found relative to `cwd`, where cargo runs
+/// with `env`. Files are returned as bit's process sees them: prefixed by
+/// `dir`.
 fn discover_input_paths(
     packages: &[&serde_json::Value],
     cwd: &Path,
     dir: Option<&str>,
+    env: &BTreeMap<String, String>,
     excluded: &[PathBuf],
 ) -> InputPaths {
     let in_dir = |path: &Path| PathBuf::from(crate::provider::in_dir(dir, &path.to_string_lossy()));
@@ -939,13 +1069,18 @@ fn discover_input_paths(
         roots,
         excluded: excluded.to_vec(),
         files,
+        filters: packages
+            .iter()
+            .filter_map(|package| PackageFilter::new(package, env))
+            .collect(),
     }
 }
 
 /// The source files of every package directory in `paths`, as
 /// [`FileTracker::source_files`] lists them, except those of a package
-/// nested inside another's directory, such as a member below a root package.
-/// All the directories are listed in one request so they share a listing.
+/// nested inside another's directory, such as a member below a root package,
+/// and those the package's [`PackageFilter`] leaves out. All the directories
+/// are listed in one request so they share a listing.
 fn package_files(paths: &InputPaths, tracker: &FileTracker) -> Vec<PathBuf> {
     let listed = tracker.source_files(&paths.roots);
     paths
@@ -957,9 +1092,15 @@ fn package_files(paths: &InputPaths, tracker: &FileTracker) -> Vec<PathBuf> {
             // such as a workspace root package above a member; those would
             // drop every file.
             let nested: Vec<&PathBuf> = paths.excluded.iter().filter(|dir| !root.starts_with(dir)).collect();
-            files
-                .into_iter()
-                .filter(move |file| !nested.iter().any(|dir| file.starts_with(dir)))
+            let left_out = paths
+                .filters
+                .iter()
+                .find(|filter| filter.root == *root)
+                .map(|filter| filter.excluded(&files));
+            files.into_iter().filter(move |file| {
+                !nested.iter().any(|dir| file.starts_with(dir))
+                    && left_out.as_ref().is_none_or(|left_out| !left_out.contains(file))
+            })
         })
         .collect()
 }
@@ -1505,6 +1646,110 @@ mod tests {
             let old = hash_of(&inputs(), file);
             write(dir.path(), &[(file, changed)]);
             assert_ne!(old, hash_of(&inputs(), file), "{file}");
+        }
+    }
+
+    #[test]
+    fn manifest_include_and_exclude_leave_files_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = |name: &str, extra: &str| {
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{extra}")
+        };
+        write(
+            dir.path(),
+            &[
+                (
+                    "Cargo.toml",
+                    &format!(
+                        "{}[workspace]\nmembers = [\"crates/member\", \"crates/narrow\"]\n\
+                         [workspace.package]\nexclude = [\"bin/\", \"/notes.md\"]\n",
+                        package("rootpkg", "exclude.workspace = true\n")
+                    ),
+                ),
+                ("src/main.rs", "fn main() {}\n"),
+                ("bin/tool", ""),
+                ("notes.md", ""),
+                ("docs/notes.md", ""),
+                (
+                    "crates/member/Cargo.toml",
+                    &package("member", "exclude = [\"tests/\", \"data/\"]\n"),
+                ),
+                ("crates/member/src/lib.rs", ""),
+                ("crates/member/tests/it.rs", ""),
+                ("crates/member/tests/fixtures/x.json", ""),
+                ("crates/member/data/big.bin", ""),
+                (
+                    "crates/narrow/Cargo.toml",
+                    &package("narrow", "include = [\"/README.md\"]\n"),
+                ),
+                ("crates/narrow/src/lib.rs", ""),
+                ("crates/narrow/README.md", ""),
+                ("crates/narrow/LICENSE", ""),
+            ],
+        );
+        let status = Command::new("cargo")
+            .args(["generate-lockfile", "--offline"])
+            .current_dir(dir.path())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        crate::git::command()
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        let ws = dir.path().to_string_lossy().into_owned();
+        let flags = vec!["--workspace".to_owned()];
+        let selection = Selection {
+            dir: Some(&ws),
+            env: &BTreeMap::new(),
+            package: None,
+            flags: &flags,
+        };
+        let root = dir.path().canonicalize().unwrap();
+        let inputs: Vec<String> = resolve_rust_inputs(&selection, &FileTracker::default())
+            .unwrap()
+            .into_keys()
+            .filter_map(|path| {
+                Some(
+                    Path::new(&path)
+                        .strip_prefix(&root)
+                        .ok()?
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .collect();
+
+        for expected in [
+            "Cargo.toml",
+            "src/main.rs",
+            "docs/notes.md",
+            "crates/member/Cargo.toml",
+            "crates/member/src/lib.rs",
+            // Under a target's directory, which an exclusion cannot remove.
+            "crates/member/tests/it.rs",
+            "crates/member/tests/fixtures/x.json",
+            "crates/narrow/Cargo.toml",
+            "crates/narrow/src/lib.rs",
+            "crates/narrow/README.md",
+        ] {
+            assert!(
+                inputs.iter().any(|input| input == expected),
+                "missing {expected}: {inputs:?}"
+            );
+        }
+        for unexpected in [
+            "bin/tool",
+            "notes.md",
+            "crates/member/data/big.bin",
+            "crates/narrow/LICENSE",
+        ] {
+            assert!(
+                !inputs.iter().any(|input| input == unexpected),
+                "has {unexpected}: {inputs:?}"
+            );
         }
     }
 
