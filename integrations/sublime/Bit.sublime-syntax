@@ -1,0 +1,230 @@
+%YAML 1.2
+---
+# Sublime Text syntax for bit. Cult of Diff highlights with syntect, so this
+# stays within syntect's subset: no `extends`, `branch_point`, or `fail`.
+name: Bit
+file_extensions:
+  - bit
+scope: source.bit
+
+variables:
+  # BEGIN generated from the tree-sitter grammar by tests/sublime_syntax.rs
+  conditionals: '(?:else|if|then)'
+  constants: '(?:false|null|true)'
+  keywords: '(?:as|group|import|let|output|param)'
+  modifiers: '(?:explicit|large|post|pre|protected)'
+  types: '(?:bool|duration|int|number|path|string)'
+  # END generated
+  ident: '[A-Za-z_][A-Za-z0-9_-]*'
+  # Identifiers may contain `-`, so `\b` would match inside `pre-commit`.
+  before: '(?<![A-Za-z0-9_-])'
+  after: '(?![A-Za-z0-9_-])'
+
+contexts:
+  main:
+    - include: comments
+    - include: statements
+    - include: expressions
+
+  comments:
+    # `#` starts a comment only before whitespace; `#{` is interpolation.
+    - match: '#(?=\s|$)[^\n]*'
+      scope: comment.line.number-sign.bit
+
+  statements:
+    - match: '^\s*(import){{after}}'
+      captures:
+        1: keyword.control.import.bit
+      push: import
+    - match: '^\s*(let|output)\s+({{ident}})'
+      captures:
+        1: keyword.declaration.bit
+        2: entity.name.variable.bit
+    - match: '^\s*(param)\s+({{ident}})'
+      captures:
+        1: keyword.declaration.bit
+        2: variable.parameter.bit
+    - match: '^\s*(group)\s+({{ident}})'
+      captures:
+        1: keyword.declaration.bit
+        2: entity.name.function.bit
+    # Statement keywords the rules above don't know yet.
+    - match: '^\s*({{keywords}}){{after}}'
+      captures:
+        1: keyword.other.bit
+    # Target header: `[modifiers] name[matrix](params) = provider.resource {`.
+    # Matrix keys and parameters fall through to the bracket contexts.
+    - match: '^\s*((?:{{modifiers}}\s+)*)({{ident}})(?=\s*(?:[\[(]|=(?!=)))'
+      captures:
+        1: storage.modifier.bit
+        2: entity.name.variable.bit
+    - match: '(=)\s*({{ident}})(?:(\.)({{ident}}))?(?=\s*\{)'
+      captures:
+        1: keyword.operator.assignment.bit
+        2: support.namespace.bit
+        3: punctuation.accessor.bit
+        4: entity.name.type.bit
+
+  import:
+    - match: '(?=\n)|$'
+      pop: true
+    - include: comments
+    - include: strings
+    - match: '{{before}}(as)\s+({{ident}})'
+      captures:
+        1: keyword.control.import.bit
+        2: support.namespace.bit
+
+  expressions:
+    - include: strings
+    - match: ':'
+      scope: punctuation.separator.type.bit
+      push: type
+    - match: '{{before}}{{conditionals}}{{after}}'
+      scope: keyword.control.conditional.bit
+    - match: '{{before}}{{constants}}{{after}}'
+      scope: constant.language.bit
+    - match: '{{before}}\d+(?:\.\d+)?(?:ns|us|ms|s|m|h|d)?{{after}}'
+      scope: constant.numeric.bit
+    - match: '(\|)\s*(?:({{ident}})(\.))?({{ident}})'
+      captures:
+        1: keyword.operator.pipe.bit
+        2: support.namespace.bit
+        3: punctuation.accessor.bit
+        4: variable.function.bit
+    - match: '{{before}}({{ident}})(\.)({{ident}})(?=\s*\()'
+      captures:
+        1: support.namespace.bit
+        2: punctuation.accessor.bit
+        3: variable.function.bit
+    # A target call takes only named arguments: `build(tag = "1.2")`.
+    - match: '{{before}}{{ident}}(?=\s*\(\s*{{ident}}\s*=(?!=))'
+      scope: variable.other.bit
+    - match: '{{before}}{{ident}}(?=\s*\()'
+      scope: variable.function.bit
+    - match: '\{'
+      scope: punctuation.section.braces.begin.bit
+      push: braces
+    - match: '\['
+      scope: punctuation.section.brackets.begin.bit
+      push: brackets
+    - match: '\('
+      scope: punctuation.section.parens.begin.bit
+      push: parens
+    - match: '==|!=|\+|\|'
+      scope: keyword.operator.bit
+    - match: '='
+      scope: keyword.operator.assignment.bit
+    - match: '\.'
+      scope: punctuation.accessor.bit
+    - match: ','
+      scope: punctuation.separator.bit
+    - match: '{{ident}}'
+      scope: variable.other.bit
+
+  # Target bodies and maps.
+  braces:
+    - match: '\}'
+      scope: punctuation.section.braces.end.bit
+      pop: true
+    - include: comments
+    - match: '{{before}}{{ident}}(?=\s*(?::|=(?!=)))'
+      scope: variable.other.member.bit
+    - include: expressions
+
+  brackets:
+    - match: '\]'
+      scope: punctuation.section.brackets.end.bit
+      pop: true
+    - include: comments
+    - include: expressions
+
+  # Parameter lists and named arguments.
+  parens:
+    - match: '\)'
+      scope: punctuation.section.parens.end.bit
+      pop: true
+    - include: comments
+    - match: '{{before}}{{ident}}(?=\s*(?::|=(?!=)))'
+      scope: variable.parameter.bit
+    - include: expressions
+
+  # A type annotation after `:`, such as `[string] | {string = int}`. Type
+  # names are highlighted only here, since outside a type they are ordinary
+  # identifiers such as a `path` field.
+  type:
+    - include: type-atoms
+    - match: '\|'
+      scope: keyword.operator.bit
+    - match: '(?=\S)'
+      pop: true
+
+  type-atoms:
+    - match: '{{before}}{{types}}{{after}}'
+      scope: storage.type.bit
+    - match: '\['
+      scope: punctuation.section.brackets.begin.bit
+      push: type-list
+    - match: '\{'
+      scope: punctuation.section.braces.begin.bit
+      push: type-map
+
+  type-list:
+    - match: '\]'
+      scope: punctuation.section.brackets.end.bit
+      pop: true
+    - include: type-atoms
+    - match: '\|'
+      scope: keyword.operator.bit
+
+  type-map:
+    - match: '\}'
+      scope: punctuation.section.braces.end.bit
+      pop: true
+    - include: type-atoms
+    - match: '\|'
+      scope: keyword.operator.bit
+    - match: '='
+      scope: keyword.operator.assignment.bit
+
+  strings:
+    # The terminator may be indented and must be alone on its line.
+    - match: '(<<-?)([A-Za-z0-9_]+)(?=\r?\n)'
+      captures:
+        1: punctuation.definition.string.begin.bit
+        2: entity.name.tag.heredoc.bit
+      push:
+        - meta_scope: string.unquoted.heredoc.bit
+        - match: '^[ \t]*(\2)(?=\r?\n|$)'
+          captures:
+            1: entity.name.tag.heredoc.bit
+          pop: true
+        - include: interpolation
+    - match: '"'
+      scope: punctuation.definition.string.begin.bit
+      push:
+        - meta_scope: string.quoted.double.bit
+        - match: '"'
+          scope: punctuation.definition.string.end.bit
+          pop: true
+        - match: '\\.'
+          scope: constant.character.escape.bit
+        - include: interpolation
+    - match: "'"
+      scope: punctuation.definition.string.begin.bit
+      push:
+        - meta_scope: string.quoted.single.bit
+        - match: "'"
+          scope: punctuation.definition.string.end.bit
+          pop: true
+
+  interpolation:
+    - match: '#\{'
+      scope: punctuation.section.interpolation.begin.bit
+      push:
+        - clear_scopes: 1
+        - meta_scope: meta.interpolation.bit
+        - match: '\}'
+          scope: punctuation.section.interpolation.end.bit
+          pop: true
+        - include: expressions

@@ -1,11 +1,9 @@
 # Format Rust sources.
 fmt = rust.fmt {}
 
-# Check Rust formatting. Ordered after `fmt` so `bit ...` checks the
-# formatted sources.
-fmt-check = rust.fmt-check {
-  after = [fmt]
-}
+# Check Rust formatting. Not ordered after `fmt`, since `after` would run
+# `fmt` first and the check could never fail. The pre-commit hook formats.
+fmt-check = rust.fmt-check {}
 
 # Debug build of the `bit` binary.
 large debug = rust.exe {}
@@ -117,6 +115,15 @@ protected sync-zed-rev = exec {
     rm integrations/zed/extension.toml.bak
   EOF
   outputs = "integrations/zed/extension.toml"
+}
+
+# Regenerate the Sublime syntax's keyword lists from the tree-sitter grammar.
+# The test that checks them rewrites them in update mode. Explicit, since
+# alongside the test suite it would race the suite reading the same file.
+explicit sync-sublime-syntax = exec {
+  inputs = ["integrations/tree-sitter/src/grammar.json", "integrations/sublime/Bit.sublime-syntax", "tests/sublime_syntax.rs"]
+  command = "UPDATE_SUBLIME_SYNTAX=1 cargo test --test sublime_syntax"
+  outputs = "integrations/sublime/Bit.sublime-syntax"
 }
 
 # Regenerate the Built-in Functions and Providers sections from `bit --schema --json`.
