@@ -602,6 +602,105 @@ pub fn lockfile(selection: &Selection) -> Result<String, BoxError> {
     Ok(selection.paths()?.0.lockfile.to_string_lossy().into_owned())
 }
 
+/// The workspace members of the workspace a target builds in, with the local
+/// packages each depends on, to find the members a changed file can affect.
+pub struct MemberGraph {
+    /// Each member's directory, and the directories of the local packages it
+    /// depends on in any way, itself included.
+    closures: Vec<(PathBuf, Vec<PathBuf>)>,
+    /// Files every member is built with: the workspace manifest, the lockfile
+    /// and cargo's config files.
+    config: Vec<PathBuf>,
+    /// Where cargo runs rustc, which relative paths in dep-info are relative to.
+    workspace_root: PathBuf,
+}
+
+impl MemberGraph {
+    pub fn discover(selection: &Selection) -> Result<Self, BoxError> {
+        let flags = SelectionFlags::parse(selection.flags);
+        let dir = selection.cargo_dir(&flags);
+        let discovered = discovered(dir.as_deref(), selection.env)?;
+        let metadata = cargo_metadata(dir.as_deref(), selection.env)?;
+        let workspace_root = metadata
+            .get("workspace_root")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+            .ok_or("`cargo metadata` output has no workspace_root")?;
+        let closures = workspace_packages_by_name(&metadata)?
+            .into_iter()
+            .filter_map(|(name, package)| {
+                let closure = discovered.packages.get(&name)?.roots.clone();
+                Some((package_root(package)?, closure))
+            })
+            .collect();
+        Ok(Self {
+            closures,
+            config: discovered.config,
+            workspace_root,
+        })
+    }
+
+    /// The member whose directory most closely contains `path`.
+    pub fn owner(&self, path: &Path) -> Option<&Path> {
+        self.closures
+            .iter()
+            .map(|(root, _)| root.as_path())
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+    }
+
+    /// The members built with the member in `root`, itself included.
+    pub fn dependents<'a>(&'a self, root: &'a Path) -> impl Iterator<Item = &'a Path> {
+        self.closures
+            .iter()
+            .filter(move |(_, closure)| closure.iter().any(|dir| dir == root))
+            .map(|(member, _)| member.as_path())
+    }
+
+    pub fn is_config(&self, path: &Path) -> bool {
+        self.config.iter().any(|file| file == path)
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+}
+
+/// Whether cargo would run test executables through a runner the user
+/// configured, in a `CARGO_TARGET_<triple>_RUNNER` variable or a
+/// `target.<triple or cfg>.runner` key in a cargo config file. A config file
+/// bit cannot read counts as configuring one.
+pub fn runner_configured(selection: &Selection) -> Result<bool, BoxError> {
+    let is_runner = |name: &str| name.starts_with("CARGO_TARGET_") && name.ends_with("_RUNNER");
+    if std::env::vars_os().any(|(name, _)| is_runner(&name.to_string_lossy()))
+        || selection.env.keys().any(|name| is_runner(name))
+    {
+        return Ok(true);
+    }
+    let config = selection.paths()?.0.config;
+    let configs = config.iter().filter(|file| {
+        file.file_name()
+            .is_some_and(|name| name == "config" || name == "config.toml")
+    });
+    for file in configs {
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let Ok(table) = text.parse::<toml::Table>() else {
+            return Ok(true);
+        };
+        let targets = table.get("target").and_then(toml::Value::as_table);
+        if targets.is_some_and(|targets| {
+            targets
+                .values()
+                .any(|target| target.as_table().is_some_and(|target| target.contains_key("runner")))
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The binary `cargo run` would build in `cwd`, following cargo's own rules:
 /// the packages are `names`, every member with `workspace`, or else the
 /// package of the manifest cargo finds from `cwd`, or the default members

@@ -108,8 +108,9 @@ it.
 
 When a target reruns, its provider sees which files changed and can narrow the
 work to them. For example, `go.test` and `go.lint` run only on the packages
-that changed files affect, and `exec` passes the changed files to its command
-in `BIT_CHANGED_FILES`.
+that changed files affect, `rust.test` runs only the test executables they
+affect, and `exec` passes the changed files to its command in
+`BIT_CHANGED_FILES`.
 
 Successful results also go into a [shared build cache](#shared-build-cache).
 Another checkout of the project with the same sources reuses them, restoring
