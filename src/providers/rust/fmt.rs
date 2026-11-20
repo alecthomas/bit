@@ -185,7 +185,7 @@ impl Resource for RustFmtResource {
     /// The `.rs` files `cargo fmt` may rewrite, so formatting them is not
     /// taken for an edit made while it ran.
     fn output_keys(&self, inputs: &Target<RustFmtInputs>) -> Vec<String> {
-        super::rust_files(&selection(inputs)).unwrap_or_default()
+        super::rust_files(&selection(inputs), &self.tracker).unwrap_or_default()
     }
 }
 

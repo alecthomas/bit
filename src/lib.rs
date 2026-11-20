@@ -22,5 +22,6 @@ pub mod provider;
 pub mod providers;
 pub mod schema;
 pub mod sha256;
+mod source_files;
 pub mod state;
 pub mod value;

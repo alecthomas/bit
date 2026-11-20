@@ -408,8 +408,8 @@ fn set_by_cargo(name: &str) -> bool {
 /// expensive metadata call on every resolve.
 #[derive(Clone)]
 struct InputPaths {
-    /// Directories of the local packages, whose files are listed afresh on
-    /// every resolve so a new file is seen.
+    /// Directories of the local packages, whose files are listed through the
+    /// tracker on every resolve so a new file is seen.
     roots: Vec<PathBuf>,
     /// The target directory and every local package directory. A package
     /// nested in another's directory is an input only through its own root.
@@ -586,12 +586,10 @@ pub fn package_roots(selection: &Selection) -> Result<Vec<PathBuf>, BoxError> {
 
 /// The `.rs` files of the packages a target builds, keyed as
 /// [`resolve_rust_inputs`] keys them: the files `cargo fmt` may rewrite.
-pub fn rust_files(selection: &Selection) -> Result<Vec<String>, BoxError> {
+pub fn rust_files(selection: &Selection, tracker: &FileTracker) -> Result<Vec<String>, BoxError> {
     let (_, paths) = selection.paths()?;
-    Ok(paths
-        .roots
-        .iter()
-        .flat_map(|root| package_files(root, &paths.excluded))
+    Ok(package_files(&paths, tracker)
+        .into_iter()
         .filter(|file| file.extension().is_some_and(|extension| extension == "rs"))
         .map(|file| file.to_string_lossy().into_owned())
         .collect())
@@ -740,10 +738,7 @@ pub fn hash_existing(files: &[PathBuf], tracker: &FileTracker) -> Result<BTreeMa
 pub fn resolve_rust_inputs(selection: &Selection, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
     let (discovered, paths) = selection.paths()?;
 
-    let mut result = BTreeMap::new();
-    for root in &paths.roots {
-        result.extend(tracker.hash_files(&package_files(root, &paths.excluded))?);
-    }
+    let mut result = tracker.hash_files(&package_files(&paths, tracker))?;
     for path in paths.files.iter().chain(&discovered.config) {
         if path.is_file() {
             let key = path.display().to_string();
@@ -848,70 +843,26 @@ fn discover_input_paths(
     }
 }
 
-/// Every file in the package directory `root` that Git does not ignore,
-/// except those under an `excluded` directory nested inside `root`, such as
-/// a member package below a root package. Outside a Git repository, such as
-/// for a path dependency elsewhere, every file but those in `.git`
-/// directories.
-fn package_files(root: &Path, excluded: &[PathBuf]) -> Vec<PathBuf> {
-    let files = git_files(root).unwrap_or_else(|| {
-        let mut files = Vec::new();
-        walk_files(root, &mut files);
-        files
-    });
-    // `excluded` also holds `root` and the packages that contain it, such as
-    // a workspace root package above a member; those would drop every file.
-    let nested: Vec<&PathBuf> = excluded.iter().filter(|dir| !root.starts_with(dir)).collect();
-    files
-        .into_iter()
-        .filter(|file| !nested.iter().any(|dir| file.starts_with(dir)))
+/// The source files of every package directory in `paths`, as
+/// [`FileTracker::source_files`] lists them, except those of a package
+/// nested inside another's directory, such as a member below a root package.
+/// All the directories are listed in one request so they share a listing.
+fn package_files(paths: &InputPaths, tracker: &FileTracker) -> Vec<PathBuf> {
+    let listed = tracker.source_files(&paths.roots);
+    paths
+        .roots
+        .iter()
+        .zip(listed)
+        .flat_map(|(root, files)| {
+            // `excluded` also holds `root` and the packages that contain it,
+            // such as a workspace root package above a member; those would
+            // drop every file.
+            let nested: Vec<&PathBuf> = paths.excluded.iter().filter(|dir| !root.starts_with(dir)).collect();
+            files
+                .into_iter()
+                .filter(move |file| !nested.iter().any(|dir| file.starts_with(dir)))
+        })
         .collect()
-}
-
-/// The files under `root` that Git tracks or would track, or `None` when
-/// `root` is not in a Git work tree.
-fn git_files(root: &Path) -> Option<Vec<PathBuf>> {
-    let output = crate::git::command()
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            ".",
-        ])
-        .current_dir(root)
-        .stderr(Stdio::null())
-        .logged_output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(
-        output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .map(|path| root.join(String::from_utf8_lossy(path).as_ref()))
-            // A tracked file deleted from the work tree is still listed.
-            .filter(|path| path.is_file())
-            .collect(),
-    )
-}
-
-fn walk_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() && entry.file_name() != ".git" => walk_files(&path, files),
-            Ok(_) if path.is_file() => files.push(path),
-            _ => {}
-        }
-    }
 }
 
 /// Run `cargo metadata` once per process for `dir`.
@@ -1437,7 +1388,11 @@ mod tests {
         // The root package's files leave out the member nested inside it.
         let (_, paths) = selection.paths().unwrap();
         let root = paths.roots.iter().find(|root| root.join("src/main.rs").is_file());
-        let root_files = package_files(root.unwrap(), &paths.excluded);
+        let root_paths = InputPaths {
+            roots: vec![root.unwrap().clone()],
+            ..paths.clone()
+        };
+        let root_files = package_files(&root_paths, &FileTracker::default());
         assert!(
             !root_files
                 .iter()

@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 use crate::provider::BoxError;
 use crate::providers::LinkChain;
 use crate::sha256::SHA256;
+use crate::source_files::SourceFiles;
 
 /// Shared cache for filesystem operations within a single engine run.
 ///
-/// Caches glob expansion and file content hashes so that multiple targets
-/// referencing the same files avoid redundant I/O.
+/// Caches glob expansion, source file listings and file content hashes so
+/// that multiple targets referencing the same files avoid redundant I/O.
 ///
 /// Every target resolves its inputs through one shared tracker, so it is
 /// safe to use concurrently and never holds a lock while reading or hashing
@@ -30,6 +31,7 @@ use crate::sha256::SHA256;
 pub struct FileTracker {
     hashes: DashMap<PathBuf, FileHash>,
     globs: DashMap<String, Arc<[PathBuf]>>,
+    sources: SourceFiles,
     /// See [`FileTracker::derived`].
     derived: DashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     executables: ExecutableHashes,
@@ -42,6 +44,7 @@ impl FileTracker {
         Self {
             hashes: DashMap::new(),
             globs: DashMap::new(),
+            sources: SourceFiles::default(),
             derived: DashMap::new(),
             executables: ExecutableHashes {
                 path: None,
@@ -138,6 +141,13 @@ impl FileTracker {
         self.hash_files(&paths)
     }
 
+    /// The source files under each of `dirs`, in the same order: those Git
+    /// tracks or would track, or every file outside a Git work tree. Pass
+    /// every directory a target needs in one call, so they share a listing.
+    pub fn source_files(&self, dirs: &[PathBuf]) -> Vec<Vec<PathBuf>> {
+        self.sources.list(dirs)
+    }
+
     /// Hash a list of discovered files, returning entries keyed by path.
     ///
     /// A file that no longer exists is skipped rather than failing the
@@ -172,10 +182,12 @@ impl FileTracker {
     }
 
     /// Drop the caches that cannot revalidate themselves against the
-    /// filesystem, glob expansions and [`FileTracker::derived`] caches,
-    /// because a target may have written files since they were filled.
+    /// filesystem, glob expansions, source file listings and
+    /// [`FileTracker::derived`] caches, because a target may have written
+    /// files since they were filled.
     pub fn invalidate(&self) {
         self.globs.clear();
+        self.sources.invalidate();
         self.derived.clear();
     }
 
