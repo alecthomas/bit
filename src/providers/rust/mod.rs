@@ -849,18 +849,22 @@ fn discover_input_paths(
 }
 
 /// Every file in the package directory `root` that Git does not ignore,
-/// except those under `excluded` other than `root` itself. Outside a Git
-/// repository, such as for a path dependency elsewhere, every file but
-/// those in `.git` directories.
+/// except those under an `excluded` directory nested inside `root`, such as
+/// a member package below a root package. Outside a Git repository, such as
+/// for a path dependency elsewhere, every file but those in `.git`
+/// directories.
 fn package_files(root: &Path, excluded: &[PathBuf]) -> Vec<PathBuf> {
     let files = git_files(root).unwrap_or_else(|| {
         let mut files = Vec::new();
         walk_files(root, &mut files);
         files
     });
+    // `excluded` also holds `root` and the packages that contain it, such as
+    // a workspace root package above a member; those would drop every file.
+    let nested: Vec<&PathBuf> = excluded.iter().filter(|dir| !root.starts_with(dir)).collect();
     files
         .into_iter()
-        .filter(|file| !excluded.iter().any(|dir| dir != root && file.starts_with(dir)))
+        .filter(|file| !nested.iter().any(|dir| file.starts_with(dir)))
         .collect()
 }
 
@@ -1375,6 +1379,78 @@ mod tests {
                 !names.iter().any(|name| name.ends_with(unexpected)),
                 "has {unexpected}: {names:?}"
             );
+        }
+    }
+
+    #[test]
+    fn members_below_a_root_package_are_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = |name: &str| format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        write(
+            dir.path(),
+            &[
+                (
+                    "Cargo.toml",
+                    &format!("{}[workspace]\nmembers = [\"crates/member\"]\n", package("rootpkg")),
+                ),
+                ("src/main.rs", "fn main() {}\n"),
+                ("crates/member/Cargo.toml", &package("member")),
+                (
+                    "crates/member/src/lib.rs",
+                    "pub const DATA: &str = include_str!(\"../data.txt\");\n",
+                ),
+                ("crates/member/data.txt", "one"),
+                ("target/debug/out.rs", ""),
+            ],
+        );
+        let status = Command::new("cargo")
+            .args(["generate-lockfile", "--offline"])
+            .current_dir(dir.path())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        crate::git::command()
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        let ws = dir.path().to_string_lossy().into_owned();
+        let flags = vec!["--workspace".to_owned()];
+        let selection = Selection {
+            dir: Some(&ws),
+            env: &BTreeMap::new(),
+            package: None,
+            flags: &flags,
+        };
+        let inputs = || resolve_rust_inputs(&selection, &FileTracker::default()).unwrap();
+        let hash_of = |inputs: &BTreeMap<String, SHA256>, file: &str| {
+            let matches: Vec<_> = inputs.iter().filter(|(path, _)| path.ends_with(file)).collect();
+            assert_eq!(matches.len(), 1, "{file} in {:?}", inputs.keys());
+            *matches[0].1
+        };
+
+        let before = inputs();
+        hash_of(&before, "src/main.rs");
+        assert!(!before.keys().any(|path| path.ends_with("target/debug/out.rs")));
+
+        // The root package's files leave out the member nested inside it.
+        let (_, paths) = selection.paths().unwrap();
+        let root = paths.roots.iter().find(|root| root.join("src/main.rs").is_file());
+        let root_files = package_files(root.unwrap(), &paths.excluded);
+        assert!(
+            !root_files
+                .iter()
+                .any(|file| file.to_string_lossy().contains("crates/member"))
+        );
+
+        for (file, changed) in [
+            ("crates/member/src/lib.rs", "pub const DATA: &str = \"\";\n"),
+            ("crates/member/data.txt", "two"),
+        ] {
+            let old = hash_of(&inputs(), file);
+            write(dir.path(), &[(file, changed)]);
+            assert_ne!(old, hash_of(&inputs(), file), "{file}");
         }
     }
 
