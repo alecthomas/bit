@@ -217,21 +217,64 @@ fn color_for_name(name: &str) -> Color {
     Color::Fixed(usable_colors[idx])
 }
 
+/// One logical line of output. It is kept unwrapped and wrapped to the
+/// terminal width only when drawn, so a resize can rewrap lines that are
+/// already in the live region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Line {
+    /// Painted prefix of the first row.
+    head: String,
+    /// Painted prefix of the rows the body wraps onto.
+    cont: String,
+    /// Styled body, without newlines.
+    body: String,
+}
+
+impl Line {
+    /// The terminal rows this line occupies at `term_width` (0 = no wrapping).
+    fn rows(&self, term_width: usize) -> Vec<String> {
+        OutputInner::wrap_content(&self.body, content_width(term_width, &self.head))
+            .into_iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let prefix = if i == 0 { &self.head } else { &self.cont };
+                format!("{prefix} {chunk}")
+            })
+            .collect()
+    }
+}
+
+/// Available width for content after `prefix`. Returns 0 when the terminal
+/// width is unknown, which `wrap_content` interprets as "don't split".
+fn content_width(term_width: usize, prefix: &str) -> usize {
+    if term_width == 0 {
+        return 0;
+    }
+    term_width.saturating_sub(console::measure_text_width(prefix) + 1)
+}
+
+/// The last `REGION_LINES` rows of `lines` at `term_width`, wrapping only as
+/// many lines as needed from the end.
+fn last_rows<'a>(lines: impl DoubleEndedIterator<Item = &'a Line>, term_width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in lines.rev() {
+        if rows.len() >= REGION_LINES {
+            break;
+        }
+        rows.splice(0..0, line.rows(term_width));
+    }
+    let excess = rows.len().saturating_sub(REGION_LINES);
+    rows.split_off(excess)
+}
+
 /// Rendering state for a single task that currently occupies a live region.
 #[derive(Default)]
 struct TaskState {
-    /// Fully-formatted header lines (from the `Starting` event). Retained in
-    /// full for failure output; the live region displays only the tail.
-    header: Vec<String>,
-    /// Last `REGION_LINES` streamed output lines, fully formatted.
-    recent: VecDeque<String>,
-}
-
-impl TaskState {
-    fn visible_header(&self) -> &[String] {
-        let start = self.header.len().saturating_sub(REGION_LINES);
-        &self.header[start..]
-    }
+    /// Header lines (from the `Starting` event). Retained in full for failure
+    /// output; the live region displays only the last `REGION_LINES` rows.
+    header: Vec<Line>,
+    /// Up to `TAIL_LINES` recent streamed output lines.
+    recent: VecDeque<Line>,
 }
 
 /// Thread-safe output formatter. All output goes through this to keep
@@ -265,15 +308,18 @@ struct OutputInner {
     term_width: usize,
     /// Per-task live-region state, in insertion order.
     active: IndexMap<String, TaskState>,
-    /// Number of terminal rows currently occupied by the live region, used
-    /// to know how far up to move the cursor before clearing.
-    live_rows: usize,
+    /// Display width of each row of the live region as drawn, used to know
+    /// how far up to move the cursor before clearing.
+    live_widths: Vec<usize>,
     /// Targets that printed a [`Message`] since they started.
     messaged: HashSet<String>,
     /// Whether output is held back until a target fails; see [`Output::with_quiet`].
     quiet: bool,
     /// In quiet mode, the lines of each target that has not finished yet.
-    held: HashMap<String, Vec<String>>,
+    held: HashMap<String, Vec<Line>>,
+    /// Stops the thread started by [`Output::redraw_on_resize`].
+    #[cfg(unix)]
+    resize_signals: Option<signal_hook::iterator::Handle>,
 }
 
 /// The byte length of the longest prefix of `text` whose display width is at
@@ -355,10 +401,12 @@ impl Output {
                 term_height,
                 term_width,
                 active: IndexMap::new(),
-                live_rows: 0,
+                live_widths: Vec::new(),
                 messaged: HashSet::new(),
                 quiet: false,
                 held: HashMap::new(),
+                #[cfg(unix)]
+                resize_signals: None,
             })),
             debug: false,
             silent: false,
@@ -403,6 +451,42 @@ impl Output {
             inner.live = false;
             inner.term_width = 0;
         }
+        self
+    }
+
+    /// Rewrap and redraw the live region whenever the terminal is resized,
+    /// even while every task is silent. Does nothing without a live region.
+    #[cfg(unix)]
+    pub fn redraw_on_resize(self) -> Self {
+        let mut inner = self.inner.lock().expect("output lock poisoned");
+        if !inner.live {
+            drop(inner);
+            return self;
+        }
+        let Ok(mut signals) = signal_hook::iterator::Signals::new([signal_hook::consts::SIGWINCH]) else {
+            drop(inner);
+            return self;
+        };
+        inner.resize_signals = Some(signals.handle());
+        drop(inner);
+        // Weak, so the thread doesn't keep the output alive: dropping the last
+        // `Output` must still clear the live region and close `signals`,
+        // which ends the thread.
+        let weak = Arc::downgrade(&self.inner);
+        std::thread::spawn(move || {
+            for _ in signals.forever() {
+                let Some(inner) = weak.upgrade() else { break };
+                let (rows, columns) = console::Term::stdout().size();
+                let mut inner = inner.lock().expect("output lock poisoned");
+                let stdout = io::stdout();
+                let _ = inner.resize(&mut stdout.lock(), rows.into(), columns.into());
+            }
+        });
+        self
+    }
+
+    #[cfg(not(unix))]
+    pub fn redraw_on_resize(self) -> Self {
         self
     }
 
@@ -536,7 +620,7 @@ impl Output {
 
 impl OutputInner {
     /// Keep a target's lines until it finishes, in quiet mode.
-    fn hold(&mut self, name: &str, lines: Vec<String>) {
+    fn hold(&mut self, name: &str, lines: Vec<Line>) {
         if !name.is_empty() {
             self.held.entry(name.to_owned()).or_default().extend(lines);
         }
@@ -545,13 +629,11 @@ impl OutputInner {
     /// Handle an event in quiet mode. A target's terminal event drops the
     /// lines held for it when it succeeds and prints them when it fails, so
     /// the failure keeps the output that explains it. Other events are held.
-    fn hold_event(&mut self, out: &mut impl Write, name: &str, event: Event, raw: bool, lines: Vec<String>) {
+    fn hold_event(&mut self, out: &mut impl Write, name: &str, event: Event, raw: bool, lines: Vec<Line>) {
         match (event, raw) {
             (Event::Failed, false) => {
                 let held = self.held.remove(name).unwrap_or_default();
-                for line in held.iter().chain(&lines) {
-                    let _ = writeln!(out, "{line}");
-                }
+                self.write_lines(out, held.iter().chain(&lines));
             }
             (Event::Ok | Event::Skipped | Event::NoChange | Event::Protected, false) => {
                 self.held.remove(name);
@@ -563,7 +645,7 @@ impl OutputInner {
     /// Return the lines to print for a target's terminal event and stop
     /// tracking its messages. A bare "ok" is dropped when the target printed
     /// messages, because they say more.
-    fn finish_messages(&mut self, name: &str, event: Event, message: &str, lines: Vec<String>) -> Vec<String> {
+    fn finish_messages(&mut self, name: &str, event: Event, message: &str, lines: Vec<Line>) -> Vec<Line> {
         let messaged = self.messaged.remove(name);
         if messaged && event == Event::Ok && message.is_empty() {
             Vec::new()
@@ -642,21 +724,8 @@ impl OutputInner {
         out
     }
 
-    /// Available width for content given a prefix. Returns 0 when the
-    /// terminal width is unknown (which `wrap_content` interprets as
-    /// "don't split").
-    fn content_width(&self, prefix: &str) -> usize {
-        if self.term_width == 0 {
-            return 0;
-        }
-        let prefix_width = console::measure_text_width(prefix);
-        self.term_width.saturating_sub(prefix_width + 1)
-    }
-
-    /// Format streamed `content` as one entry per terminal row.
-    ///
-    /// The live region counts one row per entry to move the cursor before a
-    /// redraw, so multi-line content is split at its newlines.
+    /// Format streamed `content` as one [`Line`] per embedded line, since
+    /// each must start a new terminal row.
     fn fmt_stream_line(
         &self,
         name: &str,
@@ -664,84 +733,101 @@ impl OutputInner {
         indent: Option<usize>,
         content: &str,
         stderr: bool,
-    ) -> Vec<String> {
-        let head_prefix = self.prefix(name, "│", indent);
-        let cont_prefix = self.prefix(name, "┆", indent);
-        let width = self.content_width(&head_prefix);
+    ) -> Vec<Line> {
+        let head = self.prefix(name, "│", indent).paint(color).to_string();
+        let cont = self.prefix(name, "┆", indent).paint(color).to_string();
         // `lines` yields nothing for empty content, which is still one row.
         let logical_lines = content.lines().chain(content.is_empty().then_some(""));
         logical_lines
-            .flat_map(|logical| Self::wrap_content(logical, width).into_iter().enumerate())
-            .map(|(i, chunk)| {
-                let prefix = if i == 0 { &head_prefix } else { &cont_prefix };
-                if stderr {
-                    format!("{} {}", prefix.paint(color), chunk.dim().italic())
+            .map(|logical| Line {
+                head: head.clone(),
+                cont: cont.clone(),
+                body: if stderr {
+                    logical.dim().italic().to_string()
                 } else {
-                    format!("{} {chunk}", prefix.paint(color))
-                }
+                    logical.to_owned()
+                },
             })
             .collect()
     }
 
-    fn fmt_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str) -> Vec<String> {
-        let (head_prefix, cont_prefix) = self.event_prefixes(name, event, indent);
+    fn fmt_event(&self, name: &str, event: Event, indent: Option<usize>, message: &str) -> Vec<Line> {
         let dim = event.is_dim();
-
         let body: String = if message.is_empty() {
             format!("{event:?}").to_lowercase()
         } else {
             message.to_owned()
         };
-
-        let mut lines = Vec::new();
-        // Multiple logical lines in the message become multiple rows; each
-        // row then wraps to fit the terminal.
-        let mut first = true;
-        for logical in body.lines() {
-            let prefix = if first { &head_prefix } else { &cont_prefix };
-            for (i, chunk) in Self::wrap_content(logical, self.content_width(prefix))
-                .into_iter()
-                .enumerate()
-            {
-                let p = if first && i == 0 { &head_prefix } else { &cont_prefix };
-                lines.push(format!("{p} {}", chunk.paint(event.color()).dim_if(dim)));
-            }
-            first = false;
-        }
-        lines
+        self.event_lines(name, event, indent, &body, |logical| {
+            logical.paint(event.color()).dim_if(dim).to_string()
+        })
     }
 
-    fn fmt_event_raw(&self, name: &str, event: Event, indent: Option<usize>, message: &str) -> Vec<String> {
-        let (head_prefix, cont_prefix) = self.event_prefixes(name, event, indent);
+    fn fmt_event_raw(&self, name: &str, event: Event, indent: Option<usize>, message: &str) -> Vec<Line> {
+        self.event_lines(name, event, indent, message, str::to_owned)
+    }
 
-        let mut lines = Vec::new();
-        let mut first = true;
-        for logical in message.lines() {
-            let prefix = if first { &head_prefix } else { &cont_prefix };
-            for (i, chunk) in Self::wrap_content(logical, self.content_width(prefix))
-                .into_iter()
-                .enumerate()
-            {
-                let p = if first && i == 0 { &head_prefix } else { &cont_prefix };
-                lines.push(format!("{p} {chunk}"));
+    /// One [`Line`] per line of `message`, styled by `style`. Only the first
+    /// carries the event's sigil.
+    fn event_lines(
+        &self,
+        name: &str,
+        event: Event,
+        indent: Option<usize>,
+        message: &str,
+        style: impl Fn(&str) -> String,
+    ) -> Vec<Line> {
+        let (head_prefix, cont_prefix) = self.event_prefixes(name, event, indent);
+        message
+            .lines()
+            .enumerate()
+            .map(|(i, logical)| Line {
+                head: if i == 0 {
+                    head_prefix.clone()
+                } else {
+                    cont_prefix.clone()
+                },
+                cont: cont_prefix.clone(),
+                body: style(logical),
+            })
+            .collect()
+    }
+
+    /// Write `lines` wrapped to the current terminal width.
+    fn write_lines<'a>(&self, out: &mut impl Write, lines: impl IntoIterator<Item = &'a Line>) {
+        for line in lines {
+            for row in line.rows(self.term_width) {
+                let _ = writeln!(out, "{row}");
             }
-            first = false;
         }
-        lines
     }
 
     /// Move the cursor to the top of the live region and clear everything
     /// below it. Caller is responsible for redrawing afterwards.
-    fn clear_live(&mut self, out: &mut StdoutLock<'_>) -> io::Result<()> {
-        if self.live_rows > 0 {
+    fn clear_live(&mut self, out: &mut impl Write) -> io::Result<()> {
+        let rows = self.live_rows();
+        if rows > 0 {
             // ESC[{N}A  = cursor up N lines (column unchanged; after a println
             //             we're at column 0 so this lands at column 0 of the
             //             first drawn line).
             // ESC[0J    = clear from cursor to end of screen.
-            write!(out, "\x1b[{}A\x1b[0J", self.live_rows)?;
-            self.live_rows = 0;
+            write!(out, "\x1b[{rows}A\x1b[0J")?;
         }
+        self.live_widths = Vec::new();
         Ok(())
+    }
+
+    /// Terminal rows the live region occupies at the current width. Rows
+    /// drawn before the terminal narrowed are assumed to have been reflowed
+    /// onto as many rows as their width now needs, as most terminals do.
+    fn live_rows(&self) -> usize {
+        if self.term_width == 0 {
+            return self.live_widths.len();
+        }
+        self.live_widths
+            .iter()
+            .map(|width| width.div_ceil(self.term_width).max(1))
+            .sum()
     }
 
     /// Render the last `REGION_LINES` rows of each active task header and as
@@ -752,22 +838,29 @@ impl OutputInner {
     /// live region.
     fn redraw_live(&mut self, out: &mut impl Write) -> io::Result<()> {
         let row_budget = self.term_height.checked_sub(1).unwrap_or(usize::MAX);
-        let header_rows: usize = self.active.values().map(|state| state.visible_header().len()).sum();
-        let mut rows = 0;
+        let regions: Vec<(Vec<String>, Vec<String>)> = self
+            .active
+            .values()
+            .map(|state| {
+                (
+                    last_rows(state.header.iter(), self.term_width),
+                    last_rows(state.recent.iter(), self.term_width),
+                )
+            })
+            .collect();
+        let header_rows: usize = regions.iter().map(|(header, _)| header.len()).sum();
+        let mut drawn: Vec<&String> = Vec::new();
 
         if header_rows > row_budget {
             let skip = header_rows - row_budget;
-            for line in self.active.values().flat_map(TaskState::visible_header).skip(skip) {
-                writeln!(out, "{line}")?;
-                rows += 1;
-            }
+            drawn.extend(regions.iter().flat_map(|(header, _)| header).skip(skip));
         } else {
-            let mut recent_counts = vec![0; self.active.len()];
+            let mut recent_counts = vec![0; regions.len()];
             let mut remaining = row_budget - header_rows;
             while remaining > 0 {
                 let mut added = false;
-                for (index, state) in self.active.values().enumerate().rev() {
-                    let available = state.recent.len().min(REGION_LINES);
+                for (index, (_, recent)) in regions.iter().enumerate().rev() {
+                    let available = recent.len();
                     if recent_counts[index] < available {
                         recent_counts[index] += 1;
                         remaining -= 1;
@@ -782,49 +875,49 @@ impl OutputInner {
                 }
             }
 
-            for (index, state) in self.active.values().enumerate() {
-                for line in state.visible_header() {
-                    writeln!(out, "{line}")?;
-                    rows += 1;
-                }
-                let visible = recent_counts[index];
-                let skip = state.recent.len() - visible;
-                for line in state.recent.iter().skip(skip) {
-                    writeln!(out, "{line}")?;
-                    rows += 1;
-                }
+            for (index, (header, recent)) in regions.iter().enumerate() {
+                drawn.extend(header);
+                drawn.extend(&recent[recent.len() - recent_counts[index]..]);
             }
         }
-        self.live_rows = rows;
+        for row in &drawn {
+            writeln!(out, "{row}")?;
+        }
+        self.live_widths = drawn.iter().map(|row| console::measure_text_width(row)).collect();
         out.flush()
+    }
+
+    /// Clear the live region and redraw it after the terminal changed to
+    /// `rows` by `columns`. Rows that no longer fit are rewrapped.
+    fn resize(&mut self, out: &mut impl Write, rows: usize, columns: usize) -> io::Result<()> {
+        // The terminal has already reflowed the old drawing, so it must be
+        // measured at the new width before it is cleared.
+        self.term_height = rows;
+        self.term_width = columns;
+        self.clear_live(out)?;
+        self.redraw_live(out)
     }
 
     /// Print lines above the live region (they scroll naturally upward).
     /// Used for debug, plan-mode change events, and intermediate `event_raw`.
-    fn print_detached(&mut self, out: &mut StdoutLock<'_>, lines: &[String]) {
+    fn print_detached(&mut self, out: &mut StdoutLock<'_>, lines: &[Line]) {
         if !self.live {
-            for line in lines {
-                let _ = writeln!(out, "{line}");
-            }
+            self.write_lines(out, lines);
             return;
         }
         let _ = self.clear_live(out);
-        for line in lines {
-            let _ = writeln!(out, "{line}");
-        }
+        self.write_lines(out, lines);
         let _ = self.redraw_live(out);
     }
 
-    /// Push one or more rows into the task's rolling buffer (capped at
+    /// Push one or more lines into the task's rolling buffer (capped at
     /// `TAIL_LINES`). The live region only renders the last
-    /// `REGION_LINES` of this buffer while the task runs; the rest is
+    /// `REGION_LINES` rows of this buffer while the task runs; the rest is
     /// kept so a failure can flush full context. In non-TTY mode this
     /// just prints each line immediately.
-    fn push_stream_many(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<String>) {
+    fn push_stream_many(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<Line>) {
         if !self.live {
-            for line in &lines {
-                let _ = writeln!(out, "{line}");
-            }
+            self.write_lines(out, &lines);
             return;
         }
         let _ = self.clear_live(out);
@@ -839,11 +932,9 @@ impl OutputInner {
     }
 
     /// Begin (or replace) a task's live region with the given header lines.
-    fn open_region(&mut self, out: &mut StdoutLock<'_>, name: &str, header: Vec<String>) {
+    fn open_region(&mut self, out: &mut StdoutLock<'_>, name: &str, header: Vec<Line>) {
         if !self.live {
-            for line in &header {
-                let _ = writeln!(out, "{line}");
-            }
+            self.write_lines(out, &header);
             return;
         }
         let _ = self.clear_live(out);
@@ -858,7 +949,7 @@ impl OutputInner {
     /// Snapshot the target's last `REGION_LINES` streamed lines without
     /// removing them from state. Returns an empty vec if the target has
     /// no active region. Exposed as a pure method for testing.
-    fn recent_tail(&self, name: &str) -> Vec<String> {
+    fn recent_tail(&self, name: &str) -> Vec<Line> {
         self.active
             .get(name)
             .map(|state| state.recent.iter().cloned().collect())
@@ -869,7 +960,7 @@ impl OutputInner {
     /// being executed) for a target that currently owns a live region. Used
     /// alongside [`recent_tail`] on failure so the command stays visible in
     /// scrollback. Returns an empty vec when the target has no active region.
-    fn recent_header(&self, name: &str) -> Vec<String> {
+    fn recent_header(&self, name: &str) -> Vec<Line> {
         self.active
             .get(name)
             .map(|state| state.header.clone())
@@ -883,11 +974,9 @@ impl OutputInner {
     /// full failure context stays on screen. In non-TTY mode the header
     /// and tail were already streamed; only `lines` (the terminal event)
     /// needs printing.
-    fn close_region(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<String>, preserve_tail: bool) {
+    fn close_region(&mut self, out: &mut StdoutLock<'_>, name: &str, lines: Vec<Line>, preserve_tail: bool) {
         if !self.live {
-            for line in &lines {
-                let _ = writeln!(out, "{line}");
-            }
+            self.write_lines(out, &lines);
             return;
         }
         let (header, tail) = if preserve_tail {
@@ -897,20 +986,22 @@ impl OutputInner {
         };
         let _ = self.clear_live(out);
         self.active.shift_remove(name);
-        for line in header.iter().chain(tail.iter()).chain(lines.iter()) {
-            let _ = writeln!(out, "{line}");
-        }
+        self.write_lines(out, header.iter().chain(&tail).chain(&lines));
         let _ = self.redraw_live(out);
     }
 }
 
 impl Drop for OutputInner {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(signals) = &self.resize_signals {
+            signals.close();
+        }
         // Best-effort cleanup so a stranded live region doesn't mangle the
         // terminal after normal exit. Panics have already unwound by here;
         // if the process is aborting this runs only for the thread that
         // owns the last Arc.
-        if self.live && self.live_rows > 0 {
+        if self.live && !self.live_widths.is_empty() {
             let stdout = io::stdout();
             let mut out = stdout.lock();
             let _ = self.clear_live(&mut out);
@@ -1297,11 +1388,29 @@ mod tests {
             term_height: usize::MAX,
             term_width,
             active: IndexMap::new(),
-            live_rows: 0,
+            live_widths: Vec::new(),
             messaged: HashSet::new(),
             quiet: false,
             held: HashMap::new(),
+            #[cfg(unix)]
+            resize_signals: None,
         }
+    }
+
+    /// A line that renders as `text`: the prefix is the first word.
+    impl From<&str> for Line {
+        fn from(text: &str) -> Self {
+            let (head, body) = text.split_once(' ').unwrap_or((text, ""));
+            Line {
+                head: head.to_owned(),
+                cont: head.to_owned(),
+                body: body.to_owned(),
+            }
+        }
+    }
+
+    fn rows(lines: &[Line], term_width: usize) -> Vec<String> {
+        lines.iter().flat_map(|line| line.rows(term_width)).collect()
     }
 
     fn message(level: MessageLevel, text: &str) -> Message {
@@ -1364,14 +1473,22 @@ mod tests {
     fn event_sigil_takes_event_colour() {
         let inner = inner_tty(4, 80);
         let sigil = "▲".paint(Color::Yellow).to_string();
-        assert!(inner.fmt_event("a", Event::Warning, None, "careful")[0].contains(&sigil));
-        assert!(inner.fmt_event_raw("a", Event::Warning, None, "careful")[0].contains(&sigil));
+        assert!(
+            inner.fmt_event("a", Event::Warning, None, "careful")[0]
+                .head
+                .contains(&sigil)
+        );
+        assert!(
+            inner.fmt_event_raw("a", Event::Warning, None, "careful")[0]
+                .head
+                .contains(&sigil)
+        );
     }
 
     #[test]
     fn finish_messages_replaces_ok_after_messages() {
         let mut inner = inner_tty(4, 80);
-        let ok = vec!["a ✔ ok".to_owned()];
+        let ok = vec![Line::from("a ✔ ok")];
         inner.messaged.insert("a".into());
         assert!(inner.finish_messages("a", Event::Ok, "", ok.clone()).is_empty());
         // Tracking ends with the target, so its next run shows "ok" again.
@@ -1382,7 +1499,7 @@ mod tests {
     #[test]
     fn finish_messages_keeps_failure_after_messages() {
         let mut inner = inner_tty(4, 80);
-        let failed = vec!["a ✘ command exited with 1".to_owned()];
+        let failed = vec![Line::from("a ✘ command exited with 1")];
         inner.messaged.insert("a".into());
         assert_eq!(
             inner.finish_messages("a", Event::Failed, "command exited with 1", failed.clone()),
@@ -1399,8 +1516,14 @@ mod tests {
         inner.quiet = true;
         let mut out = Vec::new();
         for name in ["ok", "bad"] {
-            inner.hold_event(&mut out, name, Event::Starting, false, vec![format!("{name} ▶ run")]);
-            inner.hold(name, vec![format!("{name} │ output")]);
+            inner.hold_event(
+                &mut out,
+                name,
+                Event::Starting,
+                false,
+                vec![format!("{name} ▶ run").as_str().into()],
+            );
+            inner.hold(name, vec![format!("{name} │ output").as_str().into()]);
         }
         inner.hold("", vec!["engine debug".into()]);
         inner.hold_event(&mut out, "ok", Event::Ok, false, vec!["ok ✔ ok".into()]);
@@ -1417,10 +1540,10 @@ mod tests {
     fn region_open_tracks_rows() {
         let mut inner = inner_tty(4, 80);
         let state = inner.active.entry("a".to_string()).or_default();
-        state.header = vec!["h1".into(), "h2".into()];
+        state.header = vec!["a h1".into(), "a h2".into()];
         let mut buf: Vec<u8> = Vec::new();
         inner.redraw_live(&mut buf).unwrap();
-        assert_eq!(inner.live_rows, 2);
+        assert_eq!(inner.live_rows(), 2);
         inner.live = false;
     }
 
@@ -1428,13 +1551,18 @@ mod tests {
     fn region_caps_long_header_at_per_target_height() {
         let mut inner = inner_tty(4, 80);
         let state = inner.active.entry("a".to_string()).or_default();
-        state.header = (0..REGION_LINES + 2).map(|index| format!("line{index}")).collect();
+        state.header = (0..REGION_LINES + 2)
+            .map(|index| format!("line {index}").as_str().into())
+            .collect();
 
         let mut buf = Vec::new();
         inner.redraw_live(&mut buf).unwrap();
 
-        assert_eq!(String::from_utf8(buf).unwrap(), "line2\nline3\nline4\nline5\nline6\n");
-        assert_eq!(inner.live_rows, REGION_LINES);
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "line 2\nline 3\nline 4\nline 5\nline 6\n"
+        );
+        assert_eq!(inner.live_rows(), REGION_LINES);
         assert_eq!(inner.recent_header("a").len(), REGION_LINES + 2);
         inner.live = false;
     }
@@ -1458,8 +1586,8 @@ mod tests {
             "first start\nsecond start\nsecond output\n"
         );
         assert!(inner.live);
-        assert_eq!(inner.live_rows, 3);
-        assert_eq!(inner.recent_tail("first"), vec!["first output"]);
+        assert_eq!(inner.live_rows(), 3);
+        assert_eq!(inner.recent_tail("first"), vec![Line::from("first output")]);
         inner.live = false;
     }
 
@@ -1479,7 +1607,64 @@ mod tests {
         inner.redraw_live(&mut buf).unwrap();
 
         assert_eq!(String::from_utf8(buf).unwrap(), "first start\nfirst output\n");
-        assert_eq!(inner.live_rows, 2);
+        assert_eq!(inner.live_rows(), 2);
+        inner.live = false;
+    }
+
+    #[test]
+    fn region_wraps_lines_and_counts_rows_at_draw_time() {
+        let mut inner = inner_tty(1, 12);
+        let state = inner.active.entry("a".to_string()).or_default();
+        state.header.push("a ▶ start".into());
+        // Prefix "a" leaves 12 - 1 - 1 = 10 columns per row.
+        state.recent.push_back(format!("a {}", "x".repeat(25)).as_str().into());
+
+        let mut buf = Vec::new();
+        inner.redraw_live(&mut buf).unwrap();
+
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "a ▶ start\na xxxxxxxxxx\na xxxxxxxxxx\na xxxxx\n"
+        );
+        assert_eq!(inner.live_rows(), 4);
+        inner.live = false;
+    }
+
+    #[test]
+    fn resize_clears_reflowed_rows_and_rewraps() {
+        let mut inner = inner_tty(1, 30);
+        let state = inner.active.entry("a".to_string()).or_default();
+        state.recent.push_back(format!("a {}", "x".repeat(20)).as_str().into());
+        inner.redraw_live(&mut Vec::new()).unwrap();
+        assert_eq!(inner.live_rows(), 1);
+
+        // At 12 columns the terminal reflowed the 22-column row onto two.
+        let mut buf = Vec::new();
+        inner.resize(&mut buf, usize::MAX, 12).unwrap();
+
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\x1b[2A\x1b[0Ja xxxxxxxxxx\na xxxxxxxxxx\n"
+        );
+        assert_eq!(inner.live_rows(), 2);
+        inner.live = false;
+    }
+
+    #[test]
+    fn resize_wider_rejoins_wrapped_rows() {
+        let mut inner = inner_tty(1, 12);
+        let state = inner.active.entry("a".to_string()).or_default();
+        state.recent.push_back(format!("a {}", "x".repeat(20)).as_str().into());
+        inner.redraw_live(&mut Vec::new()).unwrap();
+        assert_eq!(inner.live_rows(), 2);
+
+        let mut buf = Vec::new();
+        inner.resize(&mut buf, usize::MAX, 30).unwrap();
+
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            format!("\x1b[2A\x1b[0Ja {}\n", "x".repeat(20))
+        );
         inner.live = false;
     }
 
@@ -1491,13 +1676,13 @@ mod tests {
             if state.recent.len() == TAIL_LINES {
                 state.recent.pop_front();
             }
-            state.recent.push_back(format!("line{i}"));
+            state.recent.push_back(format!("line {i}").as_str().into());
         }
         assert_eq!(state.recent.len(), TAIL_LINES);
-        assert_eq!(state.recent.front().map(|s| s.as_str()), Some("line3"));
+        assert_eq!(state.recent.front().map(|l| l.body.as_str()), Some("3"));
         assert_eq!(
-            state.recent.back().map(|s| s.as_str()),
-            Some(format!("line{}", TAIL_LINES + 2).as_str())
+            state.recent.back().map(|l| l.body.as_str()),
+            Some((TAIL_LINES + 2).to_string().as_str())
         );
     }
 
@@ -1507,13 +1692,13 @@ mod tests {
         let state = inner.active.entry("backend".to_string()).or_default();
         // Fill past REGION_LINES but under TAIL_LINES.
         for i in 0..12 {
-            state.recent.push_back(format!("line{i}"));
+            state.recent.push_back(format!("line {i}").as_str().into());
         }
         let tail = inner.recent_tail("backend");
         // recent_tail surfaces the full buffer, not just the live-region slice.
         assert_eq!(tail.len(), 12);
-        assert_eq!(tail.first().map(|s| s.as_str()), Some("line0"));
-        assert_eq!(tail.last().map(|s| s.as_str()), Some("line11"));
+        assert_eq!(tail.first().map(|l| l.body.as_str()), Some("0"));
+        assert_eq!(tail.last().map(|l| l.body.as_str()), Some("11"));
     }
 
     #[test]
@@ -1544,7 +1729,10 @@ mod tests {
     fn fmt_stream_line_wraps_long_content() {
         let inner = inner_tty(4, 30);
         // prefix "backend │" width = 11, available = 30 - 11 - 1 = 18.
-        let lines = inner.fmt_stream_line("backend", color_for_name("backend"), None, &"x".repeat(40), false);
+        let lines = rows(
+            &inner.fmt_stream_line("backend", color_for_name("backend"), None, &"x".repeat(40), false),
+            30,
+        );
         assert!(lines.len() >= 2, "expected wrapping, got {:?}", lines.len());
         // First line uses the primary separator; continuations use ┆.
         assert!(lines[0].contains('│'));
@@ -1557,7 +1745,10 @@ mod tests {
     fn fmt_stream_line_emits_one_row_per_embedded_line() {
         let inner = inner_tty(4, 30);
         let content = format!("warning: failed\n  |\n\n  = note: {}\n", "x".repeat(20));
-        let lines = inner.fmt_stream_line("backend", color_for_name("backend"), None, &content, true);
+        let lines = rows(
+            &inner.fmt_stream_line("backend", color_for_name("backend"), None, &content, true),
+            30,
+        );
         assert_eq!(lines.len(), 5, "{lines:?}");
         for line in &lines {
             assert!(!line.contains('\n'), "row spans lines: {line:?}");
@@ -1603,7 +1794,7 @@ mod tests {
         state.recent.push_back("third".into());
 
         let tail = inner.recent_tail("backend");
-        assert_eq!(tail, vec!["first", "second", "third"]);
+        assert_eq!(tail, vec![Line::from("first"), "second".into(), "third".into()]);
     }
 
     #[test]
@@ -1619,7 +1810,7 @@ mod tests {
         state.header = vec!["backend ▶ go build -o bin ./cmd".into()];
 
         let header = inner.recent_header("backend");
-        assert_eq!(header, vec!["backend ▶ go build -o bin ./cmd"]);
+        assert_eq!(header, vec![Line::from("backend ▶ go build -o bin ./cmd")]);
     }
 
     #[test]
@@ -1640,16 +1831,13 @@ mod tests {
 
         let header = inner.recent_header("backend");
         let tail = inner.recent_tail("backend");
-        let terminal = ["backend ✘ `go build` exited with exit status: 1".to_string()];
+        let terminal = [Line::from("backend ✘ `go build` exited with exit status: 1")];
 
         // The chaining order in close_region: header first, then tail,
         // then the terminal event lines.
-        let written: Vec<String> = header
-            .iter()
-            .chain(tail.iter())
-            .chain(terminal.iter())
-            .cloned()
-            .collect();
+        let mut out = Vec::new();
+        inner.write_lines(&mut out, header.iter().chain(&tail).chain(&terminal));
+        let written: Vec<String> = String::from_utf8(out).unwrap().lines().map(str::to_owned).collect();
         assert_eq!(
             written,
             vec![

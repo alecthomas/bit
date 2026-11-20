@@ -420,6 +420,7 @@ fn output_for_names(names: &[String], debug: bool, long: bool, quiet: bool) -> O
         .with_debug(debug)
         .with_long(long)
         .with_quiet(quiet)
+        .redraw_on_resize()
 }
 
 /// Compute per-node graph styles that reflect each target's planned action.

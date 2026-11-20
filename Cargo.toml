@@ -51,3 +51,6 @@ libtest-mimic = "0.8.2"
 name = "integration"
 harness = false
 test = false
+
+[target."cfg(unix)".dependencies]
+signal-hook = "0.4.6"
