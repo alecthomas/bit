@@ -512,7 +512,11 @@ pub fn affected_order(
         }
 
         // A target with no source paths cannot be proven unaffected by Git.
-        if tracked.iter().all(|path| is_output(path)) {
+        // An output that is also a source, as a formatter's files are, is one.
+        if tracked
+            .iter()
+            .all(|path| is_output(path) && !current.contains_key(*path))
+        {
             direct = true;
         }
         if dag
@@ -618,10 +622,51 @@ fn output_files(node: &DagNode, inputs: &Map, cache: &BuildCache) -> Result<Vec<
 #[derive(Default)]
 struct ResolvedHashes {
     sources: BTreeMap<String, SHA256>,
-    tracked: BTreeMap<String, SHA256>,
+    /// Declared outputs, by role or, within a directory output, by file.
+    outputs: BTreeMap<String, SHA256>,
+    /// Fingerprints of the variables the tool recorded reading, keyed as
+    /// [`crate::providers::hash_ambient`] keys any variable.
+    recorded_hashes: BTreeMap<String, SHA256>,
     /// Names of the variables the tool recorded reading. Their values are in
-    /// `tracked` but not `sources`; see [`Ambient::RecordedVariable`].
+    /// `recorded_hashes` but not `sources`; see [`Ambient::RecordedVariable`].
     recorded: Vec<String>,
+}
+
+impl ResolvedHashes {
+    /// Everything the local content hash covers. An output that is also a
+    /// source is tracked by its output hash.
+    fn tracked(&self) -> BTreeMap<String, SHA256> {
+        let mut tracked = self.sources.clone();
+        tracked.extend(self.recorded_hashes.clone());
+        tracked.extend(self.outputs.clone());
+        tracked
+    }
+
+    /// What a run that read `read` before it started has built: those
+    /// sources, with the outputs and recorded variables measured now. A
+    /// source that is also a declared output is tracked by its output hash,
+    /// so a target that rewrites its own inputs, as a formatter does, records
+    /// them as it left them.
+    ///
+    /// Other sources are not measured now, because a file edited while the
+    /// target ran, as by an editor or another target, would be recorded as
+    /// built. The next run would then skip it.
+    fn built_from(self, read: &BTreeMap<String, SHA256>) -> Self {
+        Self {
+            sources: read.clone(),
+            ..self
+        }
+    }
+
+    /// Whether any source other than a declared output differs from `read`,
+    /// the sources measured before the target ran. Something else changed
+    /// it, so the run is not known to match either version of the file.
+    fn sources_changed_since(&self, read: &BTreeMap<String, SHA256>) -> bool {
+        read.keys()
+            .chain(self.sources.keys())
+            .filter(|key| !self.outputs.contains_key(*key))
+            .any(|key| read.get(key) != self.sources.get(key))
+    }
 }
 
 /// A target's sources as [`resolve_sources`] finds them.
@@ -704,24 +749,24 @@ fn resolve_hashes(
 ) -> Result<ResolvedHashes, BoxError> {
     let resolved = resolve_sources(node, inputs, tracker, cache.paths())?;
     let sources = cache.normalize_keys(&resolved.hashes);
-    let mut tracked = sources.clone();
-    tracked.extend(resolved.recorded_hashes);
+    let mut output_hashes = BTreeMap::new();
     for output in outputs {
         let path = Path::new(&output.path);
         if path.is_file() {
-            tracked.insert(output.role.clone(), tracker.hash_file(path)?);
+            output_hashes.insert(output.role.clone(), tracker.hash_file(path)?);
         } else if path.is_dir() {
             // Each file is tracked under its own key, so deleting or editing
             // one reruns the target and is reported as a changed path.
             for file in files_under(path)? {
                 let key = cache.normalize_str(&file.to_string_lossy()).into_owned();
-                tracked.insert(key, tracker.hash_file(&file)?);
+                output_hashes.insert(key, tracker.hash_file(&file)?);
             }
         }
     }
     Ok(ResolvedHashes {
         sources,
-        tracked,
+        outputs: output_hashes,
+        recorded_hashes: resolved.recorded_hashes,
         recorded: resolved.recorded,
     })
 }
@@ -884,11 +929,10 @@ fn prepare_target(
     let prior = restore_prior(writer, node.prior_state.as_ref());
 
     let outputs = output_files(node, &inputs, cache).map_err(provider_error(node, name, "resolve"))?;
-    let ResolvedHashes {
-        sources,
-        tracked: resolve_map,
-        ..
-    } = resolve_hashes(node, &inputs, &outputs, cache, tracker).map_err(provider_error(node, name, "resolve"))?;
+    let resolved =
+        resolve_hashes(node, &inputs, &outputs, cache, tracker).map_err(provider_error(node, name, "resolve"))?;
+    let resolve_map = resolved.tracked();
+    let sources = resolved.sources;
     let input_hash = hash_inputs(&inputs, cache);
     let content_hash = compute_content_hash(&input_hash, &resolve_map, &dep_hashes);
 
@@ -1696,30 +1740,36 @@ fn execute_target(
 
     let mut result_hash = None;
     let wrapped_state = if let Some(new_state) = &apply_result.state {
-        // Re-resolve after apply: outputs now exist and mutating actions
-        // such as formatters change their own inputs. The tracker rehashes
+        // Re-resolve after apply: outputs now exist, tools record the
+        // variables they read, and sources may have changed while the
+        // target ran (see `ResolvedHashes::built_from`). The tracker rehashes
         // any file whose metadata changed, but globs and providers' parsed
         // sources may predate files the target added, here and for every
         // target that resolves after it.
         tracker.invalidate();
-        let ResolvedHashes {
-            sources: post_sources,
-            tracked: post_resolve,
-            recorded,
-        } = resolve_hashes(node, &prepared.inputs, &prepared.outputs, cache, tracker).unwrap_or_default();
+        let post = resolve_hashes(node, &prepared.inputs, &prepared.outputs, cache, tracker).unwrap_or_default();
+        let sources_changed = post.sources_changed_since(&prepared.sources);
+        let post_sources = post.sources.clone();
+        let built = post.built_from(&prepared.sources);
+        let post_resolve = built.tracked();
         let post_hash = compute_content_hash(&prepared.input_hash, &post_resolve, &prepared.dep_hashes);
-        crate::debug!(writer, "post-apply hash={}", short_hash(&post_hash));
+        crate::debug!(
+            writer,
+            "post-apply hash={} sources_changed={sources_changed}",
+            short_hash(&post_hash)
+        );
         result_hash = Some(post_hash);
 
         // Failed tests stay in local state so they rerun, but never enter
-        // the shared cache.
-        if !from_cache && !test_failed && prepared.shared {
+        // the shared cache. Nor does a result whose sources changed while it
+        // ran: it is not known to match either version of them.
+        if !from_cache && !test_failed && !sources_changed && prepared.shared {
             publish_receipt(
                 name,
                 node,
                 &prepared,
                 &post_sources,
-                &recorded,
+                &built.recorded,
                 post_hash,
                 new_state,
                 &apply_result.outputs,
@@ -3244,6 +3294,68 @@ lint[module] = go.lint {
         assert_eq!(run()[0].plan.action, PlanAction::Update);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "SECOND");
         assert_eq!(run()[0].plan.action, PlanAction::None);
+    }
+
+    /// A target that builds `out.txt` beside `src` while its command also
+    /// rewrites `src`, as an editor saving a file while a build runs would.
+    /// The output makes its results shareable.
+    fn edits_input_while_running(src: &Path) -> crate::ast::Module {
+        let out = src.with_file_name("out.txt");
+        let input = format!(
+            "build = exec {{\n  command = \"cp '{src}' '{out}' && printf edited > '{src}'\"\n  inputs = [\"{src}\"]\n  outputs = \"{out}\"\n}}\n",
+            src = src.display(),
+            out = out.display(),
+        );
+        parser::parse(&input, "<test>").unwrap()
+    }
+
+    #[test]
+    fn source_edited_while_running_reruns_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let module = edits_input_while_running(&src);
+        let tracker = test_tracker();
+        let store = MemoryStore::new();
+        let output = Output::new(&[]);
+        let run = || {
+            let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), &store, &[]).unwrap();
+            apply(&mut dag, &base, &store, &test_cache(), &output, &[], 1, &tracker).unwrap()
+        };
+
+        std::fs::write(&src, "original").unwrap();
+        assert_eq!(run()[0].plan.action, PlanAction::Create);
+        // The run read "original"; "edited" has not been built yet.
+        let rerun = run();
+        assert_eq!(rerun[0].plan.action, PlanAction::Update);
+        assert!(
+            rerun[0].plan.reason.as_deref().is_some_and(|r| r.contains("src.txt")),
+            "{:?}",
+            rerun[0].plan.reason
+        );
+        assert_eq!(run()[0].plan.action, PlanAction::None);
+    }
+
+    #[test]
+    fn source_edited_while_running_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.txt");
+        let module = edits_input_while_running(&src);
+        let cache = BuildCache::open_at(dir.path(), &dir.path().join("cache"));
+        let tracker = test_tracker();
+        let output = Output::new(&[]);
+        let run = |store: &MemoryStore| {
+            let (mut dag, base) = loader::load(&module, &Map::new(), &test_registry(&tracker), store, &[]).unwrap();
+            apply(&mut dag, &base, store, &cache, &output, &[], 1, &tracker).unwrap()
+        };
+
+        std::fs::write(&src, "original").unwrap();
+        assert_eq!(run(&MemoryStore::new())[0].plan.action, PlanAction::Create);
+
+        // Another checkout holding "edited" must run the target, not reuse a
+        // result that was built from "original".
+        let other = run(&MemoryStore::new());
+        assert_eq!(other[0].plan.action, PlanAction::Create);
+        assert_eq!(other[0].plan.reason, None);
     }
 
     #[test]

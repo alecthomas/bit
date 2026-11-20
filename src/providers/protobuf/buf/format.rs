@@ -119,7 +119,21 @@ impl Resource for BufFormatResource {
     /// The buf executable is a tool, so the action key already describes
     /// the toolchain, but not a remote input's content.
     fn cache_policy(&self, inputs: &Target<BufFormatInputs>) -> CachePolicy {
-        inputs.target.cache_policy(inputs.dir.as_deref())
+        match inputs.target.cache_policy(inputs.dir.as_deref()) {
+            // Receipts hold the formatted files from version 2.
+            CachePolicy::Shared { .. } => CachePolicy::Shared { version: 2 },
+            local => local,
+        }
+    }
+
+    /// The `.proto` files `buf format --write` may rewrite, so formatting
+    /// them is not taken for an edit made while it ran.
+    fn output_keys(&self, inputs: &Target<BufFormatInputs>) -> Vec<String> {
+        inputs
+            .target
+            .sources(inputs.dir.as_deref(), &inputs.flags)
+            .and_then(|sources| sources.proto_files())
+            .unwrap_or_default()
     }
 }
 

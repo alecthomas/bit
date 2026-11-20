@@ -461,7 +461,18 @@ impl Resource for RustTestResource {
     }
 
     fn cache_policy(&self, _inputs: &Target<RustTestInputs>) -> CachePolicy {
-        CachePolicy::Shared { version: 1 }
+        CachePolicy::Shared { version: 2 }
+    }
+
+    fn output_keys(&self, inputs: &Target<RustTestInputs>) -> Vec<String> {
+        super::lockfile(&super::Selection {
+            dir: inputs.dir.as_deref(),
+            env: &inputs.env,
+            package: inputs.package.as_deref(),
+            flags: &inputs.flags,
+        })
+        .into_iter()
+        .collect()
     }
 }
 

@@ -108,6 +108,19 @@ impl Sources {
             .map(PathBuf::as_path)
     }
 
+    /// The `.proto` files buf compiles, keyed as [`Sources::hash`] keys them.
+    pub(super) fn proto_files(&self) -> Result<Vec<String>, BoxError> {
+        let mut files = Vec::new();
+        for root in &self.proto_roots {
+            files.extend(
+                super::super::proto_files(root)?
+                    .into_iter()
+                    .map(|file| file.to_string_lossy().into_owned()),
+            );
+        }
+        Ok(files)
+    }
+
     pub(super) fn hash(&self, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
         let mut hashes = super::super::hash_protos(&self.proto_roots, tracker)?;
         let files: Vec<PathBuf> = self.files.iter().filter(|path| path.is_file()).cloned().collect();

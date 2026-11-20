@@ -231,7 +231,17 @@ impl Resource for GoFmtResource {
     }
 
     fn cache_policy(&self, _inputs: &Target<GoFmtInputs>) -> CachePolicy {
-        CachePolicy::Shared { version: 1 }
+        CachePolicy::Shared { version: 2 }
+    }
+
+    /// The `.go` files `gofmt -w` may rewrite, so formatting them is not
+    /// taken for an edit made while it ran.
+    fn output_keys(&self, inputs: &Target<GoFmtInputs>) -> Vec<String> {
+        go_source_files(&self.tracker, inputs)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|file| file.to_string_lossy().into_owned())
+            .collect()
     }
 }
 

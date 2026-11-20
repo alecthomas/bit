@@ -524,6 +524,11 @@ pub trait Resource {
     /// change detection, so a deleted output triggers a rebuild. Output hashes
     /// enter the shared action key only when `resolve` also names them as sources.
     ///
+    /// Every file `apply` modifies must be named, including inputs, such as
+    /// the files a formatter rewrites or a lockfile the tool updates. A
+    /// source that changes during apply but is not an output is taken for an
+    /// edit the target never saw, so the target runs again.
+    ///
     /// The engine also pairs each key with its portable form and
     /// hands the result to the cache methods below as [`OutputFile`]s, so
     /// these must be paths this process can read and write.

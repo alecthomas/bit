@@ -507,7 +507,7 @@ If the target can use the shared build cache (§8.1), the engine then looks for 
 
 Apply executes the planned action. It receives the inputs, the prior state, the set of input paths changed since the target last succeeded (or "all"), and a writer for the target's output. It returns `outputs`, which downstream targets can reference, and an optional `state`. On failure it returns an error.
 
-After apply, the engine re-resolves sources, hashes the declared outputs, and recomputes the content hash. It then persists a wrapped state containing:
+After apply, the engine re-resolves sources, hashes the declared outputs, and recomputes the content hash. Sources are recorded as they were before apply, because a file edited while the target ran, by an editor or another target, was not what the target read. A source that is also a declared output is recorded as apply left it. A resource that modifies files therefore declares them as outputs, as formatters declare the files they format and cargo targets declare `Cargo.lock`. The engine then persists a wrapped state containing:
 
 - the provider's state;
 - the target's outputs;
@@ -658,7 +658,7 @@ The action key hashes:
 
 A resource opts in through `cache_policy()`, which returns `Local` or `Shared { version }`. The cache is consulted only when the target uses a shared policy, the plan is not `none`, the run isn't forced, and no dependency is dirty. It is never consulted for a test that failed last time.
 
-The lookup key uses sources measured before apply. The publish key uses sources re-measured after apply. Inputs that a resource only discovers after building must therefore also be found before it, or the keys never match.
+The lookup key uses sources measured before apply. The publish key uses sources re-measured after apply. Inputs that a resource only discovers after building must therefore also be found before it, or the keys never match. A result is not published when a source other than a declared output changed while the target ran, since it matches neither version of that file.
 
 The exception is an environment variable a tool records reading, such as one listed in rustc's dep-info, which `ambient()` reports as `RecordedVariable`. A checkout that has not built yet has no record, so these variables stay out of the key. They are part of the content hash. Each receipt stores a fingerprint of every recorded variable, with unset variables fingerprinted too. One key can hold several receipts, one for each set of fingerprints. A lookup uses the receipt whose fingerprints all match the current environment.
 

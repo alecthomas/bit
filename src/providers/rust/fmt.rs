@@ -71,13 +71,17 @@ fn fmt_check_command(inputs: &Target<RustFmtInputs>) -> CargoCommand {
     cargo
 }
 
-fn resolve(inputs: &Target<RustFmtInputs>, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
-    let selection = super::Selection {
+fn selection(inputs: &Target<RustFmtInputs>) -> super::Selection<'_> {
+    super::Selection {
         dir: inputs.dir.as_deref(),
         env: &inputs.env,
         package: inputs.package.as_deref(),
         flags: &inputs.flags,
-    };
+    }
+}
+
+fn resolve(inputs: &Target<RustFmtInputs>, tracker: &FileTracker) -> Result<BTreeMap<String, SHA256>, BoxError> {
+    let selection = selection(inputs);
     let mut files = super::resolve_rust_inputs(&selection, tracker)?;
     files.extend(super::hash_existing(&rustfmt_config(&selection)?, tracker)?);
     Ok(files)
@@ -175,7 +179,13 @@ impl Resource for RustFmtResource {
     }
 
     fn cache_policy(&self, _inputs: &Target<RustFmtInputs>) -> CachePolicy {
-        CachePolicy::Shared { version: 1 }
+        CachePolicy::Shared { version: 2 }
+    }
+
+    /// The `.rs` files `cargo fmt` may rewrite, so formatting them is not
+    /// taken for an edit made while it ran.
+    fn output_keys(&self, inputs: &Target<RustFmtInputs>) -> Vec<String> {
+        super::rust_files(&selection(inputs)).unwrap_or_default()
     }
 }
 

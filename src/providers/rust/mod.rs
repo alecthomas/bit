@@ -424,6 +424,8 @@ struct DiscoveredPaths {
     /// Configuration every package of the workspace is built with, hashed
     /// when it exists.
     config: Vec<PathBuf>,
+    /// The workspace's `Cargo.lock`, one of `config`.
+    lockfile: PathBuf,
     target_dir: PathBuf,
 }
 
@@ -580,6 +582,26 @@ impl Selection<'_> {
 /// [`resolve_rust_inputs`] selects them.
 pub fn package_roots(selection: &Selection) -> Result<Vec<PathBuf>, BoxError> {
     Ok(selection.paths()?.1.roots)
+}
+
+/// The `.rs` files of the packages a target builds, keyed as
+/// [`resolve_rust_inputs`] keys them: the files `cargo fmt` may rewrite.
+pub fn rust_files(selection: &Selection) -> Result<Vec<String>, BoxError> {
+    let (_, paths) = selection.paths()?;
+    Ok(paths
+        .roots
+        .iter()
+        .flat_map(|root| package_files(root, &paths.excluded))
+        .filter(|file| file.extension().is_some_and(|extension| extension == "rs"))
+        .map(|file| file.to_string_lossy().into_owned())
+        .collect())
+}
+
+/// The workspace's `Cargo.lock`, keyed as [`resolve_rust_inputs`] keys it.
+/// Cargo writes it whenever it resolves dependencies and finds it missing or
+/// out of date.
+pub fn lockfile(selection: &Selection) -> Result<String, BoxError> {
+    Ok(selection.paths()?.0.lockfile.to_string_lossy().into_owned())
 }
 
 /// The binary `cargo run` would build in `cwd`, following cargo's own rules:
@@ -763,13 +785,15 @@ fn discover_paths(dir: Option<&str>, env: &BTreeMap<String, String>) -> Result<D
         .and_then(|root| root.as_str())
         .map(PathBuf::from)
         .ok_or("`cargo metadata` output has no workspace_root")?;
-    let mut config = vec![workspace_root.join("Cargo.toml"), workspace_root.join("Cargo.lock")];
+    let lockfile = workspace_root.join("Cargo.lock");
+    let mut config = vec![workspace_root.join("Cargo.toml"), lockfile.clone()];
     config.extend(cargo_config_files(&cwd));
 
     Ok(DiscoveredPaths {
         workspace,
         packages,
         config,
+        lockfile,
         target_dir,
     })
 }

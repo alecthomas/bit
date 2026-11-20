@@ -19,6 +19,13 @@ stderr '\Aone\n\z'
 exec ./bin/two
 stderr '\Atwo\n\z'
 
+# `modules` wrote modules.txt into the root module while its tests ran, so
+# they run again: they never saw it.
+bit
+stdout 'tests\[".", "example\.com/root"\] ▶ .*modules\.txt'
+bit
+! stdout '▶'
+
 # A change in one module reruns only its slices.
 cp api.go.changed svc/api/api.go
 bit

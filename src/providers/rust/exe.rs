@@ -297,6 +297,20 @@ impl Resource for RustExeResource {
         CachePolicy::Shared { version: 1 }
     }
 
+    /// `Cargo.lock`, which the build may write. The binary is not declared:
+    /// cargo reports where it is only while it builds, so the receipt
+    /// methods below capture and restore it from state.
+    fn output_keys(&self, inputs: &Target<RustExeInputs>) -> Vec<String> {
+        super::lockfile(&super::Selection {
+            dir: inputs.dir.as_deref(),
+            env: &inputs.env,
+            package: inputs.package.as_deref(),
+            flags: &inputs.flags,
+        })
+        .into_iter()
+        .collect()
+    }
+
     fn capture_artifacts(
         &self,
         _inputs: &Target<RustExeInputs>,

@@ -248,16 +248,18 @@ impl Resource for PnpmInstallResource {
     /// trees: hashing every package in them would cost more than a rerun.
     /// `.modules.yaml` records the layout and `lock.yaml` the packages the
     /// virtual store holds, so an install by hand, or a deleted or
-    /// re-created tree, changes one of them.
+    /// re-created tree, changes one of them. An unfrozen install also writes
+    /// the lockfile when it is missing or out of date.
     fn output_keys(&self, inputs: &Target<PnpmInstallInputs>) -> Vec<String> {
         let layout = self.layout(inputs);
-        [
+        let mut outputs = vec![
             layout.root.join(&layout.modules_dir).join(".modules.yaml"),
             layout.virtual_store_dir.join("lock.yaml"),
-        ]
-        .iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect()
+        ];
+        if !inputs.frozen {
+            outputs.push(layout.root.join("pnpm-lock.yaml"));
+        }
+        outputs.iter().map(|path| path.to_string_lossy().into_owned()).collect()
     }
 }
 
